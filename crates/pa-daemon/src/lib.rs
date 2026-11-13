@@ -107,6 +107,7 @@ pub mod socket;
 pub(crate) mod state_getters;
 mod stop_cleanup;
 pub(crate) mod streaming;
+pub(crate) mod streaming_utf8;
 pub mod supervisor;
 pub mod supervisor_link;
 pub(crate) mod supervisor_lost;

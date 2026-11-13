@@ -4,7 +4,7 @@
 //! message as a `provider_stream_failure` diagnostic (kind, status, `retryAfterMs`).
 
 use pa_agent::abort::AbortSignal;
-use pa_agent::types::{AssistantMessage, StopReason};
+use pa_agent::types::{AssistantContent, AssistantMessage, AssistantMessageDiagnostic, StopReason};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,14 +52,6 @@ pub fn is_agent_lifecycle_failure(message: &AssistantMessage) -> bool {
             .iter()
             .any(|diagnostic| diagnostic.kind == "agent_lifecycle_failure")
     })
-}
-
-/// The faux test provider's queue running dry is deterministic; retrying it
-/// only stalls tests.
-#[must_use]
-pub fn is_faux_provider_queue_exhausted(message: &AssistantMessage) -> bool {
-    message.provider == "faux"
-        && message.error_message.as_deref() == Some("No more faux responses queued")
 }
 
 /// A context-overflow failure: re-issuing it unchanged can never
@@ -127,12 +119,12 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
         .and_then(|status| u16::try_from(status).ok())
 }
 
-/// The failure-scoped disclosure's gate. Lifecycle and faux queue
-/// failures and abort conversions stay silent (the 402 diagnosis: only
-/// a real provider failure must never settle silently).
+/// The failure-scoped disclosure's gate. Lifecycle failures and abort
+/// conversions stay silent (the 402 diagnosis: only a real provider
+/// failure must never settle silently).
 #[must_use]
 pub fn has_provider_stream_failure(message: &AssistantMessage) -> bool {
-    !is_faux_provider_queue_exhausted(message) && provider_stream_failure_details(message).is_some()
+    provider_stream_failure_details(message).is_some()
 }
 
 /// Deterministic rejections never retry; auth gets one retry before it
@@ -149,9 +141,67 @@ pub fn is_permanent_provider_failure_kind(
         // A payment failure never refills mid-ladder, so it settles on
         // the first attempt (the disclosure row still fires).
         Some("invalid_request" | "refusal" | "permission" | "safety" | "payment_required") => true,
-        Some("auth") => retries_performed > 0,
+        // Auth retries once before it can be marked stale; an incomplete
+        // reply retries once before its turn fails.
+        Some("auth" | INCOMPLETE_REPLY_KIND) => retries_performed > 0,
         _ => false,
     }
+}
+
+/// The `provider_stream_failure` kind of a final reply that cannot end its
+/// turn (see [`incomplete_reply_reason`]). It gets one retry.
+pub const INCOMPLETE_REPLY_KIND: &str = "incomplete_reply";
+
+/// Why a final reply cannot end its turn, if it cannot. The agent loop ends
+/// a turn on any reply without a tool call, so a reply cut off at the output
+/// limit, or a clean stop with no visible text, would otherwise end the turn
+/// as if it were the answer. A turn that owes no answer (`owes_answer` false:
+/// harness notices and agent messages) may end silently. A silent context
+/// overflow stays with the overflow recovery.
+#[must_use]
+pub fn incomplete_reply_reason(
+    message: &AssistantMessage,
+    owes_answer: bool,
+    context_window: u64,
+) -> Option<&'static str> {
+    if message
+        .content
+        .iter()
+        .any(|block| matches!(block, AssistantContent::ToolCall(_)))
+        || is_context_overflow_failure(message, context_window)
+    {
+        return None;
+    }
+    let has_visible_text = message
+        .content
+        .iter()
+        .any(|block| matches!(block, AssistantContent::Text(text) if !text.text.trim().is_empty()));
+    match message.stop_reason {
+        StopReason::Length => {
+            Some("The model's reply was cut off at its output limit before it finished")
+        }
+        StopReason::Stop if owes_answer && !has_visible_text => {
+            Some("The model ended its reply with no visible answer")
+        }
+        _ => None,
+    }
+}
+
+/// `message` as a retryable provider failure carrying `reason`.
+#[must_use]
+pub fn incomplete_reply_failure(mut message: AssistantMessage, reason: &str) -> AssistantMessage {
+    message.stop_reason = StopReason::Error;
+    message.error_message = Some(reason.to_string());
+    message
+        .diagnostics
+        .get_or_insert_with(Vec::new)
+        .push(AssistantMessageDiagnostic {
+            kind: "provider_stream_failure".to_string(),
+            timestamp: message.timestamp,
+            error: None,
+            details: Some(serde_json::json!({ "kind": INCOMPLETE_REPLY_KIND })),
+        });
+    message
 }
 
 /// Jitter band on the computed backoff (SANCTIONED DIVERGENCE from TS
@@ -243,7 +293,6 @@ where
         }
         if retries_performed >= max_retries
             || is_agent_lifecycle_failure(&message)
-            || is_faux_provider_queue_exhausted(&message)
             || is_unsupported_tool_failure(&message)
         {
             return Ok(message);
@@ -464,6 +513,136 @@ mod tests {
             );
         }
         assert!(!is_permanent_provider_failure_kind(None, 0, None));
+        // An incomplete reply gets exactly one retry.
+        assert!(!is_permanent_provider_failure_kind(
+            Some(INCOMPLETE_REPLY_KIND),
+            0,
+            None
+        ));
+        assert!(is_permanent_provider_failure_kind(
+            Some(INCOMPLETE_REPLY_KIND),
+            1,
+            None
+        ));
+    }
+
+    const WINDOW: u64 = 128_000;
+
+    fn reply(stop_reason: StopReason, content: Vec<AssistantContent>) -> AssistantMessage {
+        AssistantMessage {
+            content,
+            stop_reason,
+            ..ok_message()
+        }
+    }
+
+    fn text(text: &str) -> AssistantContent {
+        AssistantContent::Text(TextContent {
+            text: text.to_string(),
+            text_signature: None,
+        })
+    }
+
+    fn thinking(thinking: &str) -> AssistantContent {
+        AssistantContent::Thinking(pa_agent::types::ThinkingContent {
+            thinking: thinking.to_string(),
+            thinking_signature: None,
+            redacted: None,
+        })
+    }
+
+    fn tool_call() -> AssistantContent {
+        AssistantContent::ToolCall(pa_agent::types::ToolCall {
+            id: "c".to_string(),
+            name: "python_repl".to_string(),
+            arguments: serde_json::json!({}),
+            thought_signature: None,
+        })
+    }
+
+    #[test]
+    fn a_reply_without_visible_text_cannot_end_a_turn_that_owes_an_answer() {
+        for content in [
+            vec![thinking("the answer is 42")],
+            vec![],
+            vec![thinking("planned"), text(" \n\t")],
+            vec![text("  ")],
+        ] {
+            let message = reply(StopReason::Stop, content.clone());
+            assert!(
+                incomplete_reply_reason(&message, true, WINDOW).is_some(),
+                "{content:?} owes an answer"
+            );
+            assert_eq!(
+                incomplete_reply_reason(&message, false, WINDOW),
+                None,
+                "{content:?} may end a turn that owes no answer"
+            );
+        }
+        for answer in [".", "4", "(no action)"] {
+            let message = reply(StopReason::Stop, vec![thinking("t"), text(answer)]);
+            assert_eq!(
+                incomplete_reply_reason(&message, true, WINDOW),
+                None,
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_cut_off_at_the_output_limit_never_ends_a_turn() {
+        for content in [vec![thinking("still thinking")], vec![text("Half of the")]] {
+            let message = reply(StopReason::Length, content);
+            assert!(incomplete_reply_reason(&message, true, WINDOW).is_some());
+            assert!(incomplete_reply_reason(&message, false, WINDOW).is_some());
+        }
+    }
+
+    #[test]
+    fn tool_calls_and_failures_are_not_incomplete_replies() {
+        for stop_reason in [StopReason::ToolUse, StopReason::Length, StopReason::Stop] {
+            let message = reply(stop_reason, vec![thinking("t"), tool_call()]);
+            assert_eq!(incomplete_reply_reason(&message, true, WINDOW), None);
+        }
+        for stop_reason in [StopReason::Error, StopReason::Aborted] {
+            assert_eq!(
+                incomplete_reply_reason(&reply(stop_reason, Vec::new()), true, WINDOW),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_silent_overflow_stays_with_the_overflow_recovery() {
+        // The input alone overflowed the window: a clean stop past it, and
+        // a length stop with no output, are overflows, not incomplete replies.
+        let mut silent = reply(StopReason::Stop, Vec::new());
+        silent.usage.input = WINDOW + 1;
+        assert_eq!(incomplete_reply_reason(&silent, true, WINDOW), None);
+        let mut truncated = reply(StopReason::Length, Vec::new());
+        truncated.usage.input = WINDOW;
+        assert_eq!(incomplete_reply_reason(&truncated, true, WINDOW), None);
+    }
+
+    #[test]
+    fn an_incomplete_reply_failure_is_a_retryable_non_overflow_failure() {
+        let message = reply(StopReason::Length, vec![thinking("t")]);
+        let reason = incomplete_reply_reason(&message, true, WINDOW).expect("incomplete");
+        let failure = incomplete_reply_failure(message, reason);
+        assert_eq!(failure.stop_reason, StopReason::Error);
+        assert_eq!(failure.error_message.as_deref(), Some(reason));
+        assert_eq!(
+            provider_stream_failure_kind(&failure).as_deref(),
+            Some(INCOMPLETE_REPLY_KIND)
+        );
+        assert!(has_provider_stream_failure(&failure));
+        assert!(!is_context_overflow_failure(&failure, 128_000));
+        let silent = reply(StopReason::Stop, Vec::new());
+        let reason = incomplete_reply_reason(&silent, true, WINDOW).expect("incomplete");
+        assert!(!is_context_overflow_failure(
+            &incomplete_reply_failure(silent, reason),
+            128_000
+        ));
     }
 
     /// The stream-drop arc, end to end: the REAL provider against the
@@ -780,7 +959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_and_faux_failures_are_never_retried() {
+    async fn lifecycle_failures_are_never_retried() {
         let policy = ProviderRetryPolicy {
             enabled: true,
             max_retries: 3,
@@ -809,10 +988,27 @@ mod tests {
         .unwrap();
         assert_eq!(attempts, 1);
         assert_eq!(message.stop_reason, StopReason::Error);
+    }
 
-        let mut faux = error_message(None, None, None);
-        faux.provider = "faux".to_string();
-        faux.error_message = Some("No more faux responses queued".to_string());
+    #[tokio::test]
+    async fn an_exhausted_faux_queue_is_never_retried() {
+        use crate::session_engine::provider_adapter::json_round_trip;
+        let policy = ProviderRetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 5,
+            max_retry_delay_ms: 50,
+            max_delay_ms: UNBOUNDED_BACKOFF_MS,
+        };
+        let registration = pa_ai::faux::register_faux_provider(
+            pa_ai::faux::RegisterFauxProviderOptions::default(),
+        );
+        let model = registration.get_model();
+        let context = pa_types::ai::Context {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: None,
+        };
         let mut attempts = 0;
         let message = complete_with_provider_retry(
             &policy,
@@ -820,13 +1016,18 @@ mod tests {
             |_| async { true },
             || {
                 attempts += 1;
-                async { Ok(faux.clone()) }
+                let exhausted = pa_ai::complete(&model, &context, None);
+                async move {
+                    let exhausted = exhausted.await?;
+                    Ok(json_round_trip(&exhausted).expect("the faux reply crosses the boundary"))
+                }
             },
         )
         .await
         .unwrap();
         assert_eq!(attempts, 1);
         assert_eq!(message.stop_reason, StopReason::Error);
+        registration.unregister();
     }
 
     #[tokio::test]

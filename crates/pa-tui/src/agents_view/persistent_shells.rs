@@ -9,7 +9,7 @@ use super::{
 };
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
 use crate::bash_view::{
-    format_duration, parse_bash_activities, BashActivity, BashView, BashViewAction,
+    format_duration, parse_bash_activities, BashActivity, BashView, BashViewAction, ShellCounts,
 };
 
 /// The daemon capability that serves the machine-wide shell list, output, and kill.
@@ -228,9 +228,6 @@ impl AgentsViewMode {
 
     /// One key while the bash view is open: it owns every key; its close returns to the list.
     pub(super) fn handle_shell_view_key(&mut self, key: &str) {
-        if key == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let Some(view) = self.shell_view.as_mut() else {
             return;
         };
@@ -257,9 +254,35 @@ impl AgentsViewMode {
                 view.clear_error();
             }
         }
+        self.session_activity.persistent_shells = shell_counts_by_session(&data);
         self.persistent_shells = data;
         self.rebuild_rows();
     }
+}
+
+/// The list's shell counts by assigned `sessionId`: every session's persistent shells.
+fn shell_counts_by_session(data: &Value) -> HashMap<String, ShellCounts> {
+    let mut rows: HashMap<String, Vec<Value>> = HashMap::new();
+    for row in data
+        .get("activities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(session_id) = row.get("sessionId").and_then(Value::as_str) {
+            rows.entry(session_id.to_string())
+                .or_default()
+                .push(row.clone());
+        }
+    }
+    rows.into_iter()
+        .map(|(session_id, rows)| {
+            (
+                session_id,
+                crate::bash_view::running_shell_counts(&Value::Array(rows)),
+            )
+        })
+        .collect()
 }
 
 /// The orphan bash view's shells: exactly the shells whose row has no session.

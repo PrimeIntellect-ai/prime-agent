@@ -5,8 +5,8 @@
 //! the thing under test.
 //!
 //! The mock provider scripts the turn: request 1 calls `python_repl` with a
-//! one-shot `await bash('sleep 13; echo ...')`. The await degrades at the
-//! 10s default: the tool result carries the still-running handle, and the
+//! one-shot `await bash('sleep 5; echo ...')`. The await degrades at the
+//! 1s window: the tool result carries the still-running handle, and the
 //! turn settles while the command keeps running. Its `[bash-done ...]`
 //! notice then wakes the idle session. Everything is asserted by transcript
 //! event ORDER, not wall-clock caps.
@@ -144,7 +144,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                         "type": "function",
                         "function": {
                             "name": "python_repl",
-                            "arguments": "{\"code\": \"from rlm import bash\\nres = await bash('sleep 13; echo BOUNDED_AWAIT_E2E_DONE')\\nres\"}"
+                            "arguments": "{\"code\": \"from rlm import bash\\nres = await bash('sleep 5; echo BOUNDED_AWAIT_E2E_DONE')\\nres\"}"
                         }
                     }]
                 }),
@@ -361,7 +361,7 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
         .expect("active session id")
         .to_string();
 
-    // THE TURN: the tool call awaits a 13s command with NO override; the
+    // THE TURN: the tool call awaits a 5s command; the
     // default wiring must degrade the await and settle the turn while the
     // command is still running.
     let turn = client.request(
@@ -421,7 +421,7 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
     });
 
     // Teardown: stop the session through the live supervisor so the worker
-    // (and its kernel + the 13s sleeper) do not leak past the test.
+    // (and its kernel + the 5s sleeper) do not leak past the test.
     client.request(
         "k1",
         &json!({ "type": "kill", "activeSessionId": active_id }),

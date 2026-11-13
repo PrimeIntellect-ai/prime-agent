@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [{
+    "server": "user-catalog", "service": "user-catalog", "label": "User Catalog",
+    "url": "https://user.example/mcp", "aliases": [],
+    "transport": { "type": "http", "url": "https://user.example/mcp" },
+    "auth": { "strategy": "oauth", "clientRegistration": "dynamic" },
+    "setup": { "status": "ready" },
+    "verification": { "status": "unverified" },
+    "legacyBuiltin": false, "provenance": [{ "source": "user" }]
+  }]
+}

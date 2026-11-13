@@ -510,14 +510,8 @@ mod tests {
     }
 
     /// A tree move is not a replacement: the built session stays warm.
-    // The faux provider registration is global; the lock must span the
-    // awaited turns that consume its queue.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn replacement_flows_retire_only_on_a_prepared_file() {
-        let _faux = crate::agent_engine::FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().expect("temp dir");
         let sessions_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
@@ -629,6 +623,90 @@ mod tests {
         let worker_for_drop = worker;
         drop(engine);
         tokio::task::spawn_blocking(move || drop(worker_for_drop))
+            .await
+            .expect("worker drop join");
+    }
+
+    /// A replaced session is live: the teardown closes the OLD session, and
+    /// the moved-to session still runs its goal loop (a stale close would
+    /// stop every continuation mint after the first turn).
+    // The faux provider registration is global; the lock must span the
+    // awaited turns that consume its queue.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_replaced_session_continues_its_goal() {
+        let _faux = crate::agent_engine::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        // No provider retry: the exhausted faux script ends the loop at once.
+        std::fs::create_dir_all(dir.path().join("agent")).expect("agent dir");
+        std::fs::write(
+            dir.path().join("agent").join("settings.json"),
+            json!({ "retry": { "enabled": false } }).to_string(),
+        )
+        .expect("settings");
+        let config = crate::worker::WorkerConfig {
+            socket_path: dir.path().join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "replaced-goal-session".to_string(),
+            agent_dir: dir.path().join("agent"),
+            recovery_journal_path: dir.path().join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({
+                "engine": "faux",
+                "responses": ["before the replacement", "goal start", "goal continuation"],
+            })),
+        };
+        let worker = Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({
+                    "cwd": dir.path().to_string_lossy(),
+                    "sessionDir": sessions_dir.to_string_lossy(),
+                }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        let session_id = "replaced-goal-session";
+        let prompted = worker
+            .dispatch(
+                "prompt_and_wait",
+                &json!({ "activeSessionId": session_id, "message": "hello" }),
+            )
+            .await;
+        assert!(prompted.success, "prompt failed: {prompted:?}");
+        let replaced = worker
+            .dispatch("new_session", &json!({ "activeSessionId": session_id }))
+            .await;
+        assert_eq!(
+            replaced.data,
+            Some(json!({ "cancelled": false })),
+            "new_session failed: {replaced:?}"
+        );
+        let goal = worker
+            .dispatch(
+                "prompt_and_wait",
+                &json!({ "activeSessionId": session_id, "message": "/goal keep going" }),
+            )
+            .await;
+        assert!(goal.success, "the goal start failed: {goal:?}");
+        let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+        assert!(idle.success, "the goal loop never settled: {idle:?}");
+        let state = worker.engine.goal_state_value();
+        assert!(
+            state["continuationsUsed"].as_u64().unwrap_or(0) >= 1,
+            "the replaced session never continued its goal: {state}"
+        );
+
+        // The worker (and its engine's private runtime) must drop off the
+        // async context.
+        tokio::task::spawn_blocking(move || drop(worker))
             .await
             .expect("worker drop join");
     }

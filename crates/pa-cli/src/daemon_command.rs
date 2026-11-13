@@ -339,23 +339,8 @@ fn run_rename(client: &mut DaemonClient, args: &[String], json: bool) -> Result<
     Ok(())
 }
 
-struct ParsedSendArgs {
-    target_active_session_id: String,
-    from_active_session_id: Option<String>,
-    message: String,
-}
-
 fn run_send(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
-    let parsed = parse_send_args(args)?;
-    let response = client.request(DaemonCommand::SendMessage {
-        id: None,
-        target_active_session_id: parsed.target_active_session_id,
-        message: parsed.message,
-        from_active_session_id: parsed.from_active_session_id,
-        agent_origin: None,
-        delivery_mode: None,
-        rest: serde_json::Map::new(),
-    })?;
+    let response = client.request(parse_send_args(args)?)?;
     let data = require_success(response)?.unwrap_or(Value::Null);
     if json {
         print_json(&data);
@@ -393,8 +378,9 @@ fn run_send(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()
     Ok(())
 }
 
-fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
+fn parse_send_args(args: &[String]) -> Result<DaemonCommand> {
     let mut from_active_session_id: Option<String> = None;
+    let mut delivery_mode: Option<&str> = None;
     let mut target_active_session_id: Option<String> = None;
     let mut explicit_message: Option<String> = None;
     let mut message_parts: Vec<String> = Vec::new();
@@ -413,6 +399,14 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
                 .ok_or_else(|| anyhow!("--from requires a session id or name"))?;
             index += 1;
             from_active_session_id = Some(value.clone());
+            continue;
+        }
+        if parse_options && arg == "--steer" {
+            delivery_mode = Some("steer");
+            continue;
+        }
+        if parse_options && arg == "--follow-up" {
+            delivery_mode = Some("follow_up");
             continue;
         }
         if parse_options && arg == "--message" {
@@ -446,10 +440,14 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
     if target_active_session_id.is_none() || message.is_empty() {
         bail!("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
     }
-    Ok(ParsedSendArgs {
+    Ok(DaemonCommand::SendMessage {
+        id: None,
         target_active_session_id: target_active_session_id.expect("checked above"),
-        from_active_session_id,
         message,
+        from_active_session_id,
+        agent_origin: None,
+        delivery_mode: delivery_mode.map(Value::from),
+        rest: serde_json::Map::new(),
     })
 }
 
@@ -679,15 +677,19 @@ mod tests {
         assert_eq!(list.positionals, args(&["-a"]));
     }
 
+    fn send_request(list: &[&str]) -> Value {
+        serde_json::to_value(parse_send_args(&args(list)).unwrap()).unwrap()
+    }
+
     #[test]
     fn send_args_match_ts_usage_rules() {
-        let parsed = parse_send_args(&args(&["--from", "me", "target", "hello", "there"])).unwrap();
-        assert_eq!(parsed.target_active_session_id, "target");
-        assert_eq!(parsed.from_active_session_id.as_deref(), Some("me"));
-        assert_eq!(parsed.message, "hello there");
+        let parsed = send_request(&["--from", "me", "target", "hello", "there"]);
+        assert_eq!(parsed["targetActiveSessionId"], "target");
+        assert_eq!(parsed["fromActiveSessionId"], "me");
+        assert_eq!(parsed["message"], "hello there");
 
-        let flag = parse_send_args(&args(&["target", "--message", "queued"])).unwrap();
-        assert_eq!(flag.message, "queued");
+        let flag = send_request(&["target", "--message", "queued"]);
+        assert_eq!(flag["message"], "queued");
 
         let explicit_and_positional =
             parse_send_args(&args(&["target", "--message", "queued", "extra"]));
@@ -698,6 +700,18 @@ mod tests {
 
         let no_target = parse_send_args(&args(&["--message", "text"]));
         assert!(no_target.is_err());
+    }
+
+    #[test]
+    fn send_steer_flag_requests_steer_delivery() {
+        let request = send_request(&["--steer", "target", "hello"]);
+        assert_eq!(request["deliveryMode"], "steer");
+    }
+
+    #[test]
+    fn send_follow_up_flag_requests_follow_up_delivery() {
+        let request = send_request(&["target", "--follow-up", "hello"]);
+        assert_eq!(request["deliveryMode"], "follow_up");
     }
 
     #[test]

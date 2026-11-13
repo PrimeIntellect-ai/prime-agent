@@ -3,25 +3,10 @@
 //! that group's view, and a click on the tray's `← manage` hint hands
 //! the pane to the agents view; hover motions ride the same path.
 #![cfg(unix)]
-// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// Render routes are flat tables (one arm per route); splitting adds indirection.
-#![allow(clippy::too_many_lines)]
-// Widget state structs carry independent flag bits.
-#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
-#![allow(clippy::large_futures)]
-// The wrappers preserve a uniform Result-returning API surface.
-#![allow(clippy::unnecessary_wraps)]
+#![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+mod support;
+
 use std::sync::{Mutex, MutexGuard};
 
 /// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
@@ -35,11 +20,13 @@ fn run_lock() -> MutexGuard<'static, ()> {
     }
 }
 
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
-};
+use pa_tui::interactive::{run_interactive, HeadlessPlan, HeadlessStep, UiMode};
 use serde_json::{json, Value};
+
+use support::{
+    attach_response, create_response, detach_response, options, serve_connection,
+    session_stats_response, write_json, MockSupervisor, Request,
+};
 
 /// The SGR reports a real terminal sends: a left press, a release, and the `?1003` buttonless
 /// motion report (base code 3 + the motion bit — 35) the hover affordance rides.
@@ -55,130 +42,43 @@ fn motion(col: usize, row: usize) -> String {
     format!("\x1b[<35;{col};{row}M")
 }
 
-struct MockSupervisor {
-    listener: UnixListener,
-}
-
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
-        MockSupervisor {
-            listener: UnixListener::bind(socket).expect("bind mock socket"),
-        }
-    }
-
     /// Serve one connection: the heartbeat catalog and the kernel-bash registry carry the rows that
     /// mount the activity dock.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-
-        // The kernel-bash capability gate: the dock's bash rows fold only when the daemon
-        // advertises the registry.
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": ["kernel_bash_activity"],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+        serve_connection(
+            stream,
+            &["kernel_bash_activity"],
+            |writer, Request { id, kind, .. }| {
+                match kind {
+                    "create" => {
+                        write_json(writer, &create_response(id));
+                    }
+                    "attach" => {
+                        write_json(writer, &attach_data(id));
+                    }
+                    "get_session_stats" => {
+                        write_json(writer, &session_stats_response(id));
+                    }
+                    "heartbeats_list" => {
+                        write_json(writer, &heartbeat_data(id));
+                        // A live goal rides the attach's first-frame fold as a session event: the
+                        // dock's goal group mounts with its row, the click surface's fourth group.
+                        write_json(writer, &goal_event());
+                    }
+                    "list_kernel_bash" => {
+                        write_json(writer, &bash_data(id));
+                    }
+                    "detach" => {
+                        write_json(writer, &detach_response(id));
+                    }
+                    _ => return false,
                 }
-                "attach" => {
-                    write_json(&mut writer, &attach_data(id));
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                "heartbeats_list" => {
-                    write_json(&mut writer, &heartbeat_data(id));
-                    // A live goal rides the attach's first-frame fold as a session event: the
-                    // dock's goal group mounts with its row, the click surface's fourth group.
-                    write_json(&mut writer, &goal_event());
-                }
-                "list_kernel_bash" => {
-                    write_json(&mut writer, &bash_data(id));
-                }
-                "detach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "detach",
-                            "success": true,
-                        }),
-                    );
-                }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
-            }
-        }
+                true
+            },
+        );
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The slim attach result with a one-prompt transcript: the dock mounts under the editor and the
@@ -192,36 +92,9 @@ fn attach_data(id: &str) -> Value {
             "timestamp": 2u64,
         }),
     ];
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "dock click session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": messages,
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
+    let mut response = attach_response(id, "dock click session");
+    response["data"]["snapshot"]["messages"] = json!(messages);
+    response
 }
 
 /// One scoped heartbeat: the dock's heartbeats group reads one live job (the heartbeats view's
@@ -293,44 +166,6 @@ fn bash_data(id: &str) -> Value {
             },
         ] },
     })
-}
-
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        client_settings: None,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-    }
 }
 
 /// Run the headless plan and return the outcome. Holds the run lock: mouse tracking is

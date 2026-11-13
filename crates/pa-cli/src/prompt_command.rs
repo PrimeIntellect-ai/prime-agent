@@ -83,10 +83,10 @@ fn assemble_breakdown(
     let agent_dir = get_agent_dir();
     let model_prompts = pa_core::prompts::model_prompts::load_model_prompts(model, &agent_dir);
     let settings = SettingsManager::create(cwd, &agent_dir);
-    // MCP gating: auth-gated built-in integrations drop their skills; enabled persistent generic
+    // User/global MCP gating: auth-gated built-in integrations drop their skills; enabled generic
     // servers add the prompt MCP guidance.
     let user_servers = settings
-        .settings()
+        .global_settings()
         .mcp_servers
         .clone()
         .unwrap_or_default()

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use pa_types::ai::{
-    CompatKind, Model, ModelCompat, ModelCost, ModelInput, ModelThinkingLevel,
+    CompatKind, Model, ModelCompat, ModelCost, ModelInput, ModelServing, ModelThinkingLevel,
     OpenAiCompletionsCompat, ThinkingFormat, ThinkingLevelMap,
 };
 use pa_types::JsNumber;
@@ -48,6 +48,10 @@ pub struct PrimeInferenceEntry {
     /// route has no effort selector.
     pub reasoning_efforts: Option<Vec<String>>,
     pub reasoning_mandatory: Option<bool>,
+    /// How the route is served (the live `serving` field): `Some(Hosted)`
+    /// on Prime's own clusters, `Some(Gateway)` through the Prime gateway;
+    /// `None` when the route does not declare it.
+    pub serving: Option<ModelServing>,
 }
 
 /// Reasoning request controls derived from a live Prime Inference catalog
@@ -187,6 +191,11 @@ struct WireItem {
     /// The raw `reasoning` object (`supported_efforts`, `mandatory`).
     #[serde(default)]
     reasoning: Option<serde_json::Value>,
+    /// The raw `serving` field (`hosted` or `gateway`): any other value
+    /// drops to `None` instead of failing the item, so a future value
+    /// never hides the model.
+    #[serde(default)]
+    serving: Option<serde_json::Value>,
 }
 
 // Wire contract: the field names mirror the Prime Inference `/models`
@@ -265,10 +274,16 @@ pub fn parse_prime_inference_model_catalog(
     };
     let mut entries = Vec::with_capacity(items.len());
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut null_specs: Vec<&str> = Vec::new();
     for item in items {
-        let wire: WireItem = match serde_json::from_value(item.clone()) {
-            Ok(wire) => wire,
-            Err(_) => continue,
+        let Ok(wire) = serde_json::from_value::<WireItem>(item.clone()) else {
+            if let (Some(serde_json::Value::Null), Some(id)) = (
+                item.get("specs"),
+                item.get("id").and_then(serde_json::Value::as_str),
+            ) {
+                null_specs.push(id);
+            }
+            continue;
         };
         if wire.id.is_empty() || wire.id.chars().count() > 1_024 {
             continue;
@@ -333,11 +348,21 @@ pub fn parse_prime_inference_model_catalog(
             .and_then(|spec| spec.get("mandatory"))
             .and_then(serde_json::Value::as_bool)
             .filter(|mandatory| *mandatory);
+        let serving = wire
+            .serving
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .and_then(|serving| match serving {
+                "hosted" => Some(ModelServing::Hosted),
+                "gateway" => Some(ModelServing::Gateway),
+                _ => None,
+            });
         let mut entry = PrimeInferenceEntry {
             id: wire.id,
             name,
             input,
             output,
+            serving,
             cache_read: wire
                 .pricing
                 .cache_read_usd_per_mtok
@@ -362,6 +387,12 @@ pub fn parse_prime_inference_model_catalog(
             entry.reasoning = wire.specs.supports_reasoning;
         }
         entries.push(entry);
+    }
+    if !null_specs.is_empty() {
+        tracing::warn!(
+            models = ?null_specs,
+            "dropped Prime Inference models whose /models entry has null specs"
+        );
     }
     if entries.is_empty() && !allow_empty {
         return Err("Prime Inference model catalog is empty".into());
@@ -518,6 +549,7 @@ pub fn build_prime_inference_models(
             // stay capped: only explicit configuration flips the flag.
             max_tokens_explicit: false,
             featured: template.and_then(|t| t.featured),
+            serving: entry.serving,
             headers: None,
             compat: Some(compat),
         });
@@ -556,7 +588,10 @@ pub fn merge_prime_inference_models(bundled: &[Model], live: Option<&[Model]>) -
 }
 
 /// The scope-keyed Prime Inference catalog: one last-good snapshot per
-/// credential+team scope, fetched live with credentials.
+/// credential+team scope, fetched live with credentials. The snapshot keeps
+/// the scope's private routes, so it is the private-model authorization. The
+/// coverage gate counts only public templates: an empty or thin response
+/// keeps the last-good snapshot instead of wiping the public routes.
 pub struct PrimeInferenceCatalog {
     cache: CatalogCache<Vec<Model>>,
 }
@@ -571,7 +606,7 @@ impl PrimeInferenceCatalog {
         let parse_templates = Arc::clone(&templates);
         let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
             let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
+            build_prime_inference_models(&parse_templates, &entries, true, None)
                 .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
         });
         Self {
@@ -596,7 +631,7 @@ impl PrimeInferenceCatalog {
         let parse_templates = Arc::clone(&templates);
         let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
             let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
+            build_prime_inference_models(&parse_templates, &entries, true, None)
                 .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
         });
         Self {
@@ -740,6 +775,40 @@ mod tests {
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), false).is_err());
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), true).is_ok());
         assert!(parse_prime_inference_model_catalog(&json!({}), false).is_err());
+    }
+
+    #[test]
+    fn serving_class_parses_and_carries_into_the_built_model() {
+        let mut hosted = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
+        hosted["serving"] = json!("hosted");
+        let mut gateway = wire_entry("anthropic/claude-fable-5", 1.0, 2.0);
+        gateway["serving"] = json!("gateway");
+        let mut unknown = wire_entry("qwen/qwen3.8-max", 1.0, 4.0);
+        unknown["serving"] = json!("quantum");
+        let unlabeled = wire_entry("openai/gpt-5.6", 1.0, 2.0);
+        let value = json!({"data": [hosted, gateway, unknown, unlabeled]});
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let built = build_prime_inference_models(&[], &entries, false, Some(0)).expect("built");
+        let serving: Vec<Option<ModelServing>> = built.iter().map(|model| model.serving).collect();
+        assert_eq!(
+            serving,
+            [
+                Some(ModelServing::Hosted),
+                Some(ModelServing::Gateway),
+                None,
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_drops_entries_with_null_specs() {
+        let mut null_specs = wire_entry("openai/gpt-5.6", 1.0, 2.0);
+        null_specs["specs"] = Value::Null;
+        let value = json!({"data": [wire_entry("z-ai/glm-5.3", 1.0, 2.0), null_specs]});
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["z-ai/glm-5.3"]);
     }
 
     #[test]
@@ -1008,6 +1077,7 @@ mod tests {
             max_tokens: 10_000,
             max_tokens_explicit: false,
             featured: Some(true),
+            serving: None,
             headers: None,
             compat: Some(ModelCompat::from_kind(CompatKind::OpenAiCompletions(
                 Box::new(OpenAiCompletionsCompat {

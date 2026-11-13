@@ -127,8 +127,12 @@ impl SessionFile {
         }
         let temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
         {
-            let file =
-                fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
+            let mut options = fs::OpenOptions::new();
+            options.create(true).write(true).truncate(true);
+            pa_core::platform::perms::set_private_mode(&mut options);
+            let file = options
+                .open(&temp)
+                .with_context(|| format!("create {}", temp.display()))?;
             let mut writer = std::io::BufWriter::new(file);
             write_line(&mut writer, &session_header_line(&self.header))?;
             for entry in &self.entries {
@@ -295,10 +299,15 @@ impl SessionFile {
             });
             if let Err(error) = rewritten {
                 self.unindex_last();
-                self.leaf_id = previous_leaf;
+                self.set_leaf(previous_leaf);
                 return Err(error);
             }
             self.fold_attribution_id(&id);
+        }
+        if let (Some(sink), Some(entry)) = (&self.billed_row_sink.0, self.entry(&id)) {
+            if let Some(row) = crate::session_usage::billed_store_row(entry) {
+                sink(&row);
+            }
         }
         Ok(id)
     }

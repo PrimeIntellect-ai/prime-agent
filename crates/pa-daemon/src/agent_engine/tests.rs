@@ -12,6 +12,9 @@ mod autonomous;
 mod compaction;
 mod failover_facts;
 mod goal;
+mod incomplete_reply;
+mod live_auth;
+mod mcp_settings;
 mod model_resolution;
 mod quota_park;
 mod reload;
@@ -42,7 +45,7 @@ fn bare_engine(dir: &std::path::Path) -> AgentSessionEngine {
 }
 
 /// A settings.json with an explicit compaction reserve (the f14 battery shape).
-fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
+pub(crate) fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
     std::fs::create_dir_all(dir.join("agent")).unwrap();
     std::fs::write(
         dir.join("agent").join("settings.json"),
@@ -90,7 +93,7 @@ impl Drop for TelemetryOptIn {
 pub(crate) fn faux_engine_with_settings(
     script: &serde_json::Value,
     reserve_tokens: u64,
-) -> (AgentSessionEngine, tempfile::TempDir) {
+) -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
     write_compaction_settings(dir.path(), reserve_tokens);
     let engine = AgentSessionEngine::new(AgentEngineConfig {
@@ -109,6 +112,10 @@ pub(crate) fn faux_engine_with_settings(
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     (engine, dir)
 }
 
@@ -310,15 +317,12 @@ pub(crate) fn assert_cancelled_end_event(
     );
 }
 
-/// A driver loop test harness: faux script + collected events, holding the faux lock.
+/// A driver loop test harness: faux script + collected events.
 #[cfg(test)]
 fn run_prompts(
     script: &serde_json::Value,
     prompts: &[&str],
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),

@@ -88,7 +88,7 @@ async fn execute_compaction(
         Ok(attempt) => attempt,
         Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
     };
-    let prepared = summarize_attempt(&attempt, &options).await?;
+    let prepared = summarize_attempt(&attempt, &options, &SummaryBill::default()).await?;
     assert!(
         commit_attempt(session, &mut attempt, &prepared, options.abort)?,
         "no concurrent writer in a unit test"

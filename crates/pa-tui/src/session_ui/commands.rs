@@ -515,10 +515,8 @@ impl SessionUi {
             // update replaces only the on-disk binary, so the new build
             // takes effect on restart and nothing here blocks or tears
             // down; there is no busy guard to keep). The confirm carries
-            // the preserve invariant: the update uninstalls the
-            // TypeScript version and installs the latest Rust build;
-            // sessions and configuration (~/.prime/agent) are never
-            // touched.
+            // the preserve invariant: sessions and configuration
+            // (~/.prime/agent) are never touched.
             "update" => {
                 if !resolved.args.trim().is_empty() {
                     view.editor.set_text(text);
@@ -538,7 +536,7 @@ impl SessionUi {
                 // confirm renders each line truncated, never wrapped).
                 view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
                     "Update Prime Agent",
-                    "Update uninstalls the TypeScript version and installs the latest Rust build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
+                    "Update installs the latest Prime Agent build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
                 ));
                 self.pending_confirm = Some(PendingConfirm::Update);
                 self.dirty = true;
@@ -653,11 +651,16 @@ impl SessionUi {
                     Ok(tree) => {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
+                        let factory_runs =
+                            crate::factory_view::parse_factory_runs(&self.factory_graph);
                         self.open_info_panel(
                             view,
                             None,
                             InfoContent::Rows(info_commands::context_tree_rows(
-                                &tree, width, scope,
+                                &tree,
+                                width,
+                                scope,
+                                &factory_runs,
                             )),
                         );
                         self.track_menu_opened("context", "command");

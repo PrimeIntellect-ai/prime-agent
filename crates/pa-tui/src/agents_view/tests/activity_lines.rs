@@ -1,18 +1,26 @@
-//! The shells and factory-run lines: Enter on a line opens its node's session with the matching
+//! The shells and factory lines: Enter on a line opens its node's session with the matching
 //! panel requested, the line's identity carried for the return.
 
 use super::*;
 use crate::agents_view_forest::SessionActivity;
+use crate::bash_view::ShellCounts;
+use crate::factory_view::{FactoryCounts, FactoryRunCounts};
 use crate::interactive::SessionPanel;
 
 fn with_activity(mode: &mut AgentsViewMode, active: &str, shells: usize, factory_runs: usize) {
-    mode.session_activity.insert(
+    mode.session_activity.live.insert(
         active.to_string(),
         SessionActivity {
-            shells,
-            factory_runs: crate::factory_view::FactoryRunCounts {
-                running: factory_runs,
-                paused: 0,
+            shells: ShellCounts {
+                running: shells,
+                persistent: 0,
+            },
+            factory: FactoryCounts {
+                specs: 0,
+                runs: FactoryRunCounts {
+                    running: factory_runs,
+                    paused: 0,
+                },
             },
         },
     );
@@ -58,14 +66,14 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
     let mut mode = mode_with_parent_and_child();
     mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
     with_activity(&mut mode, "c-live", 0, 1);
-    select_title(&mut mode, "\u{2699} 1 factory run");
+    select_title(&mut mode, "\u{2699} 0 factories \u{b7} 1 running");
     mode.handle_key("enter");
     let opened = mode.opened.as_ref().expect("open recorded");
     assert_eq!(
         opened.selection,
         SessionSelection::Attach("c-live".to_string())
     );
-    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns));
+    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns { row: None }));
     assert_eq!(opened.expanded_ancestors, vec!["p".to_string()]);
 }
 

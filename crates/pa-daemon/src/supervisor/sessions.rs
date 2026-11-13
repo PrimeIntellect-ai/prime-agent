@@ -5,8 +5,8 @@ use super::{
     anyhow, bail, join_all, json, list_sessions, mpsc, name_unavailable_error, paths,
     reservation_key, response_failure, response_line, response_success, subscribers, Arc,
     DaemonCommand, DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf,
-    ResidentWorker, Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
-    SUMMARY_TIMEOUT_MS,
+    ResidentWorker, Result, RosterFamilySeedOwner, RouteAdmission, Supervisor, Value,
+    ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS,
 };
 use crate::session_scan::list_sessions_with;
 
@@ -114,7 +114,7 @@ impl Supervisor {
         }
         // Only a connected resident rebinds: one mid-teardown would answer the
         // not-connected error instead of the unknown-session failure the client can act on.
-        if resident.cmd_tx.lock().await.is_none() {
+        if !resident.route_state().connected {
             return None;
         }
         // Only a session-ready resident rebinds: a replacement's command channel exists
@@ -219,6 +219,9 @@ impl Supervisor {
         let scan = tokio::task::spawn_blocking(move || {
             let persistent_shells =
                 crate::persistent_shells::live_shell_rows_by_session(&agent_dir);
+            // The factory is opt-in: while it stays off, no row counts stored specs.
+            let factory_lane = crate::factory_activity::factory_lane_enabled(&agent_dir);
+            let mut factory_specs = std::collections::HashMap::new();
             let mut file_total = 0usize;
             let page = list_sessions_with(&dir, cursor.as_deref(), limit, |index, total, info| {
                 file_total = total;
@@ -226,7 +229,10 @@ impl Supervisor {
                     // The row is out of scope, but the scan itself goes on.
                     return true;
                 }
-                let row = saved_session_row(info, &persistent_shells);
+                if factory_lane {
+                    count_factory_specs(info, &mut factory_specs);
+                }
+                let row = saved_session_row(info, &persistent_shells, &factory_specs);
                 let mut item = json!({
                     "id": scan_command_id,
                     "type": "session_list_item",
@@ -265,19 +271,26 @@ impl Supervisor {
                     }
                 }
             });
-            (page, file_total, persistent_shells)
+            (
+                page,
+                file_total,
+                persistent_shells,
+                factory_specs,
+                factory_lane,
+            )
         });
-        let (page, file_total, persistent_shells) = match scan.await {
-            Ok(scanned) => scanned,
-            Err(error) => {
-                return vec![response_line(&response_failure(
-                    Some(command_id),
-                    "list_saved_sessions",
-                    &format!("the saved-session scan failed: {error}"),
-                    None,
-                ))];
-            }
-        };
+        let (page, file_total, persistent_shells, mut factory_specs, factory_lane) =
+            match scan.await {
+                Ok(scanned) => scanned,
+                Err(error) => {
+                    return vec![response_line(&response_failure(
+                        Some(command_id),
+                        "list_saved_sessions",
+                        &format!("the saved-session scan failed: {error}"),
+                        None,
+                    ))];
+                }
+            };
         // The scan's parse trees folded and freed inside the blocking task; return their
         // arena high-water to the OS at the phase boundary (live cache untouched).
         pa_types::memory_release::trim_freed_heap();
@@ -337,8 +350,21 @@ impl Supervisor {
             .map(crate::rlm_roster::passive_child_info)
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect();
+        if factory_lane {
+            match stored_factory_specs(merged.clone()).await {
+                Ok(specs) => factory_specs.extend(specs),
+                Err(error) => {
+                    return vec![response_line(&response_failure(
+                        Some(command_id),
+                        "list_saved_sessions",
+                        &format!("{error:#}"),
+                        None,
+                    ))]
+                }
+            }
+        }
         for info in &merged {
-            let row = saved_session_row(info, &persistent_shells);
+            let row = saved_session_row(info, &persistent_shells, &factory_specs);
             let mut item = json!({
                 "id": command_id,
                 "type": "session_list_item",
@@ -389,7 +415,7 @@ impl Supervisor {
         let mut lines = Vec::new();
         let sessions: Vec<Value> = infos
             .iter()
-            .map(|info| saved_session_row(info, &persistent_shells))
+            .map(|info| saved_session_row(info, &persistent_shells, &factory_specs))
             .collect();
         let mut data = json!({ "sessions": sessions, "remaining": remaining });
         if let Some(next_cursor) = next_cursor {
@@ -637,7 +663,9 @@ impl Supervisor {
             Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
             _ => None,
         };
-        let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
+        let (resident, create_summary) = self
+            .launch_worker(command, owner_client_id, RosterFamilySeedOwner::Create)
+            .await?;
         // The single-flight stays held through the spawn admission below: an admission
         // failure tears the resident down, and a concurrent open that had just reused it
         // would hold a summary for a gone worker. The ledger is the only topology store.
@@ -650,9 +678,7 @@ impl Supervisor {
             let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
-        // The admission settled: the single-flight may release (a
-        // concurrent open's classification now finds a durable resident).
-        drop(opening_guard);
+        // Keep concurrent opens behind the first family's edge-only seed.
         // Prefer a fresh get_state, but a degraded one falls back to the authoritative
         // create summary instead of failing the spawn.
         let summary = match self
@@ -674,19 +700,22 @@ impl Supervisor {
         // write (its counter raises the resident's stale-delta watermark).
         self.write_roster_summary_for_resident(&resident, &summary)
             .await;
-        // The new root's passive family renders immediately from the ledger edges, then
-        // one bounded background hydration fills each seeded row's display fields. The root
-        // is the CREATE response's session file (a mid-replay get_state must not skip it).
         if let Some(root) = summary
             .get("sessionFile")
             .and_then(Value::as_str)
             .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
         {
-            let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
+            let seeded = self.seed_roster_family_edges(Path::new(root)).await;
             if !seeded.is_empty() {
-                self.spawn_seeded_hydration(seeded);
+                drop(self.spawn_seeded_hydration(seeded));
             }
+            let supervisor = Arc::clone(self);
+            drop(tokio::spawn(async move {
+                let refreshed = supervisor.refresh_deleted_descendant_usage().await;
+                supervisor.push_roster_update(refreshed, Vec::new());
+            }));
         }
+        drop(opening_guard);
         Ok(summary)
     }
 
@@ -837,9 +866,40 @@ fn offline_summary(worker_id: &str) -> Value {
     })
 }
 
+/// Read one session's stored factory specs (its local harness store's factory entries) into a
+/// listing's map: a listing reads each store once, and only sessions holding specs get an entry.
+fn count_factory_specs(
+    info: &crate::session_store::SessionInfo,
+    factory_specs: &mut std::collections::HashMap<String, usize>,
+) {
+    let specs = crate::scheduled_jobs::session_artifact_dir(&info.path, &info.id)
+        .map_or(0, |dir| {
+            crate::factory_activity::stored_factory_spec_count(&dir)
+        });
+    if specs > 0 {
+        factory_specs.insert(info.id.clone(), specs);
+    }
+}
+
+/// The sessions' stored factory specs, read off the async executor.
+pub(super) async fn stored_factory_specs(
+    infos: Vec<crate::session_store::SessionInfo>,
+) -> Result<std::collections::HashMap<String, usize>> {
+    tokio::task::spawn_blocking(move || {
+        let mut factory_specs = std::collections::HashMap::new();
+        for info in &infos {
+            count_factory_specs(info, &mut factory_specs);
+        }
+        factory_specs
+    })
+    .await
+    .map_err(|error| anyhow!("saved-session factory spec reader failed: {error}"))
+}
+
 pub(super) fn saved_session_row(
     info: &crate::session_store::SessionInfo,
     persistent_shells: &std::collections::HashMap<String, Vec<Value>>,
+    factory_specs: &std::collections::HashMap<String, usize>,
 ) -> Value {
     let mut row = json!({
         "path": info.path.to_string_lossy(),
@@ -883,9 +943,13 @@ pub(super) fn saved_session_row(
         object.insert("thinkingLevel".to_string(), json!(level));
     }
     // Persistent `bash()` shells outlive the session's kernel: an inactive row still
-    // shows the live ones (kernel activity row shape).
+    // shows the live ones (kernel activity row shape). Its stored factory specs are
+    // durable harness entries, readable without a kernel too.
     if let Some(shells) = persistent_shells.get(&info.id) {
         object.insert("persistentShells".to_string(), json!(shells));
+    }
+    if let Some(specs) = factory_specs.get(&info.id) {
+        object.insert("factorySpecs".to_string(), json!(specs));
     }
     row
 }
@@ -931,14 +995,18 @@ mod tests {
     ) -> tokio::sync::mpsc::Receiver<WorkerRequest> {
         let (cmd_tx, cmd_rx) =
             tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        resident
+            .install_command_channel(resident.begin_connection(), cmd_tx)
+            .await;
         cmd_rx
     }
 
     async fn responsive_worker(resident: &Arc<ResidentWorker>, state: Value) {
         let (cmd_tx, mut cmd_rx) =
             tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        resident
+            .install_command_channel(resident.begin_connection(), cmd_tx)
+            .await;
         let responder = Arc::clone(resident);
         tokio::spawn(async move {
             while let Some(request) = cmd_rx.recv().await {

@@ -222,6 +222,37 @@ pub struct BundledSkillsSettings {
     pub websearch: Option<bool>,
 }
 
+/// `webSearchProvider`: the service the bundled websearch skill queries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchProvider {
+    #[default]
+    Serper,
+    /// You.com Eco Search.
+    Eco,
+}
+
+impl WebSearchProvider {
+    /// The provider's id: its settings value, its auth-store slot, and the
+    /// kernel's `PRIME_AGENT_WEBSEARCH_PROVIDER` value.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            WebSearchProvider::Serper => crate::auth::SERPER_CREDENTIAL_ID,
+            WebSearchProvider::Eco => crate::auth::ECO_CREDENTIAL_ID,
+        }
+    }
+
+    /// The environment variable whose nonblank value overrides the stored key.
+    #[must_use]
+    pub fn api_key_env(self) -> &'static str {
+        match self {
+            WebSearchProvider::Serper => "SERPER_API_KEY",
+            WebSearchProvider::Eco => "YOU_API_KEY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WarningSettings {
@@ -254,8 +285,7 @@ pub struct TelemetrySettings {
     pub local_mirror: Option<bool>,
 }
 
-/// The default per-cell watchdog budget for user `python_repl` cells: 60
-/// seconds.
+/// The default time limit for user `python_repl` cells: 60 seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
 
 /// The settings document: every known field optional; unknown keys preserved.
@@ -293,25 +323,25 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
-    /// Per-cell watchdog budget for user `python_repl` cells, in milliseconds
-    /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). Daemonless
-    /// sessions never arm it.
+    /// Default time limit for user `python_repl` cells, in milliseconds
+    /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). A cell
+    /// running longer is interrupted; the model can pass a per-call
+    /// `timeout` instead. Daemonless sessions never arm it.
     pub python_cell_timeout_ms: Option<u64>,
     pub autonomous: Option<AutonomousSettings>,
     /// Custom shell that runs every kernel `bash()` and user-bash command as
     /// `<shell> -c <command>`: an absolute path to an existing executable,
     /// validated once at session start (a bad value fails session creation
-    /// naming this setting). Project `.prime/agent/settings.json` overrides
-    /// the global value (TS parity), so opening an untrusted repo lets it
-    /// choose the binary that wraps every agent shell command - review
-    /// project settings before running the agent there.
+    /// naming this setting). Only global settings can select this executable.
     pub shell_path: Option<String>,
     pub quiet_startup: Option<bool>,
     pub shell_command_prefix: Option<String>,
     pub npm_command: Option<Vec<String>>,
+    /// Execution reads this from global settings only; project overrides are ignored.
     pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
     /// Extra local MCP service-catalog files (~-relative allowed), merged after the
     /// compiled built-ins; first source wins per id, and no bundled id can be shadowed.
+    /// Read from global settings only, like executable MCP server configuration.
     pub mcp_catalog_sources: Option<Vec<String>>,
     pub packages: Option<Vec<serde_json::Value>>,
     pub skills: Option<Vec<String>>,
@@ -319,6 +349,8 @@ pub struct Settings {
     pub themes: Option<Vec<String>>,
     pub enable_skill_commands: Option<bool>,
     pub bundled_skills: Option<BundledSkillsSettings>,
+    /// Read from global settings only, like the stored keys it selects between.
+    pub web_search_provider: Option<WebSearchProvider>,
     pub enable_builtin_skills: Option<bool>,
     pub terminal: Option<TerminalSettings>,
     pub images: Option<ImageSettings>,
@@ -334,6 +366,8 @@ pub struct Settings {
     pub editor_padding_x: Option<u64>,
     pub autocomplete_max_visible: Option<u64>,
     pub show_hardware_cursor: Option<bool>,
+    /// Typing `:name` in the prompt editor suggests matching emoji (unset means on).
+    pub emoji_shortcodes: Option<bool>,
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
     pub session_dir: Option<String>,

@@ -126,6 +126,16 @@ pub enum McpServerConfig {
             skip_serializing_if = "Option::is_none"
         )]
         callback_port: Option<u16>,
+        /// Secret of the pre-registered client, for servers that only issue confidential clients.
+        #[serde(
+            rename = "clientSecret",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        client_secret: Option<String>,
+        /// Space-separated scopes to request instead of the server's advertised ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scopes: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Stdio {
@@ -250,6 +260,9 @@ pub(crate) struct ResolvedIntegration {
 /// Options for constructing an [`McpManager`].
 pub type BeginLoginFuture = Box<dyn Future<Output = anyhow::Result<()>> + Send>;
 pub type BeginLoginFn = Arc<dyn Fn(String) -> BeginLoginFuture + Send + Sync>;
+
+/// Reads the current `mcpServers` setting.
+pub type UserServersFn = Arc<dyn Fn() -> Option<HashMap<String, McpServerConfig>> + Send + Sync>;
 
 pub struct McpManagerOptions {
     pub auth_storage: AuthStorage,
@@ -542,12 +555,14 @@ impl McpManager {
         user_servers: std::collections::HashMap<String, McpServerConfig>,
         agent_dir: &std::path::Path,
     ) -> (Vec<String>, Vec<String>, McpManager) {
+        let user_servers: UserServersFn = Arc::new(move || Some(user_servers.clone()));
+        let oauth_user_servers = Arc::clone(&user_servers);
         let manager = McpManager::new(McpManagerOptions {
             auth_storage: crate::auth::AuthStorage::create_with_oauth(
                 agent_dir,
-                std::sync::Arc::new(McpOAuth::new()),
+                std::sync::Arc::new(McpOAuth::new(oauth_user_servers)),
             ),
-            get_user_servers: Box::new(move || Some(user_servers.clone())),
+            get_user_servers: Box::new(move || user_servers()),
             begin_login: None,
             agent_dir: Some(agent_dir.to_path_buf()),
             get_catalog_sources: None,
@@ -1043,6 +1058,8 @@ mod tests {
             call_timeout_ms: None,
             client_id: None,
             callback_port: None,
+            client_secret: None,
+            scopes: None,
         }
     }
 

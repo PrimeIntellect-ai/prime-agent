@@ -24,12 +24,10 @@ pub(crate) struct AutonomousBoundaryMirror {
 }
 
 impl AgentSessionEngine {
-    /// The built session's consult mirror (cleared with the runtime's retirement).
+    /// The built session's consult mirror (gone once the session retires or closes).
     fn autonomous_boundary_mirror(&self) -> Option<AutonomousBoundaryMirror> {
-        self.autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock")
-            .clone()
+        self.live_handles()
+            .map(|live| live.autonomous_boundary.clone())
     }
 }
 
@@ -56,8 +54,8 @@ impl AgentSessionEngine {
                     return Ok(Vec::new());
                 };
                 // An aborted run mints no continuation — a kill that lands
-                // mid-turn never rolls one more zombie turn.
-                if signal.is_aborted() || engine.session_is_closed() {
+                // mid-turn never rolls one more zombie turn (the rows check the close).
+                if signal.is_aborted() {
                     return Ok(Vec::new());
                 }
                 Ok(engine.autonomous_continuation_rows(&context.message).await)
@@ -157,7 +155,7 @@ impl AgentSessionEngine {
 
     /// Whether an active thread goal owns the continuation wakeup.
     async fn goal_owns_continuation_wakeup(&self) -> bool {
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let Some(handles) = self.live_handles().map(|live| live.goal.clone()) else {
             return false;
         };
         let driver = handles.driver.lock().await;
@@ -338,7 +336,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent_engine::tests::{admit, faux_engine_with_settings, FAUX_TEST_LOCK};
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
     use crate::engine::EngineEvent;
 
     /// Inject the engine's background-bash liveness probe (a `true` probe
@@ -347,24 +345,16 @@ mod tests {
         engine: &Arc<AgentSessionEngine>,
         probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) {
-        *engine
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = Some(probe);
+        engine.set_test_probes(Some(probe), None);
     }
 
     /// The consult's lost-wakeup guard (Macroscope's #2826 review).
     #[test]
     fn a_handle_settling_between_the_probe_and_the_flag_store_still_wakes() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
         );
-        let engine = Arc::new(engine);
-        engine.register_arc();
         // The admission itself is the observable event (the sink hands the owed turn to a channel).
         let (admit_tx, admit_rx) = std::sync::mpsc::channel::<String>();
         engine.set_autonomous_admission(std::sync::Arc::new(move |text| {
@@ -405,16 +395,10 @@ mod tests {
 
     #[test]
     fn live_background_bash_holds_the_autonomous_continuation_until_it_settles() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
         );
-        let engine = Arc::new(engine);
-        // The in-run continuation hook upgrades the engine's registered arc.
-        engine.register_arc();
         // The admission collector stands in for the worker's follow-up lane.
         let admitted: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

@@ -4,15 +4,11 @@ use crate::engine::PromptBatchRow;
 
 /// `get_commands` enumerates the session's skills as `skill:<name>`
 /// commands, including before the first prompt (the read seam demand-builds
-/// the core session). The faux provider registers under `FAUX_TEST_LOCK`
-/// on a blocking thread (the lock is std, so it never rides an await).
+/// the core session).
 #[tokio::test]
 async fn get_commands_enumerates_skills_before_the_first_prompt() {
     use crate::engine::SessionEngine as _;
     let (engine, _dir) = tokio::task::spawn_blocking(|| {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         let skill_dir = agent_dir.join("skills").join("demo-skill");
@@ -42,7 +38,7 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
         .unwrap();
         let engine = std::sync::Arc::new(engine);
         engine.register_arc();
-        // Register under the lock; the async section resolves the cached model.
+        // Register here; the async section resolves the cached model.
         let model = engine.resolve_model().expect("faux model");
         drop(model);
         (engine, dir)
@@ -89,13 +85,9 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
 
 /// The built engine carries the durable file's header id, not the in-memory
 /// manager's fresh one, and keeps it across a replacement build (#3618). The
-/// faux registry is process-global, so the whole test holds `FAUX_TEST_LOCK`
-/// and drives the async seams on the engine's own runtime.
+/// test drives the async seams on the engine's own runtime.
 #[test]
 fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let mut store =
         crate::session_store::SessionFile::create(dir.path().to_str().unwrap_or("/tmp"), None, 0);
@@ -142,6 +134,69 @@ fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
     }
 }
 
+/// A side question bills the session it ran on: one `side_question` usage
+/// row carrying the run's tokens.
+#[test]
+fn a_side_question_bills_the_session_it_ran_on() {
+    use crate::engine::SessionEngine as _;
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({ "responses": [{ "text": "warm ok" }, { "text": "the aside" }] }),
+        u64::MAX,
+    );
+    admit(&engine, "warm".to_string(), &mut Vec::new());
+    let built = engine
+        .session
+        .blocking_lock()
+        .clone()
+        .expect("built session");
+    let sink: pa_core::session_engine::side_question::SideQuestionSink =
+        std::sync::Arc::new(|_| true);
+    let outcome = engine.run_side_question(
+        crate::engine::SideQuestionRequest {
+            side_question_id: "sq".to_string(),
+            question: "why?".to_string(),
+            previous_turns: Vec::new(),
+        },
+        &pa_agent::abort::AbortController::new().signal(),
+        &sink,
+    );
+    assert!(
+        matches!(outcome, crate::engine::SideQuestionOutcome::Complete { .. }),
+        "{outcome:?}"
+    );
+    let entries = engine.runtime.block_on(async {
+        built
+            .session
+            .shared_persistence()
+            .lock()
+            .await
+            .get_entries()
+    });
+    let bills: Vec<(String, u64)> = serde_json::to_value(entries)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["customType"] == "model_usage")
+        .map(|row| {
+            (
+                row["data"]["source"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                row["data"]["usage"]["totalTokens"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect();
+    assert!(
+        matches!(bills.as_slice(), [(source, tokens)] if source == "side_question" && *tokens > 0),
+        "one billed side-question row, got {bills:?}"
+    );
+}
+
 #[tokio::test]
 async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_branch() {
     let engine = {
@@ -160,11 +215,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     // Retire: the built session drops with its mirrored goal handles.
     engine.retire_session_runtime().await;
     assert!(engine.session.lock().await.is_none());
-    assert!(engine
-        .goal_runtime
-        .lock()
-        .expect("goal runtime lock")
-        .is_none());
+    assert!(engine.built_handles().is_none());
 
     // Park the moved branch on the unbuilt engine (the worker parks it on a blocking thread).
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -264,12 +315,7 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     let goal_branch = {
         let engine = std::sync::Arc::clone(&engine);
         tokio::task::spawn_blocking(move || {
-            let handles = engine
-                .goal_runtime
-                .lock()
-                .expect("goal runtime lock")
-                .clone()
-                .expect("goal handles");
+            let handles = engine.live_handles().expect("goal handles").goal.clone();
             let entries = engine
                 .runtime
                 .block_on(async { handles.session.lock().await })
@@ -373,9 +419,6 @@ fn run_skill_prompt_body(
     prompt: &str,
     batch: &[&str],
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let skill_dir = dir.path().join("agent").join("skills").join("demo-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -549,15 +592,11 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
 
 /// The branch summary call carries the request's durable session id even
 /// when no core session is built (a `/tree` summary right after a resume
-/// races the create's background build). The faux registry is
-/// process-global, so the test holds `FAUX_TEST_LOCK`; the recorder
-/// registration replaces the script's provider for the summary call.
+/// races the create's background build). The recorder registration
+/// replaces the script's provider for the summary call.
 #[test]
 fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
     use crate::engine::SessionEngine as _;
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -575,10 +614,10 @@ fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
         queued_steering_probe: None,
     })
     .unwrap();
-    engine.resolve_model().expect("faux model");
+    let model = engine.resolve_model().expect("faux model");
     assert!(engine.session.blocking_lock().is_none(), "no session built");
     let recorder = pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-        api: Some("faux".to_string()),
+        api: Some(model.api),
         provider: Some("faux".to_string()),
         ..Default::default()
     });

@@ -4,16 +4,16 @@
 use super::{
     anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
     ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
-    KernelState, Mutex, Ordering, Signal, StderrLog, Write, KERNEL_STDERR_LOG_BUDGET_MARKER,
-    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_PROTOCOL_LINE_BYTES,
-    READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
+    Lifecycle, MemoSlot, Mutex, Ordering, Signal, Starting, StderrLog, Write,
+    KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES,
+    MAX_PROTOCOL_LINE_BYTES, READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
 };
 
 impl Inner {
     /// True when a teardown (or newer start) superseded the start that
     /// captured `generation`.
     pub(crate) fn start_stale(&self, generation: u64) -> bool {
-        lock(&self.guarded).start_generation != generation
+        lock(&self.guarded).lifecycle.generation() != generation
     }
 
     /// Child stderr tail for error messages: at most the last 1024 chars.
@@ -111,31 +111,70 @@ impl Inner {
         }
         let progress = options.on_bootstrap_progress.clone();
         let skills = self.options.python_skills.clone();
-        let python = crate::kernel::bootstrap::ensure_kernel_python(
+        let python = crate::kernel::bootstrap::ensure_kernel_python_for_project(
             crate::kernel::bootstrap::EnsureKernelPythonOptions {
                 python_skills: skills,
                 on_progress: progress,
             },
+            self.options
+                .cwd
+                .clone()
+                .or_else(|| std::env::current_dir().ok()),
         )
         .await?;
         *lock(&self.resolved_python) = Some(python.clone());
         Ok(python)
     }
 
-    /// Perform the startup: resolve the interpreter, spawn `python -m rlm.repl`,
-    /// complete the protocol handshake, and mark the kernel running.
+    /// Start an idle kernel and run the startup; a no-op unless idle.
     pub(crate) async fn do_start(
         self: &Arc<Self>,
         options: &KernelStartOptions,
     ) -> anyhow::Result<()> {
-        {
+        let slot = {
             let mut g = lock(&self.guarded);
-            if g.state != KernelState::Idle {
-                return Ok(());
+            match g.lifecycle.current() {
+                Lifecycle::Idle => {}
+                Lifecycle::Starting(_)
+                | Lifecycle::Running
+                | Lifecycle::ShuttingDown { .. }
+                | Lifecycle::Discarding
+                | Lifecycle::Defunct => return Ok(()),
             }
-            g.start_generation += 1;
-            g.state = KernelState::Starting;
+            let slot = MemoSlot::new();
+            g.lifecycle.transition(Lifecycle::starting(slot.clone()));
+            slot
+        };
+        self.run_start(options, &slot).await
+    }
+
+    /// Run the startup `slot` belongs to and settle the slot for every joined caller.
+    pub(super) async fn run_start(
+        self: &Arc<Self>,
+        options: &KernelStartOptions,
+        slot: &Arc<MemoSlot>,
+    ) -> anyhow::Result<()> {
+        let result = self.spawn_and_handshake(options).await;
+        slot.finish(result.as_ref().err().map(|e| anyhow!("{e:#}")));
+        if result.is_err() {
+            if let Some(Starting { start, .. }) = lock(&self.guarded).lifecycle.starting_mut() {
+                if start
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, slot))
+                {
+                    *start = None;
+                }
+            }
         }
+        result
+    }
+
+    /// Resolve the interpreter, spawn `python -m rlm.repl`, complete the protocol
+    /// handshake, and mark the kernel running.
+    async fn spawn_and_handshake(
+        self: &Arc<Self>,
+        options: &KernelStartOptions,
+    ) -> anyhow::Result<()> {
         // Tracked from the moment startup begins so cleanup can dispose a
         // kernel that is still booting.
         live_kernels::add(self);
@@ -149,8 +188,8 @@ impl Inner {
                 }
                 live_kernels::remove(self);
                 let mut g = lock(&self.guarded);
-                if g.state != KernelState::Shutdown {
-                    g.state = KernelState::Idle;
+                if !g.lifecycle.is_shut_down() {
+                    g.lifecycle.transition(Lifecycle::Idle);
                 }
                 return Err(error);
             }
@@ -159,15 +198,17 @@ impl Inner {
         if self.start_stale(generation) {
             return Err(anyhow!("Kernel start superseded"));
         }
-        if lock(&self.guarded).state == KernelState::Shutdown {
+        if lock(&self.guarded).lifecycle.is_shut_down() {
             return Err(anyhow!("Kernel was disposed during startup"));
         }
 
-        let env = kernel_spawn_env(&self.options.env);
         let cwd = self.options.cwd.clone();
+        let env = kernel_spawn_env(&self.options.env);
         let mut command = tokio::process::Command::new(&python);
         command
-            .args(["-m", "rlm.repl"])
+            // `-m` otherwise prepends the project cwd to sys.path, allowing
+            // a repository's `rlm` to run before a prompt.
+            .args(["-P", "-s", "-m", "rlm.repl"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -186,14 +227,8 @@ impl Inner {
                 // is stale.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
-                {
-                    let mut g = lock(&self.guarded);
-                    g.state = KernelState::Shutdown;
-                }
+                lock(&self.guarded).lifecycle.transition(Lifecycle::Defunct);
                 live_kernels::remove(self);
-                if let Some(tx) = lock(&self.guarded).ready_tx.take() {
-                    let _ = tx.send(Err(anyhow!("spawn error: {error}")));
-                }
                 self.cleanup_resources(Signal::Term);
                 return Err(anyhow!(
                     "failed to spawn kernel python {}: {error}",
@@ -204,10 +239,8 @@ impl Inner {
         let pid = child.id().map_or(-1, |p| p as i32);
         orphan_journal::record_orphan_process_state(pid, true);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<i64>>();
-        {
-            let mut g = lock(&self.guarded);
-            g.startup_protocol_error = None;
-            g.ready_tx = Some(ready_tx);
+        if let Some(starting) = lock(&self.guarded).lifecycle.starting_mut() {
+            starting.ready_tx = Some(ready_tx);
         }
         self.wire_child(child, generation);
 
@@ -221,14 +254,14 @@ impl Inner {
                 // The child died or never reached ready, so the memoized runtime-ready
                 // result is stale: drop it and let a startup retry re-probe.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
-                let can_retry_startup = lock(&self.guarded).state != KernelState::Shutdown;
+                let can_retry_startup = !lock(&self.guarded).lifecycle.is_shut_down();
                 // Only the call that performed the cleanup may resurrect to
                 // idle; a concurrent kill()/teardown owns the state otherwise.
                 let performed = self
                     .perform_shutdown(KernelShutdownOptions::default())
                     .await;
                 if performed && can_retry_startup {
-                    lock(&self.guarded).state = KernelState::Idle;
+                    lock(&self.guarded).lifecycle.transition(Lifecycle::Idle);
                 }
                 return Err(error);
             }
@@ -236,7 +269,15 @@ impl Inner {
         if self.start_stale(generation) {
             return Err(anyhow!("Kernel start superseded"));
         }
-        if let Some(startup_error) = lock(&self.guarded).startup_protocol_error.clone() {
+        let startup_error = match lock(&self.guarded).lifecycle.current() {
+            Lifecycle::Starting(starting) => starting.protocol_error.clone(),
+            Lifecycle::Idle
+            | Lifecycle::Running
+            | Lifecycle::ShuttingDown { .. }
+            | Lifecycle::Discarding
+            | Lifecycle::Defunct => None,
+        };
+        if let Some(startup_error) = startup_error {
             return Err(anyhow!("{startup_error}"));
         }
         if protocol != REPL_PROTOCOL_VERSION as i64 {
@@ -250,7 +291,20 @@ impl Inner {
         }
         {
             let mut g = lock(&self.guarded);
-            g.state = KernelState::Running;
+            // A teardown that landed during the handshake owns the kernel now.
+            let starting = g.lifecycle.generation() == generation
+                && match g.lifecycle.current() {
+                    Lifecycle::Starting(_) => true,
+                    Lifecycle::Idle
+                    | Lifecycle::Running
+                    | Lifecycle::ShuttingDown { .. }
+                    | Lifecycle::Discarding
+                    | Lifecycle::Defunct => false,
+                };
+            if !starting {
+                return Err(anyhow!("Kernel was disposed during startup"));
+            }
+            g.lifecycle.transition(Lifecycle::Running);
             // The freshness memo describes the namespace of the kernel that committed it: a freshly
             // started kernel has no committed description yet.
             g.capture_freshness = None;
@@ -260,7 +314,7 @@ impl Inner {
     }
 
     pub(crate) fn current_generation(&self) -> u64 {
-        lock(&self.guarded).start_generation
+        lock(&self.guarded).lifecycle.generation()
     }
 
     /// Wire the spawned child: protocol reader, stderr tail + log, and the
@@ -439,11 +493,26 @@ impl Inner {
             }
             // append_diagnostic re-locks `guarded`, so it must run OUTSIDE
             // this lock scope (a std Mutex is not reentrant).
-            let was_live = {
+            let (was_live, owned_elsewhere) = {
                 let mut g = lock(&inner.guarded);
-                let was_live = g.state != KernelState::Shutdown;
-                g.state = KernelState::Shutdown;
-                was_live
+                // An in-flight graceful shutdown() owns this exit: it runs cleanup itself.
+                let (was_live, owned_elsewhere) = if g.lifecycle.graceful_shutdown_in_flight() {
+                    (false, true)
+                } else {
+                    match g.lifecycle.current() {
+                        // A protocol repair is killing this child; kill_child_to_idle runs
+                        // cleanup and settles the state itself.
+                        Lifecycle::Discarding => (false, true),
+                        Lifecycle::Idle | Lifecycle::Starting(_) | Lifecycle::Running => {
+                            (true, false)
+                        }
+                        Lifecycle::ShuttingDown { .. } | Lifecycle::Defunct => (false, false),
+                    }
+                };
+                if !owned_elsewhere {
+                    g.lifecycle.transition(Lifecycle::Defunct);
+                }
+                (was_live, owned_elsewhere)
             };
             if was_live {
                 inner.append_diagnostic(&format!(
@@ -453,15 +522,7 @@ impl Inner {
                 ));
             }
             live_kernels::remove(&inner);
-            // This exit is part of an in-flight graceful shutdown(): that call owns
-            // the teardown and runs cleanup itself.
-            // Scoped reads: locking the same std Mutex twice in one expression
-            // self-deadlocks (non-reentrant).
-            let graceful_in_flight = {
-                let g = lock(&inner.guarded);
-                g.graceful_shutdown_generation == Some(g.start_generation)
-            };
-            if graceful_in_flight {
+            if owned_elsewhere {
                 return;
             }
             inner.cleanup_resources(Signal::Term);
@@ -529,18 +590,25 @@ impl Inner {
 /// read UTF-8 regardless of the active legacy code page, overriding any
 /// provisioner-provided `PYTHONUTF8`) and the owner pid the runtime journals
 /// its process groups under.
-fn kernel_spawn_env(options_env: &HashMap<String, String>) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+fn kernel_spawn_env(
+    options_env: &HashMap<String, String>,
+) -> HashMap<std::ffi::OsString, std::ffi::OsString> {
+    let mut env: HashMap<std::ffi::OsString, std::ffi::OsString> = std::env::vars_os().collect();
     for (key, value) in options_env {
-        env.insert(key.clone(), value.clone());
+        #[cfg(windows)]
+        env.retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case(key));
+        env.insert(key.into(), value.into());
     }
-    if cfg!(windows) {
-        env.insert("PYTHONUTF8".to_string(), "1".to_string());
+    #[cfg(windows)]
+    {
+        env.retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case("PYTHONUTF8"));
+        env.insert("PYTHONUTF8".into(), "1".into());
     }
     env.insert(
-        "PRIME_AGENT_KERNEL_OWNER_PID".to_string(),
-        std::process::id().to_string(),
+        "PRIME_AGENT_KERNEL_OWNER_PID".into(),
+        std::process::id().to_string().into(),
     );
+    crate::kernel::python_env::sanitize_python_env(&mut env);
     env
 }
 
@@ -559,6 +627,37 @@ mod tests {
         ReplKernelManager::new(KernelManagerOptions::default())
     }
 
+    #[test]
+    fn kernel_spawn_drops_python_overrides_after_applying_options() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let trusted = root.path().join("trusted");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&trusted).unwrap();
+        let options = HashMap::from([
+            (
+                "PYTHONPATH".to_string(),
+                std::env::join_paths([std::path::Path::new("."), &project, &trusted])
+                    .unwrap()
+                    .into_string()
+                    .unwrap(),
+            ),
+            (
+                "PYTHONHOME".to_string(),
+                project.to_string_lossy().into_owned(),
+            ),
+            (
+                "PYTHONUSERBASE".to_string(),
+                project.to_string_lossy().into_owned(),
+            ),
+        ]);
+
+        let env = kernel_spawn_env(&options);
+        assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONPATH")));
+        assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONHOME")));
+        assert!(!env.contains_key(std::ffi::OsStr::new("PYTHONUSERBASE")));
+    }
+
     fn temp_root(tag: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("pa-stderr-perms-{}-{tag}", std::process::id()));
@@ -570,11 +669,16 @@ mod tests {
     #[test]
     fn kernel_spawn_env_forces_utf8_mode() {
         let mut options_env = HashMap::new();
-        options_env.insert("PYTHONUTF8".to_string(), "0".to_string());
+        options_env.insert("pythonutf8".to_string(), "0".to_string());
         let env = kernel_spawn_env(&options_env);
-        assert_eq!(env.get("PYTHONUTF8").map(String::as_str), Some("1"));
         assert_eq!(
-            env.get("PRIME_AGENT_KERNEL_OWNER_PID").map(String::as_str),
+            env.get(std::ffi::OsStr::new("PYTHONUTF8"))
+                .and_then(|value| value.to_str()),
+            Some("1")
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("PRIME_AGENT_KERNEL_OWNER_PID"))
+                .and_then(|value| value.to_str()),
             Some(std::process::id().to_string().as_str())
         );
     }

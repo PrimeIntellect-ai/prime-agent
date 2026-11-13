@@ -6,6 +6,13 @@ use super::{
 };
 
 impl AgentSession {
+    pub(crate) fn refinement_signal(&self) -> pa_agent::abort::AbortSignal {
+        self.refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .signal()
+    }
+
     pub async fn latest_compaction_timestamp(&self) -> Option<u64> {
         let state = self.agent.state().await;
         state
@@ -192,7 +199,7 @@ impl AgentSession {
         };
         // The flight spans the attempts, the rebuilt-context replace, and
         // the kernel-state notice: every path here REPLACES the live loop
-        // context, and the other replacers — `refine_with_refiner`'s
+        // context, and the other replacers — `commit_refinement`'s
         // outcome push and `record_compaction_outcome`'s failure row —
         // take the same flight. A row pushed onto the context must not
         // interleave with the replace: it would duplicate in the rebuilt
@@ -280,11 +287,25 @@ impl AgentSession {
                 summary_delta: options.summary_delta.clone(),
                 semantic_edges: options.semantic_edges.clone(),
             };
-            let mut prepared = crate::session_engine::compact_session::summarize_attempt(
+            let summaries = UncommittedSummaries {
+                store: std::sync::Arc::clone(&self.usage_store),
+                session_id: self.session_id().await,
+                bill: crate::session_engine::compact_session::SummaryBill::default(),
+            };
+            let summarized = crate::session_engine::compact_session::summarize_attempt(
                 &attempt,
                 &attempt_options,
+                &summaries.bill,
             )
-            .await?;
+            .await;
+            let mut prepared = match summarized {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    // A failed or aborted attempt's resolved calls land before the error returns.
+                    self.record_model_usage(summaries.bill.take()).await;
+                    return Err(error);
+                }
+            };
             // A toggle during the summarizer request must not re-inject the captured digest.
             if !self.harness_refinements_enabled() {
                 prepared.entry.harness_digest = None;
@@ -297,9 +318,18 @@ impl AgentSession {
                     &mut attempt,
                     &prepared,
                     options.abort,
-                )?
+                )
+            };
+            let committed = match committed {
+                Ok(committed) => committed,
+                Err(error) => {
+                    self.record_model_usage(summaries.bill.take()).await;
+                    return Err(error);
+                }
             };
             if committed {
+                // The committed row carries the attempt's calls.
+                summaries.bill.take();
                 return Ok(CompactOutcome::Ran(Box::new(
                     crate::session_engine::compact_session::CompactRun {
                         result: prepared.result,
@@ -309,6 +339,9 @@ impl AgentSession {
                     },
                 )));
             }
+            // A structural conflict retries from PREPARE: the discarded calls
+            // land first, so the retry builds on their row.
+            self.record_model_usage(summaries.bill.take()).await;
             pa_agent::abort::throw_if_aborted_signal(options.abort)?;
         }
         Err(anyhow::anyhow!(
@@ -382,33 +415,51 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Execute `/refine`: plan, re-read, apply, and persist the continual
-    /// harness state for this session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the conversation history cannot be read, or
-    /// when the refinement plan, apply, or persist fails.
-    pub async fn refine(
+    /// Start ephemeral background refinement; awaiting the returned task is
+    /// optional for hosts that deliver completion through their event stream.
+    /// Planning never reserves a user turn. Committed rows append at full-run idle.
+    pub fn start_refinement(
         &self,
-        options: &refine::RefineOptions,
+        options: refine::RefineOptions,
         source: refine::RefinementSource,
-        model: &pa_types::ai::Model,
+        model: pa_types::ai::Model,
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
-    ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        self.refine_with_refiner(
-            options,
-            source,
-            model,
-            refine::default_refiner_call(api_key, self.session_id().await),
-            global_harness_dir,
-        )
-        .await
+    ) -> tokio::task::JoinHandle<anyhow::Result<refine::CommittedRefinement>> {
+        let session = self.session.clone();
+        let agent = self.agent.clone();
+        let flight = self.compaction_flight.clone();
+        let in_flight = self.refinements_in_flight.clone();
+        let cancel = self.refinement_signal();
+        let agent_dir = self.agent_dir.clone();
+        let auxiliary = self.auxiliary_model.clone();
+        let usage_store = self.usage_store.clone();
+        tokio::spawn(async move {
+            let session_id = session.lock().await.get_session_id().to_string();
+            let refiner =
+                refine::session_refiner_call(auxiliary, &model, api_key, session_id).await?;
+            let refiner =
+                refine::recorded_refiner_call(refiner, "refine", session.clone(), usage_store);
+            refine::run_refinement(
+                session,
+                agent,
+                flight,
+                in_flight,
+                cancel,
+                agent_dir,
+                options,
+                source,
+                model,
+                refiner,
+                global_harness_dir,
+            )
+            .await
+        })
     }
 
-    /// [`Self::refine`] with an injected refiner call: the seam the parity
-    /// tests use to drive the refinement without a provider.
+    /// One awaited refinement run with an injected refiner call: the seam the
+    /// parity tests use to drive the refinement without a provider.
+    #[cfg(test)]
     pub(crate) async fn refine_with_refiner(
         &self,
         options: &refine::RefineOptions,
@@ -417,59 +468,57 @@ impl AgentSession {
         refine_call: crate::refinement::executor::RefinerFn,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        // The flight serializes every live-context replacer against a
-        // compaction's rebuild: this round's outcome rows persist and then
-        // push onto the context the compaction replaces, so the push must
-        // not interleave with a replace (duplicating in the rebuilt view
-        // or vanishing under it).
-        let _flight = self.compaction_flight.lock().await;
-        // The transcript's consumed artifacts are extracted under this first
-        // lock straight from the retained rows: no second clone of the rows.
-        let parts = self.session.lock().await.refine_transcript_parts();
-        let crate::session::manager::RefineTranscriptParts {
-            messages,
-            refinement_history,
-        } = parts.await?;
-        let (result, context_row_ids) = {
-            let mut session = self.session.lock().await;
-            // The factory opt-in resolves at apply time, not here: the
-            // agent dir (the same settings.json the kernel-side factory
-            // gate reads) rides down to the refinement, which re-reads
-            // `factory.enabled` immediately before applying the plan, off
-            // the async worker (`spawn_blocking`). The arm performs no
-            // synchronous settings read while holding this session lock,
-            // and the long planning request can no longer leave the gate
-            // deciding on a snapshot the request made stale. A session
-            // without a wired agent dir keeps the fail-closed disabled
-            // default.
-            refine::execute_refinement_with_rows(
-                &mut session,
-                refine::RefinementTranscript {
-                    messages: &messages,
-                    refinement_history: &refinement_history,
-                },
-                &global_harness_dir,
-                model,
-                options,
-                source,
+        refine::run_refinement(
+            self.session.clone(),
+            self.agent.clone(),
+            self.compaction_flight.clone(),
+            self.refinements_in_flight.clone(),
+            self.refinement_signal(),
+            self.agent_dir.clone(),
+            options.clone(),
+            source,
+            model.clone(),
+            refine::recorded_refiner_call(
                 refine_call,
-                self.agent_dir.as_deref(),
-            )
-            .await?
+                "refine",
+                self.session.clone(),
+                self.usage_store.clone(),
+            ),
+            global_harness_dir,
+        )
+        .await
+        .map(|committed| committed.result)
+    }
+}
+
+/// One compaction attempt's summarizer spend until it commits. A commit takes
+/// the bill (the compaction row carries those calls); a conflict, failure, or
+/// abort records it as a `compaction_discarded` `model_usage` row before
+/// `compaction_attempts` moves on. What is left when this drops belongs to a
+/// compaction future the caller dropped mid-flight, recorded from here, in
+/// the session the attempt started in.
+struct UncommittedSummaries {
+    store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
+    session_id: String,
+    bill: crate::session_engine::compact_session::SummaryBill,
+}
+
+impl Drop for UncommittedSummaries {
+    fn drop(&mut self) {
+        let Some(usage) = self.bill.take() else {
+            return;
         };
-        // The outcome rows (and the notice row when any edit applied) push
-        // onto the live context after the durable append, never a full rebuild
-        // — a rebuild would resurrect a retried turn's dropped trailing
-        // assistant. The pushed rows are THIS run's, under ONE agent-state lock.
-        let rows = {
-            let session = self.session.lock().await;
-            refine::context_rows_by_ids(session.retained_entries(), &context_row_ids)
+        // A drop cannot await the append, and a dropped compaction future
+        // leaves no caller to await it.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
         };
-        let loop_rows: Vec<AgentMessage> =
-            rows.iter().filter_map(session_message_to_loop).collect();
-        if !loop_rows.is_empty() {
-            self.agent.append_messages(loop_rows).await;
-        }
-        Ok(result)
+        let store = std::sync::Arc::clone(&self.store);
+        let session_id = std::mem::take(&mut self.session_id);
+        runtime.spawn(async move {
+            if let Err(error) = store.append_model_usage(session_id, usage).await {
+                eprintln!("pa-core: model usage row not persisted: {error}");
+            }
+        });
     }
 }

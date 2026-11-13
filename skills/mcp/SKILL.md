@@ -66,6 +66,32 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
 - Results are already-parsed Python (a `dict` for structured output, otherwise
   a string). No `json.loads` needed.
 
+## Large or integrity-critical payloads
+
+`mcp.call_tool` runs the MCP client session inside this kernel. Arguments go
+from Python straight to the server and never pass through model output or the
+daemon; results enter context only if you print them. For bulk writes or data
+that must stay exact (financial figures, generated rows), keep the payload in
+code:
+
+```python
+import hashlib, json
+from pathlib import Path
+
+src = Path("/tmp/updates.json")              # written by code, never typed by the model
+args = json.loads(src.read_text())
+result = await mcp.call_tool("sheets", "update_spreadsheet", args)
+Path("/tmp/updates.result.json").write_text(json.dumps(result))
+print(len(args["requests"]), hashlib.sha256(src.read_bytes()).hexdigest()[:12])
+```
+
+- Build or load arguments with code (`json.load`, a dataframe, a generator).
+  Never paste a payload into a cell or ask the model to retype one.
+- Write results to a file and check them in Python (counts, hashes, a readback
+  compared field by field). Print the summary, not the payload.
+- Each call times out after 60 s by default. For large writes, raise
+  `callTimeoutMs` in that server's `mcpServers` entry.
+
 ## Errors and permissions
 
 - `PermissionError` — the tool is excluded by the user's `enabledTools` /

@@ -13,10 +13,16 @@ use super::{
     anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
     DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
-    Supervisor, TempSync, TypedCreateRejection, Value, ROUTE_TIMEOUT_MS,
+    Supervisor, TempSync, TypedCreateRejection, Value, WorkerTransition, ROUTE_TIMEOUT_MS,
 };
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
+
+/// Which admission path publishes a fresh worker's passive family.
+pub(crate) enum RosterFamilySeedOwner {
+    Create,
+    Registration,
+}
 
 impl Supervisor {
     /// Complete a tombstoned stop for a worker encountered at adoption: adoption
@@ -33,7 +39,7 @@ impl Supervisor {
             // The worker outlived the stop: connect and forward the ORIGINAL stop intent —
             // kill for the kill stop, shutdown for the resumable stop. A failed connect
             // degrades to the finalize below.
-            resident.intentional_stop.store(true, Ordering::SeqCst);
+            resident.transition(WorkerTransition::RequestStop);
             // TS stopWorker(force) bounds the graceful IPC leg to one
             // second before process escalation. Auth and stop share that
             // budget: the ordinary route's 30s timeout begins only AFTER
@@ -67,7 +73,7 @@ impl Supervisor {
             // only with a provably-gone process — the settle is not a death certificate.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
-                if self.retire_worker_after_stop(resident).await {
+                if self.retire_worker_after_stop(resident, false).await {
                     self.log_line(&format!(
                         "finished the tombstoned stop of session worker {}",
                         resident.worker_id
@@ -87,7 +93,7 @@ impl Supervisor {
             if resident.descriptor.lock().await.owner_client_id.is_some() {
                 self.finalize_owned_stop(resident).await;
             }
-            if self.retire_worker_after_stop(resident).await {
+            if self.retire_worker_after_stop(resident, false).await {
                 self.log_line(&format!(
                     "finished the tombstoned per-session stop of session worker {}",
                     resident.worker_id
@@ -101,6 +107,7 @@ impl Supervisor {
         self: &Arc<Self>,
         create: &DaemonCommand,
         owner_client_id: Option<String>,
+        family_seed_owner: RosterFamilySeedOwner,
     ) -> Result<(Arc<ResidentWorker>, Value)> {
         let DaemonCommand::Create {
             session_path,
@@ -351,6 +358,11 @@ impl Supervisor {
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
+        // Claim before registration can observe the newly inserted resident.
+        resident.roster_family_seed_owned_by_create.store(
+            matches!(family_seed_owner, RosterFamilySeedOwner::Create),
+            Ordering::SeqCst,
+        );
         // TS stores `worker.launchEnv` before the spawn.
         resident.set_launch_env(client_launch_env);
         // Register the resident before spawning: the worker's boot self-registration must
@@ -509,7 +521,7 @@ impl Supervisor {
         }
         // The create completed with a validated session identity: client commands may
         // now be routed to this worker — nothing overtakes the session's create.
-        resident.note_session_ready();
+        resident.transition(WorkerTransition::SessionReady);
         let pid = child.id().unwrap_or(0);
         self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid), None);
         Ok((resident, create_summary))
@@ -737,10 +749,9 @@ impl Supervisor {
         // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
         // survives the escalation, must never be adopted as healthy by a later boot.
         self.persist_stop_tombstone_stop(resident).await?;
-        resident.intentional_stop.store(true, Ordering::SeqCst);
-        // The stop is intentional: routes waiting out a replacement must
-        // fail fast instead of parking on this worker.
-        resident.note_retired();
+        // The stop is intentional and final: routes waiting out a replacement
+        // must fail fast instead of parking on this worker.
+        resident.transition(WorkerTransition::RetireStopped);
         // The fence releases past the retire (a tombstone-persist failure
         // fails the stop before it, and the worker stays fully
         // routable) and before the shutdown route, which needs a permit
@@ -773,7 +784,7 @@ impl Supervisor {
         }
         // The per-session stop shares the terminal-stop contract: the descriptor dies only
         // with a provably-gone process — a worker that missed the shutdown stays adoptable.
-        self.retire_worker_after_stop(resident).await;
+        self.retire_worker_after_stop(resident, false).await;
         // A client-owned (ephemeral) worker's scheduled jobs die with the
         // registration (TS `cancelEphemeralWorkerScheduledJobs`).
         let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
@@ -800,13 +811,15 @@ impl Supervisor {
     pub(super) async fn retire_worker_after_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
+        keep_interrupted_work: bool,
     ) -> bool {
-        let (pid, start_id, recovery_journal_path) = {
+        let (pid, start_id, recovery_journal_path, no_session) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 descriptor.pid as u32,
                 descriptor.process_start_id.clone(),
                 descriptor.recovery_journal_path.clone(),
+                descriptor.create_command.no_session == Some(true),
             )
         };
         // An unobservable identity never receives the escalation's signals; a live process
@@ -835,6 +848,21 @@ impl Supervisor {
                 // run their teardown reap: kill the `bash()` groups they
                 // journaled before the descriptor dies with its files.
                 self.reap_dead_worker_orphans(resident).await;
+                if keep_interrupted_work
+                    && !no_session
+                    && crate::journal::WorkerRecoveryJournal::read_interrupted(Path::new(
+                        &recovery_journal_path,
+                    ))
+                {
+                    // A shutdown-continued worker keeps descriptor and journal so
+                    // the next boot can adopt the interrupted work. An in-memory
+                    // noSession worker has no saved conversation to adopt.
+                    let mut descriptor = resident.descriptor.lock().await;
+                    descriptor.stop_requested_at = None;
+                    descriptor.archive_on_stop = None;
+                    let _ = persist_worker(&resident.descriptor_path, &descriptor);
+                    return false;
+                }
                 // Metadata retirement historically treats failed liveness probes
                 // as gone. Journal deletion needs positive owner-death evidence:
                 // an unobservable process may still be writing durable work.
@@ -1031,7 +1059,7 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
         resident: &Arc<ResidentWorker>,
         timeout: Duration,
     ) -> Result<()> {
-        resident.intentional_stop.store(true, Ordering::SeqCst);
+        resident.transition(WorkerTransition::RequestStop);
         let response = self
             .route_command_typed(
                 resident,
@@ -1162,7 +1190,7 @@ mod tests {
         let resident =
             ResidentWorker::new("w-gone".to_string(), descriptor, descriptor_path.clone());
 
-        assert!(supervisor.retire_worker_after_stop(&resident).await);
+        assert!(supervisor.retire_worker_after_stop(&resident, false).await);
 
         assert!(
             !journal_path.exists(),
@@ -1191,7 +1219,7 @@ mod tests {
             "rootActiveSessionId": "w-retire",
             "createdAt": "2026-10-07T00:00:00Z",
             "updatedAt": "2026-10-07T00:00:00Z",
-            "lifecycle": "stopping",
+            "lifecycle": "ready",
             "createCommand": {},
             "consecutiveFailures": 0,
         }))
@@ -1207,17 +1235,17 @@ mod tests {
         let resident =
             ResidentWorker::new("w-retire".to_string(), descriptor, descriptor_path.clone());
 
-        assert!(!supervisor.retire_worker_after_stop(&resident).await);
+        assert!(!supervisor.retire_worker_after_stop(&resident, false).await);
         assert!(descriptor_path.is_dir());
         assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_some());
 
         std::fs::remove_dir(&descriptor_path).expect("unblock descriptor path");
         persist_worker(&descriptor_path, &*resident.descriptor.lock().await)
             .expect("descriptor persisted for retry");
-        assert!(supervisor.retire_worker_after_stop(&resident).await);
+        assert!(supervisor.retire_worker_after_stop(&resident, false).await);
         assert!(!descriptor_path.exists());
         assert!(crate::descriptor::read_identity_pending(&descriptor_path).is_none());
-        assert!(supervisor.retire_worker_after_stop(&resident).await);
+        assert!(supervisor.retire_worker_after_stop(&resident, false).await);
     }
 
     #[tokio::test]

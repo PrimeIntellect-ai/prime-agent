@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Hosted actual factory Left/Right navigation with raw PTY evidence.
+"""Hosted actual factory page navigation with raw PTY evidence: Right and
+Enter on a run header are inert, the stop key only arms, Left closes. Enter
+on a state opens its child session without ending the app, and Left in the
+child returns to the page with the same run and state selected.
 
 A protocol fixture supplies one real-shaped run; actual input parsing, view
 rendering and fallback keys execute unchanged.
@@ -21,21 +24,49 @@ from lifecycle_lib import Supervisor, Terminal, digest, env_for
 from lifecycle_lib import OwnedProcesses, TAG, finish
 
 RUN = 'factory-navigation-run'
+CHILD = 'factory-navigation-child'
 GRAPH = {'runs': [{'run_id': RUN, 'spec_id': 'navigation-fixture', 'name': RUN,
     'state': 'running', 'machine': {'states': [{'id': 'work'}], 'transitions': []},
-    'usage': {'running': 1}, 'nodes': [{'id': 'work', 'status': 'running', 'running': 1}]}]}
+    'usage': {'running': 1}, 'nodes': [{'id': 'work', 'status': 'running', 'running': 1,
+    'instances': [{'status': 'running', 'child': 'work-1'}]}]}]}
+# The roster row the page resolves the state's child through: a live depth-1
+# subagent of the fixture session s1.
+ROSTER = [{'agentId': 'work-agent', 'summary': {'runtimeKind': 'subagent',
+    'rlmChildId': 'work-1', 'parentActiveSessionId': 's1', 'activeSessionId': CHILD,
+    'rlmDepth': 1}}]
+STATE_SELECTED = '\u25b8 \u25cf work'
 
 
 class FactorySupervisor(Supervisor):
+    def extra_command(self, command, response):
+        return command.get('type') == 'cancel_rlm_child'
+
     def send(self, sock, data):
         data = copy.deepcopy(data)
+        if data.get('type') == 'response' and data.get('command') == 'cancel_rlm_child':
+            return  # A real socket sink that never replies to the confirmed stop.
         if data.get('type') == 'daemon_hello':
             data['serverCapabilities'] = ['session_input_admission', 'factory_activity']
         if data.get('type') == 'response' and data.get('command') == 'factory_activity':
             # The base fixture already recognizes this lane with an empty
             # legacy response. Supply its graph shape without mutating errors.
             data['data'] = copy.deepcopy(GRAPH)
+        if data.get('type') == 'response' and data.get('command') == 'roster_subscribe':
+            data['data'] = {'roster': copy.deepcopy(ROSTER)}
+        if data.get('type') == 'response' and data.get('command') == 'attach' \
+                and self.attach_target() == CHILD:
+            # The base fixture attaches every session as s1; the child keeps
+            # its own identity so the roster and the handoff can tell them apart.
+            snapshot = data['data']['snapshot']
+            data['data']['activeSessionId'] = snapshot['activeSessionId'] = CHILD
+            snapshot['summary']['id'] = snapshot['state']['activeSessionId'] = CHILD
+            snapshot['state'].update(sessionId='fixture-child', sessionName='Child fixture')
         super().send(sock, data)
+
+    def attach_target(self):
+        with self.lock:
+            attaches = [c for c in self.commands if c.get('type') == 'attach']
+        return attaches[-1].get('activeSessionId') if attaches else None
 
 
 def hello(binary, root, env, observed):
@@ -85,14 +116,50 @@ def observe(binary, root, observed):
         snap('dock', lambda text: server.attaches > 0 and 'factory' in text
              and any(c.get('type') == 'factory_activity' for c in server.commands))
         terminal.send(factory_click(terminal.screen))
-        snap('page', lambda text: RUN in text and 'actions:' not in text)
+        snap('page', lambda text: RUN in text and '\u2190 back' in text and 'Ctrl+X stop' in text)
+        # Right and Enter on the selected run header are inert; the stop
+        # key's armed prompt is the barrier proving they were handled.
+        terminal.send('\x1b[C\x1b[C\r\r')
+        terminal.send('\x18')
+        snap('right_enter_inert_then_stop_armed', lambda text: RUN in text
+             and 'again to confirm' in text)
         terminal.send('\x1b[C')
-        snap('right_opens_actions', lambda text: 'actions: ' + RUN in text)
-        terminal.send('\x1b[D')
-        snap('left_backs_out', lambda text: RUN in text and 'actions:' not in text)
+        snap('other_key_disarms', lambda text: RUN in text and 'again to confirm' not in text)
         terminal.send('\x1b[D')
         terminal.send('FACTORY_CLOSED_INPUT_BARRIER')
         snap('left_closes_page', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text and RUN not in text)
+        # Reopen the page, select the state, and open its child: the app must
+        # stay up and attach the child, which shows its depth label.
+        terminal.send(factory_click(terminal.screen))
+        snap('page_reopened', lambda text: RUN in text and '\u2190 back' in text)
+        terminal.send('\x1b[B')
+        snap('state_selected', lambda text: STATE_SELECTED in text)
+        terminal.send('\r')
+        snap('child_opened', lambda text: 'depth 1' in text and server.attach_target() == CHILD)
+        # Left on the child's empty editor leaves it: the page is back on the
+        # same run and state, and its Left closes to the chat as before.
+        terminal.send('\x1b[D')
+        snap('page_returned_on_the_state', lambda text: server.attach_target() == 's1'
+             and RUN in text and STATE_SELECTED in text and '\u25b8 factory: ' not in text)
+        # A confirmed child stop must leave navigation and paint responsive
+        # even while the daemon never replies. The returned page above is
+        # already on the child row; no dock-readiness assumption is needed.
+        terminal.send('\x18')
+        snap('child_stop_armed', lambda text: STATE_SELECTED in text and 'again to confirm' in text)
+        terminal.send('\x18')
+        terminal.wait('child stop reached hanging sink', lambda: any(
+            c.get('type') == 'cancel_rlm_child' for c in server.commands), server)
+        started = time.monotonic()
+        terminal.send('\x1b[DSTOP_PENDING_INPUT_BARRIER')
+        snap('child_stop_does_not_block_navigation', lambda text:
+             'STOP_PENDING_INPUT_BARRIER' in text and RUN not in text)
+        observed['stop_navigation_seconds'] = time.monotonic() - started
+        assert observed['stop_navigation_seconds'] < 3, 'child stop blocked the UI until its timeout'
+        snap('returned_page_closes', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text
+             and RUN not in text)
+        snap('child_stop_timeout_survives_page_close', lambda text:
+             'timed out waiting for the Prime Agent daemon response' in text
+             and RUN not in text)
         assert not server.prompts, 'navigation submitted a prompt'
         assert all(c.get('action') in ('graph', 'watch') for c in server.commands
                    if c.get('type') == 'factory_activity'), server.commands
@@ -130,7 +197,7 @@ def main():
     args = parser.parse_args()
     receipt = {'verified': False, 'scope': __doc__, 'not_verified': [
         'real factory execution',
-        'rebound keybindings (unit regression)', 'action execution after Right confirmation']}
+        'rebound keybindings (unit regression)', 'stop execution after the second press']}
     try:
         assert sys.platform == 'linux', 'hosted Linux only'
         with tempfile.TemporaryDirectory(prefix='pa-fnav-', dir='/tmp') as folder:

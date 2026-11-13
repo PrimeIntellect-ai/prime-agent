@@ -332,9 +332,14 @@ impl ExitBackfillHarness {
 impl Drop for ExitBackfillHarness {
     fn drop(&mut self) {
         // A panicking wait must never leak the pty child (it owns its
-        // session's controlling terminal).
+        // session's controlling terminal). Reap while draining: macOS holds
+        // an exiting process in the tty close until its queued output is read.
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        while matches!(self.child.try_wait(), Ok(None)) {
+            let mut buffer = [0u8; 8192];
+            let _ = self.master.file.read(&mut buffer);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -421,6 +426,8 @@ fn find_subsequence_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
+        // TIOCSCTTY is already the request type on Linux and a `u32` on macOS.
+        #[allow(clippy::cast_lossless)]
         let rc = unsafe { libc::ioctl(fd, libc::TIOCSCTTY as libc::c_ulong, 0) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());

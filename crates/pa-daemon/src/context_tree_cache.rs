@@ -30,6 +30,8 @@ pub(crate) struct CachedWalk {
     live_nodes: HashMap<String, Value>,
     /// Persisted child dirs' nodes, in the walk's mtime order.
     persisted: Vec<Value>,
+    /// Exact roster identities whose files were tombstoned during this walk.
+    excluded_snapshots: HashSet<String>,
 }
 
 /// The per-worker context-tree cache: the data swap under a std mutex
@@ -108,7 +110,11 @@ impl ContextTreeCache {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             live_ids.insert(id.to_string());
-            if invalidated.contains(id) {
+            if invalidated.contains(id)
+                || cached
+                    .as_ref()
+                    .is_some_and(|walk| walk.excluded_snapshots.contains(&snapshot_key(snapshot)))
+            {
                 // A deletion that outran the roster removal: the row must not come back.
                 continue;
             }
@@ -266,7 +272,7 @@ impl ContextTreeCache {
                 })
                 .await;
                 match walk {
-                    Ok(Ok((mut live_nodes, mut persisted))) => {
+                    Ok(Ok(mut walk)) => {
                         let mut invalidated = cache
                             .invalidated
                             .lock()
@@ -274,8 +280,8 @@ impl ContextTreeCache {
                         // Deletions that landed while this walk ran must not be
                         // republished by the stale snapshot. The set drains here.
                         for child_id in invalidated.iter() {
-                            live_nodes.remove(child_id);
-                            persisted.retain(|node| {
+                            walk.live_nodes.remove(child_id);
+                            walk.persisted.retain(|node| {
                                 node.get("id").and_then(Value::as_str) != Some(child_id)
                             });
                         }
@@ -284,12 +290,8 @@ impl ContextTreeCache {
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        *state = Some(CachedWalk {
-                            computed_at: Instant::now(),
-                            session_id: session_id.clone(),
-                            live_nodes,
-                            persisted,
-                        });
+                        walk.computed_at = Instant::now();
+                        *state = Some(walk);
                     }
                     Ok(Err(error)) => {
                         eprintln!("context tree walk failed: {error:#}");
@@ -322,67 +324,66 @@ impl ContextTreeCache {
     }
 }
 
-/// One full artifact-tree walk: the model registry, the ledger tombstones,
-/// every live child's file-derived node, and every persisted child dir under
-/// the session's artifact tree. Blocking pool only.
+/// One full artifact-tree walk: the model registry, the ledger facts, every
+/// live child's file-derived node, every persisted child dir under the
+/// session's artifact tree, and the session's deleted rows. Blocking pool only.
 fn walk_children(
     agent_dir: &Path,
     session_id: &str,
     snapshots: &[Value],
     session_file: Option<&Path>,
-) -> Result<(HashMap<String, Value>, Vec<Value>)> {
+) -> Result<CachedWalk> {
     let registry = crate::state_getters::worker_model_registry(agent_dir);
     let artifacts_root = crate::context_tree_children::session_artifacts_dir(agent_dir);
-    // User-deleted subagents stay hidden at every depth: the tombstones key by the deleted
-    // child's parent session file, so this session's deletions resolve into the root skip
-    // set and each recursion level its own. Unreadable ledgers degrade to no filtering.
+    // User-deleted subagents' transcripts stay hidden at every depth and bill
+    // through their deleted rows: the ledger keys both by the deleted child's
+    // parent session file, so this session's deletions resolve here and each
+    // recursion level its own.
+    let sessions_dir = agent_dir.join("sessions");
+    let ledger = crate::context_tree_children::ContextLedger::read(
+        &crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {}),
+    );
     let mut skip_ids: HashSet<String> = snapshots
         .iter()
         .filter_map(|child| child.get("id").and_then(Value::as_str))
         .map(str::to_string)
         .collect();
-    let mut tombstones = crate::context_tree_children::TombstonedChildren::new();
-    let sessions_dir = agent_dir.join("sessions");
-    let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {});
-    if let Ok(edges) = ledger.edges(true) {
-        for edge in edges {
-            if edge.deleted.is_some() {
-                tombstones
-                    .entry(crate::lease::canonical_session_path(Path::new(
-                        &edge.parent,
-                    )))
-                    .or_default()
-                    .insert(edge.child_id.clone());
-            }
-        }
-    }
     if let Some(session_file) = session_file {
-        if let Some(deleted) = tombstones.get(&crate::lease::canonical_session_path(session_file)) {
-            skip_ids.extend(deleted.iter().cloned());
-        }
+        skip_ids.extend(ledger.tombstoned_ids(session_file));
     }
     // Live children: the node carries the child's real usage and its
     // recursive grandchildren; the registry supplies the fresher identity.
     let mut live_nodes = HashMap::with_capacity(snapshots.len());
+    let mut excluded_snapshots = HashSet::new();
     for child in snapshots {
-        let mut node = child
+        let loaded = child
             .get("sessionDir")
             .and_then(Value::as_str)
             .and_then(|dir| {
-                crate::context_tree_children::load_context_tree_child(
+                crate::context_tree_children::load_context_tree_child_with_path(
                     &artifacts_root,
                     Path::new(dir),
                     &registry,
-                    &tombstones,
+                    &ledger,
                 )
-            })
-            .unwrap_or_else(|| {
+            });
+        if loaded
+            .as_ref()
+            .is_some_and(|(path, _)| ledger.is_tombstoned_file(path))
+        {
+            excluded_snapshots.insert(snapshot_key(child));
+            continue;
+        }
+        let mut node = loaded.map_or_else(
+            || {
                 json!({
                     "ownUsage": empty_usage(),
                     "totalUsage": empty_usage(),
                     "children": [],
                 })
-            });
+            },
+            |(_, node)| node,
+        );
         node["id"] = child.get("id").cloned().unwrap_or(Value::Null);
         node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
         node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
@@ -393,14 +394,33 @@ fn walk_children(
             .to_string();
         live_nodes.insert(id, node);
     }
-    let persisted = crate::context_tree_children::load_context_tree_children(
+    let mut persisted = crate::context_tree_children::load_context_tree_children(
         &artifacts_root,
         session_id,
         &registry,
         &skip_ids,
-        &tombstones,
+        &ledger,
     );
-    Ok((live_nodes, persisted))
+    if let Some(session_file) = session_file {
+        persisted.extend(ledger.deleted_nodes(session_file));
+    }
+    Ok(CachedWalk {
+        computed_at: Instant::now(),
+        session_id: session_id.to_string(),
+        live_nodes,
+        persisted,
+        excluded_snapshots,
+    })
+}
+
+/// Identity only: status and elapsed duration can change on a stale roster row.
+fn snapshot_key(snapshot: &Value) -> String {
+    json!([
+        snapshot.get("id"),
+        snapshot.get("activeSessionId"),
+        snapshot.get("sessionDir")
+    ])
+    .to_string()
 }
 
 #[cfg(test)]
@@ -416,6 +436,7 @@ mod tests {
         let cache = Arc::new(ContextTreeCache::new());
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
+            excluded_snapshots: HashSet::new(),
             session_id: session_id.to_string(),
             live_nodes: live
                 .iter()
@@ -505,6 +526,7 @@ mod tests {
         // the child back at serve time.
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
+            excluded_snapshots: HashSet::new(),
             session_id: "session-a".to_string(),
             live_nodes: [(
                 "child-live".to_string(),
@@ -557,6 +579,7 @@ mod tests {
         let cache = Arc::new(ContextTreeCache::new());
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
+            excluded_snapshots: HashSet::new(),
             session_id: "session-a".to_string(),
             live_nodes: HashMap::new(),
             persisted: vec![json!({
@@ -580,6 +603,304 @@ mod tests {
             children[0]["totalUsage"]["input"],
             json!(77),
             "the persisted row's body served the live row: {children:?}"
+        );
+    }
+
+    /// One session transcript: a user row and an assistant row billing `cost`.
+    fn write_session(path: &Path, session_id: &str, cost: f64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lines = [
+            json!({
+                "type": "session", "version": 3, "id": session_id,
+                "timestamp": "2026-10-25T00:00:00.000Z", "cwd": "/tmp",
+            }),
+            json!({
+                "type": "message", "id": "m1", "parentId": null,
+                "timestamp": "2026-10-25T00:00:01.000Z",
+                "message": {"role": "user", "content": "work"},
+            }),
+            json!({
+                "type": "message", "id": "m2", "parentId": "m1",
+                "timestamp": "2026-10-25T00:00:02.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "provider": "anthropic", "model": "claude-opus-4-6",
+                    "stopReason": "stop",
+                    "usage": {
+                        "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                        "totalTokens": 15,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": cost },
+                    },
+                },
+            }),
+        ];
+        let content: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(path, content.join("\n") + "\n").unwrap();
+    }
+
+    /// A deleted factory child keeps billing: /context serves it as a
+    /// `deleted` row tagged with its run (from the tombstoned ledger edge)
+    /// and split by model (the delete's capture), and the /context grand
+    /// total equals the agents-view session total (own row + live child
+    /// rows + the ledger's deleted-descendant bucket).
+    // Exact binary fractions: the two totals must be the same number.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn deleted_children_keep_their_spend_in_the_context_totals() {
+        let agent_dir = std::env::temp_dir().join(format!("pa-ctx-del-{}", uuid::Uuid::new_v4()));
+        let sessions_dir = agent_dir.join("sessions");
+        let root_file = sessions_dir.join("01a0root-0000.jsonl");
+        write_session(&root_file, "01a0root-0000", 0.5);
+        let children_dir = agent_dir.join("session-artifacts/01a0root-0000");
+        let live_file = children_dir.join("sub-live/01a0live-0000.jsonl");
+        write_session(&live_file, "01a0live-0000", 0.25);
+        let gone_file = children_dir.join("sub-gone/01a0gone-0000.jsonl");
+        write_session(&gone_file, "01a0gone-0000", 0.125);
+        let tag = crate::rlm_ledger::RlmFactoryTag {
+            run_id: "0123456789ab".to_string(),
+            spec_id: "sw".to_string(),
+            state_id: "build".to_string(),
+        };
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        for (child_id, file) in [("sub-live", &live_file), ("sub-gone", &gone_file)] {
+            ledger
+                .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                    child_id: child_id.to_string(),
+                    parent: root_file.to_string_lossy().to_string(),
+                    child: file.to_string_lossy().to_string(),
+                    depth: 1,
+                    name: child_id.to_string(),
+                    factory: Some(tag.clone()),
+                })
+                .unwrap();
+        }
+        // Another session's untagged child that drew the same child id,
+        // spawned later: tags key by child session file, so it neither
+        // clears this run's tag nor inherits it.
+        let twin = agent_dir.join("session-artifacts/01a0other-0000/sub-live/01a0twin-0000.jsonl");
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-live".to_string(),
+                parent: sessions_dir
+                    .join("01a0other-0000.jsonl")
+                    .to_string_lossy()
+                    .to_string(),
+                child: twin.to_string_lossy().to_string(),
+                depth: 1,
+                name: "twin".to_string(),
+                factory: None,
+            })
+            .unwrap();
+        // The production delete: the tombstone, then the usage amendment.
+        let gone = gone_file.to_string_lossy().to_string();
+        ledger
+            .append_delete(
+                "sub-gone",
+                &gone,
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+            )
+            .unwrap();
+        crate::stop_cleanup::append_deleted_child_usage_amendments(&ledger, &gone, "sub-gone")
+            .expect("a deleted child");
+
+        let walk = walk_children(&agent_dir, "01a0root-0000", &[], Some(&root_file)).unwrap();
+        let live_nodes = walk.live_nodes;
+        let persisted = walk.persisted;
+        assert!(live_nodes.is_empty());
+        let cost = |node: &Value| node["ownUsage"]["cost"]["total"].as_f64().unwrap();
+        let by_id = |id: &str| {
+            persisted
+                .iter()
+                .find(|node| node["id"] == json!(id))
+                .unwrap_or_else(|| panic!("{id} in {persisted:?}"))
+        };
+        assert_eq!(persisted.len(), 2, "{persisted:?}");
+        assert_eq!(by_id("sub-live")["factory"], json!(tag));
+        let deleted = persisted
+            .iter()
+            .find(|node| node["deleted"] == json!(true))
+            .unwrap();
+        assert_eq!(deleted["deleted"], json!(true));
+        assert_eq!(
+            deleted["factory"],
+            json!(tag),
+            "the run tag survives the tombstone"
+        );
+        assert_eq!(cost(deleted), 0.125);
+        // The delete captured the per-model split, so the /context Cost
+        // breakdown keeps the deleted spend under its model.
+        assert_eq!(
+            deleted["ownUsageByModel"],
+            json!([{
+                "provider": "anthropic",
+                "id": "claude-opus-4-6",
+                "ownUsage": {
+                    "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.125 },
+                },
+            }])
+        );
+
+        let root = crate::session_store::SessionFile::open(&root_file).unwrap();
+        let (root_own, _) = crate::state_getters::compute_own_and_total_usage(
+            &root.branch_bridged(),
+            root.entries(),
+        );
+        let context_total =
+            root_own["cost"]["total"].as_f64().unwrap() + persisted.iter().map(cost).sum::<f64>();
+        let row_cost = |file: &Path| {
+            crate::session_store::read_session_info(file)
+                .and_then(|info| info.usage)
+                .map_or(0.0, |usage| usage.cost)
+        };
+        let root_key = crate::lease::canonical_session_path(&root_file)
+            .to_string_lossy()
+            .to_string();
+        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+        let agents_view_total =
+            row_cost(&root_file) + row_cost(&live_file) + bucket[&root_key].cost;
+        assert_eq!(context_total, 0.875);
+        assert_eq!(context_total, agents_view_total);
+        let _ = std::fs::remove_dir_all(&agent_dir);
+    }
+
+    /// Roster removal may lag the ledger tombstone even after invalidation
+    /// has drained. A new walk must not bill the surviving snapshot again.
+    #[test]
+    fn a_tombstoned_roster_snapshot_never_reenters_the_context_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path();
+        let parent = agent_dir.join("sessions/parent.jsonl");
+        let child = agent_dir.join("session-artifacts/parent/sub-old/child.jsonl");
+        write_session(&parent, "parent", 0.5);
+        write_session(&child, "child", 0.125);
+        let ledger =
+            crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &agent_dir.join("sessions"), |_| {});
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-old".into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "old".into(),
+                factory: None,
+            })
+            .unwrap();
+        ledger
+            .append_delete(
+                "sub-old",
+                &child.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+            )
+            .unwrap();
+        crate::stop_cleanup::append_deleted_child_usage_amendments(
+            &ledger,
+            &child.to_string_lossy(),
+            "sub-old",
+        )
+        .unwrap();
+        let stale = json!({"id": "sub-old", "label": "old", "status": "completed",
+            "sessionDir": child.parent().unwrap()});
+        let walk = walk_children(
+            agent_dir,
+            "parent",
+            std::slice::from_ref(&stale),
+            Some(&parent),
+        )
+        .unwrap();
+        let live = &walk.live_nodes;
+        let deleted = &walk.persisted;
+        assert!(
+            live.is_empty(),
+            "tombstone must hide stale roster row: {live:?}"
+        );
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0]["totalUsage"]["cost"]["total"], json!(0.125));
+        let expected = walk.persisted.clone();
+        let cache = ContextTreeCache::new();
+        *cache.state.lock().unwrap() = Some(walk);
+        let mut changed_status = stale.clone();
+        changed_status["status"] = json!("cancelled");
+        changed_status["durationMs"] = json!(1234);
+        assert_eq!(
+            cache.serve_children(Some("parent"), &[changed_status]),
+            expected,
+            "cache overlay must not resurrect the usage-empty fallback either"
+        );
+        let mut reused = stale;
+        reused["activeSessionId"] = json!("new-runtime");
+        let served = cache.serve_children(Some("parent"), &[reused]);
+        assert_eq!(
+            served
+                .iter()
+                .map(|node| (node["id"].clone(), node["deleted"].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("sub-old"), Value::Null),
+                (expected[0]["id"].clone(), json!(true))
+            ],
+            "a new runtime reusing the child id remains visible"
+        );
+    }
+
+    /// A child id may identify distinct historical files under the same
+    /// parent. Each billable tombstone needs a distinct context node id.
+    #[test]
+    #[allow(clippy::float_cmp)] // Exact binary fractions: the billable total must match.
+    fn deleted_context_nodes_distinguish_reused_child_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path();
+        let parent = agent_dir.join("sessions/parent.jsonl");
+        write_session(&parent, "parent", 0.5);
+        let ledger =
+            crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &agent_dir.join("sessions"), |_| {});
+        for (id, cost) in [("first", 0.125), ("second", 0.25)] {
+            let child = agent_dir.join(format!("session-artifacts/parent/{id}/{id}.jsonl"));
+            write_session(&child, id, cost);
+            ledger
+                .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                    child_id: "reused".into(),
+                    parent: parent.to_string_lossy().into(),
+                    child: child.to_string_lossy().into(),
+                    depth: 1,
+                    name: id.into(),
+                    factory: None,
+                })
+                .unwrap();
+            ledger
+                .append_delete(
+                    "reused",
+                    &child.to_string_lossy(),
+                    crate::rlm_ledger::RlmLedgerDeleteReason::User,
+                )
+                .unwrap();
+            crate::stop_cleanup::append_deleted_child_usage_amendments(
+                &ledger,
+                &child.to_string_lossy(),
+                "reused",
+            )
+            .unwrap();
+        }
+        let nodes = walk_children(agent_dir, "parent", &[], Some(&parent))
+            .unwrap()
+            .persisted;
+        assert_eq!(nodes.len(), 2);
+        let ids: HashSet<&str> = nodes
+            .iter()
+            .map(|node| node["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "distinct tombstoned files share ids: {nodes:?}"
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node["totalUsage"]["cost"]["total"].as_f64().unwrap())
+                .sum::<f64>(),
+            0.375
         );
     }
 

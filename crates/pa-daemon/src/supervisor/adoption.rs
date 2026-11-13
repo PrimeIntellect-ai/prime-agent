@@ -7,7 +7,7 @@ use super::{
     anyhow, json, load_descriptors, response_failure, response_success, socket,
     worker_connect_deadline, Context, DaemonCommand, DaemonResponse, DaemonWorkerLifecycle,
     Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor, Value,
-    WorkerRegistration,
+    WorkerRegistration, WorkerTransition,
 };
 
 /// An unobservable start identity does not prove that a live pid was recycled.
@@ -286,7 +286,7 @@ impl Supervisor {
                 }
                 // The adopted worker's session already exists (its create ran before the
                 // supervisor restart): routed client commands may reach it immediately.
-                resident.note_session_ready();
+                resident.transition(WorkerTransition::SessionReady);
             }
             (adopted, None)
         } else {
@@ -557,22 +557,28 @@ impl Supervisor {
             record.epoch
         ));
         drop(guard);
-        // Registration rebuilt the resident: refresh its roster entry from
-        // the live worker so the roster reflects the re-registered state.
-        self.refresh_roster_entry(&resident).await;
         // A worker that registers after the boot seed publishes its passive ledger family in
         // the background: TS reseeds on the worker's first roster snapshot, and this port's
         // workers push only their own summary, so the daemon walks the family here.
-        let family_root = {
-            let descriptor = resident.descriptor.lock().await;
-            descriptor
-                .session_file
-                .clone()
-                .or_else(|| descriptor.create_command.session_path.clone())
-        };
-        if let Some(root) = family_root {
-            self.spawn_roster_registration_seed(Path::new(&root));
+        if record.epoch == 1
+            && !resident
+                .roster_family_seed_owned_by_create
+                .load(Ordering::SeqCst)
+        {
+            let family_root = {
+                let descriptor = resident.descriptor.lock().await;
+                descriptor
+                    .session_file
+                    .clone()
+                    .or_else(|| descriptor.create_command.session_path.clone())
+            };
+            if let Some(root) = family_root {
+                self.spawn_roster_registration_seed(Path::new(&root));
+            }
         }
+        // Registration rebuilt the resident: refresh its roster entry from
+        // the live worker so the roster reflects the re-registered state.
+        self.refresh_roster_entry(&resident).await;
         response_success(
             Some(command_id),
             type_name,
@@ -691,7 +697,7 @@ impl Supervisor {
         }
         // The self-registered worker's session already exists: routed
         // client commands may reach it immediately.
-        resident.note_session_ready();
+        resident.transition(WorkerTransition::SessionReady);
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(
             Arc::clone(&resident),
@@ -772,6 +778,9 @@ impl Supervisor {
                 child: child.to_string(),
                 depth,
                 name: session_name.clone(),
+                factory: metadata
+                    .get("factory")
+                    .and_then(|factory| serde_json::from_value(factory.clone()).ok()),
             })
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));

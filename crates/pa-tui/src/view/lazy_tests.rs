@@ -70,6 +70,33 @@ fn mid_transcript_scroll_frames_render_neither_end_section() {
     assert_eq!(frame, full.render_frame(37, 24));
 }
 
+/// A suspend's main-screen flush runs a layout pass that would strand
+/// the sparse follow window: the resumed compose must still follow the
+/// post-suspend tail instead of re-walking the stale cursor.
+#[test]
+fn suspend_flush_keeps_the_following_viewport_on_new_output() {
+    let mut view = view();
+    for index in 0..400 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("row {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    view.render_frame(37, 24);
+    let mut sink: Vec<u8> = Vec::new();
+    view.stream_flush_to(&mut sink, 37, 24)
+        .expect("the suspend flush streams");
+    view.push_entry(ChatEntry::Status {
+        text: "post-resume reply".to_string(),
+        kind: StatusKind::Info,
+    });
+    let rows = text_of(&view.render_frame(37, 24));
+    assert!(
+        rows.iter().any(|row| row.contains("post-resume reply")),
+        "the resumed viewport follows the new entry: {rows:?}"
+    );
+}
+
 /// A frame at the transcript start renders the splash (not the tail), a
 /// following frame renders the tail (not the splash), and the reached
 /// section's content is in the frame the walk returned.

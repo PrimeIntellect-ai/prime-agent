@@ -57,7 +57,8 @@ impl Worker {
     /// `get_context_tree`: the root is the session itself (usage totals over
     /// the persisted branch, ghost-parent gaps bridged); the children are the
     /// live RLM roster plus every persisted child dir (tombstoned ids stay
-    /// hidden). The disk walk runs in the background cache refresh: this path
+    /// hidden; their spend rides `deleted` rows from the ledger's
+    /// deleted-spend fold). The disk walk runs in the background cache refresh: this path
     /// serves the cached walk with fresh live identity overlaid (usage lags;
     /// a child's status never lags).
     pub(crate) async fn handle_get_context_tree(&self) -> DaemonResponse {
@@ -285,7 +286,8 @@ impl Worker {
 mod usage;
 
 pub(crate) use usage::{
-    compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, worker_model_registry,
+    compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, own_usage_by_model_of,
+    worker_model_registry,
 };
 
 // The getter battery lives in state_getters::state_getters_tests.

@@ -17,6 +17,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -59,14 +60,13 @@ _ASYNCIO_WRAPPER_CALLBACKS = {
     ("asyncio.tasks", "_release_waiter"),
 }
 
-# Bounded awaits (yield_after): in sessions whose host registers the
-# bash.completed handler, an await past its bound degrades to returning the
+# Bounded awaits: in sessions whose host registers the bash.completed handler,
+# an await still running after _YIELD_AFTER_SECONDS degrades to returning the
 # live handle instead of blocking (the [bash-done] notice collects it). The
 # kernel bootstrap flips the flag from the host-handler registry — one source
-# of truth; the numbers stay here, never on the Rust side.
+# of truth; the window stays here, never on the Rust side.
 _completion_notices_wired = False
-_DEFAULT_YIELD_AFTER_SECONDS = 10.0
-_MAX_YIELD_AFTER_SECONDS = 300.0
+_YIELD_AFTER_SECONDS = 1.0
 
 
 def _set_completion_notices_wired(wired: bool) -> None:
@@ -78,15 +78,6 @@ def _set_completion_notices_wired(wired: bool) -> None:
     """
     global _completion_notices_wired
     _completion_notices_wired = wired
-
-
-def _effective_yield_after(yield_after: float | None) -> float | None:
-    """The bound every await of a handle uses; None means unbounded."""
-    if not _completion_notices_wired:
-        return None
-    if yield_after is None:
-        return _DEFAULT_YIELD_AFTER_SECONDS
-    return min(yield_after, _MAX_YIELD_AFTER_SECONDS)
 
 
 # One stderr hint per degrade, budgeted per kernel (nano-rlm's
@@ -110,19 +101,13 @@ def _note_degrade(handle: "BashHandle", bound: float) -> None:
     )
 
 
-# Scan-cost guard (parity with the Rust bash_guard, crates/pa-core
-# src/tools/bash_guard.rs): a recursive scan over home-scale roots with no
-# time or depth bound is unbounded in time — output caps (`| head`) never
-# bound how long a no-match scan walks. The Rust tool call is awaited inline
-# by the agent loop; bash() cannot know at dispatch whether the cell will
-# await the handle inline, so the kernel-side surface teaches at dispatch
-# with a budgeted stderr hint and the command still runs (searches are
-# legitimate, the kernel's own await is already bounded by yield_after).
-# The opted-in auto-timeout applies here too: shipped sessions never register
-# the Rust execute_bash tool (the daemon registers python_repl only), so this
-# dispatch is the incident path — an armed scan's group is killed at the
-# user's bound and the result keeps the partial output plus a timeout status
-# (Rust parity: the execute_bash scan timeout).
+# Scan-cost guard: a recursive scan over home-scale roots with no time or
+# depth bound is unbounded in time — output caps (`| head`) never bound how
+# long a no-match scan walks. bash() cannot know at dispatch how the handle
+# will be awaited, so it teaches at dispatch with a budgeted stderr hint and
+# the command still runs (searches are legitimate). With the opt-in
+# PRIME_AGENT_SCAN_TIMEOUT, an armed scan's group is killed at the user's
+# bound and the result keeps the partial output plus a timeout status.
 _MAX_SCAN_HINTS = 3
 _scan_hints_written = 0
 _SCAN_TIMEOUT_ENV = "PRIME_AGENT_SCAN_TIMEOUT"
@@ -135,7 +120,7 @@ def _is_home_scale_root(token: str) -> bool:
     trees and stay quiet. Exact names keep other env vars ($HOMEDIR,
     ${HOMEBREW_PREFIX}) out. A grouping paren glued to the token
     (`(rg pattern $HOME)`) is stripped first — only `)`: `${HOME}`'s closing
-    brace is part of the expansion. Mirrors the Rust bash_guard."""
+    brace is part of the expansion."""
     token = token.rstrip(")")
     if token in ("~", "~/", "$HOME", "$HOME/", "${HOME}", "${HOME}/"):
         return True
@@ -175,8 +160,7 @@ _REDIRECT_OPERATORS = frozenset(
 
 
 def _is_redirect_operator(token: str) -> bool:
-    """A redirection operator token, with its optional fd prefix (`2>`).
-    Mirrors the Rust bash_guard."""
+    """A redirection operator token, with its optional fd prefix (`2>`)."""
     return token.lstrip("0123456789") in _REDIRECT_OPERATORS
 
 
@@ -199,8 +183,7 @@ _SUBSTITUTION_DEPTH_CAP = 8
 
 def _starts_with_home_expansion(chars: list[str], at: int) -> bool:
     """True when chars[at:] starts with $HOME or ${HOME}; a following
-    variable-name character ($HOMEDIR) is a different variable. Mirrors the
-    Rust bash_guard helper."""
+    variable-name character ($HOMEDIR) is a different variable."""
     if at + 1 < len(chars) and chars[at + 1] == "{":
         return "".join(chars[at : at + 7]) == "${HOME}"
     if "".join(chars[at : at + 5]) != "$HOME":
@@ -216,7 +199,7 @@ _HEREDOC_MASK_CAP = 8
 
 
 def _mask_scan_literals(command: str) -> str:
-    """Mirror of the Rust bash_guard masker: one linear scan masking
+    """One linear scan masking
     single-quoted spans, double-quoted literal data, comments, and heredoc
     bodies so they cannot masquerade as a scan. A double-quoted span that
     starts with a $HOME/${HOME} expansion stays fully live (the path argument
@@ -748,14 +731,13 @@ def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
 
 
 def _is_unbounded_home_scan(command: str) -> bool:
-    """True for the unbounded-scan shape; mirrors the Rust bash_guard rule.
+    """True for the unbounded-scan shape.
 
     Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
     root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
     Quoted literal data, heredoc bodies, and comments are masked first so
     they cannot masquerade as a scan; command-substitution bodies run in a
-    subshell, so they are scanned as commands too (the same rules as the
-    Rust guard).
+    subshell, so they are scanned as commands too.
     """
     # Iterative worklist with a depth cap: recursion would hit Python's
     # limit (or the agent's stack) on deeply nested malformed input before
@@ -781,12 +763,11 @@ def _note_scan_cost(command: str, scan_timeout: float | None = None) -> None:
     _scan_hints_written += 1
     hint = (
         "bash: this recursive scan of home-scale directories is unbounded "
-        "in time; output caps (| head) do not bound scan time, and "
-        "awaiting it inline can stall the turn. Bound it with "
-        "`yield_after` or background it and end the turn (not the shell "
-        "`timeout` prefix, which stock macOS lacks while `2>/dev/null` "
-        "masks its failure), add --max-depth / -maxdepth, or scan a "
-        "narrower directory."
+        "in time; output caps (| head) do not bound scan time. Bound it "
+        "with --max-depth / -maxdepth or a narrower directory (not the "
+        "shell `timeout` prefix, which stock macOS lacks while "
+        "`2>/dev/null` masks its failure), or background it "
+        "(`h = bash(...)`) and end the turn."
     )
     if scan_timeout is not None:
         hint += (
@@ -798,8 +779,7 @@ def _note_scan_cost(command: str, scan_timeout: float | None = None) -> None:
 
 def _scan_timeout_from_env(command: str) -> float | None:
     """The opted-in auto-timeout for `command` when set and it is an unbounded
-    home scan (Rust parity: scan_timeout_from_env — finite and positive; the
-    scan-shape gate mirrors is_unbounded_home_scan)."""
+    home scan; the value must be finite and positive."""
     raw = os.environ.get(_SCAN_TIMEOUT_ENV)
     if raw is None:
         return None
@@ -815,19 +795,19 @@ def _scan_timeout_from_env(command: str) -> float | None:
 
 
 async def _bounded_wait(
-    wait: Awaitable[BashResult], yield_after: float | None
+    wait: Awaitable[BashResult], bound: float | None
 ) -> BashResult | None:
-    """Await a command wait, abandoning it after `yield_after` seconds.
+    """Await a command wait, abandoning it after `bound` seconds.
 
     Returns None only on the degrade: the wait task keeps running (cancelling
     an owned wait would kill the command — the degrade must not), and its
     late result is consumed silently by the done callback.
     """
-    if yield_after is None:
+    if bound is None:
         return await wait
     wait_task = asyncio.ensure_future(wait)
     try:
-        done, _pending = await asyncio.wait({wait_task}, timeout=yield_after)
+        done, _pending = await asyncio.wait({wait_task}, timeout=bound)
     except asyncio.CancelledError:
         # An interrupt inside the window: the wait must observe the cancel
         # (an owned await runs its kill dance in _wait_owned) before the
@@ -1085,11 +1065,8 @@ class BashHandle:
     handle; later awaits only wait and cancelling them leaves it running.
     """
 
-    def __init__(self, command: str, yield_after: float | None = None) -> None:
+    def __init__(self, command: str) -> None:
         self.command = command
-        # The requested bound (None = the session default); every await
-        # resolves it through _effective_yield_after.
-        self._yield_after = yield_after
         self._activity_id = secrets.token_hex(16)
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
@@ -1517,8 +1494,7 @@ class BashHandle:
                     f"Command timed out after {self._scan_timeout:g} seconds "
                     f"({_SCAN_TIMEOUT_ENV})"
                 )
-                # Rust append_status parity: a blank line separates any
-                # partial output from the status.
+                # A blank line separates any partial output from the status.
                 text = status if not text else f"{text}\n\n{status}"
             self._result = BashResult(
                 exit_code=exit_code,
@@ -1799,13 +1775,13 @@ class BashHandle:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
         # as a deliberate background handle whose awaits only wait. Both paths
-        # wait at most the handle's bound, then degrade to this live handle.
+        # wait at most the yield window, then degrade to this live handle.
         try:
             current_task = asyncio.current_task()
         except RuntimeError:
             current_task = None
         creating_cell_waited = _creating_cell_waits_for(self._creating_cell_task, current_task)
-        bound = _effective_yield_after(self._yield_after)
+        bound = _YIELD_AFTER_SECONDS if _completion_notices_wired else None
         owned = not self._released
         wait = self._wait_owned() if owned else self._wait()
         self._released = True
@@ -1912,10 +1888,8 @@ class PersistentBashHandle(BashHandle):
         home: str,
         proc: subprocess.Popen[bytes] | None,
         running: bool = True,
-        yield_after: float | None = None,
     ) -> None:
         self.command = command
-        self._yield_after = yield_after
         self._activity_id = shell_id
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
@@ -2049,21 +2023,19 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, yield_after: float | None = None, persistent: bool = False) -> BashHandle:
+def bash(command: str, persistent: bool = False) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
     kills the command's process group. In sessions whose host wires completion
-    notices (the kernel bootstrap turns the bounded default on), an await that
-    is still running after `yield_after` seconds instead DEGRADES: it returns a
-    BashSnapshot (r.running True, r.output the output so far, r.handle the live
-    handle) while the command keeps running, and its [bash-done] notification
-    arrives on completion. `yield_after=None` uses the session
-    default (10 seconds); explicit values must be positive and are clamped to
-    300. In sessions without completion notices every await stays unbounded and
-    `yield_after` has no effect. `h = bash(cmd)` used as a background
-    handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
-    the first await) survives cancellation; awaiting it only waits. Leak
+    notices (the kernel bootstrap turns the bound on), an await that is still
+    running after 1 second instead DEGRADES: it returns a BashSnapshot
+    (r.running True, r.output the output so far, r.handle the live handle)
+    while the command keeps running, and its [bash-done] notification arrives
+    on completion. In sessions without completion notices every await stays
+    unbounded. `h = bash(cmd)` used as a background handle (any
+    .pid/.running/.output()/.tail()/.poll()/.kill() access before the first
+    await) survives cancellation; awaiting it only waits. Leak
     containment is per-platform: process groups plus the orphan journal on
     POSIX; a kill-on-close job object on Windows entered while the child is
     still suspended, so no descendant can escape it and kill()/crash cleanup
@@ -2077,27 +2049,25 @@ def bash(command: str, yield_after: float | None = None, persistent: bool = Fals
     shell survives kernel, worker, and daemon restarts and its session's
     delete or archive (a deleted session's shells keep running as orphans);
     only its own exit or an explicit kill() ends it. Its output and exit
-    status live in files under the agent dir, and awaits never own it: an
-    await bounded by yield_after degrades as for any handle and the shell runs
-    on. After a restart, get the handles back with `from rlm import
-    persistent_shells; persistent_shells()`; a shell that finished while no
+    status live in files under the agent dir, and awaits never own it: a
+    bounded await degrades as for any handle and the shell runs on. After a
+    restart, get the handles back with `from rlm import persistent_shells;
+    persistent_shells()`; a shell that finished while no
     kernel ran is listed once, finished. Completion of a re-attached shell is
     polled, so its result and completion notice lag by up to a second; its
     exit_code is -1 when it was killed before recording a status.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
-    if yield_after is not None and yield_after <= 0:
-        raise ValueError("yield_after must be a positive number of seconds")
     # A persistent shell ends only on its own exit or an explicit kill(), so
-    # the auto-timeout never arms there; this dispatch is the incident path.
+    # the auto-timeout never arms there.
     scan_timeout = None if persistent else _scan_timeout_from_env(command)
     _note_scan_cost(command, scan_timeout)
     if persistent:
-        handle: BashHandle = _spawn_persistent(command, yield_after)
+        handle: BashHandle = _spawn_persistent(command)
     else:
         _install_shutdown_hook()
-        handle = BashHandle(command, yield_after)
+        handle = BashHandle(command)
         if scan_timeout is not None:
             handle._arm_scan_timeout(scan_timeout)
     from . import repl
@@ -2295,7 +2265,7 @@ def _shell_identity(pid: int, start_id: str) -> bool | None:
     return None if current is None else current == start_id
 
 
-def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBashHandle:
+def _spawn_persistent(command: str) -> PersistentBashHandle:
     if not _IS_POSIX:
         raise RuntimeError("bash(persistent=True) is only supported on POSIX")
     session_id = os.environ.get("RLM_SESSION_ID")
@@ -2306,10 +2276,11 @@ def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBash
         )
     home = _persistent_home()
     shell_id = secrets.token_hex(16)
-    os.makedirs(home, exist_ok=True)
+    os.makedirs(home, mode=0o700, exist_ok=True)
     shell = _shell()
     script = f'{{\n{_with_prefix(command)}\n}}\n__prime_status=$?\nwait\nexit "$__prime_status"\n'
-    with open(_persistent_file(home, shell_id, "out"), "wb") as out:
+    out_fd = os.open(_persistent_file(home, shell_id, "out"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(out_fd, "wb") as out:
         proc = subprocess.Popen(
             [shell, "-c", _PERSISTENT_WRAPPER, "prime-agent-persistent", shell, script,
              _persistent_file(home, shell_id, "rc")],
@@ -2333,15 +2304,14 @@ def _spawn_persistent(command: str, yield_after: float | None) -> PersistentBash
             "startedAt": started_at, "sessionId": session_id,
         }
         path = _persistent_file(home, shell_id, "json")
-        with open(f"{path}.tmp", "w") as f:
+        fd, temp = tempfile.mkstemp(dir=home, suffix=".tmp")
+        with open(fd, "w") as f:
             json.dump(record, f)
-        os.replace(f"{path}.tmp", path)
+        os.replace(temp, path)
         gate.write(b"\n")
     finally:
         gate.close()
-    return PersistentBashHandle(
-        command, shell_id, proc.pid, start_id, started_at, home, proc, yield_after=yield_after
-    )
+    return PersistentBashHandle(command, shell_id, proc.pid, start_id, started_at, home, proc)
 
 
 def persistent_shells() -> list[BashHandle]:

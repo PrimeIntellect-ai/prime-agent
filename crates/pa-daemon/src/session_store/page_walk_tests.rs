@@ -97,7 +97,7 @@ fn mixed_store() -> SessionFile {
             fork_point.clone_from(&store.leaf_id);
         }
     }
-    store.leaf_id = fork_point;
+    store.branch_to(fork_point.as_deref()).unwrap();
     for turn in 40..55 {
         append_turn(&mut store, turn);
     }
@@ -384,4 +384,224 @@ fn a_page_walks_only_its_window() {
     let (contains, steps) = steps_for(|| store.branch_contains(&deep));
     assert!(contains);
     assert!(steps <= 128, "historyLeafId check took {steps} steps");
+}
+
+/// A slice's rows (index, entry id, message) and its matching total.
+type Slice = (Vec<(usize, String, Value)>, usize);
+
+/// The reference slice: Python's `rows[start:][:limit]` over the full-branch display
+/// rows the role filter keeps, each with its index among them.
+fn reference_messages(
+    store: &SessionFile,
+    start: i64,
+    limit: usize,
+    keep_role: impl Fn(&str) -> bool,
+) -> Slice {
+    let rows: Vec<(String, Value)> = reference_branch(store)
+        .into_iter()
+        .filter_map(|entry| {
+            let message = if entry.type_ == "compaction" {
+                compaction_summary_message(entry, None)
+            } else {
+                entry_message(entry)?.into_owned()
+            };
+            keep_role(message_role(&message)?).then(|| (entry.id.clone(), message))
+        })
+        .collect();
+    let total = i64::try_from(rows.len()).unwrap();
+    let begin = if start < 0 {
+        (total + start).max(0)
+    } else {
+        start.min(total)
+    };
+    let slice = rows
+        .into_iter()
+        .enumerate()
+        .skip(usize::try_from(begin).unwrap())
+        .take(limit)
+        .map(|(index, (id, message))| (index, id, message))
+        .collect();
+    (slice, usize::try_from(total).unwrap())
+}
+
+fn messages_of(store: &mut SessionFile, start: i64, limit: usize, roles: &[&str]) -> Option<Slice> {
+    store
+        .session_messages(
+            start,
+            limit,
+            |role| roles.contains(&"*") || roles.contains(&role),
+            &std::collections::HashSet::new(),
+        )
+        .map(|slice| (slice.rows, slice.total))
+}
+
+/// The cached role counts, while fresh, equal a full recount of the branch.
+fn assert_counts_fresh_and_exact(store: &SessionFile) {
+    if let Some(counts) = &store.branch_roles {
+        assert_eq!(counts, &store.recount_branch_roles());
+    }
+}
+
+/// `rlm.session.messages` slices the filtered display transcript with Python slice
+/// semantics: ranges from either end, past the end, and every role filter; slices near
+/// the head walk from it, the rest from the leaf.
+#[test]
+fn session_messages_slice_the_filtered_branch() {
+    let mut store = mixed_store();
+    assert_counts_fresh_and_exact(&store);
+    for roles in [
+        &["*"][..],
+        &["user"],
+        &["toolResult", "custom"],
+        &["compactionSummary"],
+        &["nothing"],
+    ] {
+        for (start, limit) in [
+            (-10, 10),
+            (0, 5),
+            (7, 3),
+            (-1000, 3),
+            (-3, 10),
+            (10_000, 5),
+            (4, 0),
+            (30, 20),
+            (-60, 20),
+        ] {
+            let expected = reference_messages(&store, start, limit, |role| {
+                roles.contains(&"*") || roles.contains(&role)
+            });
+            assert_eq!(
+                messages_of(&mut store, start, limit, roles),
+                Some(expected),
+                "{roles:?} [{start}:][:{limit}]"
+            );
+        }
+    }
+    // Paging back from a tail read by its first index continues it.
+    let (tail, _) = messages_of(&mut store, -10, 10, &["user"]).unwrap();
+    let first = i64::try_from(tail[0].0).unwrap();
+    let (before, _) = messages_of(&mut store, first - 10, 10, &["user"]).unwrap();
+    let (both, _) = messages_of(&mut store, -20, 20, &["user"]).unwrap();
+    assert_eq!([before, tail].concat(), both);
+}
+
+/// Every role's count matches the reference walk.
+fn assert_role_totals(store: &mut SessionFile) {
+    for role in [
+        "user",
+        "assistant",
+        "toolResult",
+        "bashExecution",
+        "custom",
+        "compactionSummary",
+    ] {
+        let (_, expected) = reference_messages(store, 0, 0, |kept| kept == role);
+        assert_eq!(
+            messages_of(store, 0, 0, &[role]),
+            Some((Vec::new(), expected)),
+            "{role}"
+        );
+    }
+    assert_counts_fresh_and_exact(store);
+}
+
+/// The stored role counts follow the leaf: appends (bookkeeping rows and a compaction
+/// included) and forks keep them fresh, a reopened linear file loads them, and a
+/// navigation leaves them for the next read to recount.
+#[test]
+fn role_counts_follow_the_active_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counted.jsonl");
+    let mut store = SessionFile::create("/tmp", None, 0);
+    store.set_path(path.clone());
+    let mut middle = None;
+    for turn in 0..12 {
+        append_turn(&mut store, turn);
+        assert_counts_fresh_and_exact(&store);
+        if turn == 6 {
+            middle.clone_from(&store.leaf_id);
+        }
+    }
+    store.append_entry(
+        "compaction",
+        json!({ "summary": "s", "firstKeptEntryId": middle, "tokensBefore": 10 }),
+    );
+    let target = store.leaf_id.clone().unwrap();
+    store.append_label_change(&target, Some("here")).unwrap();
+    assert!(store.branch_roles.is_some());
+    assert_role_totals(&mut store);
+    assert_eq!(store.branch_roles.as_ref().unwrap()["compactionSummary"], 1);
+
+    store.rewrite().unwrap();
+    let mut reopened = SessionFile::open(&path).unwrap();
+    assert!(reopened.branch_roles.is_some());
+    assert_role_totals(&mut reopened);
+
+    store.branch_to(middle.as_deref()).unwrap();
+    assert!(store.branch_roles.is_none());
+    assert_role_totals(&mut store);
+    append_turn(&mut store, 12);
+    assert!(store.branch_roles.is_some());
+    assert_role_totals(&mut store);
+
+    let leaf = store.leaf_id.clone().unwrap();
+    let mut forked = store.create_branched_file(&leaf, dir.path()).unwrap();
+    assert!(forked.branch_roles.is_some());
+    assert_role_totals(&mut forked);
+    store.replace_with_branch(Some(&target)).unwrap();
+    assert!(store.branch_roles.is_some());
+    assert_role_totals(&mut store);
+}
+
+/// The assistant row whose tool call is still running is the step in flight: it is
+/// neither returned nor counted until its call settles.
+#[test]
+fn the_in_flight_assistant_row_is_left_out() {
+    let mut store = SessionFile::create("/tmp", None, 0);
+    store.append_message(&user("read the transcript"));
+    store.append_message(&call("cell"));
+    let mut roles = |running: &[&str]| {
+        let running = running.iter().map(ToString::to_string).collect();
+        let slice = store.session_messages(-10, 10, |_| true, &running).unwrap();
+        let roles: Vec<String> = slice
+            .rows
+            .iter()
+            .map(|(_, _, message)| message_role(message).unwrap().to_string())
+            .collect();
+        (roles, slice.total)
+    };
+    assert_eq!(roles(&["cell"]), (vec!["user".to_string()], 1));
+    assert_eq!(
+        roles(&[]),
+        (vec!["user".to_string(), "assistant".to_string()], 2)
+    );
+}
+
+/// A windowed store counts its unloaded prefix: totals and indexes match the hydrated
+/// store, a slice inside the window reads without the prefix, and a slice reaching
+/// into it asks for hydration. Hydration carries the counts over unchanged.
+#[test]
+fn a_windowed_store_counts_its_prefix_and_reads_its_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut windowed = windowed_store(dir.path());
+    messages_of(&mut windowed, 0, 0, &["*"]).unwrap();
+    assert_counts_fresh_and_exact(&windowed);
+    let mut full = windowed.clone();
+    full.ensure_full_history().unwrap();
+    assert!(full.window.is_none());
+    assert_eq!(full.branch_roles, windowed.branch_roles);
+    assert_counts_fresh_and_exact(&full);
+    for roles in [&["*"][..], &["user"], &["toolResult", "custom"]] {
+        let (_, total) = messages_of(&mut full, 0, 0, roles).unwrap();
+        assert_eq!(
+            messages_of(&mut windowed, 0, 0, roles),
+            Some((Vec::new(), total))
+        );
+        assert_eq!(
+            messages_of(&mut windowed, -5, 5, roles),
+            messages_of(&mut full, -5, 5, roles),
+            "{roles:?}"
+        );
+        assert_eq!(messages_of(&mut windowed, 0, 5, roles), None, "{roles:?}");
+    }
 }

@@ -76,7 +76,9 @@ pub(crate) async fn build_faux_engine_with(
                 return Err("a real-provider child builds through the headless builder".to_string());
             }
         },
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => ("faux".to_string(), None),
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => {
+            ("faux".to_string(), None)
+        }
     };
     let registration =
         pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
@@ -110,7 +112,7 @@ pub(crate) async fn build_faux_engine_with(
         HeadlessEmbedding::Child(overrides) => {
             Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking))
         }
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => {
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => {
             Some(super::resolve_thinking_level(config, &model))
         }
     };
@@ -129,9 +131,11 @@ pub(crate) async fn build_faux_engine_with(
         rlm_subagent_host,
         extra_host_handlers,
         rlm_depth,
+        factory_child,
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
+        kernel_ready_gate,
     } = super::headless_embedding_fields(embedding);
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
@@ -163,10 +167,12 @@ pub(crate) async fn build_faux_engine_with(
             rlm_usage_store: None,
             progress_note_emit: None,
             rlm_depth,
+            factory_child,
             daemonless: true,
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
+            kernel_ready_gate,
             // The background-bash wake pair, the same seam the real
             // provider path wires (the scripted e2es drive the wake).
             bash_notice_wake: Some(std::sync::Arc::clone(&bash_wake)),

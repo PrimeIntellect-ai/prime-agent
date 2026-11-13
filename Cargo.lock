@@ -561,6 +561,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "emojis"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "589871e639330783bc20ad89d32ac1b049e02c273d96c907ca27478c8bc674a2"
+dependencies = [
+ "phf",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1441,7 +1450,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "pa-agent"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -1452,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "pa-ai"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1487,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "pa-cli"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1517,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "pa-core"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1526,7 +1535,6 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "globset",
- "hmac",
  "ignore",
  "libc",
  "nix",
@@ -1540,7 +1548,6 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "tar",
  "tempfile",
@@ -1557,11 +1564,12 @@ dependencies = [
 
 [[package]]
 name = "pa-daemon"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "filetime",
  "futures",
+ "globset",
  "nix",
  "pa-agent",
  "pa-ai",
@@ -1584,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "pa-models"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "hex",
  "hmac",
@@ -1604,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "pa-perf"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1620,11 +1628,11 @@ dependencies = [
 
 [[package]]
 name = "pa-telemetry"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "reqwest",
- "rustix 1.1.4",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
@@ -1635,12 +1643,13 @@ dependencies = [
 
 [[package]]
 name = "pa-tui"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
  "crossterm",
+ "emojis",
  "fancy-regex",
  "ignore",
  "notify",
@@ -1663,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "pa-types"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "libc",
@@ -1729,6 +1738,24 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "phf"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
+dependencies = [
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
+dependencies = [
+ "siphasher",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -2157,9 +2184,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
@@ -2415,6 +2442,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2571,7 +2604,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.4",
+ "rustix 1.1.6",
  "windows-sys 0.52.0",
 ]
 
@@ -3376,7 +3409,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix 1.1.4",
+ "rustix 1.1.6",
 ]
 
 [[package]]

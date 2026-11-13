@@ -17,6 +17,7 @@ pub mod engine;
 pub mod error_classify;
 pub mod factory_host;
 pub mod goal_boundary;
+pub mod goal_continuation;
 pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
@@ -25,6 +26,7 @@ pub mod image_model_routing;
 pub mod ipython_state;
 pub mod late_sent_messages;
 pub mod messages;
+pub mod model_usage;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_park;
@@ -143,7 +145,7 @@ pub struct AgentSession {
     auto_refine: refine::AutoRefineGates,
     /// Session-side auto-refine state the transport surfaces arm and
     /// consume.
-    compact_auto_refine: std::sync::Mutex<auto_refine_trigger::CompactAutoRefineState>,
+    compact_auto_refine: Arc<std::sync::Mutex<auto_refine_trigger::CompactAutoRefineState>>,
     /// The kernel-state probe behind the post-compaction
     /// `ipython_state` notice; `None` without a kernel.
     kernel_state: Option<std::sync::Arc<dyn ipython_state::CompactionKernelProbe>>,
@@ -165,7 +167,11 @@ pub struct AgentSession {
     /// One compaction at a time: a second `compact` waits for the
     /// in-flight run and prepares against its result; reads and writes
     /// keep using the session lock meanwhile.
-    compaction_flight: tokio::sync::Mutex<()>,
+    compaction_flight: Arc<tokio::sync::Mutex<()>>,
+    /// Refinement runs currently planning or committing (`refine.status`'s
+    /// `in_flight`): every run holds its flight guard for its whole body.
+    refinements_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    refinement_cancel: std::sync::Mutex<pa_agent::abort::AbortController>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -185,6 +191,10 @@ pub struct AgentSession {
     /// resolves it (verification harnesses building the session directly
     /// keep `None`, which reads as the fail-closed disabled default).
     agent_dir: Option<std::path::PathBuf>,
+    /// Where the session's own model calls outside the agent loop record
+    /// their `model_usage` rows: the session file unless the host binds
+    /// its durable store (the daemon worker's).
+    usage_store: std::sync::Arc<dyn rlm_usage::RlmChildUsageStore>,
 }
 
 impl AgentSession {
@@ -222,6 +232,7 @@ impl AgentSession {
         harness_digest: Option<harness_digest::HarnessDigestContext>,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
+        let usage_store = std::sync::Arc::new(rlm_usage::SessionUsageStore(session.clone()));
         agent
             .subscribe(move |event, _signal| {
                 let persistence = persistence.clone();
@@ -243,7 +254,7 @@ impl AgentSession {
             auto_refine_allowed: false,
             refinement_settings: None,
             auto_refine: refine::AutoRefineGates::default(),
-            compact_auto_refine: std::sync::Mutex::default(),
+            compact_auto_refine: Arc::default(),
             kernel_state: None,
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
@@ -253,7 +264,10 @@ impl AgentSession {
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
-            compaction_flight: tokio::sync::Mutex::new(()),
+            compaction_flight: Arc::new(tokio::sync::Mutex::new(())),
+            refinements_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            refinement_cancel: std::sync::Mutex::default(),
+            usage_store,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -523,3 +537,12 @@ mod compaction_outcome_tests;
 
 #[cfg(test)]
 mod compaction_unblocked_tests;
+
+impl Drop for AgentSession {
+    fn drop(&mut self) {
+        self.refinement_cancel
+            .get_mut()
+            .expect("refinement cancellation lock")
+            .abort();
+    }
+}

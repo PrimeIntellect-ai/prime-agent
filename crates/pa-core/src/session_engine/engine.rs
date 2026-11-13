@@ -54,6 +54,9 @@ pub struct SessionEngineConfig {
     /// The session's depth in the RLM recursion tree (0 for top-level
     /// sessions); gates the `refine.*` host requests.
     pub rlm_depth: Option<u32>,
+    /// Whether this session is a factory state's child (its spawn carried a
+    /// factory run tag); selects the child prompt's factory line.
+    pub factory_child: bool,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -81,6 +84,9 @@ pub struct SessionEngineConfig {
     /// Boot the kernel in the background at creation, depth-0 gated; boot
     /// failures surface on the next `ensure()`.
     pub prewarm_ipython_kernel: Option<bool>,
+    /// The kernel restores its snapshot only after this resolves: a replaced engine
+    /// sharing the session's artifact dir flushes its final snapshot first.
+    pub kernel_ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
     /// Fires when the kernel's last live background `bash()` handle
     /// settles; `None` installs nothing.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
@@ -156,8 +162,9 @@ async fn mcp_gating(
     settings: &crate::settings::SettingsManager,
     agent_dir: std::path::PathBuf,
 ) -> anyhow::Result<(Vec<String>, Vec<String>, crate::mcp::McpManager)> {
+    // MCP execution is user/global only, matching TS getGlobalMcpServers.
     let user_servers = settings
-        .settings()
+        .global_settings()
         .mcp_servers
         .clone()
         .unwrap_or_default()
@@ -271,8 +278,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // pin), like the request-timing snapshot above.
     let factory_allowed_models = settings.get_allowed_models();
     // Captured before `settings` moves into the resource loader: the
-    // per-cell watchdog budget (default 60s, `0` disables).
+    // default cell time limit (default 60s, `0` disables).
     let python_cell_timeout_ms = settings.get_python_cell_timeout_ms();
+    let web_search_provider = settings.get_web_search_provider();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -469,29 +477,27 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let model_visible_skills =
         super::runtime_wiring::model_visible_skills(resources.skills.clone(), &handlers);
     let python_skills = super::runtime_wiring::kernel_python_skills(&model_visible_skills);
-    // TS resolves the serper credential on the host: `!command` key refs
+    // TS resolves the web-search credential on the host: `!command` key refs
     // cannot run in-kernel (the websearch skill's auth.json fallback reads
-    // literals and env-var names, not commands). The credential is read
-    // under the auth lock, then resolved off the async runtime (a `!command`
-    // key can block).
-    let serper_api_key = {
+    // literals and env-var names, not commands). The selected provider's
+    // credential is read under the auth lock, then resolved off the async
+    // runtime (a `!command` key can block).
+    let websearch_env = {
         let credential = {
             let auth = mcp_manager.lock().unwrap().auth_storage_handle();
             let guard = auth.lock().await;
-            guard
-                .get_all()
-                .credential(crate::auth::SERPER_CREDENTIAL_ID)
+            guard.get_all().credential(web_search_provider.id())
         };
         let skills = resources.skills.clone();
         tokio::task::spawn_blocking(move || {
-            super::runtime_wiring::websearch_api_key(&skills, credential)
+            super::runtime_wiring::websearch_env(&skills, web_search_provider, credential)
         })
         .await
         .map_err(|join| anyhow::anyhow!("websearch key resolve join failed: {join}"))?
     };
-    // The per-cell watchdog: daemon-backed sessions arm the settings budget
-    // (default 60s, `0` disables); daemonless sessions keep `await bash()`
-    // unbounded by design (#3523), so their cells are never annotated.
+    // The cell time limit: daemon-backed sessions arm the settings default
+    // (60s, `0` disables); daemonless sessions keep `await bash()`
+    // unbounded by design (#3523), so their cells are never interrupted.
     let cell_timeout_ms =
         super::runtime_wiring::arm_cell_timeout_ms(config.daemonless, python_cell_timeout_ms);
     let provisioner = super::runtime_wiring::kernel_provisioner(
@@ -502,13 +508,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         kernel_shell_path,
         kernel_command_prefix,
-        serper_api_key,
+        websearch_env,
         session_artifact_dir,
         cell_timeout_ms,
         on_restore,
         config.on_background_work_settled.clone(),
         on_unavailable_skills,
         on_bootstrap_result,
+        config.kernel_ready_gate.clone(),
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
@@ -595,6 +602,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth,
+            factory_child: config.factory_child,
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
             generic_mcp_servers,
@@ -786,6 +794,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     )));
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
+    session.set_usage_store(wiring.rlm_usage.store());
     // Keep the context descriptor even while disabled, so re-enabling can load it.
     session.harness_digest = Some(digest_context);
     session.refinement_settings = Some(refinement_settings);
@@ -868,6 +877,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // push straight into the live session's queue.
     session.adopt_next_turn_rows(boot_notice_rows);
 
+    // `refine.status` answers from the session's own flight counter: the
+    // same Arc every refinement run holds its flight guard on.
+    turn_boundary.bind_refinements_in_flight(session.refinements_in_flight.clone());
     turn_boundary.bind(super::turn_boundary::TurnBoundaryRuntime {
         agent,
         session: wiring.session.clone(),
@@ -904,6 +916,22 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
+    // Each row the session's durable store appends that bills a model call
+    // outside the agent loop charges the running goal and telemetry run.
+    let charge_goal = goal_driver.lock().await.billed_row_recorder();
+    let charge_run = telemetry.clone();
+    wiring
+        .rlm_usage
+        .store()
+        .observe_billed_rows(std::sync::Arc::new(
+            move |row: &crate::session::billed_row::BilledRow| {
+                charge_goal(&row.usage);
+                if let Some(telemetry) = &charge_run {
+                    telemetry.note_billed_call(&row.usage);
+                }
+            },
+        ))
+        .await;
     // The factory host bridge: registered from `create_session` (the #3184
     // pattern), so the daemon/TUI factory surface resolves against this
     // session's harness dirs, model registry, and the allowlist pin. The
@@ -1030,7 +1058,16 @@ impl SessionEngine {
     /// The session's cached Codex WebSocket closes with it (TS `cleanupSessionResources` on
     /// dispose), so a worker that replaces its session does not hold the old socket until the
     /// idle expiry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the refinement-cancellation mutex is poisoned.
     pub async fn dispose_kernel(&self) {
+        self.session
+            .refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .abort();
         if let Some(session_id) = self.session.agent().session_id() {
             pa_ai::codex_debug::close_websocket_sessions(Some(session_id));
         }
@@ -1126,3 +1163,6 @@ mod tests;
 
 #[cfg(test)]
 mod append_system_tests;
+
+#[cfg(test)]
+mod billed_row_tests;

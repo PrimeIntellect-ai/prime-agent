@@ -9,6 +9,7 @@ use pa_agent::agent::Agent;
 use pa_agent::types::{AgentEvent, AgentMessage, Message};
 use pa_core::session_engine::engine::SessionEngine;
 use pa_core::session_engine::goal_boundary::custom_message_to_loop_row;
+use pa_core::session_engine::goal_continuation::{ContinuationTrigger, GoalContinuationDecision};
 use pa_core::session_engine::goal_driver::UsageOutcome;
 use pa_core::session_engine::provider_adapter::json_round_trip;
 use pa_types::session::CustomMessage;
@@ -477,41 +478,39 @@ impl PrintGoalSurface {
         if engine.turn_boundary.compaction_scheduled().await {
             return NaturalContinuation::RequestedCompaction;
         }
-        // The daemon's consult order: a goal that does not own the
-        // wake-up drops any armed RLM deferral (the deferral dies with
-        // the goal's loop); only an owning goal gates behind unsettled
-        // descendant work — an ownerless boundary never starves the
-        // autonomous arm.
-        let owns_wakeup = engine.goal_owns_continuation_wakeup().await;
-        if !owns_wakeup {
-            engine.drop_owed_goal_continuation().await;
-        } else if unsettled_rlm_work {
-            engine.mark_goal_continuation_owed().await;
-            return NaturalContinuation::HeldForRlmWork;
-        }
-        // The threshold arm: the crossing turn mints BEFORE the loop stops; the
-        // boundary compacts, and the driver runs the held turn post-compaction.
-        if engine.session.auto_compaction_due(model).await {
-            if let Some(message) = engine.mint_goal_continuation().await {
+        // The threshold arm reads the crossing before the consult: a crossing turn
+        // mints BEFORE the loop stops; the boundary compacts, and the driver runs
+        // the held turn post-compaction.
+        let threshold_due = engine.session.auto_compaction_due(model).await;
+        match engine
+            .consult_goal_continuation(ContinuationTrigger::TurnEnd, unsettled_rlm_work)
+            .await
+        {
+            GoalContinuationDecision::Owed => NaturalContinuation::HeldForRlmWork,
+            GoalContinuationDecision::Minted { message, .. } => {
                 self.publish_goal_update(engine).await;
-                self.hold_threshold_continuation(message).await;
+                if threshold_due {
+                    self.hold_threshold_continuation(*message).await;
+                    return NaturalContinuation::ThresholdDue;
+                }
+                // The natural continuation: the goal's context turn runs as the next
+                // turn of the same run; a row that cannot convert drops the mint.
+                engine.clear_pending_goal_continuation().await;
+                match custom_message_to_loop_row(&message) {
+                    Some(row) => NaturalContinuation::GoalRow(Box::new(row)),
+                    None => NaturalContinuation::FallThrough,
+                }
             }
-            return NaturalContinuation::ThresholdDue;
+            GoalContinuationDecision::NotOwned
+            | GoalContinuationDecision::NothingOwed
+            | GoalContinuationDecision::NotMinted { .. } => {
+                if threshold_due {
+                    NaturalContinuation::ThresholdDue
+                } else {
+                    NaturalContinuation::FallThrough
+                }
+            }
         }
-        if !owns_wakeup {
-            return NaturalContinuation::FallThrough;
-        }
-        // The natural continuation mint: the goal's context turn runs as the next
-        // turn of the same run; a row that cannot convert drops the mint.
-        if let Some(message) = engine.mint_goal_continuation().await {
-            self.publish_goal_update(engine).await;
-            engine.clear_pending_goal_continuation().await;
-            return match custom_message_to_loop_row(&message) {
-                Some(row) => NaturalContinuation::GoalRow(Box::new(row)),
-                None => NaturalContinuation::FallThrough,
-            };
-        }
-        NaturalContinuation::FallThrough
     }
 
     /// The settled boundary's goal drain: the held continuation and the armed
@@ -665,14 +664,10 @@ impl PrintGoalSurface {
 }
 
 #[cfg(test)]
-// The faux provider registry is process-global: one std lock serializes every test that drives it.
 mod tests {
     use super::*;
     use pa_core::session_engine::provider_adapter::json_round_trip;
     use serde_json::json;
-
-    /// One test at a time over the global faux registry.
-    static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// One captured event line (the sink's frames, in order).
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
@@ -855,9 +850,11 @@ mod tests {
                     rlm_subagent_host: None,
                     rlm_usage_store: None,
                     progress_note_emit: None,
+                    factory_child: false,
                     daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
+                    kernel_ready_gate: None,
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
                     bash_notice_wake: None,
@@ -973,7 +970,6 @@ mod tests {
     /// seed never announces.
     #[tokio::test]
     async fn seed_rides_the_first_turn_and_stays_silent() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
             script(&json!(["first reply"]), 128_000),
             no_compaction(),
@@ -1053,7 +1049,6 @@ mod tests {
     /// An unseeded branch reports no seed; a branched (already-seeded) session does not reseed.
     #[tokio::test]
     async fn seeding_respects_the_branch() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
             script(&json!(["first reply", "second reply"]), 128_000),
             no_compaction(),
@@ -1079,7 +1074,6 @@ mod tests {
     /// the one agent run.
     #[tokio::test]
     async fn natural_loop_mints_continuations_inside_one_run() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
             script(&json!(["turn one reply", "turn two reply"]), 128_000),
             no_compaction(),
@@ -1130,7 +1124,6 @@ mod tests {
     /// the wake run.
     #[tokio::test(start_paused = true)]
     async fn backoff_wake_runs_the_marker_turn_and_recovers_the_reply() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
             script(&json!([{}, "recovered reply"]), 128_000),
             no_compaction(),
@@ -1166,7 +1159,6 @@ mod tests {
     /// calls — the third wake never runs.
     #[tokio::test(start_paused = true)]
     async fn three_empty_turns_hit_the_cap_with_exactly_three_model_calls() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
             script(&json!([{}, {}, {}]), 128_000),
             no_compaction(),
@@ -1195,7 +1187,6 @@ mod tests {
     /// A non-goal empty turn never wakes: no marker turn, the boundary returns at once.
     #[tokio::test(start_paused = true)]
     async fn non_goal_empty_turn_returns_without_a_wake() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(script(&json!([{}]), 128_000), no_compaction(), None).await;
         let (counter, subscription) = agent_run_counter(&bed.engine).await;
         let owns = bed.prompt("work").await;
@@ -1213,7 +1204,6 @@ mod tests {
     /// steer drains as its own run.
     #[tokio::test]
     async fn budget_steer_drains_as_its_own_run() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
             script(&json!(["goal turn reply", "wrap-up reply"]), 128_000),
             no_compaction(),
@@ -1263,7 +1253,6 @@ mod tests {
     /// run stops, the boundary compacts, and the held turn runs as the post-compaction turn.
     #[tokio::test]
     async fn threshold_hold_mints_before_the_compaction_and_runs_after() {
-        let _guard = FAUX_TEST_LOCK.lock().await;
         // Include faux cache-write usage in the threshold: the resumed history
         // crosses the 25_904 ceiling (32k - 2_000 output - 4_096 headroom),
         // while the compacted continuation stays below it.
@@ -1473,9 +1462,11 @@ mod tests {
                     rlm_subagent_host: None,
                     rlm_usage_store: None,
                     progress_note_emit: None,
+                    factory_child: false,
                     daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
+                    kernel_ready_gate: None,
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
                     bash_notice_wake: None,

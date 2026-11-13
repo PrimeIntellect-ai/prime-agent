@@ -141,11 +141,14 @@ impl CompactionManager {
         outcome
     }
 
-    /// `set_auto_compaction`: update the connection-state flag (the
-    /// persistent write lives in the `set_auto_compaction` handler).
-    pub(crate) fn set_auto_compaction(&self, enabled: bool) {
-        let mut core = self.core.lock().unwrap();
-        core.auto_compaction_enabled = enabled;
+    /// `set_auto_compaction`: update the connection-state flag and the built
+    /// session's live toggle (the persistent write lives in the
+    /// `set_auto_compaction` handler).
+    pub(crate) async fn set_auto_compaction(&self, enabled: bool) {
+        self.core.lock().unwrap().auto_compaction_enabled = enabled;
+        let engine = Arc::clone(&self.engine);
+        let _ =
+            tokio::task::spawn_blocking(move || engine.set_auto_compaction_enabled(enabled)).await;
     }
 
     /// Wait until the running turn (if any) has settled.
@@ -155,6 +158,7 @@ impl CompactionManager {
                 let mut core = self.core.lock().unwrap();
                 if core.busy {
                     core.abort_requested = true;
+                    core.turn_cancelled = true;
                     // TS `compact()` detaches from agent events before the abort, so the
                     // interrupted turn's aborted row never reaches the wire or the session file.
                     core.suppress_aborted_row = true;

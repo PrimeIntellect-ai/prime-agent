@@ -981,8 +981,9 @@ const SESSION_ARCHIVED: EventRule = EventRule {
 
 /// A settled ipython cell that rendered as bash (v2): its executed
 /// `bash()` line share and command count, never command text. One of the
-/// two standalone TUI events (with `agent command used`), tracked per
-/// render by the upstream #3307 addition and kept intact.
+/// standalone TUI events (with `agent command used`),
+/// tracked per render by the upstream #3307
+/// addition and kept intact.
 const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
     name: "tui ipython bash rendered",
     since: 2,
@@ -1010,6 +1011,7 @@ const TUI_EXIT: EventRule = EventRule {
         ),
         ("turn_active", required(boolean())),
         ("tui_scroll_count", optional(count())),
+        ("tui_live_tool_timer_count", optional(count())),
         ("tui_selection_count", optional(count())),
         ("tui_click_count", optional(count())),
         ("tui_menu_open_count", optional(count())),
@@ -1239,11 +1241,22 @@ const HARNESS_REFINEMENTS_CHANGED: EventRule = EventRule {
     properties: &[("enabled", required(boolean()))],
 };
 
+/// Adoption of the web search provider setting: the chosen provider's id only.
+const WEB_SEARCH_PROVIDER_CHANGED: EventRule = EventRule {
+    name: "web search provider changed",
+    since: 2,
+    properties: &[(
+        "provider",
+        required(enum_rule(&["serper", "eco"], "serper")),
+    )],
+};
+
 /// Every catalogued event, flattened.
 #[must_use]
 pub fn catalog() -> Vec<&'static EventRule> {
     let mut all: Vec<&'static EventRule> = vec![
         &HARNESS_REFINEMENTS_CHANGED,
+        &WEB_SEARCH_PROVIDER_CHANGED,
         &AGENT_STARTED,
         &AGENT_RUN_COMPLETED,
         &AGENT_SESSION_ENDED,

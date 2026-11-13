@@ -9,7 +9,7 @@
 # this script's own launcher replaces the prime-agent-rust one it wrote in
 # past installs. The FILENAME stays install-rust.sh deliberately: the
 # curl|sh URL and the update entry points (`prime-agent update`, the TUI
-# /update — both exec this script with --update) already point at it, and
+# /update — both run this script with no arguments) already point at it, and
 # the filename is invisible to users; the command they type is what
 # changed.
 #
@@ -184,7 +184,7 @@ warning and the first session bootstraps the kernel itself — it needs the
 network once.
 
 Options:
-  --update    the documented alias the update entry points exec (identical run)
+  --update    accepted alias; identical to a plain run
   --force     if a Prime Agent daemon (TypeScript or Rust) is still up after the
               shutdown requests and the drain wait, send it SIGTERM, then SIGKILL.
               Never applies to the daemon this install runs under.
@@ -226,10 +226,11 @@ USAGE
 }
 
 # --- arguments ---------------------------------------------------------------
-# No positional arguments. --update is the documented alias the update entry
-# points (`prime-agent update`, the TUI /update) exec — identical to the default
-# run because the flow is idempotent by construction. --verbose folds the fd-3
-# progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
+# No positional arguments. --update is an accepted alias identical to the
+# default run (the update entry points, `prime-agent update` and the TUI
+# /update, run this script with no arguments) because the flow is idempotent
+# by construction. --verbose folds the fd-3 progress detail onto stdout
+# (PRIME_AGENT_RUST_VERBOSE=1 does the same).
 # --rollback and --archive pick the payload source (MODE); the default is the
 # channel download.
 VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
@@ -778,14 +779,14 @@ ARCH="$(uname -m)"
 WINDOWS="no"
 # CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
 # NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
-# reads); TARGET stays the rust triple the payload names its targets by.
+# reads).
 case "$OS:$ARCH" in
-  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
-  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
-  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
-  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
+  Darwin:arm64) CHANNEL_PLATFORM=darwin-arm64 ;;
+  Darwin:x86_64) CHANNEL_PLATFORM=darwin-x64 ;;
+  Linux:x86_64) CHANNEL_PLATFORM=linux-x64 ;;
+  Linux:aarch64) CHANNEL_PLATFORM=linux-arm64 ;;
   MINGW64_NT*:x86_64|MINGW_NT*:x86_64|MSYS_NT*:x86_64|CYGWIN_NT*:x86_64)
-    TARGET=x86_64-pc-windows-msvc; CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
+    CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
   *)
     die "no rust build is published for ${OS} ${ARCH} (detected via uname);
 the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
@@ -2982,9 +2983,7 @@ fi
 # list (the same whitespace ruling).
 rust_leftover="no"
 verify_stopped_socket() {
-  last_verify_leftover="no"
   if [ "$("$UVPY" "$probe_py" --listening "$1" 2>/dev/null)" = "up" ]; then
-    last_verify_leftover="yes"
     if [ "$2" = "yes" ]; then
       rust_leftover="yes"
     fi

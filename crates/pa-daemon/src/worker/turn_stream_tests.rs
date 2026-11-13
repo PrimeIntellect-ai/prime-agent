@@ -29,6 +29,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         created: false,
         attached_client_ids: Vec::new(),
         abort_requested: false,
+        turn_cancelled: false,
+        turn_completed: false,
         suppress_aborted_row: false,
         shutdown_requested: false,
         compacting: false,
@@ -84,6 +86,7 @@ async fn turn_session_events(engine: Arc<dyn SessionEngine>) -> Vec<Value> {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -127,11 +130,17 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
     boundaries: Mutex<Vec<Option<String>>>,
+    turns_done: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionEngine for GateProbeEngine {
     fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
         self.boundaries.lock().unwrap().push(leaf_id);
+    }
+
+    fn on_turn_done(&self) {
+        self.turns_done
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn run_prompt(
@@ -198,7 +207,7 @@ async fn gate_sighting_events(
 ) -> Vec<Value> {
     let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
         frames,
-        boundaries: Mutex::new(Vec::new()),
+        ..GateProbeEngine::default()
     });
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -210,6 +219,7 @@ async fn gate_sighting_events(
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -237,8 +247,8 @@ async fn gate_sighting_events(
     events
 }
 
-/// A sighting on the trailing `Done` of a self-completed run must not arm the
-/// fallback's silence — the closer still pairs the run's `agent_start`.
+/// A late abort sighting on the trailing `Done` of a self-completed run keeps the
+/// fallback closer that pairs the run's `agent_start`.
 #[tokio::test]
 async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_closer() {
     let events = gate_sighting_events(vec![EngineEvent::Done(Ok(()))], true, false).await;
@@ -256,15 +266,88 @@ async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_close
     );
 }
 
-/// `DoneAborted` with no engine `agent_end`: the aborted-outcome carrier arms the
-/// silence.
+/// `DoneAborted` with no engine `agent_end` (the pre-run abort, or a run a compaction or
+/// tree move detached): the fallback still closes the delivery's `agent_start`.
 #[tokio::test]
-async fn done_aborted_arms_the_fallback_silence() {
-    let events = gate_sighting_events(vec![EngineEvent::DoneAborted], true, false).await;
+async fn an_aborted_settle_closes_the_run() {
+    for suppress_aborted_row in [false, true] {
+        let events =
+            gate_sighting_events(vec![EngineEvent::DoneAborted], true, suppress_aborted_row).await;
+        assert_eq!(
+            positions_of(&events, "agent_end").len(),
+            1,
+            "the aborted settle pairs the opening agent_start: {events:?}"
+        );
+    }
+}
+
+/// A later run of the same delivery (a retry or continuation) whose end never
+/// reaches the wire still gets the fallback closer, after the earlier run's own end.
+#[tokio::test]
+async fn a_later_run_without_its_end_still_gets_the_fallback_closer() {
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::AgentEnd {
+                messages: Vec::new(),
+            },
+            EngineEvent::AgentStart,
+            EngineEvent::Done(Ok(())),
+        ],
+        false,
+        false,
+    )
+    .await;
+    let starts = positions_of(&events, "agent_start");
+    let ends = positions_of(&events, "agent_end");
+    assert_eq!(ends.len(), 2, "both runs close: {events:?}");
     assert!(
-        positions_of(&events, "agent_end").is_empty(),
-        "the aborted settle keeps the suppressed-run silence: {events:?}"
+        ends[1] > *starts.last().unwrap(),
+        "the closer follows the later run's start: {events:?}"
     );
+}
+
+/// A turn aborted under row suppression (a manual compaction or tree move)
+/// still reaches the engine's turn boundary at its swallowed `Done`, so
+/// child prompts held for that turn are released.
+#[tokio::test]
+async fn a_suppressed_abort_still_ends_the_engine_turn() {
+    for done in [EngineEvent::Done(Ok(())), EngineEvent::DoneAborted] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![done],
+            ..GateProbeEngine::default()
+        });
+        let dynamic: Arc<dyn SessionEngine> = engine.clone();
+        let runner = burst_runner(Arc::clone(&dynamic));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.abort_requested = true;
+            core.suppress_aborted_row = true;
+        }
+        runner
+            .run_turn(
+                dynamic,
+                Lane::Steering,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "aborted".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        assert_eq!(
+            engine.turns_done.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
 }
 
 /// #4: the turn's tool executions count onto the session's `toolUseCount`
@@ -297,6 +380,7 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
     runner
         .run_turn(
             engine,
+            Lane::Steering,
             vec![QueuedItem {
                 priority: QueuePriority::Human,
                 preview: None,
@@ -337,9 +421,9 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
 }
 
 /// A settle frame that would forward on a plain flag sighting drops when
-/// `suppress_aborted_row` is set.
+/// `suppress_aborted_row` is set; the fallback still closes the run.
 #[tokio::test]
-async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
+async fn the_suppressed_row_sighting_drops_the_settle_frame() {
     let events = gate_sighting_events(
         vec![
             EngineEvent::ToolResultMessage(json!({
@@ -357,9 +441,10 @@ async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
             && positions_of(&events, "message_end").is_empty(),
         "the suppressed settle frame never reaches the wire: {events:?}"
     );
-    assert!(
-        positions_of(&events, "agent_end").is_empty(),
-        "the suppressed-row sighting arms the silence: {events:?}"
+    assert_eq!(
+        positions_of(&events, "agent_end").len(),
+        1,
+        "the fallback closes the detached run: {events:?}"
     );
 }
 
@@ -398,7 +483,7 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         }
         let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
             frames,
-            boundaries: Mutex::new(Vec::new()),
+            ..GateProbeEngine::default()
         });
         let runner = burst_runner(Arc::clone(&engine));
         let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
@@ -413,6 +498,7 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         runner
             .run_turn(
                 engine,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,
@@ -468,7 +554,7 @@ async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
     for file_backed in [false, true] {
         let engine = Arc::new(GateProbeEngine {
             frames: vec![EngineEvent::Done(Ok(()))],
-            boundaries: Mutex::new(Vec::new()),
+            ..GateProbeEngine::default()
         });
         let dynamic: Arc<dyn SessionEngine> = engine.clone();
         let runner = burst_runner(Arc::clone(&dynamic));
@@ -490,6 +576,7 @@ async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
         runner
             .run_turn(
                 dynamic,
+                Lane::Steering,
                 vec![QueuedItem {
                     priority: QueuePriority::Human,
                     preview: None,

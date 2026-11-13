@@ -18,6 +18,7 @@ pub(super) enum LedgerRecord {
         child: String,
         depth: u32,
         name: String,
+        factory: Option<super::RlmFactoryTag>,
     },
     Rename {
         child_id: String,
@@ -29,6 +30,7 @@ pub(super) enum LedgerRecord {
         child: String,
         reason: RlmLedgerDeleteReason,
         usage: Option<crate::session_usage::SessionUsageSummary>,
+        usage_by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
     },
 }
 
@@ -103,12 +105,18 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
             if depth < 1 || depth > u64::from(u32::MAX) {
                 bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             }
+            // The optional run tag: a malformed one reads as untagged, so
+            // the edge itself survives.
+            let factory = record
+                .get("factory")
+                .and_then(|factory| serde_json::from_value(factory.clone()).ok());
             Ok(Some(LedgerRecord::Spawn {
                 child_id,
                 parent,
                 child,
                 depth: depth as u32,
                 name,
+                factory,
             }))
         }
         "rename" => {
@@ -140,11 +148,18 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
                 None => None,
                 Some(usage) => Some(parse_deleted_usage(usage, line_no)?),
             };
+            // The snapshot's optional per-model split: a malformed one reads
+            // as unsplit, so the billed snapshot itself survives.
+            let usage_by_model = record
+                .get("usage")
+                .and_then(|usage| usage.get("byModel"))
+                .and_then(|by_model| serde_json::from_value(by_model.clone()).ok());
             Ok(Some(LedgerRecord::Delete {
                 child_id,
                 child,
                 reason,
                 usage,
+                usage_by_model,
             }))
         }
         _ => Ok(None),
@@ -158,6 +173,9 @@ pub(super) struct ReplayState {
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<Mutex<ArtifactIndex>>,
     pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
+    /// Live edges by the durable session id (file-name stem) of their
+    /// recorded parent: the family walk's entry into the replay.
+    pub(super) children_by_parent_id: HashMap<String, Vec<usize>>,
 }
 
 /// Ledger rows are immutable within a replay, but file moves and transcript
@@ -165,7 +183,7 @@ pub(super) struct ReplayState {
 #[derive(Debug)]
 pub(super) struct DeletedBucket {
     pub(super) inputs: Vec<Option<FileIdentity>>,
-    pub(super) usage: HashMap<String, crate::session_usage::SessionUsageSummary>,
+    pub(super) children: super::DeletedChildrenByParent,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {

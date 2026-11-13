@@ -448,7 +448,8 @@ async fn clear_queue_bounces_recovered_agent_messages_to_their_senders() {
 
 #[cfg(unix)]
 async fn assert_clear_queue_bounces(restore_queue: bool) {
-    let dir = std::env::temp_dir().join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
+    let dir =
+        std::path::Path::new("/tmp").join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("supervisor.sock");
     let (sends, _server) = crate::worker::tests::fake_supervisor(&socket);
@@ -503,7 +504,7 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         // above have already completed their synchronous checkpoint writes.
         drop(worker.recovery.lock().unwrap().take());
         let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
-        let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        let (steering, follow_up, _) = restore_queue_snapshot(&journal, "target-session");
         assert_eq!(steering.len(), 1, "agent row checkpoint must be durable");
         assert_eq!(follow_up.len(), 1, "prompt checkpoint must be durable");
         // The replacement worker owns the reopened sink for clear's checkpoint.

@@ -2,15 +2,17 @@
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
+use super::retirement::{Retirement, RetirementEvent, RetirementIntent};
+use super::run_state::RunState;
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
-    resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
-    ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration,
-    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle,
-    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
-    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    resolve_child_cwd, resolve_child_model, rlm_child_label, rlm_depth_limit_error,
+    spawn_name_unavailable_error, Arc, ChildCloseReason, ChildObservationSource, ChildRecord,
+    Context, DaemonCommand, Duration, Instant, Mutex, Path, Result, RlmChildResult,
+    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
+    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
     SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
-    RENAME_TIMEOUT_MS,
+    RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -53,11 +55,19 @@ async fn resolve_child_model_allowlisted(
 
 /// The `rlm.create_session` launch env (TS `createRlmRootSession`'s
 /// minimal map: `collectDaemonLaunchEnv({ PATH })` plus the provider's
-/// env API-key var plus `PRIME_TEAM_ID` for prime-inference).
-fn create_session_launch_env(model: &str) -> std::collections::BTreeMap<String, String> {
+/// env API-key var plus `PRIME_TEAM_ID` for prime-inference), plus the
+/// telemetry switch vars so the parent's opt-out carries over.
+fn create_session_launch_env(
+    model: &str,
+    read_env: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH") {
-        env.insert("PATH".to_string(), path);
+    for key in
+        std::iter::once("PATH").chain(pa_core::session_engine::telemetry::TELEMETRY_SWITCH_VARS)
+    {
+        if let Some(value) = read_env(key) {
+            env.insert(key.to_string(), value);
+        }
     }
     let provider = model
         .split_once('/')
@@ -65,12 +75,12 @@ fn create_session_launch_env(model: &str) -> std::collections::BTreeMap<String, 
     if let Some(env_key) =
         pa_ai::env_api_keys::find_env_keys(provider).and_then(|keys| keys.first().cloned())
     {
-        if let Ok(value) = std::env::var(&env_key) {
+        if let Some(value) = read_env(&env_key) {
             env.insert(env_key, value);
         }
     }
     if provider == "prime-inference" {
-        if let Ok(team) = std::env::var("PRIME_TEAM_ID") {
+        if let Some(team) = read_env("PRIME_TEAM_ID") {
             env.insert("PRIME_TEAM_ID".to_string(), team);
         }
     }
@@ -121,14 +131,22 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
-                let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
-                let runtime_metadata = json!({
+                let cwd = resolve_child_cwd(
+                    Path::new(identity.cwd.as_deref().unwrap_or("/")),
+                    request.cwd.as_deref(),
+                    "rlm.spawn",
+                )?;
+                let mut runtime_metadata = json!({
                     "kind": "subagent",
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
                     "createdAt": now_ms(),
                 });
+                // The admission's ledger spawn record reads the run tag back.
+                if let Some(factory) = &request.factory {
+                    runtime_metadata["factory"] = json!(factory);
+                }
                 let created = this
                     .create_child(
                         &child_id,
@@ -137,7 +155,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         identity.rlm_depth + 1,
                         &model,
                         thinking,
-                        &cwd,
+                        &cwd.to_string_lossy(),
                         &child_dir,
                         request.spawned_by_request_id.as_deref(),
                         Some(runtime_metadata),
@@ -159,8 +177,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
-                    settled_status: None,
-                    settled: false,
+                    run: RunState::running(),
                     answer_preview: None,
                     answer_text: None,
                     answer_captured: false,
@@ -170,13 +187,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     live_observation: None,
                     direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
+                    factory: request.factory.is_some(),
                     prompt_admitted: false,
-                    error: None,
-                    closed_by_parent: false,
-                    retiring: false,
-                    retirement_finished: false,
-                    retirement_notified: false,
-                    retirement_roster_emitted: false,
+                    retirement: Retirement::live(),
                     usage_registration_forgotten: false,
                     session_file: created.session_file.clone(),
                     attributed_rows: Some(0),
@@ -239,16 +252,24 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
-            // Capture the current turn boundary before detaching: spawn
-            // admission happens mid-turn, so the parent's continuation
-            // request reaches the provider first (see `wait_turn_done`).
-            let turn_generation = *this.turn_done.subscribe().borrow();
+            // Capture the spawning turn before detaching: a spawn admitted
+            // mid-turn prompts after that turn completes, so the parent's
+            // continuation request reaches the provider first (see
+            // `wait_turn_done`). A spawn admitted while the parent is idle
+            // (a background kernel task, e.g. a factory run) has no turn
+            // to wait for.
+            let spawning_turn = {
+                let turn = *this.parent_turn.borrow();
+                turn.running.then_some(turn.completed)
+            };
             tokio::spawn(async move {
-                watcher_this.wait_turn_done(turn_generation).await;
+                if let Some(generation) = spawning_turn {
+                    watcher_this.wait_turn_done(generation).await;
+                }
                 // The parent closed before the prompt admitted: the
                 // child is closed with it, so the detached task prompt
                 // never fires.
-                if watcher_record.lock().await.closed_by_parent {
+                if watcher_record.lock().await.retirement.closed_by_parent() {
                     return;
                 }
                 if let Err(error) = watcher_this
@@ -325,11 +346,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
             assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
             // A depth-0 resident session is created exactly like a client
             // `create`: the shared sessions dir and the requested cwd.
-            let cwd = match &request.cwd {
-                Some(cwd) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
-                Some(cwd) => Path::new(identity.cwd.as_deref().unwrap_or("/")).join(cwd),
-                None => PathBuf::from(identity.cwd.clone().unwrap_or_else(|| "/".to_string())),
-            };
+            let cwd = resolve_child_cwd(
+                Path::new(identity.cwd.as_deref().unwrap_or("/")),
+                request.cwd.as_deref(),
+                "rlm.create_session",
+            )?;
             let sessions_dir = crate::paths::sessions_dir(&this.agent_dir)?;
             std::fs::create_dir_all(&sessions_dir)
                 .with_context(|| format!("create sessions dir {}", sessions_dir.display()))?;
@@ -348,7 +369,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     &identity,
                     // The TS minimal map for a depth-0 root (the
                     // env-key heuristic is stated in the PR).
-                    Some(create_session_launch_env(&model)),
+                    Some(create_session_launch_env(&model, |key| {
+                        std::env::var(key).ok()
+                    })),
                 )
                 .await?;
             // The TS create-path summary validation: a resident depth-0
@@ -485,10 +508,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             let rename_lock = record.lock().await.rename_lock.clone();
             let _rename_guard = rename_lock.lock().await;
-            let already_terminated = this.has_retired_usage(&record);
+            let already_terminated = record.lock().await.retirement.intent().is_some();
             let no_longer_matches = {
                 let record = record.lock().await;
-                (record.closed_by_parent && !already_terminated) || !record.matches(&target)
+                (record.retirement.closed_by_parent() && !already_terminated)
+                    || !record.matches(&target)
             };
             if no_longer_matches {
                 bail!("No direct RLM subagent matches \"{target}\" in the current parent session");
@@ -517,9 +541,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // A settled child's delete records no cancel line, so it
                 // leaves its return alone.
                 let mut row = record.lock().await;
-                let was_running = row.settled_status.is_none();
+                let was_running = row.run.is_running();
                 if was_running {
-                    row.retiring = true;
+                    row.retirement.apply(RetirementEvent::BeginDelete);
                 }
                 was_running
             };
@@ -535,10 +559,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     // The kill never landed: clear the mark so the
                     // still-live child stays watchable and a later cancel
                     // can still record the parent -> child edge.
-                    record.lock().await.retiring = false;
+                    record
+                        .lock()
+                        .await
+                        .retirement
+                        .apply(RetirementEvent::KillRefused);
                     return Err(error);
                 }
-                this.retain_retired_usage(&record, super::RetirementIntent::Delete { was_running });
+                this.retain_retired_usage(&record, RetirementIntent::Delete { was_running })
+                    .await;
                 // Observe any rows that landed before the acknowledged kill.
                 this.emit_child_usage(&record).await;
             }
@@ -608,13 +637,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // A settled child that is busy again runs a follow-up turn:
                 // re-arm usage observation (the task-run watcher retired at
                 // its settle).
-                if record.lock().await.settled_status.is_some() {
+                if !record.lock().await.run.is_running() {
                     let active_session_id = record.lock().await.active_session_id.clone();
                     if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
                         SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
                     }
                 }
-                let still_running = record.lock().await.settled_status.is_none();
+                let still_running = record.lock().await.run.is_running();
                 if still_running {
                     // Wait inside the shared budget, then re-read the child:
                     // a timeout yields the current snapshot, never an error.
@@ -696,7 +725,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 None
             };
             if let Some(record) = &record {
-                if record.lock().await.closed_by_parent {
+                if record.lock().await.retirement.closed_by_parent() {
                     bail!(
                         "rlm.rename can only rename the current session or one of its direct children"
                     );
@@ -741,6 +770,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
             Ok(name)
         })
     }
+
+    /// The session's own worker answers, image payloads left out.
+    fn session_messages(&self, start: i64, limit: u64, roles: Vec<String>) -> RlmHostFuture<Value> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let command = DaemonCommand::GetSessionMessages {
+                id: None,
+                active_session_id: this.parent_active_session_id.clone(),
+                start,
+                limit,
+                roles,
+                session_file: None,
+                rest: serde_json::Map::default(),
+            };
+            this.command(&command, STATE_TIMEOUT_MS).await
+        })
+    }
 }
 
 /// Whether the child's durable session file already carries the spawn
@@ -766,4 +812,26 @@ fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: 
                     == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
                 && entry.pointer("/details/id").and_then(Value::as_str) == Some(spawn_row_id)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_session_launch_env;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn create_session_carries_the_parents_telemetry_opt_out() {
+        let expected = BTreeMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("DO_NOT_TRACK".to_string(), "1".to_string()),
+            ("PI_OFFLINE".to_string(), "1".to_string()),
+            ("PRIME_AGENT_TELEMETRY".to_string(), "0".to_string()),
+        ]);
+        let mut parent = expected.clone();
+        parent.insert("UNRELATED".to_string(), "not forwarded".to_string());
+        assert_eq!(
+            create_session_launch_env("custom/custom", |key| parent.get(key).cloned()),
+            expected
+        );
+    }
 }

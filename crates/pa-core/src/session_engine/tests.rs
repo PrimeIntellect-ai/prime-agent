@@ -177,7 +177,7 @@ async fn digest_session_with_harness(
 
 /// A resumed session over the entries of a prior session (converted
 /// loop context, adopted manager).
-async fn resumed_digest_session(
+pub(super) async fn resumed_digest_session(
     entries: Vec<FileEntry>,
     harness: crate::session_engine::harness_digest::HarnessDigestContext,
 ) -> AgentSession {
@@ -232,9 +232,9 @@ async fn loop_digest_rows(session: &AgentSession) -> Vec<(String, Option<String>
 
 /// TS #2400 + #2394 at the resume boundary: unchanged state does not
 /// re-deliver a drifted-looking digest; a state change re-delivers
-/// exactly one, replacing the superseded copy.
+/// an appended update without rewriting the existing context prefix.
 #[tokio::test]
-async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
+async fn resume_dedupes_by_state_fingerprint_and_appends_stale_digest_update() {
     let tmp = tempfile::tempdir().unwrap();
     let harness_dir = tmp.path().join("harness");
     // Seeded global state: entries whose ranked order differs once the
@@ -334,8 +334,8 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     );
 
     // Changed disk state: the fingerprint moves, so the boundary
-    // re-delivers — and the fresh row replaces the superseded copy
-    // instead of stacking (TS #2394).
+    // appends an authoritative update while preserving the prior prefix.
+    let prior_messages = resumed.agent().state().await.messages;
     state
         .entries
         .get_mut(&crate::refinement::RefinementKind::Memory)
@@ -361,15 +361,21 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
     let refreshed = resumed_digest_session(entries.clone(), harness).await;
     let rows = loop_digest_rows(&refreshed).await;
-    assert_eq!(rows.len(), 1, "the fresh digest replaces the old copy");
+    let refreshed_messages = refreshed.agent().state().await.messages;
+    assert_eq!(
+        serde_json::to_value(&refreshed_messages[..prior_messages.len()]).unwrap(),
+        serde_json::to_value(&prior_messages).unwrap(),
+        "resume must preserve every existing provider-context row"
+    );
+    assert_eq!(rows.len(), 2, "the fresh digest appends to the old copy");
     assert!(
-        rows[0].1.is_some(),
+        rows[1].1.is_some(),
         "the delivered custom row carries its state fingerprint"
     );
-    assert!(rows[0].0.contains("Resume test memory"));
+    assert!(rows[1].0.contains("Resume test memory"));
     // The persisted transcript keeps every copy (TS #2394: the newest
     // digest remains authoritative), so the file holds both while the
-    // live context carries exactly one.
+    // live context retains both without rewriting the old prefix.
     let persisted: Vec<String> = refreshed
         .entries()
         .await
@@ -392,7 +398,7 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     assert_eq!(persisted.len(), 2);
     assert_eq!(persisted[0], first_fingerprint);
     assert_ne!(persisted[1], first_fingerprint);
-    assert_eq!(Some(persisted[1].as_str()), rows[0].1.as_deref());
+    assert_eq!(Some(persisted[1].as_str()), rows[1].1.as_deref());
 }
 
 /// The digest body of the newest digest custom entry (fixture lookup).
@@ -1428,4 +1434,107 @@ async fn run_boundaries_record_git_state() {
             },
         ]
     );
+}
+
+/// Cancelling a caller once its bill is resolved must not cancel that bill,
+/// whether the session lock or the durable store is busy.
+#[tokio::test]
+async fn a_resolved_model_bill_survives_its_callers_cancellation() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    use tokio::sync::Notify;
+
+    struct GatedStore {
+        inner: Arc<dyn rlm_usage::RlmChildUsageStore>,
+        entered: Notify,
+        release: Notify,
+        completed: Notify,
+    }
+    impl rlm_usage::RlmChildUsageStore for GatedStore {
+        fn last_assistant(
+            &self,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, Option<(String, pa_types::ai::Usage)>> {
+            self.inner.last_assistant()
+        }
+        fn append_attribution(
+            &self,
+            row_id: &str,
+            target_id: &str,
+            child_usage: pa_types::ai::Usage,
+            origin: Option<pa_types::session::ChildUsageOrigin>,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<rlm_usage::ChildUsageAppendResult>>
+        {
+            self.inner
+                .append_attribution(row_id, target_id, child_usage, origin)
+        }
+        fn append_model_usage(
+            &self,
+            session_id: String,
+            usage: model_usage::ModelUsage,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                self.release.notified().await;
+                let result = self.inner.append_model_usage(session_id, usage).await;
+                self.completed.notify_one();
+                result
+            })
+        }
+        fn observe_billed_rows(
+            &self,
+            sink: crate::session::billed_row::BilledRowSink,
+        ) -> rlm_usage::RlmChildUsageFuture<'_, ()> {
+            self.inner.observe_billed_rows(sink)
+        }
+    }
+
+    let mut session = scripted_session().await;
+    let store = Arc::new(GatedStore {
+        inner: Arc::clone(&session.usage_store),
+        entered: Notify::new(),
+        release: Notify::new(),
+        completed: Notify::new(),
+    });
+    session.set_usage_store(store.clone());
+    let bill = model_usage::ModelUsage::new(
+        "compaction_discarded",
+        "test",
+        "m",
+        pa_types::ai::Usage {
+            input: 11,
+            output: 7,
+            total_tokens: 18,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let busy_session = Arc::clone(session.session_handle()).lock_owned().await;
+    let mut recording = Box::pin(session.record_model_usage(Some(bill.clone())));
+    // One poll hands the bill to its recording task, which waits on the
+    // held session lock. Readiness is the store's signal, never a fixed sleep.
+    assert!(recording
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
+    drop(recording);
+    drop(busy_session);
+    tokio::time::timeout(std::time::Duration::from_secs(5), store.entered.notified())
+        .await
+        .expect("recording reached the store");
+    store.release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.completed.notified(),
+    )
+    .await
+    .expect("a resolved bill must persist after its caller is cancelled");
+    let rows: Vec<serde_json::Value> = session
+        .entries()
+        .await
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .filter(|entry| entry["customType"] == model_usage::MODEL_USAGE_CUSTOM_TYPE)
+        .map(|entry| entry["data"].clone())
+        .collect();
+    assert_eq!(rows, vec![serde_json::to_value(bill).unwrap()]);
 }

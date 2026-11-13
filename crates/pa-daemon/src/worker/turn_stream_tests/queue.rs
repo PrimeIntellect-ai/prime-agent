@@ -411,11 +411,7 @@ async fn follow_up_mode_all_batches_the_follow_up_lane() {
 
 /// Kevin's acceptance case: ALL visible steers send together; the follow-up runs once idle.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-abort-send-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -478,10 +474,8 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
             .as_ref()
             .and_then(|engine| {
                 engine
-                    .turn_agent
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
+                    .built_handles()
+                    .map(|handles| handles.turn_agent.clone())
             })
             .and_then(|agent| agent.signal())
             .is_some();
@@ -603,11 +597,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
 
 /// Answers immediately while both the aborted turn and the follow-up's reply are held.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-abort-ack-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -867,6 +857,7 @@ async fn the_async_completion_notice_delivery_keeps_the_live_note() {
     runner
         .run_turn(
             engine.clone(),
+            Lane::Steering,
             vec![queued_prompt("review the installer", TurnPolicy::Queued)],
         )
         .await;
@@ -877,7 +868,11 @@ async fn the_async_completion_notice_delivery_keeps_the_live_note() {
     );
     let notice = runner.core.lock().unwrap().steering.pop_front();
     runner
-        .run_turn(engine.clone(), vec![notice.expect("the queued notice row")])
+        .run_turn(
+            engine.clone(),
+            Lane::Steering,
+            vec![notice.expect("the queued notice row")],
+        )
         .await;
     assert_eq!(
         engine.note_at_notice_turn.lock().unwrap().as_deref(),
@@ -907,6 +902,7 @@ async fn queued_follow_up_keeps_the_note_until_its_final_end() {
     runner
         .run_turn(
             engine.clone(),
+            Lane::Steering,
             vec![queued_prompt("review", TurnPolicy::Queued)],
         )
         .await;
@@ -915,7 +911,9 @@ async fn queued_follow_up_keeps_the_note_until_its_final_end() {
         Some("halfway through the review")
     );
     let follow_up = runner.core.lock().unwrap().follow_up.pop_front().unwrap();
-    runner.run_turn(engine.clone(), vec![follow_up]).await;
+    runner
+        .run_turn(engine.clone(), Lane::FollowUp, vec![follow_up])
+        .await;
     assert_eq!(
         engine.note_at_notice_turn.lock().unwrap().as_deref(),
         Some("halfway through the review")
@@ -939,6 +937,7 @@ async fn withdrawing_follow_up_after_agent_end_clears_the_note_at_settle() {
     runner
         .run_turn(
             engine.clone(),
+            Lane::Steering,
             vec![queued_prompt("review", TurnPolicy::Queued)],
         )
         .await;
@@ -1108,6 +1107,7 @@ async fn an_aborted_run_clears_the_note_at_its_idle_settle() {
         runner
             .run_turn(
                 engine_for_turn,
+                Lane::Steering,
                 vec![queued_prompt("review the gate", TurnPolicy::Queued)],
             )
             .await;
@@ -1151,6 +1151,7 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
         runner
             .run_turn(
                 engine_for_turn,
+                Lane::Steering,
                 vec![queued_prompt("review the gate", TurnPolicy::Queued)],
             )
             .await;

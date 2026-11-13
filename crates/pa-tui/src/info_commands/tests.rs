@@ -161,7 +161,7 @@ fn context_tree_root_only_matches_ts() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed, &[])),
         vec![
             "Context",
             "",
@@ -239,7 +239,7 @@ fn context_tree_full_shape_matches_ts() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 100, ContextTreeScope::Collapsed)),
+        plain(&context_tree_rows(&tree, 100, ContextTreeScope::Collapsed, &[])),
         vec![
             "Context",
             "",
@@ -311,7 +311,7 @@ fn context_tree_shows_per_model_costs_across_a_switch() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed, &[])),
         vec![
             "Context",
             "",
@@ -353,7 +353,7 @@ fn context_bar_color_follows_the_percent() {
                 "children": []
             }"#,
     );
-    let rows = context_tree_rows(&tree, 120, ContextTreeScope::Collapsed);
+    let rows = context_tree_rows(&tree, 120, ContextTreeScope::Collapsed, &[]);
     let bar = rows[3]
         .iter()
         .find(|span| span.text.contains("\u{2593}"))
@@ -434,7 +434,7 @@ fn context_tree_ten_rows_render_the_full_shape() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed, &[])),
         vec![
             "Context",
             "",
@@ -562,7 +562,7 @@ fn context_tree_collapses_over_the_budget_to_top_usage_rows() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed, &[])),
         vec![
             "Context",
             "",
@@ -689,7 +689,7 @@ fn context_tree_all_renders_every_row() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 120, ContextTreeScope::EveryAgent)),
+        plain(&context_tree_rows(&tree, 120, ContextTreeScope::EveryAgent, &[])),
         vec![
             "Context",
             "",
@@ -806,7 +806,12 @@ fn context_tree_collapse_can_fold_the_root_into_the_summary() {
             }"#,
     );
     assert_eq!(
-        plain(&context_tree_rows(&tree, 120, ContextTreeScope::Collapsed)),
+        plain(&context_tree_rows(
+            &tree,
+            120,
+            ContextTreeScope::Collapsed,
+            &[]
+        )),
         vec![
             "Context",
             "",
@@ -834,6 +839,182 @@ fn context_tree_collapse_can_fold_the_root_into_the_summary() {
             "Context",
             "Current: 5,000 / 200,000 (2.5%)"
         ]
+    );
+}
+
+/// Children sharing a factory run render under one run row (summed, its
+/// status from the polled graph or derived from its agents), a parent's
+/// deleted agents under one `deleted agents` row, and the grand totals stay
+/// those of the ungrouped tree (group rows are never summed again).
+#[test]
+fn context_tree_groups_factory_runs_and_deleted_agents() {
+    let usage = |input: u64, cost: f64| {
+        serde_json::json!({"input": input, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                           "cost": {"total": cost}})
+    };
+    let run = serde_json::json!({"runId": "abcdef123456", "specId": "sw", "stateId": "build"});
+    let child = |id: &str, status: &str, input: u64, cost: f64| {
+        serde_json::json!({"id": id, "label": id, "status": status,
+                           "ownUsage": usage(input, cost), "totalUsage": usage(input, cost),
+                           "children": []})
+    };
+    let mut f1 = child("f1", "done", 3000, 0.03);
+    f1["factory"] = run.clone();
+    let mut f2 = child("f2", "running", 4000, 0.04);
+    f2["factory"] = run.clone();
+    let mut d1 = child("d1", "deleted", 1000, 0.01);
+    d1["factory"] = run;
+    d1["deleted"] = serde_json::json!(true);
+    let mut d2 = child("d2", "deleted", 500, 0.006);
+    d2["deleted"] = serde_json::json!(true);
+    let mut tree = child("root", "active", 1000, 0.1);
+    tree["label"] = serde_json::json!("main agent");
+    tree["children"] = serde_json::json!([child("worker-a", "done", 2000, 0.02), f1, f2, d1, d2]);
+    let normalized = |rows: Vec<ClientLine>| -> Vec<String> {
+        plain(&rows)
+            .iter()
+            .map(|row| row.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    let grouped = normalized(context_tree_rows(
+        &tree,
+        120,
+        ContextTreeScope::Collapsed,
+        &[],
+    ));
+    assert_eq!(
+        grouped[3..11],
+        [
+            "\u{25cf} main agent 1.0k $0.10 -",
+            "\u{251c}\u{2500} \u{2713} worker-a 2.0k $0.02 -",
+            "\u{251c}\u{2500} \u{25c6} factory sw abcdef 8.0k $0.08 -",
+            "\u{2502} \u{251c}\u{2500} \u{2713} f1 3.0k $0.03 -",
+            "\u{2502} \u{251c}\u{2500} \u{25c6} f2 4.0k $0.04 -",
+            "\u{2502} \u{2514}\u{2500} \u{25c7} d1 1.0k $0.01 -",
+            "\u{2514}\u{2500} \u{25c7} deleted agents 500 $0.01 -",
+            "\u{2514}\u{2500} \u{25c7} d2 500 $0.01 -",
+        ],
+        "{grouped:#?}"
+    );
+    // The polled graph's run state wins over the derived one.
+    let runs = crate::factory_view::parse_factory_runs(&serde_json::json!({"runs": [
+        {"run_id": "abcdef123456", "spec_id": "sw", "state": "failed", "machine": {}}
+    ]}));
+    let polled = normalized(context_tree_rows(
+        &tree,
+        120,
+        ContextTreeScope::Collapsed,
+        &runs,
+    ));
+    assert_eq!(
+        polled[5],
+        "\u{251c}\u{2500} \u{2717} factory sw abcdef 8.0k $0.08 -"
+    );
+
+    // The grand totals equal the ungrouped tree's: the real agents only.
+    let totals = |rows: &[String]| {
+        let start = rows
+            .iter()
+            .position(|row| row.starts_with("Total:"))
+            .unwrap();
+        rows[start..].to_vec()
+    };
+    let mut ungrouped = tree.clone();
+    for child in ungrouped["children"].as_array_mut().unwrap() {
+        child.as_object_mut().unwrap().remove("factory");
+        child.as_object_mut().unwrap().remove("deleted");
+    }
+    let flat = normalized(context_tree_rows(
+        &ungrouped,
+        120,
+        ContextTreeScope::Collapsed,
+        &[],
+    ));
+    assert_eq!(totals(&grouped), totals(&flat));
+    assert_eq!(
+        totals(&grouped)[0],
+        "Total: 12k tokens \u{b7} $0.21 across 6 agents"
+    );
+
+    // Over the row budget the run ranks and folds as ONE unit.
+    let children = tree["children"].as_array_mut().unwrap();
+    for index in 0..9 {
+        children.push(child(&format!("w{index}"), "done", 100, 0.001));
+    }
+    let collapsed = normalized(context_tree_rows(
+        &tree,
+        120,
+        ContextTreeScope::Collapsed,
+        &[],
+    ));
+    let factory_row = collapsed
+        .iter()
+        .position(|row| row.contains("factory sw abcdef 8.0k"))
+        .expect("the run row stays visible");
+    assert!(
+        collapsed[factory_row + 1].contains("f1 3.0k"),
+        "{collapsed:#?}"
+    );
+    assert!(
+        collapsed[factory_row + 3].contains("d1 1.0k"),
+        "{collapsed:#?}"
+    );
+    assert!(
+        collapsed.contains(&"... 7 more agents 700 $0.01 -".to_string()),
+        "{collapsed:#?}"
+    );
+
+    // A run that only folds (nothing hidden) still offers the expand hint.
+    let mut folded_tree = child("root", "active", 1000, 0.1);
+    folded_tree["children"] = (0..10)
+        .map(|index| {
+            let mut member = child(&format!("m{index}"), "done", 100, 0.001);
+            member["factory"] = serde_json::json!({"runId": "fedcba987654", "specId": "sw"});
+            member
+        })
+        .collect();
+    let folded = normalized(context_tree_rows(
+        &folded_tree,
+        120,
+        ContextTreeScope::Collapsed,
+        &[],
+    ));
+    assert!(
+        folded.contains(
+            &"\u{2514}\u{2500} \u{2713} factory sw fedcba (10 agents) 1.0k $0.01 -".to_string()
+        ),
+        "{folded:#?}"
+    );
+    assert!(
+        folded.contains(&"Use /context all to show every agent.".to_string()),
+        "{folded:#?}"
+    );
+
+    // A deleted row without a per-model split (deleted before the capture
+    // existed) keeps the breakdown: its spend is one unknown-model line.
+    let mut split_tree = child("root", "active", 1000, 0.1);
+    split_tree["ownUsageByModel"] = serde_json::json!([
+        {"provider": "anthropic", "id": "claude-opus-4-6", "ownUsage": usage(1000, 0.1)}
+    ]);
+    let mut legacy = child("old", "deleted", 500, 0.05);
+    legacy["deleted"] = serde_json::json!(true);
+    split_tree["children"] = serde_json::json!([legacy]);
+    let split = normalized(context_tree_rows(
+        &split_tree,
+        120,
+        ContextTreeScope::Collapsed,
+        &[],
+    ));
+    let cost_section = &split[split.iter().position(|row| row == "Cost").unwrap()..];
+    assert_eq!(
+        cost_section[..4],
+        [
+            "Cost",
+            "Total: $0.1500",
+            "anthropic/claude-opus-4-6: $0.1000",
+            "unknown model (deleted agents): $0.0500",
+        ],
+        "{split:#?}"
     );
 }
 

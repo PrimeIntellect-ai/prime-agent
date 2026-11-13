@@ -1,1 +1,0 @@
-- Agents view: leaving a session now returns the focus to that session's row, even after `/switch`, `/new`, `/fork`, or `/resume` in the chat, and when the row loads late.

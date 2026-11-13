@@ -119,20 +119,21 @@ class ReportTests(unittest.TestCase):
                 stats.parse_results(response, DAY)
 
     def test_percentage_changes_and_zero_baselines(self):
-        cases = [(100, 80, "↑ 25.0%"), (80, 100, "↓ 20.0%"),
+        cases = [(100, 80, "🟢 ↑ 25.0%"), (80, 100, "🔴 ↓ 20.0%"),
                  (100, 100, "→ 0.0%"), (0, 0, "→ 0.0%"),
                  (100, 0, "new (baseline 0)"), (None, 100, "n/a")]
         for current, previous, expected in cases:
             self.assertEqual(stats.change(current, previous), expected)
-        self.assertEqual(stats.change(90, 80, percentage_points=True), "↑ 10.0pp")
+        self.assertEqual(stats.change(90, 80, percentage_points=True), "🟢 ↑ 10.0pp")
+        self.assertEqual(stats.change(80, 90, percentage_points=True), "🔴 ↓ 10.0pp")
 
     def test_report_compares_complete_rolling_windows_and_success_rate(self):
         report = stats.render_report(stats.parse_results(fixture(), DAY), DAY)
         self.assertTrue(report.startswith("*Prime Agent Daily Stats (Oct 5, 2026)*\n"))
         lines = report.splitlines()
-        self.assertTrue(lines[2].startswith("• *DAU: 100* · ↑ 25.0%"))
-        self.assertTrue(lines[3].startswith("• *WAU: 300* · ↑ 50.0%"))
-        self.assertTrue(lines[4].startswith("• *MAU: 700* · ↑ 40.0%"))
+        self.assertTrue(lines[2].startswith("• *DAU: 100* · 🟢 ↑ 25.0%"))
+        self.assertTrue(lines[3].startswith("• *WAU: 300* · 🟢 ↑ 50.0%"))
+        self.assertTrue(lines[4].startswith("• *MAU: 700* · 🟢 ↑ 40.0%"))
         self.assertNotIn("—", report)
         self.assertNotIn("(UTC)", report)
         for expected in ("DAU: 100", "↑ 25.0% vs yesterday", "↑ 100.0% vs last week",
@@ -163,7 +164,20 @@ class ReportTests(unittest.TestCase):
             request.assert_not_called()
             send.assert_not_called()
             self.assertNotIn("95.0%", stdout.getvalue())
-            self.assertIn("Run success rate: 95.0%", json.loads(output.read_text())["text"])
+            payload = json.loads(output.read_text())
+            text = stats.render_report(stats.parse_results(fixture(), DAY), DAY)
+            metrics, dashboard = text.rsplit("\n\n", 1)
+            self.assertEqual(payload, {
+                "text": text, "unfurl_links": False, "unfurl_media": False,
+                "blocks": [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": metrics}},
+                    {"type": "divider"},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": dashboard}},
+                ],
+            })
+            self.assertIn("Run success rate: 95.0%", payload["text"])
+            self.assertTrue(payload["text"].endswith(f"<{stats.DASHBOARD_URL}|Open dashboard>"))
+            self.assertNotIn("Active users count", payload["text"])
 
     def test_prepare_api_uses_fresh_blocking_query(self):
         with tempfile.TemporaryDirectory() as directory, \

@@ -430,6 +430,63 @@ fn encode_model_id(model_id: &str) -> String {
     encoded
 }
 
+/// Headers the Bedrock transport owns: caller/stream-option headers never override them — the
+/// `SigV4`/bearer credentials, the `SigV4` bookkeeping headers, and the fixed JSON body types.
+const BEDROCK_TRANSPORT_OWNED_HEADERS: [&str; 6] = [
+    "authorization",
+    "host",
+    "x-amz-date",
+    "x-amz-security-token",
+    "content-type",
+    "accept",
+];
+
+/// The caller/stream-option headers (the injected session identity among them) that travel on
+/// the Bedrock request. They join the signed header set on the `SigV4` path: AWS expects every
+/// sent header to be signed.
+///
+/// Case-variant duplicates (an `X-PI-Session-Id` beside an `x-pi-session-id`) collapse to one
+/// canonical entry — a duplicated name in the signed set changes AWS's canonical request and the
+/// signature stops matching. The source is a `HashMap` whose iteration order is random, so
+/// "first wins" would be nondeterministic: the entry with the lexicographically smallest value
+/// wins instead, giving duplicate callers one stable canonical entry. Output sorts by name, so
+/// the merged set feeds the wire and the signed headers in a stable order.
+fn bedrock_caller_headers(options: &BedrockOptions) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = options
+        .base
+        .headers
+        .iter()
+        .flatten()
+        .filter(|(name, _)| {
+            !BEDROCK_TRANSPORT_OWNED_HEADERS
+                .iter()
+                .any(|owned| name.eq_ignore_ascii_case(owned))
+        })
+        .map(|(name, value)| (name.to_lowercase(), value.clone()))
+        .collect();
+    headers.sort();
+    headers.dedup_by(|(name, _), (next_name, _)| name == next_name);
+    headers
+}
+
+/// The extra header set the Bedrock request carries beside its fixed content types: the
+/// request-metadata mirror plus the caller headers, deduped case-insensitively to a single entry
+/// per name. The metadata mirror wins over a caller-supplied copy — it must match the
+/// `requestMetadata` the body carries.
+fn bedrock_extra_signed_headers(options: &BedrockOptions) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(metadata) = &options.request_metadata {
+        headers.push((
+            "x-amzn-bedrock-request-metadata".into(),
+            serde_json::to_string(metadata).unwrap_or_default(),
+        ));
+    }
+    headers.extend(bedrock_caller_headers(options));
+    let mut seen = std::collections::HashSet::new();
+    headers.retain(|(name, _)| seen.insert(name.clone()));
+    headers
+}
+
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
@@ -512,14 +569,11 @@ async fn run_stream(
         let _ = (name, value);
     }
 
-    // requestMetadata also travels as the X-Amzn-Bedrock-Request-Metadata header.
-    let mut extra_signed_headers: Vec<(String, String)> = Vec::new();
-    if let Some(metadata) = &options.request_metadata {
-        extra_signed_headers.push((
-            "x-amzn-bedrock-request-metadata".into(),
-            serde_json::to_string(metadata).unwrap_or_default(),
-        ));
-    }
+    // requestMetadata also travels as the X-Amzn-Bedrock-Request-Metadata header, and the
+    // caller headers ride along with it: without this merge, a session-scoped Bedrock request
+    // would never carry its session identity. On the SigV4 path the whole set is signed; on the
+    // bearer path it passes through unsigned.
+    let extra_signed_headers = bedrock_extra_signed_headers(&options);
 
     // Bearer-token auth bypasses SigV4 entirely.
     let bearer_token = options
@@ -863,7 +917,8 @@ impl Provider for BedrockConverseStreamProvider {
 mod tests {
     use super::*;
     use crate::providers::bedrock::auth::{
-        get_standard_bedrock_endpoint_region, should_use_explicit_bedrock_endpoint,
+        get_standard_bedrock_endpoint_region, should_use_explicit_bedrock_endpoint, AwsCredentials,
+        SigV4Params,
     };
 
     /// The TS `formatBedrockError` shape for an HTTP-level failure: the AWS SDK exception name
@@ -1006,6 +1061,137 @@ mod tests {
         assert_eq!(bedrock_error_prefix("Unknown"), "Unknown");
     }
 
+    /// Caller headers (the injected session identity among them) travel on the Bedrock request;
+    /// transport-owned headers (credentials, `SigV4` bookkeeping, the fixed JSON body types) never
+    /// come from options.
+    #[test]
+    fn caller_headers_travel_but_transport_owned_headers_do_not() {
+        let options = BedrockOptions::from_base(StreamOptions {
+            session_id: Some("conversation".into()),
+            headers: Some(HashMap::from([
+                ("X-PI-Session-Id".to_string(), "conversation".to_string()),
+                ("x-custom-gateway".to_string(), "value".to_string()),
+                ("Content-Type".to_string(), "text/plain".to_string()),
+                ("authorization".to_string(), "Bearer nope".to_string()),
+                ("x-amz-date".to_string(), "2030-01-01".to_string()),
+            ])),
+            ..Default::default()
+        });
+        assert_eq!(
+            bedrock_caller_headers(&options),
+            vec![
+                ("x-custom-gateway".to_string(), "value".to_string()),
+                ("x-pi-session-id".to_string(), "conversation".to_string()),
+            ]
+        );
+        assert_eq!(
+            bedrock_caller_headers(&BedrockOptions::default()),
+            Vec::new()
+        );
+    }
+
+    /// Case-variant duplicates in the caller headers collapse to one canonical entry: a
+    /// duplicated name in the signed set changes AWS's canonical request, and the signature
+    /// stops matching. The `HashMap` iteration order is random, so the lexicographically
+    /// smallest value wins — a stable, documented pick rather than a random first entry.
+    #[test]
+    fn case_variant_caller_headers_collapse_to_one_canonical_entry() {
+        let options = BedrockOptions::from_base(StreamOptions {
+            headers: Some(HashMap::from([
+                ("X-Custom-Gateway".to_string(), "b".to_string()),
+                ("x-custom-gateway".to_string(), "a".to_string()),
+                ("x-pi-session-id".to_string(), "conversation".to_string()),
+            ])),
+            ..Default::default()
+        });
+        assert_eq!(
+            bedrock_caller_headers(&options),
+            vec![
+                ("x-custom-gateway".to_string(), "a".to_string()),
+                ("x-pi-session-id".to_string(), "conversation".to_string()),
+            ]
+        );
+    }
+
+    /// The merged extra signed set carries one entry per name: the request-metadata mirror beats
+    /// a caller-supplied copy of the same header (the mirror must match the body's
+    /// `requestMetadata`), and duplicated caller entries do not reach the signed set.
+    #[test]
+    fn merged_signed_headers_dedupe_the_metadata_overlap_and_caller_duplicates() {
+        let options = BedrockOptions {
+            base: StreamOptions {
+                headers: Some(HashMap::from([
+                    (
+                        "X-Amzn-Bedrock-Request-Metadata".to_string(),
+                        r#"{"caller": "copy"}"#.to_string(),
+                    ),
+                    ("X-Pi-Session-Id".to_string(), "conversation".to_string()),
+                ])),
+                ..Default::default()
+            },
+            request_metadata: Some(std::collections::BTreeMap::from([(
+                "team".to_string(),
+                "a".to_string(),
+            )])),
+            ..Default::default()
+        };
+        assert_eq!(
+            bedrock_extra_signed_headers(&options),
+            vec![
+                (
+                    "x-amzn-bedrock-request-metadata".to_string(),
+                    r#"{"team":"a"}"#.to_string(),
+                ),
+                ("x-pi-session-id".to_string(), "conversation".to_string()),
+            ]
+        );
+    }
+
+    /// Signing the merged set puts every name in `SignedHeaders` exactly once — the duplicate
+    /// rejection AWS would otherwise answer with starts upstream of the signer.
+    #[test]
+    fn signing_the_merged_set_keeps_signed_headers_canonical() {
+        let options = BedrockOptions::from_base(StreamOptions {
+            session_id: Some("conversation".into()),
+            headers: Some(HashMap::from([
+                ("X-Pi-Session-Id".to_string(), "conversation".to_string()),
+                ("x-pi-session-id".to_string(), "other".to_string()),
+            ])),
+            ..Default::default()
+        });
+        let merged = bedrock_extra_signed_headers(&options);
+        assert_eq!(
+            merged,
+            vec![("x-pi-session-id".to_string(), "conversation".to_string())]
+        );
+        let (amz_date, authorization, _) = sigv4_headers(
+            &SigV4Params {
+                method: "POST",
+                path: "/model/m/converse-stream",
+                host: "example.com",
+                region: "us-east-1",
+                service: "bedrock",
+                body: b"{}",
+                extra_signed_headers: &merged,
+            },
+            &AwsCredentials {
+                access_key_id: "AKIDEXAMPLE".to_string(),
+                secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
+                session_token: None,
+            },
+        );
+        let signed_headers = authorization
+            .split("SignedHeaders=")
+            .nth(1)
+            .and_then(|rest| rest.split(", Signature").next())
+            .unwrap_or_default();
+        assert!(!amz_date.is_empty());
+        assert_eq!(
+            signed_headers,
+            "content-type;host;x-amz-date;x-pi-session-id"
+        );
+    }
+
     #[test]
     fn gov_cloud_detection() {
         let model = test_model("arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/test");
@@ -1092,6 +1278,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         }
     }
 }

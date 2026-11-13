@@ -142,7 +142,7 @@ pub struct PythonSkillRuntimeInfo {
 pub fn get_python_skill_runtime_info(skills: &[Skill]) -> Vec<PythonSkillRuntimeInfo> {
     skills
         .iter()
-        .filter(|skill| skill.is_python())
+        .filter(|skill| skill.is_python() && skill.source_info.scope != SourceScope::Project)
         .map(|skill| {
             let python = skill.python.as_ref().expect("python skill has metadata");
             PythonSkillRuntimeInfo {

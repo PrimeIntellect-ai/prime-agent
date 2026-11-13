@@ -13,6 +13,7 @@ pub(crate) use config::WorkerConfig;
 use env::KillCloseReason;
 mod input;
 mod lifecycle;
+mod refinement;
 mod summary;
 
 mod connection;
@@ -148,6 +149,10 @@ pub struct Worker {
     /// Tokens whose attach guard already released: a late registration
     /// racing the close is rejected, not recreated as unowned.
     pub(crate) released_attach_tokens: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Every live connection's outbound sink (dead entries pruned at each
+    /// registration): the shutdown drains them before its reply unlocks
+    /// the process exit.
+    pub(crate) connection_sinks: std::sync::Mutex<Vec<std::sync::Weak<ConnectionSink>>>,
     pub(crate) events: Arc<EventPump>,
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh plus one queued re-arm per burst.
@@ -296,6 +301,8 @@ impl Worker {
             created: false,
             attached_client_ids: Vec::new(),
             abort_requested: false,
+            turn_cancelled: false,
+            turn_completed: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
             last_activity_ms: 0,
@@ -610,6 +617,12 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
+                // The worker's refinement completion sink: the background
+                // run's durable rows and completion events surface here,
+                // generation-fenced, once the run settles.
+                *concrete.refinement_completion_sink.lock().unwrap() = Some(
+                    refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
+                );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.
@@ -765,6 +778,7 @@ impl Worker {
             idle_notify,
             session_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
             released_attach_tokens: std::sync::Mutex::new(std::collections::HashSet::new()),
+            connection_sinks: std::sync::Mutex::new(Vec::new()),
             events,
             model_catalog_refresh_gate: std::sync::Arc::new(
                 crate::model_catalog::RefreshGate::default(),
@@ -847,8 +861,8 @@ impl Worker {
     /// no destructors, so the caller must have settled the close first).
     async fn exit_after_close(&self) -> ! {
         // Shutdown keeps the resume entry and exits the process (TS
-        // `closeKeepsResumeEntry("shutdown")`).
-        let _ = self.record_recovery(false, "shutdown");
+        // `closeKeepsResumeEntry("shutdown")`); `handle_shutdown` already
+        // recorded the recovery verdict.
         self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }
@@ -860,7 +874,7 @@ impl Worker {
             "pa-daemon worker {}: registration refused (the supervisor no longer owns this identity); retiring",
             std::process::id()
         );
-        let _ = self.handle_shutdown().await;
+        let _ = self.handle_shutdown(&json!({})).await;
         self.exit_after_close().await;
     }
 }
@@ -889,7 +903,26 @@ fn emit_refinement_event_for_session(
     review_session_id: &str,
     event: Value,
 ) -> bool {
+    emit_refinement_event_for_generation(
+        core,
+        events,
+        review_session_id,
+        /*expected_generation*/ None,
+        event,
+    )
+}
+
+pub(crate) fn emit_refinement_event_for_generation(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    expected_generation: Option<&str>,
+    event: Value,
+) -> bool {
     let mut core = core.lock().unwrap();
+    if expected_generation.is_some_and(|generation| core.generation != generation) {
+        return false;
+    }
     if core.store.as_ref().map(SessionFile::session_id) != Some(review_session_id) {
         return false;
     }
@@ -922,7 +955,26 @@ fn emit_refinement_row(
     review_session_id: &str,
     message: &Value,
 ) -> bool {
+    emit_refinement_row_for_generation(
+        core,
+        events,
+        review_session_id,
+        /*expected_generation*/ None,
+        message,
+    )
+}
+
+pub(crate) fn emit_refinement_row_for_generation(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    expected_generation: Option<&str>,
+    message: &Value,
+) -> bool {
     let mut core = core.lock().unwrap();
+    if expected_generation.is_some_and(|generation| core.generation != generation) {
+        return false;
+    }
     {
         let Some(store) = core.store.as_mut() else {
             return false;
@@ -944,6 +996,14 @@ fn emit_refinement_row(
             }),
         );
     }
+    #[cfg(test)]
+    tests::BEFORE_REFINEMENT_ROW_BROADCAST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    // Persistence and both frames belong to the same session generation. A
+    // navigation cannot replace the store between the check and either send.
     broadcast_custom_row_locked(&mut core, events, message);
     true
 }
@@ -1013,6 +1073,56 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
         })
     }
+
+    /// The worker swaps `core.store` on a session replace, so a bill made
+    /// before the swap lands only if its session is still the open one
+    /// (the fence `emit_refinement_event_for_session` applies to events).
+    fn append_model_usage(
+        &self,
+        session_id: String,
+        usage: pa_core::session_engine::model_usage::ModelUsage,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            let data = serde_json::to_value(&usage)?;
+            let mut core = core.lock().unwrap();
+            let Some(store) = core.store.as_mut() else {
+                return Err(std::io::Error::other("session store not created"));
+            };
+            // A pathless store's id is not the engine's (lifecycle.rs keeps the in-memory
+            // manager's own id), so only path-backed sessions are fenced.
+            if !store.path.as_os_str().is_empty() && store.session_id() != session_id {
+                return Err(std::io::Error::other(format!(
+                    "bill for session {session_id} dropped: the worker moved to session {}",
+                    store.session_id()
+                )));
+            }
+            store
+                .persist_entry(
+                    "custom",
+                    json!({
+                        "customType": pa_core::session_engine::model_usage::MODEL_USAGE_CUSTOM_TYPE,
+                        "data": data,
+                    }),
+                )
+                .map(|_| ())
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
+
+    /// The engine builds on the store a create or a replacement installed;
+    /// a replacement retires the engine, so the rebuild re-observes.
+    fn observe_billed_rows(
+        &self,
+        sink: pa_core::session::billed_row::BilledRowSink,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, ()> {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            if let Some(store) = core.lock().unwrap().store.as_mut() {
+                store.billed_row_sink = crate::session_store::BilledRowSinkSlot(Some(sink));
+            }
+        })
+    }
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's
@@ -1034,6 +1144,8 @@ pub async fn run_worker() -> Result<()> {
     if std::env::var(WORKER_ROLE_ENV).unwrap_or_default() != "1" {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
     }
+    // Structured logs land in the worker's captured stderr log.
+    pa_ai::utils::log::install_stderr_log_sink();
     let config = WorkerConfig::from_env()?;
     // Self-registration: the supervisor's roster survives its own restarts
     // because workers re-present their identity (liveness watch + backoff).

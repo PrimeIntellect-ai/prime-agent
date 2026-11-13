@@ -1,0 +1,1 @@
+- Session HTML exports now escape the `read` tool's line range, so a crafted `offset` in a tool call can no longer inject HTML or script into the exported page.

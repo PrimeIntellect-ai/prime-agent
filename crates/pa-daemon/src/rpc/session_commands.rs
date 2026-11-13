@@ -87,6 +87,7 @@ async fn switch_session(state: &Arc<RpcState>, payload: &Value) -> Result<Respon
         .replace(RpcEngineRequest::Open {
             session_path: std::path::PathBuf::from(session_path),
             reuse_lease: false,
+            ready_gate: None,
         })
         .await;
     if let Err(error) = outcome {
@@ -195,6 +196,7 @@ async fn fork_at(
         // Settle any streaming turn before the rebuild: a turn still
         // appending would land its later messages on the new branch.
         engine.session.agent().wait_for_idle().await;
+        engine.session.discard_compact_auto_refine();
         engine
             .session
             .rebuild_branch_context(branch_entries)
@@ -250,6 +252,7 @@ async fn fork_at(
         .replace_locked(RpcEngineRequest::Open {
             session_path: forked_path,
             reuse_lease: false,
+            ready_gate: None,
         })
         .await;
     drop(lease);
@@ -462,7 +465,10 @@ async fn export_html(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
     Ok(ResponseData::Present(json!({ "path": path })))
 }
 
-/// `get_session_stats` (TS `getSessionStats` over `state.messages`).
+/// `get_session_stats` (TS `getSessionStats` over `state.messages`): the
+/// counts read the live context. `tokens`/`cost` are the branch's spend
+/// across every compaction, as the daemon's `get_session_stats` reports it:
+/// assistant rows plus the rows that bill a model call outside the loop.
 async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let handle = state.session.handle().await;
     let engine = &handle.engine;
@@ -480,11 +486,6 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
     let mut assistant_messages = 0u64;
     let mut tool_calls = 0u64;
     let mut tool_results = 0u64;
-    let mut input = 0u64;
-    let mut output = 0u64;
-    let mut cache_read = 0u64;
-    let mut cache_write = 0u64;
-    let mut cost = 0.0;
     for message in &messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => user_messages += 1,
@@ -498,34 +499,32 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
                         })
                         .count() as u64;
                 }
-                if let Some(usage) = message.get("usage") {
-                    input += usage
-                        .get("input")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    output += usage
-                        .get("output")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    cache_read += usage
-                        .get("cacheRead")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    cache_write += usage
-                        .get("cacheWrite")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    cost += usage
-                        .get("cost")
-                        .and_then(|cost| cost.get("total"))
-                        .and_then(Value::as_f64)
-                        .unwrap_or_default();
-                }
             }
             Some("toolResult") => tool_results += 1,
             _ => {}
         }
     }
+    let mut spend = pa_types::ai::Usage::default();
+    for entry in manager.get_branch(None) {
+        let usage = match entry {
+            FileEntry::Message {
+                message: pa_types::session::AgentMessage::Assistant(assistant),
+                ..
+            } => Some(assistant.usage),
+            _ => pa_core::session::billed_row::billed_file_entry(entry).map(|row| row.usage),
+        };
+        if let Some(usage) = usage {
+            pa_core::session_engine::compaction_exec::add_assistant_usage(&mut spend, &usage);
+        }
+    }
+    let pa_types::ai::Usage {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        ..
+    } = spend;
+    let cost = spend.cost.total.as_f64();
     let mut session_stats = json!({
         "sessionFile": manager
             .get_session_file()

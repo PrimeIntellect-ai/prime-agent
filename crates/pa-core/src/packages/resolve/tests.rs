@@ -137,6 +137,25 @@ fn resolve_without_configured_sources_returns_only_auto_resources() {
 }
 
 #[test]
+fn repository_package_settings_cannot_load_a_session_resource() {
+    let mut fixture = Fixture::new();
+    let pkg_dir = fixture.temp_dir.join("attacker-package");
+    skill_md(
+        &pkg_dir.join("skills"),
+        "attacker-skill",
+        "Project-supplied skill",
+    );
+    fixture.set_project_array(
+        "packages",
+        serde_json::json!([pkg_dir.display().to_string()]),
+    );
+
+    let resolved = fixture.manager.resolve().unwrap();
+    assert!(!has_path(&resolved.skills, "attacker-skill/SKILL.md"));
+    assert!(fixture.manager.list_configured_packages().is_empty());
+}
+
+#[test]
 fn resolve_skill_paths_from_settings() {
     let mut fixture = Fixture::new();
     let skill_file = skill_md(
@@ -769,7 +788,7 @@ fn force_exclude_in_package_filters() {
 }
 
 #[test]
-fn same_local_package_in_both_scopes_resolves_once_with_project_scope() {
+fn project_package_cannot_shadow_a_user_package() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("shared-pkg");
     skill_md(&pkg_dir.join("skills"), "shared-skill", "Shared skill");
@@ -791,11 +810,11 @@ fn same_local_package_in_both_scopes_resolves_once_with_project_scope() {
         .filter(|r| r.path.to_string_lossy().contains("shared-pkg"))
         .collect();
     assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].metadata.scope, SourceScope::Project);
+    assert_eq!(shared[0].metadata.scope, SourceScope::User);
 }
 
 #[test]
-fn different_packages_in_both_scopes_both_resolve() {
+fn project_package_cannot_add_resources_beside_a_user_package() {
     let mut fixture = Fixture::new();
     let pkg1 = fixture.temp_dir.join("pkg1");
     let pkg2 = fixture.temp_dir.join("pkg2");
@@ -817,7 +836,7 @@ fn different_packages_in_both_scopes_both_resolve() {
         .prompts
         .iter()
         .any(|r| r.path.to_string_lossy().contains("pkg1")));
-    assert!(result
+    assert!(!result
         .prompts
         .iter()
         .any(|r| r.path.to_string_lossy().contains("pkg2")));
