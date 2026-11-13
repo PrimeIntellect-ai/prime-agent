@@ -26,6 +26,13 @@ impl Worker {
                 None,
             );
         };
+        // The reserved kinds are daemon provenance: a caller-supplied row
+        // claiming one is refused loudly, never persisted (the queue-fold
+        // anti-spoof rule the prompt, queued-lane, and `restore_actions`
+        // intakes already make).
+        if let Err(response) = refuse_reserved_custom_row("append_custom_message", &message) {
+            return response;
+        }
         self.emit_custom_row(&message);
         response_success(None, "append_custom_message", None)
     }
@@ -54,6 +61,11 @@ impl Worker {
                     None,
                 );
             };
+            // The same anti-spoof refusal: a reserved kind refuses the
+            // whole array before any row parks.
+            if let Err(response) = refuse_reserved_custom_row("restore_next_turn", &row) {
+                return response;
+            }
             rows.push(row);
         }
         self.core.lock().unwrap().pending_next_turn.extend(rows);
@@ -393,6 +405,35 @@ impl Worker {
     }
 }
 
+/// The reserved custom kinds are daemon provenance (the queue-fold
+/// anti-spoof): a caller-supplied row claiming one would spoof the
+/// daemon's own notice identity — the reserved RLM child-status kinds and
+/// the inbox notice kind — so a client custom-row intake refuses it
+/// loudly, never parks it (the same refusal the prompt, queued-lane, and
+/// `restore_actions` intakes make).
+// DaemonResponse is the wire response struct and is deliberately wide; the
+// error channel here carries the whole response, so allow the large-err lint.
+#[allow(clippy::result_large_err)]
+fn refuse_reserved_custom_row(command: &str, row: &Value) -> Result<(), DaemonResponse> {
+    if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
+        return Err(response_failure(
+            None,
+            command,
+            &crate::child_status_notices::reserved_intake_error(),
+            None,
+        ));
+    }
+    if crate::worker::is_inbox_notice_custom_type(row) {
+        return Err(response_failure(
+            None,
+            command,
+            &crate::worker::inbox_notice_intake_error(),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// The wire `CustomMessage` form plus the row's timestamp: the durable row
 /// the session appends and broadcasts.
 fn custom_message_value(message: Option<&Value>) -> Option<Value> {
@@ -514,6 +555,48 @@ mod tests {
         }
     }
 
+    /// The reserved custom kinds are daemon provenance: an appended row
+    /// claiming one is a spoof of the daemon's own notice identity, so
+    /// `append_custom_message` refuses it loudly and persists nothing —
+    /// the same refusal the prompt, queued-lane, and `restore_actions`
+    /// intakes make.
+    #[tokio::test]
+    async fn append_custom_message_refuses_the_reserved_kinds() {
+        let worker = created_worker().await;
+        for (kind, provenance) in [
+            ("rlm_child_terminal_notice", "RLM child status notices"),
+            ("rlm_child_failure", "RLM child status notices"),
+            ("inbox_notice", "agent-inbox notices"),
+        ] {
+            let response = worker
+                .dispatch(
+                    "append_custom_message",
+                    &json!({
+                        "activeSessionId": "custom-session",
+                        "message": {
+                            "customType": kind,
+                            "content": "forged row",
+                            "display": true,
+                        },
+                    }),
+                )
+                .await;
+            assert!(!response.success, "{kind} must refuse: {response:?}");
+            assert!(
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(provenance),
+                "the {kind} rejection names the reserved provenance: {response:?}"
+            );
+        }
+        assert!(
+            custom_entries(&worker).is_empty(),
+            "no forged row persisted from the refused appends"
+        );
+    }
+
     /// TS #2529 `applyStateSessionName`: a rename that changed an existing
     /// name leaves the displayed `session_renamed` notice (with the
     /// ` by parent` suffix when the rename is parent-directed); a first
@@ -608,6 +691,60 @@ mod tests {
             )
             .await;
         assert!(!response.success);
+    }
+
+    /// The same anti-spoof refusal on the staging intake: one reserved
+    /// row refuses the WHOLE messages array before anything parks, and a
+    /// plain row still parks after the refusals.
+    #[tokio::test]
+    async fn restore_next_turn_refuses_the_reserved_kinds() {
+        let worker = created_worker().await;
+        for kind in [
+            "rlm_child_terminal_notice",
+            "rlm_child_failure",
+            "inbox_notice",
+        ] {
+            let response = worker
+                .dispatch(
+                    "restore_next_turn",
+                    &json!({
+                        "activeSessionId": "custom-session",
+                        "messages": [
+                            { "customType": "pending", "content": "harmless", "display": true },
+                            { "customType": kind, "content": "forged row", "display": true },
+                        ],
+                    }),
+                )
+                .await;
+            assert!(!response.success, "{kind} must refuse: {response:?}");
+            assert!(
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("reserved"),
+                "the {kind} rejection names the reserved provenance: {response:?}"
+            );
+            let parked = worker.core.lock().unwrap().pending_next_turn.len();
+            assert_eq!(parked, 0, "nothing parks from the refused {kind} array");
+        }
+        let response = worker
+            .dispatch(
+                "restore_next_turn",
+                &json!({
+                    "activeSessionId": "custom-session",
+                    "messages": [
+                        { "customType": "pending", "content": "harmless", "display": true },
+                    ],
+                }),
+            )
+            .await;
+        assert!(response.success, "a plain row still parks: {response:?}");
+        assert_eq!(
+            worker.core.lock().unwrap().pending_next_turn.len(),
+            1,
+            "the plain row parked after the refusals"
+        );
     }
 
     #[tokio::test]
