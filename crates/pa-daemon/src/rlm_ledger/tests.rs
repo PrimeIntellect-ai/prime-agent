@@ -797,54 +797,6 @@ fn display_entry_file_is_owner_only() {
     }
 }
 
-/// A transcript-removing delete records the child's total; a later bare
-/// re-tombstone keeps it.
-#[test]
-fn delete_with_total_records_the_childs_total() {
-    let dir = temp_dir("delete-total");
-    let sessions = dir.join("sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    let parent = sessions.join("parent.jsonl");
-    let child = sessions.join("child.jsonl");
-    let ledger = ledger_for(&dir);
-    ledger
-        .append_spawn(&RlmSpawnInput {
-            child_id: "sub-child".into(),
-            parent: parent.to_string_lossy().into(),
-            child: child.to_string_lossy().into(),
-            depth: 1,
-            name: "child".into(),
-            factory: None,
-        })
-        .unwrap();
-    let total = pa_types::ai::Usage {
-        input: 40,
-        output: 4,
-        total_tokens: 44,
-        cost: pa_types::ai::UsageCost {
-            total: pa_types::JsNumber(0.4),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    ledger
-        .append_delete_with_total(
-            "sub-child",
-            &child.to_string_lossy(),
-            RlmLedgerDeleteReason::User,
-            &total,
-        )
-        .unwrap();
-    ledger
-        .append_delete(
-            "sub-child",
-            &child.to_string_lossy(),
-            RlmLedgerDeleteReason::User,
-        )
-        .unwrap();
-    assert_eq!(ledger.edges(true).unwrap()[0].deleted_total, Some(total));
-}
-
 #[test]
 fn the_artifact_index_rechecks_deleted_and_relocated_transcripts_without_an_append() {
     let dir = temp_dir("index-disk-change");
@@ -913,7 +865,7 @@ fn artifact_misses_stay_cached_until_a_directory_changes() {
         depth: 1,
         name: "child".into(),
         deleted: None,
-        deleted_total: None,
+        deleted_usage: None,
         factory: None,
     }];
     assert_eq!(ledger.live_edges().unwrap(), expected);

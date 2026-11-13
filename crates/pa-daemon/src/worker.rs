@@ -690,11 +690,13 @@ impl Worker {
                 });
             crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
             if let Some(concrete) = agent_engine.as_ref() {
-                let usage_store = std::sync::Arc::new(CoreUsageStore {
+                concrete.set_usage_store(std::sync::Arc::new(CoreUsageStore {
                     core: Arc::clone(&core),
-                    roster_pushes: roster_pushes.clone(),
-                });
-                concrete.set_usage_store(usage_store.clone(), usage_store);
+                    usage_reports: crate::usage_report::UsageReports::spawn(
+                        Arc::clone(&roster_link),
+                        worker_token.clone(),
+                    ),
+                }));
             }
             if let Some(children) = agent_engine
                 .as_ref()
@@ -1013,30 +1015,12 @@ pub(crate) fn emit_refinement_row_for_generation(
     true
 }
 
-/// The worker's session transcript as the engine's usage boundary. Every
-/// row it appends changes the session's published spend, so each append
-/// queues a roster push: a parent's total moves without waiting for its
-/// next turn, and a grandchild's spend climbs one level per push.
+/// The worker's session transcript as the engine's usage boundary: the
+/// engine's billed rows land in it, and every appended row that carries
+/// usage is reported to the supervisor's usage ledger.
 struct CoreUsageStore {
     core: Arc<Mutex<SessionCore>>,
-    roster_pushes: crate::roster_activity::RosterPushQueue,
-}
-
-impl crate::rlm_children::ChildSpendStore for CoreUsageStore {
-    fn append_child_spend(
-        &self,
-        entry: &pa_types::session::ChildSpendEntry,
-    ) -> anyhow::Result<Option<pa_types::ai::Usage>> {
-        let added = {
-            let mut core = self.core.lock().unwrap();
-            let Some(store) = core.store.as_mut() else {
-                anyhow::bail!("session store not created");
-            };
-            store.append_child_spend(entry)?
-        };
-        self.roster_pushes.push();
-        Ok(added)
-    }
+    usage_reports: crate::usage_report::UsageReports,
 }
 
 impl pa_core::session_engine::usage_store::UsageStore for CoreUsageStore {
@@ -1049,7 +1033,6 @@ impl pa_core::session_engine::usage_store::UsageStore for CoreUsageStore {
         usage: pa_core::session_engine::model_usage::ModelUsage,
     ) -> pa_core::session_engine::usage_store::UsageStoreFuture<'_, std::io::Result<()>> {
         let core = Arc::clone(&self.core);
-        let roster_pushes = self.roster_pushes.clone();
         Box::pin(async move {
             let data = serde_json::to_value(&usage)?;
             let mut core = core.lock().unwrap();
@@ -1072,21 +1055,31 @@ impl pa_core::session_engine::usage_store::UsageStore for CoreUsageStore {
                         "data": data,
                     }),
                 )
-                .map(|_| roster_pushes.push())
+                .map(|_| ())
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
         })
     }
 
     /// The engine builds on the store a create or a replacement installed;
-    /// a replacement retires the engine, so the rebuild re-observes.
+    /// a replacement retires the engine, so the rebuild re-observes. The
+    /// store's one row sink hands billed rows to the engine and reports
+    /// every usage row.
     fn observe_billed_rows(
         &self,
         sink: pa_core::session::billed_row::BilledRowSink,
     ) -> pa_core::session_engine::usage_store::UsageStoreFuture<'_, ()> {
         let core = Arc::clone(&self.core);
+        let usage_reports = self.usage_reports.clone();
         Box::pin(async move {
             if let Some(store) = core.lock().unwrap().store.as_mut() {
-                store.billed_row_sink = crate::session_store::BilledRowSinkSlot(Some(sink));
+                store.usage_row_sink = crate::session_store::UsageRowSinkSlot(Some(Arc::new(
+                    move |row: &crate::session_store::UsageRow<'_>| {
+                        if let Some(billed) = &row.billed {
+                            sink(billed);
+                        }
+                        usage_reports.report(row);
+                    },
+                )));
             }
         })
     }

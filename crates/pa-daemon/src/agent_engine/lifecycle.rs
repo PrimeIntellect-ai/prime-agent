@@ -280,19 +280,12 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
-    /// Bind the worker's session transcript: the engine's billed rows and
-    /// the children's `child_spend` snapshots land in it.
+    /// Bind the worker's session transcript: the engine's billed rows land in it.
     pub(crate) fn set_usage_store(
         &self,
         store: std::sync::Arc<dyn pa_core::session_engine::usage_store::UsageStore>,
-        spend_store: std::sync::Arc<dyn crate::rlm_children::ChildSpendStore>,
     ) {
         *self.usage_store.lock().expect("usage store lock") = Some(store);
-        if let Some(children) = &self.children {
-            children.set_spend_sink(std::sync::Arc::new(
-                crate::rlm_children::ChildSpendWriter::new(spend_store),
-            ));
-        }
     }
 
     /// Installs the worker's accepted-note announcer, threaded into every
@@ -356,12 +349,10 @@ impl AgentSessionEngine {
         }
         // The in-run autonomous continuation hook (the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
-        // The children's spend writer counts into this build's telemetry.
         if let Some(children) = &self.children {
-            children.set_spend_telemetry(built.telemetry.clone());
-            // The semantic-edge handoff (the same per-build pattern): the
-            // settle watcher records a returned child's last committed
-            // request into this recorder.
+            // The per-build semantic-edge handoff: the settle watcher
+            // records a returned child's last committed request into this
+            // recorder.
             children.set_semantic_edges(built.session.semantic_edges());
         }
         if let Some(handles) = self.built_handles() {

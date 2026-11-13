@@ -1,7 +1,6 @@
-//! Whole-file usage scan: the single source of truth for a session's spend.
-//! `own` is the session's own model calls; `total` adds every descendant's
-//! spend from the session's `child_spend` snapshots (plus legacy
-//! `child_usage_attributed` deltas), so it only grows as the file grows.
+//! Whole-file own-usage scan: the single source of truth for a session's own
+//! token/cost summary — assistant usage keyed by entry id, aggregates
+//! replacing raw blocks, child spend subtracted so rollups never double count.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -114,88 +113,9 @@ impl<'de> Deserialize<'de> for AssistantUsageById {
     }
 }
 
-/// Each direct child's first and latest `child_spend` snapshot, in
-/// first-seen order (the fold's float-sum order). The child billed so far is
-/// `latest - first`: the first row is the zero row written at spawn, or the
-/// baseline of a child that predates `child_spend` rows.
-#[derive(Default, Clone)]
-struct ChildSpendById {
-    entries: Vec<(String, Usage, Usage)>,
-    index: std::collections::HashMap<String, usize>,
-}
-
-impl ChildSpendById {
-    /// A snapshot raises the child's latest total field by field and never
-    /// lowers it: a stale or out-of-order row restates less than the child
-    /// already billed.
-    fn fold(&mut self, child_session_id: &str, total: Usage) {
-        if let Some(at) = self.index.get(child_session_id) {
-            let latest = &mut self.entries[*at].2;
-            *latest = field_max(latest, &total);
-        } else {
-            self.index
-                .insert(child_session_id.to_string(), self.entries.len());
-            self.entries
-                .push((child_session_id.to_string(), total, total));
-        }
-    }
-
-    /// Each child's spend billed to this session.
-    fn billed(&self) -> impl Iterator<Item = (&str, Usage)> {
-        self.entries.iter().map(|(id, first, latest)| {
-            let mut billed = *latest;
-            subtract_assistant_usage(&mut billed, first);
-            (id.as_str(), billed)
-        })
-    }
-}
-
-/// The field-wise maximum of two usage blocks.
-fn field_max(left: &Usage, right: &Usage) -> Usage {
-    let cost = |left: JsNumber, right: JsNumber| JsNumber(left.as_f64().max(right.as_f64()));
-    Usage {
-        input: left.input.max(right.input),
-        output: left.output.max(right.output),
-        cache_read: left.cache_read.max(right.cache_read),
-        cache_write: left.cache_write.max(right.cache_write),
-        total_tokens: left.total_tokens.max(right.total_tokens),
-        cost: UsageCost {
-            input: cost(left.cost.input, right.cost.input),
-            output: cost(left.cost.output, right.cost.output),
-            cache_read: cost(left.cost.cache_read, right.cost.cache_read),
-            cache_write: cost(left.cost.cache_write, right.cost.cache_write),
-            total: cost(left.cost.total, right.cost.total),
-        },
-    }
-}
-
-impl Serialize for ChildSpendById {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.entries.iter().map(|(id, first, latest)| {
-            (
-                id.as_str(),
-                PersistedUsage::from(*first),
-                PersistedUsage::from(*latest),
-            )
-        }))
-    }
-}
-
-impl<'de> Deserialize<'de> for ChildSpendById {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let entries = Vec::<(String, PersistedUsage, PersistedUsage)>::deserialize(deserializer)?;
-        let mut map = ChildSpendById::default();
-        for (id, first, latest) in entries {
-            map.fold(&id, Usage::from(first));
-            map.fold(&id, Usage::from(latest));
-        }
-        Ok(map)
-    }
-}
-
-/// The fold's two billable totals: `own` is the session's own spend, `total`
-/// adds its descendants' spend.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// The fold's two billable totals: `own` subtracts every attributed child
+/// block, `total` keeps the child spend (the session-tree spend including settled children).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SessionUsageTotals {
     pub own: Usage,
     pub total: Usage,
@@ -300,15 +220,13 @@ pub struct UsageScan {
     attributed_child_ids: std::collections::HashSet<String>,
     #[serde(with = "usage_bits")]
     billed_row_usage: Usage,
-    child_spend: ChildSpendById,
+    billed_rows: u64,
 }
 
 impl UsageScan {
     /// The assistant usage records and stable attribution IDs kept resident.
     pub(crate) fn retained_entries(&self) -> usize {
-        self.assistant_usage_by_id.len()
-            + self.attributed_child_ids.len()
-            + self.child_spend.entries.len()
+        self.assistant_usage_by_id.len() + self.attributed_child_ids.len()
     }
 
     /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id (only an assistant
@@ -346,32 +264,23 @@ impl UsageScan {
         }
     }
 
-    /// A `child_spend` snapshot: the child's latest total replaces its previous one.
-    pub(crate) fn fold_child_spend(
-        &mut self,
-        child_session_id: Option<&str>,
-        total: Option<Usage>,
-    ) {
-        if let (Some(child_session_id), Some(total)) = (child_session_id, total) {
-            self.child_spend.fold(child_session_id, total);
-        }
-    }
-
-    /// Each direct child's spend billed to this session, by child session id.
-    pub fn child_spend(&self) -> impl Iterator<Item = (&str, Usage)> {
-        self.child_spend.billed()
-    }
-
     /// A [`BilledRow`]'s usage: a model call made outside the agent loop.
     pub(crate) fn fold_billed_row(&mut self, row: Option<BilledRow>) {
         if let Some(row) = row {
             add_assistant_usage(&mut self.billed_row_usage, &row.usage);
+            self.billed_rows += 1;
         }
     }
 
-    /// The totals behind [`summary`](Self::summary): `own` subtracts the legacy attributed
-    /// child spend from the aggregate-replaced assistant rows, `total` keeps it and adds every
-    /// child's `child_spend` growth.
+    /// How many rows carry usage (distinct assistant rows plus billed rows):
+    /// the count the session's usage-ledger shard holds once it is complete.
+    #[must_use]
+    pub fn usage_rows(&self) -> u64 {
+        self.assistant_usage_by_id.len() as u64 + self.billed_rows
+    }
+
+    /// The totals behind [`summary`](Self::summary): `own` subtracts the attributed child spend,
+    /// `total` keeps it (the deletion capture reads both from the child's frozen file).
     #[must_use]
     pub fn totals(&self) -> SessionUsageTotals {
         let mut total = Usage::default();
@@ -381,9 +290,6 @@ impl UsageScan {
         add_assistant_usage(&mut total, &self.billed_row_usage);
         let mut own = total;
         subtract_assistant_usage(&mut own, &self.attributed_child_usage);
-        for (_, billed) in self.child_spend.billed() {
-            add_assistant_usage(&mut total, &billed);
-        }
         SessionUsageTotals { own, total }
     }
 
@@ -416,10 +322,6 @@ struct ScanEntry {
     child_usage: Option<ScanUsage>,
     #[serde(default)]
     aggregate_usage: Option<ScanUsage>,
-    #[serde(default)]
-    child_session_id: Option<String>,
-    #[serde(default)]
-    total: Option<ScanUsage>,
 }
 
 #[derive(Deserialize)]
@@ -432,6 +334,23 @@ struct ScanMessage {
 }
 
 impl ScanEntry {
+    /// The usage this row bills when it is a usage row: an assistant message
+    /// with a usage block, or a [`BilledRow`] (the rows
+    /// [`UsageScan::usage_rows`] counts).
+    fn usage_row(&self, billed: Option<&BilledRow>) -> Option<Usage> {
+        match self.type_.as_str() {
+            "message" => {
+                let message = self.message.as_ref()?;
+                if message.role.as_deref() != Some("assistant") {
+                    return None;
+                }
+                message.usage.map(Usage::from)
+            }
+            "child_usage_attributed" => None,
+            _ => billed.map(|row| row.usage),
+        }
+    }
+
     /// Fold this parsed entry into a scan (the same fold the listing scan
     /// drives); `billed` is the entry's [`BilledRow`], if any.
     fn fold_into(&self, scan: &mut UsageScan, billed: Option<BilledRow>) {
@@ -448,19 +367,15 @@ impl ScanEntry {
                 self.child_usage.map(Usage::from),
                 self.aggregate_usage.map(Usage::from),
             ),
-            "child_spend" => scan.fold_child_spend(
-                self.child_session_id.as_deref(),
-                self.total.map(Usage::from),
-            ),
             _ => scan.fold_billed_row(billed),
         }
     }
 }
 
-/// Whole-file scan over every parsable line; invalid lines contribute nothing.
-fn scan_file(path: &Path) -> Option<UsageScan> {
+/// Every parsable line of a transcript in file order, with the line's
+/// [`BilledRow`]; invalid lines are skipped. `None` when the file cannot be read.
+fn each_scan_entry(path: &Path, mut visit: impl FnMut(ScanEntry, Option<BilledRow>)) -> Option<()> {
     let file = fs::File::open(path).ok()?;
-    let mut scan = UsageScan::default();
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     loop {
@@ -476,23 +391,39 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
             continue;
         };
         let billed = billed_line(&entry.type_, trimmed);
-        entry.fold_into(&mut scan, billed);
+        visit(entry, billed);
     }
+    Some(())
+}
+
+/// Whole-file scan over every parsable line; invalid lines contribute nothing.
+fn scan_file(path: &Path) -> Option<UsageScan> {
+    let mut scan = UsageScan::default();
+    each_scan_entry(path, |entry, billed| entry.fold_into(&mut scan, billed))?;
     Some(scan)
 }
 
-/// Whole-file own usage (the saved-row summary) for the one-off readers
-/// outside the resumable scan: the saved-delete capture
-/// (`saved_session_commands`), which reads the file once while it is
-/// still alive. The listing surfaces, the worker's live row, and the
-/// spawn ledger's tombstone fallback (`rlm_ledger`) all read the
-/// resumable `session_store::read_session_info` instead.
+/// Every usage row of a transcript as `(entry id, usage)`, in file order:
+/// the rows the usage ledger records for the session.
+#[must_use]
+pub fn read_usage_rows(path: &Path) -> Option<Vec<(String, Usage)>> {
+    let mut rows = Vec::new();
+    each_scan_entry(path, |entry, billed| {
+        if let Some(usage) = entry.usage_row(billed.as_ref()) {
+            rows.push((entry.id, usage));
+        }
+    })?;
+    Some(rows)
+}
+
+/// Whole-file own usage from one full scan (the listing surfaces read the
+/// resumable `session_store::read_session_info` instead).
 #[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
 }
 
-/// Whole-file own + total usage.
+/// Whole-file own + total usage from one full scan.
 #[must_use]
 pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
     scan_file(path).map(|scan| scan.totals())
@@ -501,9 +432,9 @@ pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
 /// The same fold over a store's in-memory entries (the pathless worker has
 /// no file to scan, but its live entries carry the rows a flush would write).
 /// An entry that does not parse contributes nothing.
-pub(crate) fn usage_totals_of(
+pub(crate) fn own_usage_summary_of(
     entries: &[crate::session_store::SessionEntry],
-) -> SessionUsageTotals {
+) -> Option<SessionUsageSummary> {
     let mut scan = UsageScan::default();
     for entry in entries {
         // `type`/`id` live on the envelope (`#[serde(flatten)] fields` keeps only
@@ -515,7 +446,21 @@ pub(crate) fn usage_totals_of(
         parsed.id.clone_from(&entry.id);
         parsed.fold_into(&mut scan, billed_store_row(entry));
     }
-    scan.totals()
+    scan.summary()
+}
+
+/// The usage one in-memory store row bills (the selection
+/// [`read_usage_rows`] makes), with the row's [`BilledRow`].
+pub(crate) fn store_usage_row(
+    entry: &crate::session_store::SessionEntry,
+) -> Option<(Usage, Option<BilledRow>)> {
+    // `type` lives on the envelope (`#[serde(flatten)] fields` keeps only
+    // the rest); the usage-bearing fields deserialize borrowed.
+    let mut parsed = ScanEntry::deserialize(&entry.fields).ok()?;
+    parsed.type_.clone_from(&entry.type_);
+    let billed = billed_store_row(entry);
+    let usage = parsed.usage_row(billed.as_ref())?;
+    Some((usage, billed))
 }
 
 #[cfg(test)]
@@ -843,26 +788,6 @@ mod tests {
                 cost: 0.0
             })
         );
-    }
-
-    /// A smaller later snapshot never lowers a child's billed spend: the
-    /// fold keeps each field's maximum.
-    #[test]
-    fn a_smaller_later_child_spend_snapshot_never_lowers_the_total() {
-        let snapshot = |cost: f64| {
-            json!({
-                "type": "child_spend", "id": format!("s{cost}"),
-                "childSessionId": "child", "childSessionFile": "/c/child.jsonl",
-                "total": serde_json::to_value(usage(10, 1, cost)).unwrap(),
-            })
-        };
-        let mut scan = UsageScan::default();
-        for row in [snapshot(0.0), snapshot(0.5), snapshot(0.25)] {
-            serde_json::from_value::<ScanEntry>(row)
-                .unwrap()
-                .fold_into(&mut scan, None);
-        }
-        assert!((scan.totals().total.cost.total.as_f64() - 0.5).abs() < 1e-12);
     }
 
     #[test]

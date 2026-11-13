@@ -98,7 +98,6 @@ impl Supervisor {
         // apply order.
         let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
-        let spend_changed;
         {
             let mut descriptor = resident.descriptor.lock().await;
             {
@@ -110,10 +109,6 @@ impl Supervisor {
                 ) {
                     return response_success(Some(command_id), type_name, None);
                 }
-                let previous_total = roster
-                    .get(&pa_types::daemon::agent_roster::roster_agent_id_for_summary(&summary))
-                    .and_then(|entry| entry.summary.get("totalUsage").cloned());
-                spend_changed = previous_total.as_ref() != summary.get("totalUsage");
                 let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
                 // The worker's root slot can swap to a new durable
                 // session: the superseded row must not present as live.
@@ -139,63 +134,80 @@ impl Supervisor {
             }
         }
         self.push_roster_update(changed, removed_ids);
-        // A subagent's spend changed: its parent's worker records the new
-        // snapshot (detached - the delta's answer never waits on the parent).
-        if spend_changed && summary.get("rlmChildId").is_some() {
-            if let (Some(parent), Some(child)) = (
-                summary.get("parentSessionPath").and_then(Value::as_str),
-                summary.get("sessionFile").and_then(Value::as_str),
-            ) {
-                let supervisor = Arc::clone(self);
-                let (parent, child) = (parent.to_string(), child.to_string());
-                drop(tokio::spawn(async move {
-                    supervisor.notify_child_spend_changed(&parent, &child).await;
-                }));
-            }
-        }
         response_success(Some(command_id), type_name, None)
     }
 
-    /// Tell a resident parent's worker that one direct child's spend changed:
-    /// the worker records a fresh `child_spend` snapshot of that child. A
-    /// passive parent catches up when its worker starts (its reseed snapshots
-    /// every ledger child).
-    pub(crate) async fn notify_child_spend_changed(
+    /// `worker_usage`: one usage row a worker persisted. The report is
+    /// authenticated like a roster delta; the ledger dedupes it by entry id,
+    /// then every roster row whose total moved (the session's and each
+    /// ancestor's, a passive parent's included) is re-stamped and pushed.
+    pub(crate) async fn handle_worker_usage(
         self: &Arc<Self>,
-        parent_session_path: &str,
-        child_session_file: &str,
-    ) {
-        let Some(parent) = self
-            .registry
-            .find_by_session_file(parent_session_path)
-            .await
-        else {
-            return;
-        };
-        let command = pa_types::daemon::DaemonWorkerCommand::ChildSpendChanged {
-            id: None,
-            child_session_file: child_session_file.to_string(),
-            rest: Map::default(),
-        };
-        let payload = match serde_json::to_value(&command) {
-            Ok(payload) => payload,
-            Err(error) => {
-                self.log_line(&format!("child spend notice not serialized: {error}"));
-                return;
-            }
-        };
-        if let Err(error) = self
-            .route_command_typed(
-                &parent,
-                "child_spend_changed",
-                payload,
-                ROUTE_TIMEOUT_MS,
-                RouteAdmission::SupervisorInternal,
-            )
-            .await
-        {
-            self.log_line(&format!("child spend notice not delivered: {error:#}"));
+        command_id: &str,
+        type_name: &str,
+        worker_token: &str,
+        session_id: &str,
+        entry_id: &str,
+        usage: pa_types::ai::Usage,
+    ) -> DaemonResponse {
+        if self.registry.find_by_token(worker_token).await.is_none() {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Worker authentication failed",
+                None,
+            );
         }
+        // The id names a shard file: a durable session id is one plain file stem.
+        if session_id.is_empty() || session_id.starts_with('.') || session_id.contains(['/', '\\'])
+        {
+            return response_failure(Some(command_id), type_name, "Invalid session id", None);
+        }
+        let ledger = Arc::clone(&self.usage_ledger);
+        let (session_id, entry_id) = (session_id.to_string(), entry_id.to_string());
+        let recorded =
+            tokio::task::spawn_blocking(move || ledger.record(&session_id, &entry_id, usage)).await;
+        match recorded {
+            Ok(Ok(moved)) => {
+                self.push_spend(&moved);
+                response_success(Some(command_id), type_name, None)
+            }
+            Ok(Err(error)) => {
+                response_failure(Some(command_id), type_name, &format!("{error:#}"), None)
+            }
+            Err(error) => response_failure(Some(command_id), type_name, &error.to_string(), None),
+        }
+    }
+
+    /// Bring the shards of a session and every descendant the spawn ledger
+    /// recorded up to their transcripts (off the async runtime): a
+    /// registration (lost reports), a stop (a crash between an append and
+    /// its report), and a sweep or delete about to unlink transcripts.
+    /// Returns the sessions whose totals moved; the caller pushes their rows,
+    /// together with any row change of its own.
+    pub(crate) async fn reconcile_usage(self: &Arc<Self>, session_file: &Path) -> Vec<String> {
+        let ledger = Arc::clone(&self.usage_ledger);
+        let file = session_file.to_path_buf();
+        match tokio::task::spawn_blocking(move || ledger.reconcile_family(&file)).await {
+            Ok(Ok(moved)) => moved,
+            Ok(Err(error)) => {
+                self.log_line(&format!("usage ledger reconcile failed: {error:#}"));
+                Vec::new()
+            }
+            Err(error) => {
+                self.log_line(&format!("usage ledger reconcile failed: {error}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Re-stamp and push the roster rows of the sessions whose totals moved.
+    pub(crate) fn push_spend(&self, moved: &[String]) {
+        if moved.is_empty() {
+            return;
+        }
+        let changed = self.roster.lock().unwrap().restamp_spend(moved);
+        self.push_roster_update(changed, Vec::new());
     }
 
     /// Test-support arm: production paths write through the sequence-gated
@@ -328,6 +340,17 @@ impl Supervisor {
             roster.forget_worker_sequences(worker_id);
             (owned, unowned_at_start)
         };
+        // The worker is gone: rows it persisted but never reported reconcile
+        // before its rows settle.
+        let owned_files: HashSet<PathBuf> = owned
+            .iter()
+            .filter_map(|entry| entry.summary.get("sessionFile").and_then(Value::as_str))
+            .map(PathBuf::from)
+            .collect();
+        let mut moved = Vec::new();
+        for file in owned_files {
+            moved.extend(self.reconcile_usage(&file).await);
+        }
         // The stopping worker's family view — live edges and surviving
         // resident roots — decides each subagent row's fate; a ledger
         // failure degrades to an empty view.
@@ -358,6 +381,7 @@ impl Supervisor {
             .await
             .is_some_and(|resident| !resident.route_state().retired());
         if replacement_live {
+            self.push_spend(&moved);
             return;
         }
         let mut changed = Vec::new();
@@ -438,6 +462,13 @@ impl Supervisor {
                         roster.delete(&entry.agent_id);
                         removed.push(entry.agent_id.clone());
                     }
+                }
+            }
+            // The rows whose totals the stop's reconcile moved ride the
+            // same push.
+            for entry in roster.restamp_spend(&moved) {
+                if !changed.iter().any(|row| row.agent_id == entry.agent_id) {
+                    changed.push(entry);
                 }
             }
         }

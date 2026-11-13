@@ -73,19 +73,6 @@ impl Supervisor {
         }
     }
 
-    /// Emit the deleted-child usage capture's `daemon event` (kind
-    /// `deleted_child_usage_captured`): source + count, primitives only.
-    pub(crate) fn note_deleted_child_usage_captured(&self, source: &str, count: usize) {
-        if !self.telemetry_recording_on() {
-            return;
-        }
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_deleted_child_usage_captured(
-                client, source, count,
-            );
-        }
-    }
-
     /// Count a frequent supervision event (attach/detach, worker exits and
     /// restarts, overloads, refusals) into the window's `daemon event`
     /// summary (best-effort; no-op when the daemon is opted out).

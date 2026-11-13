@@ -256,9 +256,14 @@ impl SessionFile {
             }
             self.fold_attribution_id(&id);
         }
-        if let (Some(sink), Some(entry)) = (&self.billed_row_sink.0, self.entry(&id)) {
-            if let Some(row) = crate::session_usage::billed_store_row(entry) {
-                sink(&row);
+        if let (Some(sink), Some(entry)) = (&self.usage_row_sink.0, self.entry(&id)) {
+            if let Some((usage, billed)) = crate::session_usage::store_usage_row(entry) {
+                sink(&super::UsageRow {
+                    session_file: &self.path,
+                    id: &id,
+                    usage,
+                    billed,
+                });
             }
         }
         Ok(id)

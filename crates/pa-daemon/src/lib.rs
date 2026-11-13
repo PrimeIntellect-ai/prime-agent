@@ -119,6 +119,8 @@ pub(crate) mod update_prepare;
 pub(crate) mod update_restore;
 pub(crate) mod update_roster;
 pub(crate) mod update_stop;
+pub(crate) mod usage_ledger;
+pub(crate) mod usage_report;
 pub(crate) mod user_bash;
 pub mod util;
 pub mod worker;

@@ -223,6 +223,19 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Worker -> supervisor: one persisted transcript row that carried usage,
+    /// for the supervisor's usage ledger. `entry_id` keys the record, so a
+    /// repeated report never counts twice.
+    WorkerUsage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        worker_token: String,
+        session_id: String,
+        entry_id: String,
+        usage: crate::ai::Usage,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     RosterUnsubscribe {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

@@ -80,10 +80,6 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     usage_field("aggregateUsage"),
                 );
             }
-            "child_spend" => usage_scan.fold_child_spend(
-                entry.fields.get("childSessionId").and_then(Value::as_str),
-                entry.fields.get("total").and_then(scan_usage),
-            ),
             "message" => {
                 message_count += 1;
                 if let Some(message) = entry.fields.get("message") {
@@ -153,11 +149,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
             first_message
         },
         usage: usage_scan.summary(),
-        totals: usage_scan.totals(),
-        child_spend: usage_scan
-            .child_spend()
-            .map(|(id, usage)| (id.to_string(), usage))
-            .collect(),
+        usage_rows: usage_scan.usage_rows(),
     })
 }
 

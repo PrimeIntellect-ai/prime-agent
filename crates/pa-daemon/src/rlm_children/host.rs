@@ -8,11 +8,11 @@ use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_cwd, resolve_child_model, rlm_child_label, rlm_depth_limit_error,
     spawn_name_unavailable_error, Arc, ChildCloseReason, ChildObservationSource, ChildRecord,
-    ChildSpendSource, Context, DaemonCommand, Duration, Instant, Mutex, Path, Result,
-    RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult,
-    RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost,
-    SpawnNameReservationGuard, SupervisorChildSessions, SupervisorChildSessionsInner, Value,
-    KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
+    Context, DaemonCommand, Duration, Instant, Mutex, Path, Result, RlmChildResult,
+    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
+    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -198,15 +198,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 this.children.lock().await.push(Arc::clone(&record));
                 this.refresh_running().await;
                 this.emit_child_update(&record).await;
-                // The child's first snapshot is its zero row: everything it
-                // spends from here on bills to this parent.
-                if let Some(source) = created
-                    .session_file
-                    .as_deref()
-                    .and_then(|file| ChildSpendSource::of_file(file, None))
-                {
-                    this.record_child_spawn(source);
-                }
                 anyhow::Ok((record, created, model))
             }
             .await;
@@ -571,8 +562,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         was_running,
                     }));
             }
-            // The child's final snapshot: its spend stays on this parent.
-            this.snapshot_child_spend(&record).await;
             this.finish_retirement(&record).await;
             let entry = {
                 let record = record.lock().await;

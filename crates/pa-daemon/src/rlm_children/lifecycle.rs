@@ -559,9 +559,6 @@ impl SupervisorChildSessionsInner {
                 if busy {
                     continue;
                 }
-                // The run's spend is on the parent before the terminal
-                // notice rides the parent's follow-up route.
-                self.snapshot_child_spend(record).await;
                 // TS records the return before delivering the notice: the
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
@@ -611,9 +608,6 @@ impl SupervisorChildSessionsInner {
             } else {
                 unreachable_polls += 1;
                 if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                    // A dead child keeps whatever its file already holds;
-                    // snapshot it before the terminal notice.
-                    self.snapshot_child_spend(record).await;
                     if self
                         .settle_failed(record, "Child worker unreachable".to_string())
                         .await
@@ -1005,7 +999,6 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
             | FileEntry::BranchSummary { .. }
             | FileEntry::Custom { .. }
             | FileEntry::ChildUsageAttributed { .. }
-            | FileEntry::ChildSpend { .. }
             | FileEntry::Label { .. }
             | FileEntry::SessionInfo { .. }
             | FileEntry::SessionState { .. }

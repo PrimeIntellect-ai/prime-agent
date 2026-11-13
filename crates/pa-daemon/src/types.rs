@@ -117,12 +117,8 @@ pub struct SessionSummary {
     /// roster agent id qualifies it with the parent path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_child_id: Option<String>,
-    /// The session's own spend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
-    /// Own plus every descendant's spend (the `child_spend` fold).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_usage: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

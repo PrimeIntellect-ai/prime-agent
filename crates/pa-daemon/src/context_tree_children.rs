@@ -2,8 +2,8 @@
 //! worker spawned; every other child is read from its persisted session dir. Deliberate TS
 //! divergences: grandchildren live under the sibling tree (TS nests them inside `sub-<id>/`);
 //! a deleted subagent's transcript stays hidden via durable ledger tombstones at every level
-//! (TS: memory only) and its spend rides a `deleted` row from the parent's `child_spend` rows,
-//! the same fold every spend surface reads; every child carries its ledger edge's factory run tag.
+//! (TS: memory only) and its spend rides a `deleted` row from the usage ledger's fold, the same
+//! fold every spend surface reads; every child carries its ledger edge's factory run tag.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,21 +21,25 @@ const ELLIPSIS: &str = "...";
 
 /// The RLM ledger facts the walk reads, keyed by the parent session file
 /// (canonicalized): the tombstoned child ids whose transcripts stay hidden
-/// and the deleted children's edges (their spend reads from the parent's
-/// `child_spend` rows); plus each child's factory run tag, keyed by the
+/// and the deleted children's edges with their total spend (the usage
+/// ledger's fold, read-only); plus each child's factory run tag, keyed by the
 /// child's own session file (child ids are only unique under one parent).
 #[derive(Debug, Default)]
 pub struct ContextLedger {
     tombstoned: HashMap<PathBuf, HashSet<String>>,
     tombstoned_files: HashSet<PathBuf>,
-    deleted: HashMap<PathBuf, Vec<crate::rlm_ledger::RlmLedgerEdge>>,
+    deleted: HashMap<PathBuf, Vec<(crate::rlm_ledger::RlmLedgerEdge, pa_types::ai::Usage)>>,
     factory: HashMap<PathBuf, crate::rlm_ledger::RlmFactoryTag>,
 }
 
 impl ContextLedger {
-    /// Read the facts from one ledger. An unreadable ledger degrades to no
-    /// filtering and no deleted rows.
-    pub fn read(ledger: &crate::rlm_ledger::RlmSpawnLedger) -> Self {
+    /// Read the facts from one spawn ledger and the usage ledger beside it.
+    /// An unreadable spawn ledger degrades to no filtering and no deleted rows.
+    pub(crate) fn read(
+        ledger: &std::sync::Arc<crate::rlm_ledger::RlmSpawnLedger>,
+        agent_dir: &Path,
+    ) -> Self {
+        let usage = crate::usage_ledger::UsageLedger::new(agent_dir, std::sync::Arc::clone(ledger));
         let mut facts = Self::default();
         let edges = ledger.edges(true).unwrap_or_default();
         // A reused path with a live edge is live; an older tombstone must not
@@ -55,11 +59,12 @@ impl ContextLedger {
             if edge.deleted.is_some() {
                 let parent = crate::lease::canonical_session_path(Path::new(&edge.parent));
                 if !live_files.contains(&child) && facts.tombstoned_files.insert(child) {
+                    let total = usage.spend(Path::new(&edge.child)).total;
                     facts
                         .deleted
                         .entry(parent.clone())
                         .or_default()
-                        .push(edge.clone());
+                        .push((edge.clone(), total));
                 }
                 facts
                     .tombstoned
@@ -97,31 +102,24 @@ impl ContextLedger {
     }
 
     /// One `deleted` row per deleted child of one parent session file
-    /// that billed spend to it: the parent's `child_spend` rows hold the
-    /// child's whole spend (its descendants' included).
+    /// that billed spend: the child's whole spend, its descendants' included.
     pub fn deleted_nodes(&self, parent_file: &Path) -> Vec<Value> {
-        let Some(edges) = self
+        let Some(children) = self
             .deleted
             .get(&crate::lease::canonical_session_path(parent_file))
         else {
             return Vec::new();
         };
-        // The resumable scan (sidecar-backed): no whole-file read per build.
-        let spend: HashMap<String, pa_types::ai::Usage> =
-            crate::session_store::read_session_info(parent_file)
-                .map(|info| info.child_spend.into_iter().collect())
-                .unwrap_or_default();
-        edges
+        children
             .iter()
-            .filter_map(|edge| {
-                let child = Path::new(&edge.child);
-                let usage = spend.get(&crate::rlm_children::child_session_id(child)?)?;
-                crate::session_usage::session_usage_summary_from(usage)?;
-                let usage = serde_json::to_value(usage).ok()?;
+            .filter_map(|(edge, total)| {
+                crate::session_usage::session_usage_summary_from(total)?;
+                let usage = serde_json::to_value(total).ok()?;
+                let child = crate::lease::canonical_session_path(Path::new(&edge.child));
                 // Its own id namespace: a live child reusing the id must
                 // never collide with (or invalidate) the deleted spend.
                 let mut node = json!({
-                    "id": format!("deleted:{}", crate::lease::canonical_session_path(child).to_string_lossy()),
+                    "id": format!("deleted:{}", child.to_string_lossy()),
                     "label": edge.name,
                     "status": "deleted",
                     "deleted": true,
@@ -178,10 +176,8 @@ pub(crate) fn load_context_tree_child_with_path(
     // usage totals: a ghost-parent gap must not strip a child of its identity.
     let branch = store.branch_bridged();
     let all_entries = store.entries();
-    let (own_usage, _) = crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
-    // The total is the whole-file fold every spend surface reads.
-    let total_usage =
-        serde_json::to_value(crate::session_usage::usage_totals_of(all_entries).total).ok()?;
+    let (own_usage, total_usage) =
+        crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
     // The per-model own-usage breakdown rides the child node too (a child
     // that itself switched models shows which model billed its spend).
     let own_usage_by_model = crate::state_getters::compute_own_usage_by_model(

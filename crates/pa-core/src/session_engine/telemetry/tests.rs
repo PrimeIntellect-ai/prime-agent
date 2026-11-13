@@ -516,7 +516,6 @@ async fn session_counters_ride_session_ended() {
     telemetry.counters = Arc::clone(&counters);
     telemetry.note_skill_used();
     telemetry.note_skill_used();
-    telemetry.note_child_usage_attributed(50_208, 2_929, 0, 0, 0.008_995_7);
     counters.note_mcp_connector_use();
     counters.note_kernel_bootstrap(true, true, 1_200);
     counters.note_kernel_bootstrap(false, false, 300);
@@ -526,10 +525,6 @@ async fn session_counters_ride_session_ended() {
     assert_eq!(fixture.mock.event_names(), ["agent session ended"]);
     let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
     assert_eq!(ended["skill_use_count"], serde_json::json!(2));
-    assert_eq!(ended["rlm_child_usage_count"], serde_json::json!(1));
-    assert_eq!(ended["rlm_child_input_tokens"], serde_json::json!(50_208));
-    assert_eq!(ended["rlm_child_output_tokens"], serde_json::json!(2_929));
-    assert!((ended["rlm_child_cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
     assert_eq!(ended["mcp_connector_use_count"], serde_json::json!(1));
     assert_eq!(ended["kernel_bootstrap_count"], serde_json::json!(2));
     assert_eq!(ended["kernel_bootstrap_cold_count"], serde_json::json!(1));
@@ -1209,15 +1204,14 @@ async fn off_period_session_counters_never_count() {
     );
     telemetry.counters = Arc::clone(&counters);
 
-    // Off: a skill use, a connector use, a kernel boot, a feature
-    // outcome, and a child usage row all record nothing — the counters'
+    // Off: a skill use, a connector use, a kernel boot, and a feature
+    // outcome all record nothing — the counters'
     // switch is the same live gate the engine installs at creation, so
     // the pre-install MCP/kernel window records nothing either.
     telemetry.note_skill_used();
     counters.note_mcp_connector_use();
     counters.note_kernel_bootstrap(true, true, 1_200);
     telemetry.note_feature_outcome("goal", "completed", Some("create"));
-    telemetry.note_child_usage_attributed(50_208, 2_929, 0, 0, 0.008_995_7);
 
     // On: the same seams record again.
     on.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1233,19 +1227,9 @@ async fn off_period_session_counters_never_count() {
         "the off-period connector use never counted"
     );
     assert_eq!(
-        ended["rlm_child_usage_count"],
-        serde_json::json!(0),
-        "the off-period child usage never counted"
-    );
-    assert_eq!(
         ended["kernel_bootstrap_count"],
         serde_json::json!(0),
         "the off-period kernel boot never counted"
-    );
-    assert_eq!(
-        ended["rlm_child_input_tokens"],
-        serde_json::json!(0),
-        "the off-period child tokens never counted"
     );
     let feature_keys: Vec<_> = ended
         .keys()

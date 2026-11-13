@@ -359,8 +359,6 @@ async fn hydrate_summary_display(summary: &mut Value, file: PathBuf) -> bool {
         if let Some(level) = &info.thinking_level {
             object.insert("thinkingLevel".to_string(), json!(level));
         }
-        // The spend rides the seeded row: a passive child's own and total.
-        info.insert_spend(object);
     }
     true
 }
@@ -403,7 +401,7 @@ pub(crate) mod tests {
             depth,
             name: name.to_string(),
             deleted: None,
-            deleted_total: None,
+            deleted_usage: None,
             factory: None,
         }
     }
@@ -883,7 +881,7 @@ pub(crate) mod tests {
                     depth: 1,
                     name: "w9".to_string(),
                     deleted: None,
-                    deleted_total: None,
+                    deleted_usage: None,
                     factory: None,
                 },
             );

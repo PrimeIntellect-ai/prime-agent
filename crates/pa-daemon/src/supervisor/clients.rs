@@ -723,6 +723,25 @@ impl Supervisor {
                     .await;
                 (vec![response_line(&response)], false)
             }
+            DaemonCommand::WorkerUsage {
+                worker_token,
+                session_id,
+                entry_id,
+                usage,
+                ..
+            } => {
+                let response = self
+                    .handle_worker_usage(
+                        &command_id,
+                        &type_name,
+                        worker_token,
+                        session_id,
+                        entry_id,
+                        *usage,
+                    )
+                    .await;
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::Create { .. } => {
                 let client_id = effective_client_id.lock().unwrap().clone();
                 match self.handle_create(command, client_id).await {
