@@ -1082,7 +1082,7 @@ mod retirement;
 mod run_state;
 mod spend;
 
-pub use spend::{ChildSpendSource, ChildSpendStore, ChildSpendWriter};
+pub use spend::{child_session_id, ChildSpendSource, ChildSpendStore, ChildSpendWriter};
 
 #[cfg(test)]
 mod watch_tests;

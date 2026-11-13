@@ -611,7 +611,7 @@ mod tests {
     fn bill_child(parent: &Path, child: &Path) {
         let mut store = crate::session_store::SessionFile::open(parent).unwrap();
         let snapshot = |total| pa_types::session::ChildSpendEntry {
-            child_session_id: child.file_stem().unwrap().to_string_lossy().into_owned(),
+            child_session_id: crate::rlm_children::child_session_id(child).unwrap(),
             child_session_file: child.to_string_lossy().into_owned(),
             total,
         };

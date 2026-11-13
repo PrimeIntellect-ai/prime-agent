@@ -7,12 +7,11 @@ use pa_types::{ai::Usage, session::ChildSpendEntry};
 impl SessionFile {
     /// Append `entry` unless the child's latest retained snapshot already
     /// covers it: a child's total only grows, so a snapshot that is not
-    /// larger in some field is a restatement or a stale read racing a newer
-    /// one (compared in the transcript's JSON decoding). Returns the spend
-    /// the new row adds over the previous snapshot; `None` when nothing was
-    /// appended or the row is the child's first. A windowed store that does
-    /// not retain the child's latest row appends a restating row, which the
-    /// fold reads as no change.
+    /// larger in some field adds no row (compared in the transcript's JSON
+    /// decoding). The skip only avoids redundant rows: the fold keeps each
+    /// field's maximum, so no row can lower a child's total. Returns the
+    /// spend the new row adds over the previous snapshot; `None` when
+    /// nothing was appended or the row is the child's first.
     ///
     /// # Errors
     ///

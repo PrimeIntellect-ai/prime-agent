@@ -106,15 +106,16 @@ impl ContextLedger {
         else {
             return Vec::new();
         };
+        // The resumable scan (sidecar-backed): no whole-file read per build.
         let spend: HashMap<String, pa_types::ai::Usage> =
-            crate::session_usage::read_child_spend(parent_file)
-                .into_iter()
-                .collect();
+            crate::session_store::read_session_info(parent_file)
+                .map(|info| info.child_spend.into_iter().collect())
+                .unwrap_or_default();
         edges
             .iter()
             .filter_map(|edge| {
                 let child = Path::new(&edge.child);
-                let usage = spend.get(child.file_stem()?.to_string_lossy().as_ref())?;
+                let usage = spend.get(&crate::rlm_children::child_session_id(child)?)?;
                 crate::session_usage::session_usage_summary_from(usage)?;
                 let usage = serde_json::to_value(usage).ok()?;
                 // Its own id namespace: a live child reusing the id must

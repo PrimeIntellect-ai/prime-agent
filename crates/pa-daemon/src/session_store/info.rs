@@ -9,7 +9,7 @@ use super::{
 };
 
 /// The durable metadata the daemon list surfaces for one session file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionInfo {
     pub path: PathBuf,
     pub id: String,
@@ -30,6 +30,8 @@ pub struct SessionInfo {
     pub usage: Option<crate::session_usage::SessionUsageSummary>,
     /// The whole-file own and total spend (total = own + every descendant's).
     pub totals: crate::session_usage::SessionUsageTotals,
+    /// Each direct child's spend billed to this session, by child session id.
+    pub child_spend: Vec<(String, Usage)>,
 }
 
 impl SessionInfo {
@@ -545,6 +547,11 @@ impl SessionScanState {
         };
         let usage = acc.usage_scan.summary();
         let totals = acc.usage_scan.totals();
+        let child_spend = acc
+            .usage_scan
+            .child_spend()
+            .map(|(id, usage)| (id.to_string(), usage))
+            .collect();
         let header = acc.header.as_ref()?;
         // The newest user/assistant message timestamp, then the header's
         // creation timestamp, then the file's mtime — never scan time; only
@@ -577,6 +584,7 @@ impl SessionScanState {
             },
             usage,
             totals,
+            child_spend,
         })
     }
 }

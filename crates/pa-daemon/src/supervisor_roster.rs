@@ -172,15 +172,8 @@ impl Supervisor {
         else {
             return;
         };
-        let Some(child_session_id) = Path::new(child_session_file)
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-        else {
-            return;
-        };
         let command = pa_types::daemon::DaemonWorkerCommand::ChildSpendChanged {
             id: None,
-            child_session_id,
             child_session_file: child_session_file.to_string(),
             rest: Map::default(),
         };
