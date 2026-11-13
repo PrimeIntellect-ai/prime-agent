@@ -19,10 +19,11 @@ from lifecycle_lib import DockScreen
 from lifecycle_lib import Supervisor, Terminal, actual_hello, digest, env_for
 
 
-def parent():
+def parent(total=0):
     return {'agentId': 's1', 'status': 'idle', 'summary': {
         'sessionId': 'fixture-durable', 'activeSessionId': 's1', 'sessionFile': '/fixture/root.jsonl',
-        'lifecycle': 'live', 'runtimeKind': 'top-level', 'usage': {'cost': 0}}}
+        'lifecycle': 'live', 'runtimeKind': 'top-level', 'usage': {'cost': 0},
+        'totalUsage': {'cost': total}}}
 
 
 def child(ident, status, cost):
@@ -43,7 +44,10 @@ def usage(cost):
 class DockSupervisor(Supervisor):
     def __init__(self, path, hello, root):
         assert 'agent_roster' in hello.get('serverCapabilities', []), 'actual binary does not advertise roster protocol'
-        self.roster = [parent(), child('c1', 'running', 0.42)]
+        # The real supervisor's usage ledger: each session's recorded spend,
+        # never reduced by a row update or removal.
+        self.spent = {}
+        self.roster = [self.record([child('c1', 'running', 0.42)]), child('c1', 'running', 0.42)]
         self.write_lock = threading.Lock()
         self.emitted = []
         self.context_responses = []
@@ -70,8 +74,8 @@ class DockSupervisor(Supervisor):
                 'totalUsage': usage(row['summary']['usage']['cost']), 'children': []}
                 for row in self.roster if row['agentId'] != 's1']
             data = dict(data, data={'id': 'root', 'label': 'Dock fixture', 'status': 'active',
-                'ownUsage': usage(0), 'totalUsage': usage(sum(
-                    node['totalUsage']['cost']['total'] for node in children)), 'children': children})
+                'ownUsage': usage(0), 'totalUsage': usage(round(sum(self.spent.values()), 2)),
+                'children': children})
             self.context_responses.append(data)
         with self.write_lock:
             super().send(sock, data)
@@ -85,7 +89,19 @@ class DockSupervisor(Supervisor):
             except (BrokenPipeError, OSError):
                 pass  # A closed startup discovery connection is not a subscriber.
 
+    def record(self, changed):
+        """Record the changed rows' spend and return the root row stamped the
+        way the real supervisor stamps it: its own plus every descendant's
+        recorded spend, so a removed child never lowers the total."""
+        for row in changed:
+            if row['agentId'] != 's1':
+                cost = row['summary']['usage']['cost']
+                self.spent[row['agentId']] = max(self.spent.get(row['agentId'], 0), cost)
+        return parent(round(sum(self.spent.values()), 2))
+
     def roster_delta(self, changed, removed=(), resync=False):
+        # The supervisor pushes the root row with every total it moves.
+        changed = [row for row in changed if row['agentId'] != 's1'] + [self.record(changed)]
         if resync:
             self.roster = []
         rows = {row['agentId']: row for row in self.roster}
@@ -177,22 +193,24 @@ def run_case(binary, root, observed):
         terminal.send('\x15')  # Clear draft without submitting a prompt.
         terminal.wait('draft cleared', lambda: 'DOCK_EDITOR_FOCUS_PROBE' not in terminal.screen.text(), server)
         server.roster_delta([child('c1', 'idle', 0.42)], removed=['c2'])
-        snap('child_settled', lambda text: running_visible(text, 0) and '$0.42' in text)
+        snap('child_settled', lambda text: running_visible(text, 0) and cost_ready(text, '0.91'))
         server.roster_delta([], removed=['c1'])
-        snap('child_removed', lambda text: cost_ready(text, '0.00')
+        snap('child_removed', lambda text: cost_ready(text, '0.91')
              and running_visible(text, 0))
-        server.roster_delta([parent(), child('c3', 'running', 0.73)], resync=True)
+        server.roster_delta([child('c3', 'running', 0.73)], resync=True)
         snap('roster_restored', lambda text: running_visible(text, 1)
-             and cost_ready(text, '0.73'))
+             and cost_ready(text, '1.64'))
         server.goal('paused')
         snap('goal_paused', lambda text: 'Goal paused (12s)' in text)
         assert not server.prompts, 'focus interactions accidentally submitted a prompt'
         assert not terminal.screen.unsupported_sgr, 'unsupported SGR makes attribute evidence incomplete'
         assert not terminal.screen.unsupported_terminal, 'unsupported terminal geometry makes frame evidence incomplete'
         observed['title_costs'] = {phase: visible_cost(frame['text']) for phase, frame in observed['frames'].items()}
+        # The title reads the root row's totalUsage: a settled or removed
+        # child never lowers it.
         expected_costs = {'snapshot': '0.42', 'roster_added': '0.91', 'goal_active': '0.91',
-            'dock_focused': '0.91', 'editor_restored': '0.91', 'child_settled': '0.42',
-            'child_removed': '0.00', 'roster_restored': '0.73', 'goal_paused': '0.73'}
+            'dock_focused': '0.91', 'editor_restored': '0.91', 'child_settled': '0.91',
+            'child_removed': '0.91', 'roster_restored': '1.64', 'goal_paused': '1.64'}
         assert observed['title_costs'] == expected_costs, 'actual title cost reaction differs'
         observed['behavior_verified'] = True
     finally:

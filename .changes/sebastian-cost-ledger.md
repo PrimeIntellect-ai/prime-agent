@@ -1,0 +1,1 @@
+- Session cost totals now come from one supervisor-owned usage ledger, so the title, the agents view, and /context show the same total, and it never goes down when subagents are deleted, archived, or restarted.

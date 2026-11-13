@@ -341,7 +341,12 @@ fn walk_children(
     // recursion level its own.
     let sessions_dir = agent_dir.join("sessions");
     let ledger = crate::context_tree_children::ContextLedger::read(
-        &crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {}),
+        &Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+            agent_dir,
+            &sessions_dir,
+            |_| {},
+        )),
+        agent_dir,
     );
     let mut skip_ids: HashSet<String> = snapshots
         .iter()
@@ -606,6 +611,19 @@ mod tests {
         );
     }
 
+    /// The supervisor's usage ledger records one session's transcript (the
+    /// `/context` walk only reads the ledger).
+    fn record_spend(agent_dir: &Path, session: &Path) -> crate::usage_ledger::UsageLedger {
+        let spawns = Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+            agent_dir,
+            &agent_dir.join("sessions"),
+            |_| {},
+        ));
+        let usage = crate::usage_ledger::UsageLedger::new(agent_dir, spawns);
+        usage.reconcile(session).unwrap();
+        usage
+    }
+
     /// One session transcript: a user row and an assistant row billing `cost`.
     fn write_session(path: &Path, session_id: &str, cost: f64) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -641,9 +659,8 @@ mod tests {
 
     /// A deleted factory child keeps billing: /context serves it as a
     /// `deleted` row tagged with its run (from the tombstoned ledger edge)
-    /// and split by model (the delete's capture), and the /context grand
-    /// total equals the agents-view session total (own row + live child
-    /// rows + the ledger's deleted-descendant bucket).
+    /// with the spend the usage ledger recorded, and the /context grand
+    /// total equals the root's ledger total.
     // Exact binary fractions: the two totals must be the same number.
     #[allow(clippy::float_cmp)]
     #[test]
@@ -692,17 +709,15 @@ mod tests {
                 factory: None,
             })
             .unwrap();
-        // The production delete: the tombstone, then the usage amendment.
-        let gone = gone_file.to_string_lossy().to_string();
+        record_spend(&agent_dir, &live_file);
+        record_spend(&agent_dir, &gone_file);
         ledger
             .append_delete(
                 "sub-gone",
-                &gone,
+                &gone_file.to_string_lossy(),
                 crate::rlm_ledger::RlmLedgerDeleteReason::User,
             )
             .unwrap();
-        crate::stop_cleanup::append_deleted_child_usage_amendments(&ledger, &gone, "sub-gone")
-            .expect("a deleted child");
 
         let walk = walk_children(&agent_dir, "01a0root-0000", &[], Some(&root_file)).unwrap();
         let live_nodes = walk.live_nodes;
@@ -728,19 +743,6 @@ mod tests {
             "the run tag survives the tombstone"
         );
         assert_eq!(cost(deleted), 0.125);
-        // The delete captured the per-model split, so the /context Cost
-        // breakdown keeps the deleted spend under its model.
-        assert_eq!(
-            deleted["ownUsageByModel"],
-            json!([{
-                "provider": "anthropic",
-                "id": "claude-opus-4-6",
-                "ownUsage": {
-                    "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15,
-                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.125 },
-                },
-            }])
-        );
 
         let root = crate::session_store::SessionFile::open(&root_file).unwrap();
         let (root_own, _) = crate::state_getters::compute_own_and_total_usage(
@@ -749,19 +751,9 @@ mod tests {
         );
         let context_total =
             root_own["cost"]["total"].as_f64().unwrap() + persisted.iter().map(cost).sum::<f64>();
-        let row_cost = |file: &Path| {
-            crate::session_store::read_session_info(file)
-                .and_then(|info| info.usage)
-                .map_or(0.0, |usage| usage.cost)
-        };
-        let root_key = crate::lease::canonical_session_path(&root_file)
-            .to_string_lossy()
-            .to_string();
-        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        let agents_view_total =
-            row_cost(&root_file) + row_cost(&live_file) + bucket[&root_key].cost;
+        let root_total = record_spend(&agent_dir, &root_file).spend(&root_file).total;
         assert_eq!(context_total, 0.875);
-        assert_eq!(context_total, agents_view_total);
+        assert_eq!(context_total, root_total.cost.total.as_f64());
         let _ = std::fs::remove_dir_all(&agent_dir);
     }
 
@@ -787,6 +779,7 @@ mod tests {
                 factory: None,
             })
             .unwrap();
+        record_spend(agent_dir, &child);
         ledger
             .append_delete(
                 "sub-old",
@@ -794,12 +787,6 @@ mod tests {
                 crate::rlm_ledger::RlmLedgerDeleteReason::User,
             )
             .unwrap();
-        crate::stop_cleanup::append_deleted_child_usage_amendments(
-            &ledger,
-            &child.to_string_lossy(),
-            "sub-old",
-        )
-        .unwrap();
         let stale = json!({"id": "sub-old", "label": "old", "status": "completed",
             "sessionDir": child.parent().unwrap()});
         let walk = walk_children(
@@ -858,6 +845,7 @@ mod tests {
         for (id, cost) in [("first", 0.125), ("second", 0.25)] {
             let child = agent_dir.join(format!("session-artifacts/parent/{id}/{id}.jsonl"));
             write_session(&child, id, cost);
+            record_spend(agent_dir, &child);
             ledger
                 .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                     child_id: "reused".into(),
@@ -875,12 +863,6 @@ mod tests {
                     crate::rlm_ledger::RlmLedgerDeleteReason::User,
                 )
                 .unwrap();
-            crate::stop_cleanup::append_deleted_child_usage_amendments(
-                &ledger,
-                &child.to_string_lossy(),
-                "reused",
-            )
-            .unwrap();
         }
         let nodes = walk_children(agent_dir, "parent", &[], Some(&parent))
             .unwrap()

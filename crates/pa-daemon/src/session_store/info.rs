@@ -26,13 +26,10 @@ pub struct SessionInfo {
     pub modified: String,
     pub message_count: usize,
     pub first_message: String,
-    /// The own-usage summary — assistant aggregates plus summarization calls,
-    /// minus every attributed child block; `None` when the session recorded no billable work.
+    /// The own-usage summary; `None` when the session recorded no billable work.
     pub usage: Option<crate::session_usage::SessionUsageSummary>,
-    /// The recursive spend of ledger-tombstoned descendants, attached by the
-    /// catalog's listing arm from the spawn ledger. Never set by the file
-    /// scan: ledger-derived, not transcript-derived.
-    pub deleted_descendant_usage: Option<crate::session_usage::SessionUsageSummary>,
+    /// How many rows carry usage: the usage ledger's cheap completeness check.
+    pub usage_rows: u64,
 }
 
 /// The scan's read-buffer size: one 64 KiB fill reads the typical session in
@@ -529,6 +526,7 @@ impl SessionScanState {
             None => &self.acc,
         };
         let usage = acc.usage_scan.summary();
+        let usage_rows = acc.usage_scan.usage_rows();
         let header = acc.header.as_ref()?;
         // The newest user/assistant message timestamp, then the header's
         // creation timestamp, then the file's mtime — never scan time; only
@@ -560,8 +558,7 @@ impl SessionScanState {
                 acc.first_message.clone()
             },
             usage,
-            // Ledger-derived, never the file scan's: the listing arm attaches it from the ledger.
-            deleted_descendant_usage: None,
+            usage_rows,
         })
     }
 }

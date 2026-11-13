@@ -67,7 +67,7 @@ impl Worker {
         }
         // The root node is in-memory data: the usage walk reads the live store
         // borrow-based, so the request answers from memory even on a grown store.
-        let (label, context_usage, own_usage, total_usage, session_id, own_usage_by_model) = {
+        let (label, context_usage, own_usage, branch_total, session_file, session_id, by_model) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let label = store
@@ -79,11 +79,11 @@ impl Worker {
             let session_id = store.map(|store| store.session_id().to_string());
             // The per-model own-usage breakdown rides the node when every
             // usage-carrying row resolved to a model (`None` degrades to the plain totals).
-            let (own_usage, total_usage, own_usage_by_model) = match store {
+            let (own_usage, branch_total, by_model) = match store {
                 Some(store) => {
                     let branch = store.branch_bridged();
                     let all_entries = store.entries();
-                    let (own_usage, total_usage) =
+                    let (own_usage, branch_total) =
                         compute_own_and_total_usage(&branch, all_entries);
                     let own_usage_by_model = compute_own_usage_by_model(
                         &branch,
@@ -91,18 +91,46 @@ impl Worker {
                         &own_usage,
                         store.window_boundary_model().as_ref(),
                     );
-                    (own_usage, total_usage, own_usage_by_model)
+                    (own_usage, branch_total, own_usage_by_model)
                 }
                 None => (empty_usage(), empty_usage(), None),
             };
+            let session_file = store
+                .map(|store| store.path.clone())
+                .filter(|path| !path.as_os_str().is_empty());
             (
                 label,
                 context_usage,
                 own_usage,
-                total_usage,
+                branch_total,
+                session_file,
                 session_id,
-                own_usage_by_model,
+                by_model,
             )
+        };
+        // The root total is the usage ledger's fold (own plus every
+        // descendant's), read from disk off the core lock; a pathless
+        // session keeps its branch fold.
+        let total_usage = match session_file {
+            Some(file) => {
+                let agent_dir = self.config.agent_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    // The spawn ledger the context walk reads.
+                    let spawns = std::sync::Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+                        &agent_dir,
+                        &agent_dir.join("sessions"),
+                        |_| {},
+                    ));
+                    crate::usage_ledger::UsageLedger::new(&agent_dir, spawns)
+                        .spend(&file)
+                        .total
+                })
+                .await
+                .ok()
+                .and_then(|total| serde_json::to_value(total).ok())
+                .unwrap_or_else(empty_usage)
+            }
+            None => branch_total,
         };
         let model = self.engine.model_metadata().and_then(|model| {
             Some(json!({
@@ -132,7 +160,7 @@ impl Worker {
         if let Some(usage) = context_usage {
             tree["contextUsage"] = usage;
         }
-        if let Some(by_model) = own_usage_by_model {
+        if let Some(by_model) = by_model {
             tree["ownUsageByModel"] = json!(by_model);
         }
         response_success(None, "get_context_tree", Some(tree))
@@ -286,8 +314,7 @@ impl Worker {
 mod usage;
 
 pub(crate) use usage::{
-    compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, own_usage_by_model_of,
-    worker_model_registry,
+    compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, worker_model_registry,
 };
 
 // The getter battery lives in state_getters::state_getters_tests.

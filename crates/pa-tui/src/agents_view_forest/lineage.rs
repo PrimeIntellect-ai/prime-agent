@@ -141,8 +141,10 @@ pub(super) fn is_subagent_descendant(child: &UnifiedRecord, parent: &UnifiedReco
     child_depth > parent_depth
 }
 
-/// Roll costs and descendant counts over the whole hierarchy, keyed by record identity so
-/// filters never change a row's totals.
+/// Roll descendant counts over the whole hierarchy, keyed by record identity
+/// so filters never change a row's totals. Spend is not rolled up: each row
+/// publishes its own `totalUsage` (own plus every descendant's).
+#[must_use]
 pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
     let index = build_record_index(records);
     // Roots first, then breadth-first: the bottom-up pass below sees every
@@ -169,61 +171,11 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
     }
     let mut rollups = vec![Rollup::default(); records.len()];
     for position in order.iter().rev() {
-        // The deleted-descendant bucket is read INDEPENDENTLY of the own
-        // cost: an orchestrator parent with no own billable work (the
-        // own-zero gate omits `usage` entirely) still bills its deleted
-        // descendants' spend — the bucket carried inside the own-cost
-        // Option would drop with it. The roster row (daemon) is the
-        // fresher writer between the two — the same `daemon ?? saved`
-        // precedence as the own cost below — so the title (roster rows
-        // only) and the agents view bill the same bucket.
-        let deleted_descendants = records[*position]
-            .daemon
-            .as_ref()
-            .and_then(|daemon| daemon.get("deletedDescendantUsage"))
-            .and_then(|deleted| deleted.get("cost"))
-            .and_then(Value::as_f64)
-            .or_else(|| {
-                records[*position]
-                    .saved
-                    .as_ref()
-                    .and_then(|saved| saved.get("deletedDescendantUsage"))
-                    .and_then(|deleted| deleted.get("cost"))
-                    .and_then(Value::as_f64)
-            })
-            .unwrap_or(0.0);
-        // Deleted subagents keep no row, and their spend is already subtracted from the
-        // parent's own usage by the attribution entries: without this term a deletion erases
-        // the money from the subtree total (TS #2506).
-        let own_cost = records[*position]
-            .daemon
-            .as_ref()
-            .and_then(|daemon| daemon.get("usage"))
-            .and_then(|usage| usage.get("cost"))
-            .and_then(Value::as_f64)
-            .or_else(|| {
-                records[*position]
-                    .saved
-                    .as_ref()
-                    .and_then(|saved| saved.get("usage"))
-                    .and_then(|usage| usage.get("cost"))
-                    .and_then(Value::as_f64)
-            })
-            .unwrap_or(0.0)
-            + deleted_descendants;
-        // `descendants` starts at the deleted-descendant bucket: the bucket is descendant spend,
-        // so the aggregate bills it even though no live child row carries it.
-        let mut rollup = Rollup {
-            cost: own_cost,
-            descendants: deleted_descendants,
-            descendant_count: 0,
-        };
+        let mut rollup = Rollup::default();
         for child in index.children_by_parent.get(position).into_iter().flatten() {
             if !is_subagent_descendant(&records[*child], &records[*position]) {
                 continue;
             }
-            rollup.cost += rollups[*child].cost;
-            rollup.descendants += rollups[*child].cost;
             rollup.descendant_count += 1 + rollups[*child].descendant_count;
         }
         rollups[*position] = rollup;

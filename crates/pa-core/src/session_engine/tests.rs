@@ -1445,33 +1445,17 @@ async fn a_resolved_model_bill_survives_its_callers_cancellation() {
     use tokio::sync::Notify;
 
     struct GatedStore {
-        inner: Arc<dyn rlm_usage::RlmChildUsageStore>,
+        inner: Arc<dyn usage_store::UsageStore>,
         entered: Notify,
         release: Notify,
         completed: Notify,
     }
-    impl rlm_usage::RlmChildUsageStore for GatedStore {
-        fn last_assistant(
-            &self,
-        ) -> rlm_usage::RlmChildUsageFuture<'_, Option<(String, pa_types::ai::Usage)>> {
-            self.inner.last_assistant()
-        }
-        fn append_attribution(
-            &self,
-            row_id: &str,
-            target_id: &str,
-            child_usage: pa_types::ai::Usage,
-            origin: Option<pa_types::session::ChildUsageOrigin>,
-        ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<rlm_usage::ChildUsageAppendResult>>
-        {
-            self.inner
-                .append_attribution(row_id, target_id, child_usage, origin)
-        }
+    impl usage_store::UsageStore for GatedStore {
         fn append_model_usage(
             &self,
             session_id: String,
             usage: model_usage::ModelUsage,
-        ) -> rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+        ) -> usage_store::UsageStoreFuture<'_, std::io::Result<()>> {
             Box::pin(async move {
                 self.entered.notify_one();
                 self.release.notified().await;
@@ -1483,7 +1467,7 @@ async fn a_resolved_model_bill_survives_its_callers_cancellation() {
         fn observe_billed_rows(
             &self,
             sink: crate::session::billed_row::BilledRowSink,
-        ) -> rlm_usage::RlmChildUsageFuture<'_, ()> {
+        ) -> usage_store::UsageStoreFuture<'_, ()> {
             self.inner.observe_billed_rows(sink)
         }
     }

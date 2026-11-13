@@ -117,7 +117,7 @@ pub(crate) fn fake_supervisor(
 /// compaction), once each, and nothing about a plain message.
 #[tokio::test]
 async fn the_worker_store_reports_each_billed_row_once() {
-    use pa_core::session_engine::rlm_usage::RlmChildUsageStore;
+    use pa_core::session_engine::usage_store::UsageStore;
     let dir = tempfile::tempdir().unwrap();
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).unwrap();
@@ -142,7 +142,10 @@ async fn the_worker_store_reports_each_billed_row_once() {
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
-    let store = CoreUsageStore(Arc::clone(&worker.core));
+    let store = CoreUsageStore {
+        core: Arc::clone(&worker.core),
+        usage_reports: crate::usage_report::UsageReports::disabled(),
+    };
     let session_id = {
         let core = worker.core.lock().unwrap();
         core.store.as_ref().unwrap().session_id().to_string()
@@ -251,7 +254,7 @@ async fn background_refinement_event_is_fenced_to_its_review_session() {
 /// to: once `core.store` holds the replacement, the store refuses it.
 #[tokio::test]
 async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
-    use pa_core::session_engine::rlm_usage::RlmChildUsageStore as _;
+    use pa_core::session_engine::usage_store::UsageStore as _;
     let dir = std::env::temp_dir().join(format!("pa-bill-fence-{}", uuid::Uuid::new_v4()));
     let worker = Worker::new(
         WorkerConfig {
@@ -295,7 +298,10 @@ async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
         file.set_path(dir.join(name));
         file
     };
-    let store = CoreUsageStore(Arc::clone(&worker.core));
+    let store = CoreUsageStore {
+        core: Arc::clone(&worker.core),
+        usage_reports: crate::usage_report::UsageReports::disabled(),
+    };
     let original = session_at("original.jsonl");
     let original_id = original.session_id().to_string();
     worker.core.lock().unwrap().store = Some(original);

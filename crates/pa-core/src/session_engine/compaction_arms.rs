@@ -498,7 +498,7 @@ impl AgentSession {
 /// compaction future the caller dropped mid-flight, recorded from here, in
 /// the session the attempt started in.
 struct UncommittedSummaries {
-    store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
+    store: std::sync::Arc<dyn super::usage_store::UsageStore>,
     session_id: String,
     bill: crate::session_engine::compact_session::SummaryBill,
 }

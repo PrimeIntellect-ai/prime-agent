@@ -47,7 +47,7 @@ pub struct SessionEngineConfig {
     pub additional_prompt_paths: Vec<String>,
     pub extra_builtin_skill_overrides: Vec<String>,
     pub rlm_subagent_host: Option<Arc<dyn super::rlm_host::RlmSubagentHost>>,
-    pub rlm_usage_store: Option<Arc<dyn super::rlm_usage::RlmChildUsageStore>>,
+    pub usage_store: Option<Arc<dyn super::usage_store::UsageStore>>,
     /// Announces every accepted `rlm.progress.note`; `None` keeps the store
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
@@ -135,9 +135,8 @@ pub struct SessionEngine {
     pub turn_boundary: std::sync::Arc<super::turn_boundary::TurnBoundaryRequests>,
     /// `None` when telemetry is disabled or the session is not depth 0.
     pub telemetry: Option<std::sync::Arc<super::telemetry::SessionTelemetry>>,
-    /// The kernel `rlm.spawn` handler registers spawn targets into it; the
-    /// embedding wires the child-observation sink onto it after the build.
-    pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The session's durable usage store.
+    pub usage_store: std::sync::Arc<dyn super::usage_store::UsageStore>,
     /// The factory host bridge (`/factory` view lane): the daemon/TUI
     /// request surface over the kernel's factory runs, built from the
     /// session facts captured in `create_session` (the #3184 capture
@@ -255,7 +254,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         super::runtime_wiring::RlmWiring {
             model_registry: None,
             subagent_host: config.rlm_subagent_host.clone(),
-            usage_store: config.rlm_usage_store.clone(),
+            usage_store: config.usage_store.clone(),
             progress_note_emit: config.progress_note_emit.clone(),
         },
         config.queued_goal_context_purge.clone(),
@@ -794,7 +793,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     )));
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
     session.set_agent_dir(config.agent_dir.clone());
-    session.set_usage_store(wiring.rlm_usage.store());
+    session.set_usage_store(std::sync::Arc::clone(&wiring.usage_store));
     // Keep the context descriptor even while disabled, so re-enabling can load it.
     session.harness_digest = Some(digest_context);
     session.refinement_settings = Some(refinement_settings);
@@ -911,9 +910,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // whether this session reports at all).
     if let Some(telemetry) = telemetry.as_ref() {
         session.set_skill_telemetry(telemetry.clone());
-        // Same lifetime for the `rlm_child_*` session counters: the
-        // producer's flush counts through this handle.
-        wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
     // Each row the session's durable store appends that bills a model call
@@ -921,8 +917,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let charge_goal = goal_driver.lock().await.billed_row_recorder();
     let charge_run = telemetry.clone();
     wiring
-        .rlm_usage
-        .store()
+        .usage_store
         .observe_billed_rows(std::sync::Arc::new(
             move |row: &crate::session::billed_row::BilledRow| {
                 charge_goal(&row.usage);
@@ -958,7 +953,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         mcp_manager,
         turn_boundary,
         telemetry,
-        rlm_usage: wiring.rlm_usage,
+        usage_store: wiring.usage_store,
         factory_host,
         rlm_progress_notes: Arc::clone(&wiring.rlm.notes),
         provisioner,

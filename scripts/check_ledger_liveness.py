@@ -176,6 +176,13 @@ def family_contract(rows, child_id, parent_active):
             'parent': '<resident-parent>', 'transcript_exists': True}
 
 
+def added(before, usage, after):
+    """Whether `after` is `before` plus `usage` exactly once (row spend summaries)."""
+    return (after['inputTokens'] == before['inputTokens'] + usage['inputTokens']
+            and after['outputTokens'] == before['outputTokens'] + usage['outputTokens']
+            and abs(after['cost'] - (before['cost'] + usage['cost'])) < 1e-9)
+
+
 def catalog_row(view, path):
     rows = [row for row in view['sessions'] if Path(row['path']).resolve() == path.resolve()]
     assert len(rows) == 1, 'expected exactly one actual catalog path: ' + repr(rows)
@@ -243,6 +250,8 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
     own = catalog_row(own_view, billing_file)
     usage = own.get('usage')
     assert usage and usage['inputTokens'] > 0 and usage['outputTokens'] > 0, own
+    before_edge = catalog_row(own_view, parent_file).get('totalUsage')
+    assert before_edge, catalog_row(own_view, parent_file)
     # Controlled, valid historic ledger input: unlike the initial admission this
     # edge is seeded by the fixture, never claimed to be an actual rlm.spawn.
     records = [
@@ -259,23 +268,24 @@ def cache_boundaries(client, config, root, created, child, ledger_path, provider
     billing_file.rename(archive)
     unchanged = ledger_path.read_bytes()
     warm = client.call('list_saved_sessions', cwd=str(root), scope='all')
-    trace['bucket_warm'] = warm
-    parent_before = catalog_row(warm, parent_file)
-    trace['warm_bucket_matches_actual_usage'] = parent_before.get('deletedDescendantUsage') == usage
-    assert trace['warm_bucket_matches_actual_usage'], parent_before
+    trace['total_warm'] = warm
+    parent_total = catalog_row(warm, parent_file).get('totalUsage')
+    # The billing child already has its usage-ledger shard from its reports:
+    # the historic delete snapshot must not bill it a second time.
+    trace['warm_total_adds_child_usage_once'] = added(before_edge, usage, parent_total)
+    assert trace['warm_total_adds_child_usage_once'], (before_edge, usage, parent_total)
     wake = client.call('send_message', targetActiveSessionId=own['id'], message='Restore the billing fixture.')
     trace['actual_restore_wake'] = wake
     assert billing_file.is_file() and not archive.exists(), 'actual catalog wake did not restore transcript'
     restored = client.call('list_saved_sessions', cwd=str(root), scope='all')
-    trace['bucket_after_actual_restore'] = restored
-    parent_after = catalog_row(restored, parent_file)
+    trace['total_after_actual_restore'] = restored
     restored_child = catalog_row(restored, billing_file)
-    trace['bucket_contract'] = {'restored_child_has_own_usage': restored_child.get('usage') == usage,
-        'parent_bucket_withdrawn': 'deletedDescendantUsage' not in parent_after}
-    assert trace['bucket_contract'] == {'restored_child_has_own_usage': True, 'parent_bucket_withdrawn': True}, trace
+    trace['total_contract'] = {'restored_child_has_own_usage': restored_child.get('usage') == usage,
+        'parent_total_unchanged': catalog_row(restored, parent_file).get('totalUsage') == parent_total}
+    assert trace['total_contract'] == {'restored_child_has_own_usage': True, 'parent_total_unchanged': True}, trace
     assert ledger_path.read_bytes() == unchanged, 'actual restore unexpectedly appended ledger'
     trace['ledger_unchanged_across_boundary_operations'] = True
-    return {'artifact': trace['artifact_contract'], 'bucket': trace['bucket_contract']}
+    return {'artifact': trace['artifact_contract'], 'total': trace['total_contract']}
 
 
 def run_case(binary, root, observed):
