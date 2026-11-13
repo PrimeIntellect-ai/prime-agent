@@ -476,7 +476,10 @@ impl SessionUi {
         let id = format!("user-bash-{}", self.user_bash_counter);
         let mut card =
             crate::bash_card::BashExecutionCard::new_running(&id, command, exclude_from_context);
-        card.suppress_leading_space = matches!(view.chat.last(), Some(ChatEntry::AgentMessage(_)));
+        card.suppress_leading_space = matches!(
+            view.chat.last(),
+            Some(ChatEntry::AgentMessage(_) | ChatEntry::InboxNotice(_))
+        );
         if self.turn_active {
             view.pending_bash.push(card);
         } else {

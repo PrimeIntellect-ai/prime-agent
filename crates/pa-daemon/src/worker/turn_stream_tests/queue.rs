@@ -1193,3 +1193,177 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
 }
 
 mod withdrawal;
+
+/// The runner-level durable pin for the inbox read's drain seam: a
+/// turn whose cell reads the inbox (`rlm.inbox.read` drained the store
+/// and fired the sweep at the drain) parks with the journal settled —
+/// the queued reminder never wakes a second turn, the durable snapshot
+/// loses it while the turn still runs (a crash in that window revives no
+/// stale wake), and the parked verdict reads idle.
+struct DrainSweepEngine {
+    core: std::sync::OnceLock<Arc<Mutex<SessionCore>>>,
+    recovery: std::sync::OnceLock<Arc<Mutex<Option<WorkerRecoveryJournal>>>>,
+    arrivals: pa_core::session_engine::inbox::InboxArrivals,
+    inbox: Arc<pa_core::session_engine::inbox::SessionInbox>,
+    prompts: Mutex<Vec<String>>,
+    mid_turn_snapshot: Mutex<Vec<crate::journal::WorkerQueueItemRecord>>,
+}
+
+impl SessionEngine for DrainSweepEngine {
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        request: PromptRequest,
+        _aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        self.prompts.lock().unwrap().push(request.message);
+        // The kernel's rlm.inbox.read drained the store inside the cell
+        // and fired the drain seam: the sweep runs inside the read's own
+        // host handler.
+        self.inbox.drain();
+        withdraw_drained_inbox_notice(
+            self.recovery.get().expect("the runner's recovery"),
+            self.core.get().expect("the runner's core"),
+            &self.arrivals,
+            &self.inbox,
+            self,
+        );
+        // The durable snapshot read back MID-TURN (the crash window):
+        // the swept reminder must already be gone from the journal.
+        let snapshot = {
+            let recovery = self.recovery.get().expect("the runner's recovery");
+            let recovery = recovery.lock().unwrap();
+            recovery
+                .as_ref()
+                .expect("the runner's journal")
+                .latest_queue_snapshot("burst-session")
+                .map(|(steering, _, _)| steering)
+                .unwrap_or_default()
+        };
+        *self.mid_turn_snapshot.lock().unwrap() = snapshot;
+        emit(EngineEvent::Done(Ok(())));
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_draining_turn_sweeps_the_queued_reminder_and_parks_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("recovery.jsonl");
+    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::in_memory());
+    // The unread message a reminder row announces.
+    inbox.push(
+        pa_core::session_engine::inbox::InboxNotice {
+            class: pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            sender: Some("the command".to_string()),
+            text: "the command finished".to_string(),
+            meta: json!({ "pid": 4321 }),
+        },
+        1_000,
+    );
+    let engine = Arc::new(DrainSweepEngine {
+        core: std::sync::OnceLock::new(),
+        recovery: std::sync::OnceLock::new(),
+        arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
+        inbox: Arc::clone(&inbox),
+        prompts: Mutex::new(Vec::new()),
+        mid_turn_snapshot: Mutex::new(Vec::new()),
+    });
+    let runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
+    // The runner's journal: the admission and the sweep checkpoint against
+    // the same durable file.
+    *runner.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(&journal_path).unwrap());
+    let _ = engine.core.set(Arc::clone(&runner.core));
+    let _ = engine.recovery.set(Arc::clone(&runner.recovery));
+    {
+        let mut core = runner.core.lock().unwrap();
+        // The human turn runs first; the reminder row parks behind it.
+        core.steering
+            .push_back(queued_prompt("drain the inbox", TurnPolicy::Queued));
+    }
+    admit_inbox_reminder(
+        &runner.recovery,
+        &runner.core,
+        &runner.work_notify,
+        &inbox,
+        || false,
+        None,
+    );
+    let running = tokio::spawn(async move { runner.run().await });
+    // The park readiness: exactly one prompt ran (the reminder never
+    // woke) and the runner parked idle with empty lanes.
+    let parked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            {
+                let engine_prompts = engine.prompts.lock().unwrap().len();
+                let core = engine
+                    .core
+                    .get()
+                    .expect("the runner's core")
+                    .lock()
+                    .unwrap();
+                let empty = core.steering.is_empty() && core.follow_up.is_empty();
+                if engine_prompts == 1 && !core.busy && empty {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    running.abort();
+    parked.expect("the runner never parked after the draining turn");
+    assert_eq!(
+        *engine.prompts.lock().unwrap(),
+        vec!["drain the inbox".to_string()],
+        "the human turn ran; the swept reminder never woke a second turn"
+    );
+    assert!(
+        engine.mid_turn_snapshot.lock().unwrap().is_empty(),
+        "the durable snapshot lost the swept reminder while the turn still ran"
+    );
+    assert!(
+        !WorkerRecoveryJournal::read_interrupted(&journal_path),
+        "the parked verdict reads idle: no swept row revives as interrupted work"
+    );
+}

@@ -55,6 +55,12 @@ impl AgentView {
                     spacing,
                 )
             }
+            ChatEntry::InboxNotice(row) => crate::custom_message::geometry::inbox_notice_row_count(
+                row,
+                &self.theme,
+                width,
+                spacing,
+            ),
             ChatEntry::ShellCompletion(row) => {
                 crate::custom_message::geometry::shell_completion_row_count(
                     row, detail, width, spacing,
@@ -338,6 +344,14 @@ mod tests {
                     message,
                 }))
             }),
+            1 => (prop::sample::select(vec!["arrival", "reminder"]), markdown_text())
+                .prop_map(|(class, text)| {
+                    ChatEntry::InboxNotice(Box::new(InboxNoticeRow {
+                        sender: "Agent inbox".to_string(),
+                        class: class.to_string(),
+                        text,
+                    }))
+                }),
             1 => markdown_text().prop_map(|content| {
                 ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
                     name: "skill 数据".to_string(),

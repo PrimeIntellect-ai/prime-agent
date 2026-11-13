@@ -3,7 +3,8 @@
 //! module; compaction outcomes render through the chat status rows.
 
 use super::{
-    AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow, AGENT_MESSAGE_LABEL,
+    AgentMessageDirection, AgentMessageRow, CustomPanelRow, InboxNoticeRow, ShellCompletionRow,
+    AGENT_MESSAGE_LABEL,
 };
 use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
@@ -90,6 +91,40 @@ pub(crate) fn render_agent_message(
     if detail.tool_output_expanded() {
         out.extend(agent_message_body(&row.message, theme, width));
     }
+    out
+}
+
+/// The inbox-notice summary line: the agent-message envelope geometry
+/// (envelope + sender label + dim class word) — the sender rides where
+/// the counterpart rides, the notice class where the direction word
+/// rides.
+pub(crate) fn inbox_notice_summary_line(sender: &str, class: &str, theme: &Theme) -> Line {
+    vec![
+        Span::styled("\u{2709}".to_string(), theme.fg_style(ThemeColor::Success)),
+        Span::raw(" "),
+        Span::styled(sender.to_string(), theme.fg_style(ThemeColor::Muted)),
+        Span::styled(" \u{b7} ".to_string(), theme.fg_style(ThemeColor::Dim)),
+        Span::styled(class.to_string(), theme.fg_style(ThemeColor::Dim)),
+    ]
+}
+
+/// The inbox-notice rows: a leading blank (spacing-driven), the summary
+/// header, then the notice text body ALWAYS visible (no expansion gate —
+/// the waiting count and the `rlm.inbox.read()` call-to-action never
+/// collapse away), the same `╰─`-guttered body the agent-message rows use.
+pub(crate) fn render_inbox_notice(
+    row: &InboxNoticeRow,
+    theme: &Theme,
+    width: usize,
+    leading: bool,
+) -> Vec<Line> {
+    let mut out = Vec::new();
+    if leading {
+        out.push(spacer());
+    }
+    let header = inbox_notice_summary_line(&row.sender, &row.class, theme);
+    out.extend(text_rows(&header, width));
+    out.extend(agent_message_body(&row.text, theme, width));
     out
 }
 
@@ -380,6 +415,49 @@ mod tests {
             ],
             "{rows:?}"
         );
+    }
+
+    /// The inbox-notice header: the envelope geometry with the sender as
+    /// the label and the class word in the counterpart position.
+    #[test]
+    fn inbox_notice_header_shape() {
+        let row = InboxNoticeRow {
+            sender: "Agent inbox".to_string(),
+            class: "arrival".to_string(),
+            text: "[inbox 19:14 UTC] 1 new message".to_string(),
+        };
+        let rows = render_inbox_notice(&row, &theme(), 60, true);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert!(rows[0].is_empty());
+        let header = flat(&rows[1]);
+        assert_eq!(header.trim_end(), " \u{2709} Agent inbox \u{b7} arrival");
+        // Colors: green envelope, muted sender label, dim separator and
+        // class word (the agent-message envelope styling).
+        assert_eq!(
+            rows[1][1],
+            Span::styled(
+                "\u{2709}".to_string(),
+                theme().fg_style(ThemeColor::Success)
+            )
+        );
+        assert_eq!(
+            rows[1][3],
+            Span::styled(
+                "Agent inbox".to_string(),
+                theme().fg_style(ThemeColor::Muted)
+            )
+        );
+        assert_eq!(
+            rows[1][4],
+            Span::styled(" \u{b7} ".to_string(), theme().fg_style(ThemeColor::Dim))
+        );
+        assert_eq!(
+            rows[1][5],
+            Span::styled("arrival".to_string(), theme().fg_style(ThemeColor::Dim))
+        );
+        // The body's always-visible shape is pinned by the mod.rs gutter
+        // table and the headless frame test (render_inbox_notice takes no
+        // detail gate).
     }
 
     /// The un-boxed panel's label and body carry their shared spans with no box background.

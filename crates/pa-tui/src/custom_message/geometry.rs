@@ -1,5 +1,5 @@
 //! Count custom rows using the same headers and body geometry as rendering.
-use super::{AgentMessageRow, CustomPanelRow, ShellCompletionRow};
+use super::{AgentMessageRow, CustomPanelRow, InboxNoticeRow, ShellCompletionRow};
 use crate::branch::{branch_block_count, branch_markdown_count};
 use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
@@ -48,6 +48,20 @@ pub(crate) fn agent_message_row_count(
         } else {
             0
         }
+}
+
+/// The inbox-notice rows always paint the body (no expansion gate):
+/// leading blank + header wrap + the agent-message body geometry.
+pub(crate) fn inbox_notice_row_count(
+    row: &InboxNoticeRow,
+    theme: &Theme,
+    width: usize,
+    leading: bool,
+) -> usize {
+    let header = super::render::inbox_notice_summary_line(&row.sender, &row.class, theme);
+    usize::from(leading)
+        + wrapped_line_count(&header, width.saturating_sub(2).max(1))
+        + agent_message_body_count(&row.text, width)
 }
 
 pub(crate) fn shell_completion_row_count(

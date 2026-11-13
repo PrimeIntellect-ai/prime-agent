@@ -99,13 +99,14 @@ pub enum TurnUpdate {
     GoalUpdate(Value),
     /// `session_action_update`: the queue projection changed. `starting`
     /// carries the picked-up prompt still preparing (TS #2063); the
-    /// `rlm_child_status`/`injected_prompts` riders are Rust-native
-    /// provenance, so the strip folds exactly those rows.
+    /// `rlm_child_status`/`inbox_notice`/`injected_prompts` riders are
+    /// Rust-native provenance, so the strip folds exactly those rows.
     QueueUpdated {
         steering: Vec<String>,
         follow_ups: Vec<String>,
         starting: Option<String>,
         rlm_child_status: crate::queued::QueueLaneIndices,
+        inbox_notice: crate::queued::QueueLaneIndices,
         injected_prompts: crate::queued::QueueLaneIndices,
     },
     /// `bash_start` (the user-bash slot): a command run outside the model
@@ -337,6 +338,7 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 follow_ups: queue_lane(&actions, "followUps"),
                 starting: starting_from_actions(&actions),
                 rlm_child_status: queue_lane_indices(&actions, "rlmChildStatus"),
+                inbox_notice: queue_lane_indices(&actions, "inboxNotice"),
                 injected_prompts: queue_lane_indices(&actions, "injectedPrompts"),
             })
         }

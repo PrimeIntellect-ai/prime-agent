@@ -17,6 +17,12 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   the attach snapshot's `state.goal`), and the TUI (announcement rows, tray
   label). The goal *engine* (validation, accounting, continuation prompts)
   is pa-core's.
+- `inbox_notice`: the agent-inbox notice rows' wire vocabulary (the
+  `inbox_notice` customType, the arrival/reminder class words, the
+  `Agent inbox` sender identity) — one definition the session engine's
+  row builder (pa-core), the daemon's queue lanes and strip provenance,
+  and the TUI's decode all import (pa-tui cannot import the session
+  engine, so a twin constant would drift silently).
 - `slash_commands`: the builtin slash-command table every surface shares
   (the TUI dispatch + autocomplete, the session engine's command admission,
   CLI suggestion help) plus its pure parse/suggestion helpers — the TS

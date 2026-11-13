@@ -10,6 +10,7 @@ pub mod ai;
 pub mod compaction;
 pub mod daemon;
 pub mod goal;
+pub mod inbox_notice;
 pub mod incident;
 pub mod memory_release;
 pub mod platform;

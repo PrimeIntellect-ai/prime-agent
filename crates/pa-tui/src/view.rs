@@ -214,13 +214,14 @@ fn chunk_selection(
 }
 
 impl AgentView {
-    /// Agent messages, tool calls, bash executions, and shell completions
-    /// render flush against each other.
+    /// Agent messages, tool calls, bash executions, shell completions, and
+    /// the inbox notices render flush against each other.
     pub(super) fn is_compact_neighbor(entry: &ChatEntry) -> bool {
         matches!(
             entry,
             ChatEntry::Tool(_)
                 | ChatEntry::AgentMessage(_)
+                | ChatEntry::InboxNotice(_)
                 | ChatEntry::ShellCompletion(_)
                 | ChatEntry::BashExecution(_)
         )
@@ -470,8 +471,10 @@ impl AgentView {
         }
         let mut entry = item_to_entry(item);
         if let ChatEntry::BashExecution(card) = &mut entry {
-            card.suppress_leading_space =
-                matches!(self.chat.last(), Some(ChatEntry::AgentMessage(_)));
+            card.suppress_leading_space = matches!(
+                self.chat.last(),
+                Some(ChatEntry::AgentMessage(_) | ChatEntry::InboxNotice(_))
+            );
         }
         self.push_entry(entry);
     }
@@ -632,7 +635,10 @@ impl AgentView {
         for (offset, entry) in self.chat.iter().enumerate().skip(index + 1) {
             if matches!(
                 entry,
-                ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_)
+                ChatEntry::AgentMessage(_)
+                    | ChatEntry::InboxNotice(_)
+                    | ChatEntry::ShellCompletion(_)
+                    | ChatEntry::Tool(_)
             ) {
                 if let Some(slot) = self.entry_layout.get_mut(offset) {
                     *slot = [None, None, None];
