@@ -2425,6 +2425,19 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         || false,
         None,
     );
+    // The coalesced arrival twin's admission identity: the re-render
+    // below must move only its content, never re-mint the row.
+    let admitted_at = {
+        let core = worker.core.lock().unwrap();
+        let item = core
+            .steering
+            .iter()
+            .find(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+            .expect("the coalesced arrival row");
+        item.custom_message.as_ref().expect("the arrival twin")["timestamp"]
+            .as_u64()
+            .expect("the twin's admission timestamp")
+    };
     // A targeted read takes the bash-done message: the batch trims and
     // both rows re-render over what is left.
     let taken = inbox.drain_matching(&pa_core::session_engine::inbox::InboxReadFilter {
@@ -2443,6 +2456,39 @@ async fn the_wake_row_refresh_follows_the_live_store() {
                 && preview.as_deref() == Some("Inbox: 1 new message (factory-progress)")
         ),
         "the notice re-rendered over the surviving batch: {rows:?}"
+    );
+    // The COMPLETE twin re-rendered with the row (the re-render's whole
+    // point: delivery reads the twin, so a stale custom row would hand
+    // the model an old batch), while every identity field keeps the
+    // admission — exactly the builder's row, content included.
+    let (twin, row_message) = {
+        let core = worker.core.lock().unwrap();
+        let item = core
+            .steering
+            .iter()
+            .find(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+            .expect("the re-rendered arrival row");
+        (
+            item.custom_message.clone().expect("the arrival twin"),
+            item.message.clone(),
+        )
+    };
+    assert_eq!(
+        twin["content"], row_message,
+        "the twin's content is the row's model-visible text: {twin:?}"
+    );
+    let (count, _, _) = inbox.count();
+    let (_, expected_text) =
+        pa_core::session_engine::inbox::arrival_notice(&arrivals.lock().unwrap(), count);
+    let expected_text = inbox.with_persistence_error_clause(expected_text);
+    assert_eq!(
+        twin,
+        pa_core::session_engine::inbox::create_inbox_notice_row(
+            &expected_text,
+            pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+            admitted_at,
+        ),
+        "the twin re-rendered its content and kept its admission identity"
     );
     assert!(
         rows.iter()
