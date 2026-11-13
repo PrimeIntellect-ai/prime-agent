@@ -42,6 +42,7 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -116,6 +117,7 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -241,6 +243,7 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -474,6 +477,7 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -708,6 +712,7 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -837,6 +842,7 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
             telemetry_disabled: None,
             cron_store: Some(cron_store),
             queued_steering_probe: None,
+            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -992,6 +998,140 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         }),
         "the successful mint retired the armed wake"
     );
+}
+
+/// A shell whose kernel died without graceful cleanup is live,
+/// durable in the worker's orphan journal, and invisible to the
+/// replacement kernel's empty registry. The gate's durable term must hold
+/// the goal continuation across the restart, and drop only when the shell
+/// actually dies. Without the durable term this test's turn end mints
+/// straight through the live shell (the bypass); without the daemon-owned
+/// exit watch the owed continuation never lands.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn durable_shell_holds_the_goal_continuation_across_a_kernel_restart() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let session_file = dir.path().join("session.jsonl");
+    std::fs::write(
+        &session_file,
+        format!(
+            "{}
+",
+            serde_json::json!({
+                "type": "session",
+                "version": 3,
+                "id": "durable-shell-session",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "cwd": dir.path().display().to_string(),
+            })
+        ),
+    )
+    .unwrap();
+    let store =
+        std::sync::Arc::new(pa_core::cron::store::AgentCronJobStore::for_session_artifacts());
+    store.register_session_artifact("durable-shell-session", &dir.path().join("artifacts"));
+    let cron_store = pa_core::session_engine::runtime_wiring::KernelCronWiring {
+        store: std::sync::Arc::clone(&store),
+        binding: None,
+        mutation_hook: None,
+    };
+    // The worker's orphan journal and a REAL live shell record in the
+    // runtime's shape: the shell outlived its (dead, fake) kernel, the
+    // owner is this worker (the test process).
+    let journal = dir.path().join("durable.orphans.jsonl");
+    let mut live_shell = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let live_pid = i64::from(live_shell.id());
+    let identity = pa_core::kernel::orphan_journal::get_process_start_id(live_shell.id() as i32)
+        .expect("live shell identity");
+    std::fs::write(
+        &journal,
+        format!(
+            "{}
+",
+            serde_json::json!({
+                "version": 1, "pid": live_pid, "ownerPid": i64::from(std::process::id()),
+                "kernelPid": 999_999, "active": true,
+                "processStartId": identity,
+                "recordedAt": "2026-11-06T00:00:00Z",
+            })
+        ),
+    )
+    .unwrap();
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: Some(session_file),
+            faux_script: Some(
+                serde_json::json!({ "responses": [{"text": "goal turn reply"}] }).to_string(),
+            ),
+            supervisor_link: Some(crate::agent_engine::SupervisorLinkConfig {
+                socket_path: dir.path().join("supervisor.sock"),
+                active_session_id: "active-durable".to_string(),
+                worker_token: "token".to_string(),
+            }),
+            telemetry_disabled: None,
+            cron_store: Some(cron_store),
+            queued_steering_probe: None,
+            orphan_journal_path: Some(journal),
+        })
+        .unwrap(),
+    );
+    engine.register_arc();
+    let goal_work = goal_admission_collector(&engine);
+    // The post-restart state: the kernel-manager registry reads zero (no
+    // probe set; the session build installs the empty provisioner read),
+    // the durable journal holds the live shell.
+    assert_eq!(engine.background_bash_handle_count(), 1);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "/goal ship behind the orphaned shell".to_string(),
+        &mut events,
+    );
+    {
+        let work = goal_work.lock().unwrap();
+        assert!(
+            work.is_empty(),
+            "the durable shell must hold the continuation: {work:?}"
+        );
+    }
+    assert_eq!(engine.goal_state_value()["status"], "active");
+    assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
+    assert!(
+        store.list().into_iter().any(|job| {
+            job.label.as_deref()
+                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+                && job.status == pa_core::cron::JobStatus::Active
+        }),
+        "the held boundary arms the fallback wake behind the durable shell"
+    );
+    // The shell dies: its exit watch alone delivers the owed continuation
+    // (no settle consult runs here).
+    let _ = live_shell.kill();
+    let _ = live_shell.wait();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while goal_work.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(engine.background_bash_handle_count(), 0);
+    let work = goal_work.lock().unwrap();
+    let [crate::engine::GoalTurnEndWork::Continuation(delivered)] = work.as_slice() else {
+        panic!("the settled shell never delivered the continuation: {work:?}");
+    };
+    assert!(delivered.request.message.contains("[goal: continuation]"));
+    assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
 /// The engine session's entries as their persisted wire shapes (the
@@ -1184,6 +1324,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -1327,6 +1468,7 @@ fn assert_turn_end_publishes_a_held_goal_change(message: &str, aborted: bool) {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -1410,6 +1552,7 @@ fn active_goal_survives_an_abort_that_lands_before_the_provider_stream() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);

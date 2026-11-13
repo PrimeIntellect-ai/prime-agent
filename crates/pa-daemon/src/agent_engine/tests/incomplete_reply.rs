@@ -82,6 +82,7 @@ fn run_request(
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);

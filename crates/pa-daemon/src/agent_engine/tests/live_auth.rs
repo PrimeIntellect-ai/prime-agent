@@ -80,6 +80,7 @@ fn live_auth_engine_with_oauth(
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .expect("engine");
     if let Some(oauth) = request_auth_oauth {

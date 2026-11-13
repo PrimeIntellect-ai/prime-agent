@@ -160,6 +160,108 @@ pub fn read_active_orphan_processes(
     Ok(out)
 }
 
+/// The worker journal's active shell records — a `kernelPid` distinguishes
+/// the runtime's `bash()` records from the host's own kernel-process
+/// records. The parse half of the continuation gates' durable term
+/// ([`LiveBackgroundShellJournal`]); the liveness filter runs on every
+/// read, never on the cache (a record alive at one boundary may die before
+/// the next).
+#[must_use]
+pub fn read_active_shell_records(path: &Path, owner_pid: i64) -> Vec<ActiveOrphanProcess> {
+    let Ok(orphans) = read_active_orphan_processes(path, owner_pid) else {
+        return Vec::new();
+    };
+    orphans
+        .into_iter()
+        .filter(|orphan| {
+            let Some(kernel_pid) = orphan.kernel_pid else {
+                return false;
+            };
+            orphan.pid > 0 && orphan.pid != kernel_pid
+        })
+        .collect()
+}
+
+/// Whether an active shell record's pid still names the same live process
+/// (the recorded start-id matches; a record without one has a live pid —
+/// the same best-effort trust the reaper applies).
+fn shell_record_still_live(orphan: &ActiveOrphanProcess) -> bool {
+    match orphan.process_start_id.as_deref() {
+        // A matching recorded identity proves liveness; a mismatch is a
+        // recycled pid.
+        Some(_) => is_orphan_process_identity_current(orphan),
+        None => crate::platform::process::pid_exists(orphan.pid as u32),
+    }
+}
+
+/// The journal stamp (file size, mtime nanos) a memoized parse keys on.
+type JournalStamp = (u64, u128);
+
+/// A memoized durable-term read for the per-boundary continuation consults
+/// (goal and `/autonomous`): a kernel lost without graceful cleanup leaves
+/// its shells alive with durable active records but no in-memory registry
+/// entry, and their `[bash-done]` notice died with the kernel. The
+/// append-only journal parses only when its `(size, mtime)` changed —
+/// always-on sessions pay one parse per shell event, not one per turn
+/// end — while the liveness filter re-probes every call (a shell that
+/// dies without touching the journal must still drop out of the count).
+pub struct LiveBackgroundShellJournal {
+    path: PathBuf,
+    owner_pid: i64,
+    parsed: std::sync::Mutex<Option<(JournalStamp, Vec<ActiveOrphanProcess>)>>,
+}
+
+impl LiveBackgroundShellJournal {
+    /// The journal at `path`, read for `owner_pid`'s shell records.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>, owner_pid: i64) -> Self {
+        Self {
+            path: path.into(),
+            owner_pid,
+            parsed: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The still-live shell records (the recorded pid still names the same
+    /// process): a fresh parse when the journal changed, the cached records
+    /// otherwise, and the liveness filter always.
+    pub fn live_shells(&self) -> Vec<ActiveOrphanProcess> {
+        let Ok(metadata) = std::fs::metadata(&self.path) else {
+            return Vec::new();
+        };
+        let stamp = (
+            metadata.len(),
+            metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos()),
+        );
+        let records = {
+            let mut cached = match self.parsed.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some((cached_stamp, records)) = cached.as_ref() {
+                if *cached_stamp == stamp {
+                    return records
+                        .iter()
+                        .filter(|orphan| shell_record_still_live(orphan))
+                        .cloned()
+                        .collect();
+                }
+            }
+            let records = read_active_shell_records(&self.path, self.owner_pid);
+            *cached = Some((stamp, records.clone()));
+            records
+        };
+        records
+            .into_iter()
+            .filter(shell_record_still_live)
+            .collect()
+    }
+}
+
 /// True when the record's pid identity still matches the live process, so
 /// killing it cannot hit a reused pid.
 #[must_use]
@@ -305,5 +407,134 @@ mod tests {
                 "the journal is spent, not kept for a blind retry"
             );
         }
+    }
+
+    /// The continuation gates' durable term: only the runtime's shell
+    /// records (a `kernelPid`) whose pid still names the same live process
+    /// count. A kernel lost without graceful cleanup leaves exactly these
+    /// behind: alive, durable, and invisible to the replacement kernel's
+    /// empty registry.
+    #[test]
+    fn live_shell_reader_counts_only_live_shell_records() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("w.orphans.jsonl");
+        let owner = i64::from(std::process::id());
+        let dead_kernel_pid = 999_999_i32;
+        let mut live_shell = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn live shell");
+        let live_identity =
+            get_process_start_id(live_shell.id() as i32).expect("live shell identity");
+        let mut dead_shell = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn dead shell");
+        let dead_pid = dead_shell.id() as i32;
+        let _ = dead_shell.wait();
+        let live_pid = i64::from(live_shell.id());
+        let records = [
+            // The live shell: counted.
+            json!({
+                "version": 1, "pid": live_pid, "ownerPid": owner,
+                "kernelPid": dead_kernel_pid, "active": true,
+                "processStartId": live_identity, "recordedAt": iso8601_now(),
+            }),
+            // A dead shell's record: not counted (the recorded identity no
+            // longer matches the gone pid).
+            json!({
+                "version": 1, "pid": i64::from(dead_pid), "ownerPid": owner,
+                "kernelPid": dead_kernel_pid, "active": true,
+                "processStartId": "proc:1", "recordedAt": iso8601_now(),
+            }),
+            // The host's own kernel-process record (no kernelPid): never a
+            // shell, not counted even though the pid is alive.
+            json!({
+                "version": 1, "pid": i64::from(std::process::id()), "ownerPid": owner,
+                "active": true, "recordedAt": iso8601_now(),
+            }),
+            // A settled shell's inactive record: not counted.
+            json!({
+                "version": 1, "pid": i64::from(dead_pid), "ownerPid": owner,
+                "kernelPid": dead_kernel_pid, "active": false,
+                "recordedAt": iso8601_now(),
+            }),
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .expect("write journal");
+        let live = LiveBackgroundShellJournal::new(&path, owner).live_shells();
+        assert_eq!(live.len(), 1, "only the live shell counts: {live:?}");
+        assert_eq!(live[0].pid, live_shell.id() as i32);
+        // The identity-free arm: the runtime writes no start-id when its
+        // probe failed at spawn; a live pid still counts.
+        let mut identity_free_shell = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn identity-free shell");
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+                + &json!({
+                    "version": 1, "pid": i64::from(identity_free_shell.id()),
+                    "ownerPid": owner, "kernelPid": dead_kernel_pid, "active": true,
+                    "recordedAt": iso8601_now(),
+                })
+                .to_string()
+                + "\n",
+        )
+        .expect("write journal");
+        let live = LiveBackgroundShellJournal::new(&path, owner).live_shells();
+        assert_eq!(
+            live.len(),
+            2,
+            "the identity-free live shell counts: {live:?}"
+        );
+        // The memoized per-boundary read: the journal re-parses when the
+        // file changes and the liveness filter re-probes every call (a
+        // shell dying without touching the journal drops out).
+        let reader = LiveBackgroundShellJournal::new(&path, owner);
+        assert_eq!(reader.live_shells().len(), 2);
+        let _ = identity_free_shell.kill();
+        let _ = identity_free_shell.wait();
+        assert_eq!(
+            reader.live_shells().len(),
+            1,
+            "a shell that died without touching the journal must drop from the count"
+        );
+        // The recycled-pid form: a live pid whose recorded identity is
+        // wrong never counts.
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({
+                    "version": 1, "pid": live_pid, "ownerPid": owner,
+                    "kernelPid": dead_kernel_pid, "active": true,
+                    "processStartId": "proc:1", "recordedAt": iso8601_now(),
+                })
+            ),
+        )
+        .expect("write journal");
+        assert!(
+            LiveBackgroundShellJournal::new(&path, owner)
+                .live_shells()
+                .is_empty(),
+            "a recycled pid's record must not count"
+        );
+        let _ = live_shell.kill();
+        let _ = live_shell.wait();
     }
 }

@@ -39,6 +39,12 @@ pub struct AgentEngineConfig {
     /// the next boundary and the steer delivers next (the follow-up lane
     /// never stops the run).
     pub queued_steering_probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// The worker's orphan-process journal: the continuation gates' durable
+    /// background-shell term reads it, so a shell whose kernel died
+    /// without graceful cleanup still holds the continuation (the
+    /// replacement kernel's registry is empty and the shell's
+    /// `[bash-done]` notice died with the kernel).
+    pub orphan_journal_path: Option<std::path::PathBuf>,
 }
 
 /// Supervisor-link coordinates for a daemon worker.

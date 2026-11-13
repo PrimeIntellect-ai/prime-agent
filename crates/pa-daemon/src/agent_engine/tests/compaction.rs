@@ -197,6 +197,7 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                orphan_journal_path: None,
             })
             .unwrap(),
         );
@@ -362,6 +363,7 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                orphan_journal_path: None,
             })
             .unwrap(),
         );
@@ -738,6 +740,7 @@ fn requested_compaction_skip_records_the_durable_outcome_row() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -942,6 +945,7 @@ fn threshold_below_the_headroom_stays_silent() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);

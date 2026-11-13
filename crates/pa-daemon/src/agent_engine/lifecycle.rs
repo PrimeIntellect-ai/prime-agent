@@ -32,6 +32,15 @@ impl AgentSessionEngine {
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
+        // The continuation gates' durable term: the worker's orphan journal
+        // (memoized parse, per-call liveness; a `None` path unwires it to
+        // `0`, exactly like the kernel probe).
+        let durable_background_shell_journal = config.orphan_journal_path.clone().map(|journal| {
+            pa_core::kernel::orphan_journal::LiveBackgroundShellJournal::new(
+                journal,
+                i64::from(std::process::id()),
+            )
+        });
         let selection = EngineModelSelection {
             provider: config.provider.clone(),
             model: config.model.clone(),
@@ -142,6 +151,8 @@ impl AgentSessionEngine {
             goal_queue_purge: std::sync::Mutex::new(None),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             queue_modes,
+            durable_background_shell_journal,
+            durable_shell_exit_watches: std::sync::Mutex::new(std::collections::HashMap::new()),
             registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),

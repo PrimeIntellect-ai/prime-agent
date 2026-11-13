@@ -749,7 +749,11 @@ impl Worker {
     /// The bash lane's outstanding work at a quiescence observation: live
     /// kernel `bash()` handles plus `[bash-done]` notices still queued for
     /// delivery. Zero when nothing will wake the session from the bash
-    /// lane. Reported only — never a close/wake behavior.
+    /// lane. Reported only — never a close/wake behavior. The kernel
+    /// registry alone: the engine's combined count would double every
+    /// healthy handle (the runtime journals the same spawn the registry
+    /// counts) and drag orphaned shells the session can no longer observe
+    /// into a wire-visible field.
     ///
     /// # Panics
     ///
@@ -758,7 +762,7 @@ impl Worker {
         let live = self
             .agent_engine
             .as_ref()
-            .map_or(0, |engine| engine.background_bash_handle_count());
+            .map_or(0, |engine| engine.kernel_background_bash_handle_count());
         let queued = queued_bash_completion_notices(&self.core.lock().unwrap());
         (live + queued) as u64
     }
