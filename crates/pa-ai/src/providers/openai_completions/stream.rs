@@ -265,20 +265,6 @@ fn handle_chunk(
         return;
     };
 
-    if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
-        if !content.is_empty() {
-            let index = state.ensure_text_block(writer);
-            if let Some(AssistantContent::Text(text)) = state.output.content.get_mut(index) {
-                text.text.push_str(content);
-            }
-            writer.push(AssistantMessageEvent::TextDelta {
-                content_index: index as u64,
-                delta: content.to_string(),
-                partial: state.output.clone(),
-            });
-        }
-    }
-
     // Some endpoints return reasoning in reasoning_content (llama.cpp), or reasoning (other openai
     // compatible endpoints). Use the first non-empty reasoning field to avoid duplication.
     let mut found_reasoning_field: Option<(&str, &str)> = None;
@@ -300,6 +286,20 @@ fn handle_chunk(
             delta: reasoning_delta.to_string(),
             partial: state.output.clone(),
         });
+    }
+
+    if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
+        if !content.is_empty() {
+            let index = state.ensure_text_block(writer);
+            if let Some(AssistantContent::Text(text)) = state.output.content.get_mut(index) {
+                text.text.push_str(content);
+            }
+            writer.push(AssistantMessageEvent::TextDelta {
+                content_index: index as u64,
+                delta: content.to_string(),
+                partial: state.output.clone(),
+            });
+        }
     }
 
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {

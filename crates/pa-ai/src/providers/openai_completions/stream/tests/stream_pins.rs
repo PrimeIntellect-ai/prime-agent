@@ -204,3 +204,40 @@ async fn reasoning_content_deltas_assemble_the_thinking_block_with_the_field_sig
     );
     assert_eq!(message.stop_reason, StopReason::Stop);
 }
+
+/// One chunk can carry the end of the reasoning and the start of the reply: the last thinking
+/// delta streams before the reply's first text delta.
+#[tokio::test]
+async fn reasoning_streams_before_content_within_one_chunk() {
+    let body = sse_body(&[
+        json!({ "choices": [{ "index": 0, "delta": { "reasoning_content": "Let me think." } }] }),
+        json!({ "choices": [{ "index": 0, "delta": { "reasoning_content": " Done.", "content": "Hi" } }] }),
+        json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }),
+    ]);
+    let (events, _) = stream_events(glm_fast_model(), body).await;
+    let deltas: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AssistantMessageEvent::ThinkingDelta { delta, .. }
+            | AssistantMessageEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, ["Let me think.", " Done.", "Hi"]);
+}
+
+/// Reasoning and reply starting in the same chunk assemble thinking first, then text.
+#[tokio::test]
+async fn reasoning_and_content_starting_in_one_chunk_assemble_thinking_then_text() {
+    let body = sse_body(&[
+        json!({ "choices": [{ "index": 0, "delta": { "reasoning_content": "Think.", "content": "Hi" } }] }),
+        json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }),
+    ]);
+    let (_, message) = stream_events(glm_fast_model(), body).await;
+    let [AssistantContent::Thinking(thinking), AssistantContent::Text(text)] = &message.content[..]
+    else {
+        panic!("expected thinking then text: {:?}", message.content);
+    };
+    assert_eq!(thinking.thinking, "Think.");
+    assert_eq!(text.text, "Hi");
+}
