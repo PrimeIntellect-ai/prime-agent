@@ -25,14 +25,41 @@ fn assistant_fixture(
 }
 
 struct HeldPlanner {
+    api: String,
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     reply: &'static str,
 }
 
+impl HeldPlanner {
+    /// Registers the planner under an api of its own, so tests running in
+    /// parallel never reach each other's planner, and returns the model
+    /// routed to it. Teardown unregisters by that model's api.
+    fn register(
+        model: &Model,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        reply: &'static str,
+    ) -> Model {
+        let api = pa_ai::faux::random_id("test-held-refinement-host");
+        pa_ai::registry::register_api_provider(
+            Arc::new(HeldPlanner {
+                api: api.clone(),
+                started,
+                release,
+                reply,
+            }),
+            Some(&api),
+        );
+        let mut planner_model = model.clone();
+        planner_model.api = api;
+        planner_model
+    }
+}
+
 impl pa_ai::registry::Provider for HeldPlanner {
-    fn api(&self) -> &'static str {
-        "test-held-refinement-host"
+    fn api(&self) -> &str {
+        &self.api
     }
 
     fn stream(
@@ -194,16 +221,7 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
             Origin::Auto => r#"{"shouldRefine":false,"rationale":"decline"}"#,
             Origin::Slash | Origin::Requested => r#"{"summary":"background note","edits":[]}"#,
         };
-        pa_ai::registry::register_api_provider(
-            Arc::new(HeldPlanner {
-                started: started.clone(),
-                release: release.clone(),
-                reply,
-            }),
-            Some("test-held-refinement-host"),
-        );
-        let mut planner_model = model.clone();
-        planner_model.api = "test-held-refinement-host".to_string();
+        let planner_model = HeldPlanner::register(&model, started.clone(), release.clone(), reply);
         let mut boundary = TurnBoundary::new(false);
         let global_dir = dir.path().join("global-refinement");
         let pending = origin
@@ -242,7 +260,7 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
             pending.await.unwrap().unwrap();
         }
         boundary.wait_for_refinement_reports().await;
-        pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+        pa_ai::registry::unregister_api_providers(&planner_model.api);
     }
 }
 
@@ -266,16 +284,12 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
     engine.session.agent().wait_for_idle().await;
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    pa_ai::registry::register_api_provider(
-        Arc::new(HeldPlanner {
-            started: started.clone(),
-            release: release.clone(),
-            reply: r#"{"summary":"background note","edits":[]}"#,
-        }),
-        Some("test-held-refinement-host"),
+    let planner_model = HeldPlanner::register(
+        &model,
+        started.clone(),
+        release.clone(),
+        r#"{"summary":"background note","edits":[]}"#,
     );
-    let mut planner_model = model.clone();
-    planner_model.api = "test-held-refinement-host".to_string();
     let mut boundary = TurnBoundary::new(false);
     let global_dir = dir.path().join("global-refinement");
     // The last turn's requested refinement: the boundary owns its report.
@@ -299,7 +313,7 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
     let rows = refine_rows(&engine).await;
     assert_eq!(rows.len(), 1, "the durable outcome row landed");
     assert_eq!(rows[0].custom_type, "refinement_outcome");
-    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+    pa_ai::registry::unregister_api_providers(&planner_model.api);
 }
 
 /// The print `/refine` command's pending refinement is tracked by the same
@@ -322,16 +336,12 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
     engine.session.agent().wait_for_idle().await;
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    pa_ai::registry::register_api_provider(
-        Arc::new(HeldPlanner {
-            started: started.clone(),
-            release: release.clone(),
-            reply: r#"{"summary":"background note","edits":[]}"#,
-        }),
-        Some("test-held-refinement-host"),
+    let planner_model = HeldPlanner::register(
+        &model,
+        started.clone(),
+        release.clone(),
+        r#"{"summary":"background note","edits":[]}"#,
     );
-    let mut planner_model = model.clone();
-    planner_model.api = "test-held-refinement-host".to_string();
     let mut boundary = TurnBoundary::new(false);
     let global_dir = dir.path().join("global-refinement");
     let goal = Arc::new(crate::print_goal::PrintGoalSurface::new(false));
@@ -372,7 +382,7 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
     let rows = refine_rows(&engine).await;
     assert_eq!(rows.len(), 1, "the durable outcome row landed");
     assert_eq!(rows[0].custom_type, "refinement_outcome");
-    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+    pa_ai::registry::unregister_api_providers(&planner_model.api);
 }
 
 /// Every print exit path runs the disposal drain: a `/refine` still planning
@@ -411,16 +421,12 @@ async fn a_failed_print_run_still_drains_an_in_flight_refine() {
         })
         .await;
     let release = Arc::new(tokio::sync::Notify::new());
-    pa_ai::registry::register_api_provider(
-        Arc::new(HeldPlanner {
-            started: Arc::new(tokio::sync::Notify::new()),
-            release: release.clone(),
-            reply: r#"{"summary":"background note","edits":[]}"#,
-        }),
-        Some("test-held-refinement-host"),
+    let planner_model = HeldPlanner::register(
+        &model,
+        Arc::new(tokio::sync::Notify::new()),
+        release.clone(),
+        r#"{"summary":"background note","edits":[]}"#,
     );
-    let mut planner_model = model.clone();
-    planner_model.api = "test-held-refinement-host".to_string();
     let options = crate::mode::RunOptions {
         app_mode: crate::mode::AppMode::Print,
         config: crate::mode::RuntimeConfig {
@@ -476,7 +482,7 @@ async fn a_failed_print_run_still_drains_an_in_flight_refine() {
         outcomes, 1,
         "the /refine outcome row landed before the run returned"
     );
-    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+    pa_ai::registry::unregister_api_providers(&planner_model.api);
 }
 
 /// One `refine.status` round trip through the engine's turn-boundary
@@ -512,16 +518,12 @@ async fn refine_status_reports_a_user_refine_in_flight() {
     engine.session.agent().wait_for_idle().await;
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    pa_ai::registry::register_api_provider(
-        Arc::new(HeldPlanner {
-            started: started.clone(),
-            release: release.clone(),
-            reply: r#"{"summary":"background note","edits":[]}"#,
-        }),
-        Some("test-held-refinement-host"),
+    let planner_model = HeldPlanner::register(
+        &model,
+        started.clone(),
+        release.clone(),
+        r#"{"summary":"background note","edits":[]}"#,
     );
-    let mut planner_model = model.clone();
-    planner_model.api = "test-held-refinement-host".to_string();
     let mut boundary = TurnBoundary::new(false);
     let global_dir = dir.path().join("global-refinement");
     let pending = Origin::Slash
@@ -545,7 +547,7 @@ async fn refine_status_reports_a_user_refine_in_flight() {
         status["in_flight"], false,
         "the settled run clears the flight: {status}"
     );
-    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+    pa_ai::registry::unregister_api_providers(&planner_model.api);
 }
 
 /// The background completion reporter replays the rows the commit
@@ -567,16 +569,12 @@ async fn background_completion_replays_the_persisted_refinement_rows() {
     engine.session.agent().wait_for_idle().await;
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    pa_ai::registry::register_api_provider(
-        Arc::new(HeldPlanner {
-            started: started.clone(),
-            release: release.clone(),
-            reply: r#"{"summary":"background note","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#,
-        }),
-        Some("test-held-refinement-host"),
+    let planner_model = HeldPlanner::register(
+        &model,
+        started.clone(),
+        release.clone(),
+        r#"{"summary":"background note","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#,
     );
-    let mut planner_model = model.clone();
-    planner_model.api = "test-held-refinement-host".to_string();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
     let global_dir = dir.path().join("global-refinement");
@@ -624,5 +622,5 @@ async fn background_completion_replays_the_persisted_refinement_rows() {
             "the streamed row must equal the durable transcript row, timestamp included"
         );
     }
-    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+    pa_ai::registry::unregister_api_providers(&planner_model.api);
 }
