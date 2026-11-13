@@ -31,6 +31,8 @@ mod handshake_tests;
 #[cfg(test)]
 mod spawn_record_tests;
 #[cfg(test)]
+mod spend_invariant_tests;
+#[cfg(test)]
 mod tests;
 
 // Read only by this facade's in-file tests; the lib-target import is flagged unused.

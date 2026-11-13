@@ -606,6 +606,25 @@ mod tests {
         );
     }
 
+    /// The parent worker's snapshots of one child: its zero row at spawn,
+    /// then its current total.
+    fn bill_child(parent: &Path, child: &Path) {
+        let mut store = crate::session_store::SessionFile::open(parent).unwrap();
+        let snapshot = |total| pa_types::session::ChildSpendEntry {
+            child_session_id: child.file_stem().unwrap().to_string_lossy().into_owned(),
+            child_session_file: child.to_string_lossy().into_owned(),
+            total,
+        };
+        store
+            .append_child_spend(&snapshot(pa_types::ai::Usage::default()))
+            .unwrap();
+        let total = crate::session_store::read_session_info(child)
+            .unwrap()
+            .totals
+            .total;
+        store.append_child_spend(&snapshot(total)).unwrap();
+    }
+
     /// One session transcript: a user row and an assistant row billing `cost`.
     fn write_session(path: &Path, session_id: &str, cost: f64) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -641,9 +660,8 @@ mod tests {
 
     /// A deleted factory child keeps billing: /context serves it as a
     /// `deleted` row tagged with its run (from the tombstoned ledger edge)
-    /// and split by model (the delete's capture), and the /context grand
-    /// total equals the agents-view session total (own row + live child
-    /// rows + the ledger's deleted-descendant bucket).
+    /// with the spend the parent's `child_spend` rows recorded, and the
+    /// /context grand total equals the root's whole-file total.
     // Exact binary fractions: the two totals must be the same number.
     #[allow(clippy::float_cmp)]
     #[test]
@@ -692,17 +710,15 @@ mod tests {
                 factory: None,
             })
             .unwrap();
-        // The production delete: the tombstone, then the usage amendment.
-        let gone = gone_file.to_string_lossy().to_string();
+        bill_child(&root_file, &live_file);
+        bill_child(&root_file, &gone_file);
         ledger
             .append_delete(
                 "sub-gone",
-                &gone,
+                &gone_file.to_string_lossy(),
                 crate::rlm_ledger::RlmLedgerDeleteReason::User,
             )
             .unwrap();
-        crate::stop_cleanup::append_deleted_child_usage_amendments(&ledger, &gone, "sub-gone")
-            .expect("a deleted child");
 
         let walk = walk_children(&agent_dir, "01a0root-0000", &[], Some(&root_file)).unwrap();
         let live_nodes = walk.live_nodes;
@@ -728,19 +744,6 @@ mod tests {
             "the run tag survives the tombstone"
         );
         assert_eq!(cost(deleted), 0.125);
-        // The delete captured the per-model split, so the /context Cost
-        // breakdown keeps the deleted spend under its model.
-        assert_eq!(
-            deleted["ownUsageByModel"],
-            json!([{
-                "provider": "anthropic",
-                "id": "claude-opus-4-6",
-                "ownUsage": {
-                    "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15,
-                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.125 },
-                },
-            }])
-        );
 
         let root = crate::session_store::SessionFile::open(&root_file).unwrap();
         let (root_own, _) = crate::state_getters::compute_own_and_total_usage(
@@ -749,19 +752,12 @@ mod tests {
         );
         let context_total =
             root_own["cost"]["total"].as_f64().unwrap() + persisted.iter().map(cost).sum::<f64>();
-        let row_cost = |file: &Path| {
-            crate::session_store::read_session_info(file)
-                .and_then(|info| info.usage)
-                .map_or(0.0, |usage| usage.cost)
-        };
-        let root_key = crate::lease::canonical_session_path(&root_file)
-            .to_string_lossy()
-            .to_string();
-        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        let agents_view_total =
-            row_cost(&root_file) + row_cost(&live_file) + bucket[&root_key].cost;
+        let root_total = crate::session_store::read_session_info(&root_file)
+            .unwrap()
+            .totals
+            .total;
         assert_eq!(context_total, 0.875);
-        assert_eq!(context_total, agents_view_total);
+        assert_eq!(context_total, root_total.cost.total.as_f64());
         let _ = std::fs::remove_dir_all(&agent_dir);
     }
 
@@ -787,6 +783,7 @@ mod tests {
                 factory: None,
             })
             .unwrap();
+        bill_child(&parent, &child);
         ledger
             .append_delete(
                 "sub-old",
@@ -794,12 +791,6 @@ mod tests {
                 crate::rlm_ledger::RlmLedgerDeleteReason::User,
             )
             .unwrap();
-        crate::stop_cleanup::append_deleted_child_usage_amendments(
-            &ledger,
-            &child.to_string_lossy(),
-            "sub-old",
-        )
-        .unwrap();
         let stale = json!({"id": "sub-old", "label": "old", "status": "completed",
             "sessionDir": child.parent().unwrap()});
         let walk = walk_children(
@@ -858,6 +849,7 @@ mod tests {
         for (id, cost) in [("first", 0.125), ("second", 0.25)] {
             let child = agent_dir.join(format!("session-artifacts/parent/{id}/{id}.jsonl"));
             write_session(&child, id, cost);
+            bill_child(&parent, &child);
             ledger
                 .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                     child_id: "reused".into(),
@@ -875,12 +867,6 @@ mod tests {
                     crate::rlm_ledger::RlmLedgerDeleteReason::User,
                 )
                 .unwrap();
-            crate::stop_cleanup::append_deleted_child_usage_amendments(
-                &ledger,
-                &child.to_string_lossy(),
-                "reused",
-            )
-            .unwrap();
         }
         let nodes = walk_children(agent_dir, "parent", &[], Some(&parent))
             .unwrap()

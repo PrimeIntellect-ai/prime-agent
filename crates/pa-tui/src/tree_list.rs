@@ -346,6 +346,7 @@ impl TreeList {
                 | FileEntry::ServiceTierChange { .. }
                 | FileEntry::SessionInfo { .. }
                 | FileEntry::ChildUsageAttributed { .. }
+                | FileEntry::ChildSpend { .. }
         );
         let passes = match self.filter_mode {
             FilterMode::UserOnly => {

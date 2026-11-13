@@ -83,8 +83,17 @@ impl Worker {
                 Some(store) => {
                     let branch = store.branch_bridged();
                     let all_entries = store.entries();
-                    let (own_usage, total_usage) =
-                        compute_own_and_total_usage(&branch, all_entries);
+                    let (own_usage, _) = compute_own_and_total_usage(&branch, all_entries);
+                    // The total is the whole-file fold every spend surface reads (a
+                    // windowed store reads the file's resumable scan).
+                    let totals = if store.path.as_os_str().is_empty() {
+                        Some(crate::session_usage::usage_totals_of(all_entries))
+                    } else {
+                        crate::session_store::read_session_info(&store.path).map(|info| info.totals)
+                    };
+                    let total_usage = totals
+                        .and_then(|totals| serde_json::to_value(totals.total).ok())
+                        .unwrap_or_else(empty_usage);
                     let own_usage_by_model = compute_own_usage_by_model(
                         &branch,
                         all_entries,
@@ -286,8 +295,7 @@ impl Worker {
 mod usage;
 
 pub(crate) use usage::{
-    compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, own_usage_by_model_of,
-    worker_model_registry,
+    compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, worker_model_registry,
 };
 
 // The getter battery lives in state_getters::state_getters_tests.

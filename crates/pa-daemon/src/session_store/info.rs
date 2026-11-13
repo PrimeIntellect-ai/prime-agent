@@ -26,13 +26,23 @@ pub struct SessionInfo {
     pub modified: String,
     pub message_count: usize,
     pub first_message: String,
-    /// The own-usage summary — assistant aggregates plus summarization calls,
-    /// minus every attributed child block; `None` when the session recorded no billable work.
+    /// The own-usage summary; `None` when the session recorded no billable work.
     pub usage: Option<crate::session_usage::SessionUsageSummary>,
-    /// The recursive spend of ledger-tombstoned descendants, attached by the
-    /// catalog's listing arm from the spawn ledger. Never set by the file
-    /// scan: ledger-derived, not transcript-derived.
-    pub deleted_descendant_usage: Option<crate::session_usage::SessionUsageSummary>,
+    /// The whole-file own and total spend (total = own + every descendant's).
+    pub totals: crate::session_usage::SessionUsageTotals,
+}
+
+impl SessionInfo {
+    /// A session row's spend fields: `usage` (own) and `totalUsage` (own plus
+    /// every descendant's), each absent when the session recorded no billable work.
+    pub(crate) fn insert_spend(&self, object: &mut serde_json::Map<String, Value>) {
+        if let Some(usage) = &self.usage {
+            object.insert("usage".to_string(), serde_json::json!(usage));
+        }
+        if let Some(total) = crate::session_usage::session_usage_summary_from(&self.totals.total) {
+            object.insert("totalUsage".to_string(), serde_json::json!(total));
+        }
+    }
 }
 
 /// The scan's read-buffer size: one 64 KiB fill reads the typical session in
@@ -365,6 +375,11 @@ pub(super) struct SessionInfoEntry<'a> {
     child_usage: Option<crate::session_usage::ScanUsage>,
     #[serde(default)]
     aggregate_usage: Option<crate::session_usage::ScanUsage>,
+    /// `child_spend`: the child the snapshot measures and its total.
+    #[serde(default, borrow)]
+    child_session_id: Option<Cow<'a, str>>,
+    #[serde(default)]
+    total: Option<crate::session_usage::ScanUsage>,
 }
 
 /// Read a session file's list metadata: unchanged files answer from the cache,
@@ -529,6 +544,7 @@ impl SessionScanState {
             None => &self.acc,
         };
         let usage = acc.usage_scan.summary();
+        let totals = acc.usage_scan.totals();
         let header = acc.header.as_ref()?;
         // The newest user/assistant message timestamp, then the header's
         // creation timestamp, then the file's mtime — never scan time; only
@@ -560,8 +576,7 @@ impl SessionScanState {
                 acc.first_message.clone()
             },
             usage,
-            // Ledger-derived, never the file scan's: the listing arm attaches it from the ledger.
-            deleted_descendant_usage: None,
+            totals,
         })
     }
 }
@@ -647,6 +662,10 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
                 entry.aggregate_usage.map(Usage::from),
             );
         }
+        "child_spend" => acc.usage_scan.fold_child_spend(
+            entry.child_session_id.as_deref(),
+            entry.total.map(Usage::from),
+        ),
         "message" => {
             acc.message_count += 1;
             if let Some(message) = entry.message {

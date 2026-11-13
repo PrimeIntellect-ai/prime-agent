@@ -302,22 +302,26 @@ pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> Subagent
     counts
 }
 
-/// The session's whole-family spend: the `compute_rollups` total the
-/// agents view bills the session's row. `None` when the roster holds no
-/// record for the session.
+/// The session's whole-family spend: its roster row's published
+/// `totalUsage` (own plus every descendant's), the same number the agents
+/// view bills the row. `None` when the roster holds no row for the session.
 pub(crate) fn family_cost(roster: &[Value], session: &SessionIdentity) -> Option<f64> {
-    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[], None);
-    let rollups = crate::agents_view_forest::compute_rollups(&records);
     let keys = session.keys();
-    records
+    roster
         .iter()
-        .find(|record| {
-            summary_identity_keys(&crate::agents_view_state::summary_for_record(record))
+        .filter_map(|entry| entry.get("summary"))
+        .find(|summary| {
+            summary_identity_keys(summary)
                 .iter()
                 .any(|key| keys.contains(key))
         })
-        .and_then(|record| rollups.get(&record.identity))
-        .map(|rollup| rollup.cost)
+        .map(|summary| {
+            summary
+                .get("totalUsage")
+                .and_then(|usage| usage.get("cost"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        })
 }
 
 #[cfg(test)]
@@ -409,8 +413,8 @@ mod tests {
     }
 
     #[test]
-    fn family_cost_is_the_agents_view_row_rollup() {
-        let summary = |id: &str, depth: u32, usage_cost: f64| {
+    fn family_cost_is_the_rows_published_total() {
+        let summary = |id: &str, depth: u32, usage_cost: f64, total_cost: f64| {
             json!({
                 "sessionId": id,
                 "lifecycle": "live",
@@ -419,17 +423,18 @@ mod tests {
                 "runtimeKind": "top-level",
                 "rlmDepth": depth,
                 "usage": { "cost": usage_cost },
+                "totalUsage": { "cost": total_cost },
             })
         };
-        let root = summary("root", 0, 1.75);
-        let mut child = summary("child", 1, 0.30);
+        let root = summary("root", 0, 1.75, 2.30);
+        let mut child = summary("child", 1, 0.30, 0.55);
         child["runtimeKind"] = json!("subagent");
         child["rlmChildId"] = json!("child-a");
         child["parentActiveSessionId"] = json!("root-live");
         child["parentSessionId"] = json!("root");
         // The grandchild links by its durable session id alone (its
         // parent is no longer live), the shape a ledger-seeded row has.
-        let mut grandchild = summary("grand", 2, 0.25);
+        let mut grandchild = summary("grand", 2, 0.25, 0.25);
         grandchild["runtimeKind"] = json!("subagent");
         grandchild["rlmChildId"] = json!("child-b");
         grandchild["parentSessionId"] = json!("child");
@@ -467,6 +472,8 @@ mod tests {
             Some(row.cost),
             "the title and the agents-view row agree"
         );
+        // The total never depends on which descendant rows the roster holds.
+        assert_eq!(family_cost(&roster[..1], &identity), Some(2.30));
         assert_eq!(
             family_cost(
                 &roster,

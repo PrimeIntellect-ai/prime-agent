@@ -501,9 +501,6 @@ pub struct RlmHostBridge {
     /// Fires on every accepted note; `None` keeps the store the only surface.
     note_emit: Option<RlmProgressNoteEmit>,
     host: Arc<dyn RlmSubagentHost>,
-    /// The child-usage attribution producer `rlm.spawn` registers into
-    /// and the daemon's child observation drives.
-    pub usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
     /// The spawn anchor [`register_run`] reads the in-flight turn from
     /// (`None` until the engine built the session's agent).
     pub(crate) semantic_spawn: std::sync::OnceLock<SemanticSpawnAnchor>,
@@ -516,7 +513,6 @@ impl RlmHostBridge {
     pub fn new(
         registry: Arc<ModelRegistry>,
         host: Arc<dyn RlmSubagentHost>,
-        usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
         note_emit: Option<RlmProgressNoteEmit>,
     ) -> Self {
         Self {
@@ -524,7 +520,6 @@ impl RlmHostBridge {
             notes: Arc::new(RlmProgressNotes::default()),
             note_emit,
             host,
-            usage,
             semantic_spawn: std::sync::OnceLock::new(),
         }
     }
@@ -656,11 +651,6 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                     None => None,
                 };
                 let handle = bridge.host.spawn(request).await?;
-                // TS `_findLastAssistantMessage` at spawn: the spawning
-                // assistant row (persisted at `message_end` before tool
-                // execution) is the target every child-usage attribution
-                // folds into.
-                bridge.usage.register_spawn(&handle.rlm_child_id).await;
                 serde_json::to_value(&handle).map_err(anyhow::Error::new)
             })
         }),

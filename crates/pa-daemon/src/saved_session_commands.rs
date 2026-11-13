@@ -164,14 +164,15 @@ pub(crate) fn ledger_rename_by_child_path(
 }
 
 /// The pre-delete capture (phase 1 — the reads need the file ALIVE):
-/// `TopLevel` never tombstones; a child carries its whole-file own usage
-/// (absent when no billable work — the tombstone still lands bare).
+/// `TopLevel` never tombstones; a child carries its total spend, which its
+/// parent's last `child_spend` snapshot reads once the file is gone (absent
+/// when unreadable — the tombstone still lands bare).
 pub(crate) enum SavedDeleteCapture {
     TopLevel,
     Child {
-        usage: Option<crate::session_usage::SessionUsageSummary>,
-        /// `usage` split by model (`None` when it does not reconcile).
-        by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
+        total: Option<pa_types::ai::Usage>,
+        /// The parent transcript whose worker records the final snapshot.
+        parent_session_path: Option<String>,
         /// The canonical session key captured while the file still existed:
         /// a symlink delete unlinks the LINK, so the tombstone uses the pre-unlink key.
         canonical_path: String,
@@ -203,17 +204,12 @@ pub(crate) fn capture_saved_session_delete(
     if positively_top_level {
         return SavedDeleteCapture::TopLevel;
     }
-    let usage = if regular {
-        crate::session_usage::read_own_usage_summary(Path::new(session_path))
-    } else {
-        None
-    };
-    let by_model = usage.as_ref().and_then(|usage| {
-        crate::state_getters::own_usage_by_model_of(Path::new(session_path), usage)
-    });
     SavedDeleteCapture::Child {
-        usage,
-        by_model,
+        total: regular
+            .then(|| crate::session_usage::read_session_usage(Path::new(session_path)))
+            .flatten()
+            .map(|totals| totals.total),
+        parent_session_path: deleted_info.and_then(|info| info.parent_session_path),
         canonical_path,
     }
 }
@@ -226,24 +222,23 @@ pub(crate) fn tombstone_saved_session_delete_captured(
     capture: &SavedDeleteCapture,
 ) -> usize {
     let SavedDeleteCapture::Child {
-        usage,
-        by_model,
+        total,
         canonical_path,
+        ..
     } = capture
     else {
         return 0;
     };
     let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
-    match ledger.tombstone_child_path_with_usage(
+    match ledger.tombstone_child_path_with_total(
         canonical_path,
         crate::rlm_ledger::RlmLedgerDeleteReason::User,
-        usage.as_ref(),
-        by_model.as_deref(),
+        total.as_ref(),
     ) {
         // The returned edges are the pre-append replay state: every
-        // matching edge received the snapshot when one was captured.
+        // matching edge received the total when one was captured.
         Ok(edges) => {
-            if usage.is_some() {
+            if total.is_some() {
                 edges.len()
             } else {
                 0
@@ -670,13 +665,17 @@ impl Supervisor {
             // session can never rebind again. `canonical` was resolved while
             // the file still existed - the same key the table stores.
             self.session_bindings.forget_file(&canonical);
-            // The tombstone above changed the ledger, whether or not the
-            // deleted session had a roster row (a subagent of a stopped
-            // parent has none - its only row was the saved listing's):
-            // every successful delete refreshes the bucket, and only the
-            // row removal stays conditional. The refreshed rows and the
-            // removal ship in one push.
-            let changed = self.refresh_deleted_descendant_usage().await;
+            // A resident parent records the deleted child's final snapshot
+            // now (from the tombstone's total); a passive one at its wake.
+            if let SavedDeleteCapture::Child {
+                parent_session_path: Some(parent),
+                canonical_path,
+                ..
+            } = &capture
+            {
+                self.notify_child_spend_changed(parent, canonical_path)
+                    .await;
+            }
             let removed_ids = match roster_entry {
                 Some(entry) => {
                     let agent_id = entry.agent_id;
@@ -688,7 +687,7 @@ impl Supervisor {
                 }
                 None => Vec::new(),
             };
-            self.push_roster_update(changed, removed_ids);
+            self.push_roster_update(Vec::new(), removed_ids);
         }
         (
             vec![response_line(&response_success(
@@ -1004,10 +1003,10 @@ mod tombstone_usage_tests {
         path
     }
 
-    /// The deleted-descendant bucket still bills the parent after the
-    /// transcript is gone (the Rust-side instance of TS #2506's Macroscope race).
+    /// The tombstone carries the child's total, read while the transcript is
+    /// alive: the parent's final snapshot reads it once the file is gone.
     #[test]
-    fn saved_session_delete_captures_usage_before_the_unlink() {
+    fn saved_session_delete_captures_the_total_before_the_unlink() {
         let root = temp_dir("capture");
         let agent_dir = root.join("agent");
         let sessions_dir = agent_dir.join("sessions");
@@ -1032,25 +1031,13 @@ mod tombstone_usage_tests {
             &child.to_string_lossy(),
             Some("subagent"),
         );
-        assert_eq!(captured, 1, "the one edge received the snapshot");
+        assert_eq!(captured, 1, "the one edge received the total");
         let edges = ledger.edges(true).unwrap();
         assert_eq!(edges.len(), 1);
-        let snapshot = edges[0]
-            .deleted_usage
-            .clone()
-            .expect("the snapshot rides the tombstone");
-        assert!((snapshot.cost - 0.4).abs() < 1e-9);
-        // The file goes (the trash/unlink below the tombstone): the bucket
-        // survives the removal - the snapshot is the source, not the file.
-        std::fs::remove_file(&child).unwrap();
-        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        let parent_key = crate::lease::canonical_session_path(&parent)
-            .to_string_lossy()
-            .to_string();
-        assert!(
-            (bucket[&parent_key].cost - 0.4).abs() < 1e-9,
-            "the spend survives the transcript's removal"
-        );
+        let total = edges[0]
+            .deleted_total
+            .expect("the total rides the tombstone");
+        assert!((total.cost.total.as_f64() - 0.4).abs() < 1e-9);
     }
 
     #[test]
@@ -1118,8 +1105,8 @@ mod tombstone_usage_tests {
             "the edge is tombstoned, not left live"
         );
         assert!(
-            edges[0].deleted_usage.is_some(),
-            "the captured usage rode the tombstone"
+            edges[0].deleted_total.is_some(),
+            "the captured total rode the tombstone"
         );
     }
 
@@ -1153,13 +1140,13 @@ mod tombstone_usage_tests {
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);
         match &capture {
             SavedDeleteCapture::Child {
-                usage,
+                total,
                 canonical_path,
                 ..
             } => {
                 assert!(
-                    usage.is_none(),
-                    "a non-regular path captures no usage (no blocking read)"
+                    total.is_none(),
+                    "a non-regular path captures no total (no blocking read)"
                 );
                 assert_eq!(canonical_path, &fifo.to_string_lossy());
             }
@@ -1168,7 +1155,7 @@ mod tombstone_usage_tests {
             }
         }
         let captured = tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
-        assert_eq!(captured, 0, "no usage snapshot to carry");
+        assert_eq!(captured, 0, "no total to carry");
         let edges = ledger.edges(true).unwrap();
         assert_eq!(
             edges[0].deleted,

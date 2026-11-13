@@ -168,67 +168,10 @@ pub(crate) fn finalize_archived_stop(
     (cancelled, cancel_error.or(archive_error))
 }
 
-/// The kill route's deleted-child finalize (the `rlmLedgerDelete` marker):
-/// the `rlmChildId` whose ledger tombstone was persisted before the kill —
-/// it narrows a raced path to the exact edge the tombstone recorded.
-pub(crate) struct DeletedChild {
-    pub child_id: String,
-}
-
-/// The capture core: every tombstoned edge at the child's session path receives the
-/// amendment delete record carrying the transcript's own-usage snapshot (read
-/// post-settlement — the kill reply is the flush barrier). `None` when not a deleted child.
-pub(crate) fn append_deleted_child_usage_amendments(
-    ledger: &RlmSpawnLedger,
-    session_file: &str,
-    child_id: &str,
-) -> Option<usize> {
-    let path = canonical_session_path(Path::new(session_file));
-    let edges = ledger.edges(true).ok()?;
-    let mut tombstoned = Vec::new();
-    for edge in edges {
-        let edge_deleted = edge.deleted.is_some();
-        let edge_at_path = canonical_session_path(Path::new(&edge.child)) == path;
-        let edge_named = child_id.is_empty() || edge.child_id == child_id;
-        if edge_deleted && edge_at_path && edge_named {
-            tombstoned.push(edge);
-        }
-    }
-    if tombstoned.is_empty() {
-        // Not a deleted child: nothing to capture, no sweep to arm.
-        return None;
-    }
-    let summary = crate::session_usage::read_session_usage(&path)
-        .and_then(|totals| crate::session_usage::session_usage_summary_from(&totals.own));
-    let by_model = summary
-        .as_ref()
-        .and_then(|summary| crate::state_getters::own_usage_by_model_of(&path, summary));
-    let mut captured = 0usize;
-    for edge in &tombstoned {
-        let Some(reason) = edge.deleted else {
-            continue;
-        };
-        let Some(summary) = &summary else {
-            // No billable work: a zero snapshot adds nothing - skip the
-            // amendment (the bucket reads zero either way).
-            continue;
-        };
-        if ledger
-            .append_delete_with_usage(
-                &edge.child_id,
-                &edge.child,
-                reason,
-                summary,
-                by_model.as_deref(),
-            )
-            .is_err()
-        {
-            continue;
-        }
-        captured += 1;
-    }
-    Some(captured)
-}
+/// The kill route's deleted-child finalize (the `rlmLedgerDelete` marker): the
+/// ledger tombstone was persisted before the kill, so the stop sweeps the
+/// child's artifacts.
+pub(crate) struct DeletedChild;
 
 impl Supervisor {
     /// The registry's live coverage set: every resident worker's session file,
@@ -349,27 +292,16 @@ impl Supervisor {
             }
         };
         match deleted_child {
-            Some(deleted) => {
-                // The durable usage capture: the kill reply was the flush barrier, so the
-                // frozen transcript holds the child's final own spend. Capture it BEFORE
-                // the sweep; a failed capture never fails the stop.
-                self.capture_deleted_child_usage(
-                    &root_session_file,
-                    &deleted.child_id,
-                    "rlm_delete",
-                )
-                .await;
+            Some(_) => {
                 crate::saved_session_commands::remove_session_artifacts(Path::new(
                     &root_session_file,
                 ));
             }
             None => {
                 // The adoption finalize (an interrupted stop re-runs here): a crash
-                // between the ledger tombstone and this sweep leaves the capture undone;
-                // the durable tombstone reconstructs the delete — the capture and sweep finish.
-                if let Some(child_id) = self.tombstoned_child_at(&root_session_file).await {
-                    self.capture_deleted_child_usage(&root_session_file, &child_id, "adoption")
-                        .await;
+                // between the ledger tombstone and this sweep leaves the sweep undone;
+                // the durable tombstone reconstructs the delete and the sweep finishes.
+                if self.tombstoned_child_at(&root_session_file).await.is_some() {
                     crate::saved_session_commands::remove_session_artifacts(Path::new(
                         &root_session_file,
                     ));
@@ -393,31 +325,6 @@ impl Supervisor {
                     && crate::lease::canonical_session_path(Path::new(&edge.child)) == path
             })
             .map(|edge| edge.child_id.clone())
-    }
-
-    /// The deleted child's durable usage capture: read the frozen transcript's own usage
-    /// and append the amendment delete record carrying the snapshot (the spend survives
-    /// the transcript's removal). Best effort — a failure logs and leaves the lazy fallback.
-    pub(crate) async fn capture_deleted_child_usage(
-        self: &Arc<Self>,
-        session_file: &str,
-        child_id: &str,
-        source: &'static str,
-    ) {
-        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
-            self.log_line("deleted-child capture: could not resolve the spawn ledger");
-            return;
-        };
-        // The capture reads and JSON-parses the whole frozen transcript — blocking work
-        // that must not stall an async runtime worker, so it runs on the blocking executor.
-        let session_file = session_file.to_string();
-        let child_id = child_id.to_string();
-        let captured = tokio::task::spawn_blocking(move || {
-            append_deleted_child_usage_amendments(&ledger, &session_file, &child_id)
-        })
-        .await
-        .unwrap_or(None);
-        self.note_deleted_child_usage_captured(source, captured.unwrap_or(0));
     }
 
     /// The ephemeral stop's schedule cancel: a client-owned worker's schedules die with
@@ -465,7 +372,6 @@ mod tests {
     use super::*;
     use crate::session_store::{session_file_name, SessionFile};
     use pa_core::cron::AgentCronJob;
-    use std::io::Write;
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir()
@@ -615,237 +521,5 @@ mod tests {
             read_job(&root_file, &root_id).status,
             pa_core::cron::JobStatus::Active
         );
-    }
-
-    #[test]
-    fn capture_reads_the_frozen_transcript_before_any_sweep() {
-        let root = temp_dir();
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let (_, parent_file) = write_session(&sessions_dir, Some("orchestrator"));
-        let (_, child_file) = write_session(&sessions_dir, Some("lane"));
-        let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        ledger
-            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
-                child_id: "sub-1".to_string(),
-                parent: parent_file.to_string_lossy().to_string(),
-                child: child_file.to_string_lossy().to_string(),
-                depth: 1,
-                name: "lane".to_string(),
-                factory: None,
-            })
-            .unwrap();
-        // The tombstone lands before the kill (the revival window); the
-        // capture only runs after the kill reply settles the file.
-        ledger
-            .append_delete(
-                "sub-1",
-                &child_file.to_string_lossy(),
-                crate::rlm_ledger::RlmLedgerDeleteReason::User,
-            )
-            .unwrap();
-        // A killed-mid-turn child: an aborted assistant row with partial
-        // usage is already durable (the kill reply was the barrier).
-        let usage_row = serde_json::json!({
-            "type": "message", "id": "m-aborted",
-            "message": {
-                "role": "assistant",
-                "stopReason": "aborted",
-                "usage": {
-                    "input": 4_000, "output": 400, "cacheRead": 0, "cacheWrite": 0,
-                    "totalTokens": 4_400,
-                    "cost": { "input": 0.05, "output": 0.01, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.06 }
-                }
-            }
-        });
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&child_file)
-                .unwrap();
-            writeln!(file, "{usage_row}").unwrap();
-        }
-        let captured =
-            append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1");
-        assert_eq!(captured, Some(1), "the one tombstoned edge is amended");
-        let edges = ledger.edges(true).unwrap();
-        assert_eq!(edges.len(), 1);
-        let snapshot = edges[0]
-            .deleted_usage
-            .clone()
-            .expect("the snapshot rides the edge");
-        assert!((snapshot.cost - 0.06).abs() < 1e-9);
-        // A transcript directly in the sessions dir keeps its catalog
-        // row, so the bucket skips it (the rollup sums the row AND the
-        // parent bucket; billing both would double the spend).
-        let live_bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        let parent_key = canonical_session_path(&parent_file)
-            .to_string_lossy()
-            .to_string();
-        assert!(
-            !live_bucket.contains_key(&parent_key),
-            "a live transcript's spend rides its own row, not the bucket"
-        );
-        // The sweep never ran: the transcript is the lazy fallback's copy.
-        assert!(child_file.is_file());
-        // The transcript dies (the sweep or a later delete): the bucket's
-        // snapshot is now the only carrier — the spend survives.
-        std::fs::remove_file(&child_file).unwrap();
-        ledger
-            .append_delete(
-                "sub-1",
-                &child_file.to_string_lossy(),
-                crate::rlm_ledger::RlmLedgerDeleteReason::User,
-            )
-            .unwrap();
-        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        assert!((bucket[&parent_key].cost - 0.06).abs() < 1e-9);
-    }
-
-    /// The snapshot is OWN usage: the bucket's post-order fold re-adds the grandchild's
-    /// own snapshot, and an aggregate would double count it.
-    #[test]
-    fn capture_is_own_only_never_the_attribution_aggregate() {
-        let root = temp_dir();
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let (_, parent_file) = write_session(&sessions_dir, None);
-        let (_, child_file) = write_session(&sessions_dir, None);
-        let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        ledger
-            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
-                child_id: "sub-1".to_string(),
-                parent: parent_file.to_string_lossy().to_string(),
-                child: child_file.to_string_lossy().to_string(),
-                depth: 1,
-                name: "lane".to_string(),
-                factory: None,
-            })
-            .unwrap();
-        ledger
-            .append_delete(
-                "sub-1",
-                &child_file.to_string_lossy(),
-                crate::rlm_ledger::RlmLedgerDeleteReason::User,
-            )
-            .unwrap();
-        let usage_block = |total: f64| {
-            serde_json::json!({
-                "input": 1_000, "output": 100, "cacheRead": 0, "cacheWrite": 0,
-                "totalTokens": 1_100,
-                "cost": { "input": total, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": total }
-            })
-        };
-        // The child's own row (0.40) + the grandchild's attribution folded
-        // onto it (childUsage 0.10, aggregate 0.50).
-        let rows = [
-            serde_json::json!({
-                "type": "message", "id": "m1",
-                "message": { "role": "assistant", "usage": usage_block(0.40) }
-            }),
-            serde_json::json!({
-                "type": "child_usage_attributed", "targetId": "m1",
-                "childUsage": usage_block(0.10), "aggregateUsage": usage_block(0.50)
-            }),
-        ];
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&child_file)
-                .unwrap();
-            for row in rows {
-                writeln!(file, "{row}").unwrap();
-            }
-        }
-        let totals = crate::session_usage::read_session_usage(&child_file).unwrap();
-        assert!(
-            (totals.total.cost.total.as_f64() - 0.50).abs() < 1e-9,
-            "the file's fold"
-        );
-        assert!(
-            (totals.own.cost.total.as_f64() - 0.40).abs() < 1e-9,
-            "the own read"
-        );
-        append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1")
-            .unwrap();
-        let snapshot = ledger.edges(true).unwrap()[0]
-            .deleted_usage
-            .clone()
-            .expect("captured");
-        assert!(
-            (snapshot.cost - 0.40).abs() < 1e-9,
-            "own-only snapshot (0.40), never the aggregate (0.50): got {}",
-            snapshot.cost
-        );
-    }
-
-    #[test]
-    fn capture_skips_live_children_and_plain_kills() {
-        let root = temp_dir();
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let (_, parent_file) = write_session(&sessions_dir, None);
-        let (_, child_file) = write_session(&sessions_dir, None);
-        let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        ledger
-            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
-                child_id: "sub-1".to_string(),
-                parent: parent_file.to_string_lossy().to_string(),
-                child: child_file.to_string_lossy().to_string(),
-                depth: 1,
-                name: "lane".to_string(),
-                factory: None,
-            })
-            .unwrap();
-        // Still live: no capture (kill-failure retryability — the child
-        // keeps its transcript, its row, and its retryability).
-        assert_eq!(
-            append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1"),
-            None
-        );
-        // A path the ledger never knew: nothing to capture.
-        assert_eq!(
-            append_deleted_child_usage_amendments(&ledger, "/nowhere/x.jsonl", ""),
-            None
-        );
-    }
-
-    #[test]
-    fn capture_with_no_child_id_amends_every_tombstoned_edge() {
-        let root = temp_dir();
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let (_, parent_file) = write_session(&sessions_dir, None);
-        let (_, child_file) = write_session(&sessions_dir, None);
-        let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        for child_id in ["sub-1", "sub-2"] {
-            ledger
-                .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
-                    child_id: child_id.to_string(),
-                    parent: parent_file.to_string_lossy().to_string(),
-                    child: child_file.to_string_lossy().to_string(),
-                    depth: 1,
-                    name: "lane".to_string(),
-                    factory: None,
-                })
-                .unwrap();
-            ledger
-                .append_delete(
-                    child_id,
-                    &child_file.to_string_lossy(),
-                    crate::rlm_ledger::RlmLedgerDeleteReason::User,
-                )
-                .unwrap();
-        }
-        let captured =
-            append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "");
-        assert_eq!(captured, Some(0), "no billable usage: no amendment");
-        for edge in ledger.edges(true).unwrap() {
-            assert_eq!(edge.deleted_usage, None);
-        }
     }
 }

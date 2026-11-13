@@ -34,7 +34,7 @@ mod replay;
 
 use replay::{
     canonicalize_dir, edge_key, file_identity, is_file, parse_ledger_line, sole_edge_by_child_id,
-    DeletedBucket, LedgerRecord, LivePathResolver, ReplaySnapshot, ReplayState,
+    LedgerRecord, LivePathResolver, ReplaySnapshot, ReplayState,
 };
 
 mod legacy_registry;
@@ -95,13 +95,10 @@ pub struct RlmLedgerEdge {
     pub depth: u32,
     pub name: String,
     pub deleted: Option<RlmLedgerDeleteReason>,
-    /// The child's captured own usage at deletion, so a tombstoned child's
-    /// spend stays billable; `None` on legacy tombstones and live edges.
-    pub deleted_usage: Option<crate::session_usage::SessionUsageSummary>,
-    /// The captured usage's per-model split (`None` on snapshots written
-    /// before the split was captured, or when the transcript's models did
-    /// not reconcile with the snapshot).
-    pub deleted_usage_by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
+    /// The child's total spend captured right before a delete that removes
+    /// its transcript: the parent's last `child_spend` snapshot reads it when
+    /// the file is gone. `None` on live edges and deletes that keep the file.
+    pub deleted_total: Option<pa_types::ai::Usage>,
     /// The factory run that spawned the child (spawn records written
     /// before the tag existed read `None`); it survives the tombstone.
     pub factory: Option<RlmFactoryTag>,
@@ -116,68 +113,6 @@ pub struct RlmSpawnInput {
     pub depth: u32,
     pub name: String,
     pub factory: Option<RlmFactoryTag>,
-}
-
-/// One billable tombstoned child (the deleted-spend fold's unit): its
-/// edge identity and its spend with its tombstoned descendants folded in.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeletedChildUsage {
-    pub child_id: String,
-    /// Canonical file identity: child ids may be reused for another file.
-    pub child_file: String,
-    pub name: String,
-    pub factory: Option<RlmFactoryTag>,
-    pub usage: crate::session_usage::SessionUsageSummary,
-    /// `usage` split by model; `None` when any folded path has no split
-    /// (a snapshot captured before the split existed).
-    pub by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
-}
-
-/// The billable deleted children keyed by the parent's canonical session path.
-pub type DeletedChildrenByParent = HashMap<String, Vec<DeletedChildUsage>>;
-
-fn zero_usage() -> crate::session_usage::SessionUsageSummary {
-    crate::session_usage::SessionUsageSummary {
-        input_tokens: 0,
-        output_tokens: 0,
-        cost: 0.0,
-    }
-}
-
-/// Saturating: the fold feeds billable rollups - a huge snapshot must not
-/// panic or wrap to an underbill in release.
-fn add_usage(
-    mut left: crate::session_usage::SessionUsageSummary,
-    right: &crate::session_usage::SessionUsageSummary,
-) -> crate::session_usage::SessionUsageSummary {
-    left.input_tokens = left.input_tokens.saturating_add(right.input_tokens);
-    left.output_tokens = left.output_tokens.saturating_add(right.output_tokens);
-    left.cost += right.cost;
-    left
-}
-
-/// Merge two per-model splits; an unsplit side leaves the sum unsplit.
-fn add_usage_by_model(
-    left: Option<Vec<crate::session_usage::ModelUsageSummary>>,
-    right: Option<&Vec<crate::session_usage::ModelUsageSummary>>,
-) -> Option<Vec<crate::session_usage::ModelUsageSummary>> {
-    let (mut left, right) = (left?, right?);
-    for model in right {
-        match left
-            .iter_mut()
-            .find(|existing| existing.provider == model.provider && existing.id == model.id)
-        {
-            Some(existing) => {
-                existing.input = existing.input.saturating_add(model.input);
-                existing.output = existing.output.saturating_add(model.output);
-                existing.cache_read = existing.cache_read.saturating_add(model.cache_read);
-                existing.cache_write = existing.cache_write.saturating_add(model.cache_write);
-                existing.cost += model.cost;
-            }
-            None => left.push(model.clone()),
-        }
-    }
-    Some(left)
 }
 
 /// The per-sessions-dir spawn ledger. Reads are guarded by a file stat snapshot; a missing ledger
@@ -250,8 +185,7 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                     depth,
                     name,
                     deleted: None,
-                    deleted_usage: None,
-                    deleted_usage_by_model: None,
+                    deleted_total: None,
                     factory,
                 };
                 if let Some(at) = state.index.get(&key).copied() {
@@ -277,8 +211,7 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                 child_id,
                 child,
                 reason,
-                usage,
-                usage_by_model,
+                total,
             } if keep(&child_id) => {
                 let key = edge_key(&child_id, &child);
                 let at = match state.index.get(&key).copied() {
@@ -287,11 +220,10 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                 };
                 if let Some(at) = at {
                     state.edges[at].deleted = Some(reason);
-                    // The snapshot is sticky: a re-tombstone without a usage
-                    // block never clears it; a fresh capture replaces it.
-                    if let Some(usage) = usage {
-                        state.edges[at].deleted_usage = Some(usage);
-                        state.edges[at].deleted_usage_by_model = usage_by_model;
+                    // The capture is sticky: a re-tombstone without a total
+                    // never clears it; a fresh capture replaces it.
+                    if total.is_some() {
+                        state.edges[at].deleted_total = total;
                     }
                 }
             }
@@ -461,39 +393,20 @@ impl RlmSpawnLedger {
         }))
     }
 
-    /// The deletion's durable usage amendment (deliberate TS divergence: TS re-reads the
-    /// tombstoned transcript, which its delete removes): the captured usage rides a second record.
+    /// The tombstone of a delete that removes the child's transcript: it
+    /// carries the child's captured total spend, the only record of it left.
     ///
     /// # Errors
     ///
-    /// Returns an error when the snapshot cannot be serialized or the tombstone cannot be appended.
-    pub fn append_delete_with_usage(
+    /// Returns an error when the total cannot be serialized or the tombstone cannot be appended.
+    pub fn append_delete_with_total(
         &self,
         child_id: &str,
         child: &str,
         reason: RlmLedgerDeleteReason,
-        usage: &crate::session_usage::SessionUsageSummary,
-        by_model: Option<&[crate::session_usage::ModelUsageSummary]>,
+        total: &pa_types::ai::Usage,
     ) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
-        // The writer never records what the reader refuses: replay
-        // rejects a negative or NaN usage cost outright, which would
-        // drop the whole tombstone record. That includes negative
-        // zero - `is_sign_negative()` is how replay reads it, and
-        // `>= 0.0` alone would have passed `-0.0` through. A session
-        // file may carry such a cost (the file's own summary read
-        // preserves it), so a snapshot the reader would reject rides as
-        // absent - the tombstone still lands bare (the historical-gap
-        // zero).
-        if !usage.cost.is_finite() || usage.cost.is_sign_negative() {
-            return self.append_delete(child_id, child, reason);
-        }
-        let mut usage = serde_json::to_value(usage)
-            .with_context(|| "serialize the deleted child usage snapshot")?;
-        // Optional: old readers skip the unknown field (no version bump).
-        if let Some(by_model) = by_model {
-            usage["byModel"] = json!(by_model);
-        }
         self.append_record(&json!({
             "v": 1,
             "op": "delete",
@@ -501,7 +414,7 @@ impl RlmSpawnLedger {
             "childId": child_id,
             "child": child_path.to_string_lossy(),
             "reason": reason.wire_name(),
-            "usage": usage,
+            "total": total,
         }))
     }
 
@@ -516,21 +429,20 @@ impl RlmSpawnLedger {
         child: &str,
         reason: RlmLedgerDeleteReason,
     ) -> Result<Vec<RlmLedgerEdge>> {
-        self.tombstone_child_path_with_usage(child, reason, None, None)
+        self.tombstone_child_path_with_total(child, reason, None)
     }
 
-    /// The saved-session delete's tombstone with the captured usage snapshot (the file dies right
-    /// after this, so the bucket's lazy file fallback has nothing to read).
+    /// The saved-session delete's tombstone with the captured total spend (the file dies right
+    /// after this, so the parent's last snapshot has nothing else to read).
     ///
     /// # Errors
     ///
     /// Returns an error when the replay fails or a per-edge tombstone cannot be appended.
-    pub fn tombstone_child_path_with_usage(
+    pub fn tombstone_child_path_with_total(
         &self,
         child: &str,
         reason: RlmLedgerDeleteReason,
-        usage: Option<&crate::session_usage::SessionUsageSummary>,
-        by_model: Option<&[crate::session_usage::ModelUsageSummary]>,
+        total: Option<&pa_types::ai::Usage>,
     ) -> Result<Vec<RlmLedgerEdge>> {
         let target = canonical_session_path(Path::new(child));
         let state = self.replay_cached()?;
@@ -541,108 +453,14 @@ impl RlmSpawnLedger {
             .cloned()
             .collect();
         for edge in &matching {
-            match usage {
-                Some(usage) => {
-                    self.append_delete_with_usage(
-                        &edge.child_id,
-                        &edge.child,
-                        reason,
-                        usage,
-                        by_model,
-                    )?;
+            match total {
+                Some(total) => {
+                    self.append_delete_with_total(&edge.child_id, &edge.child, reason, total)?;
                 }
                 None => self.append_delete(&edge.child_id, &edge.child, reason)?,
             }
         }
         Ok(matching)
-    }
-
-    /// Recursive spend of tombstoned descendants keyed by the parent's
-    /// canonical session path (TS `deletedDescendantUsageByParent`, the
-    /// agents-view cost rollup's bucket): the sum of the parent's
-    /// [`Self::deleted_children_of`] entries, so every surface that
-    /// bills deleted subagents reads one fold.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the ledger replay fails (an oversized
-    /// ledger) or a prior panic poisoned the deleted-usage cache.
-    pub fn deleted_descendant_usage_by_parent(
-        &self,
-    ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
-        self.seed_once()?;
-        let state = self.replay_cached()?;
-        Ok(self
-            .deleted_children_of(&state)?
-            .into_iter()
-            .map(|(parent, children)| {
-                let total = children
-                    .iter()
-                    .fold(zero_usage(), |total, child| add_usage(total, &child.usage));
-                (parent, total)
-            })
-            .collect())
-    }
-
-    /// Every edge (tombstones included) and the billable deleted children
-    /// ([`Self::deleted_children_of`]) from ONE replay snapshot, so a delete
-    /// appended mid-read cannot both keep a transcript row and add its
-    /// deleted row.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the ledger replay fails (an oversized
-    /// ledger) or a prior panic poisoned the deleted-usage cache.
-    pub fn edges_with_deleted_children(
-        &self,
-    ) -> Result<(Vec<RlmLedgerEdge>, DeletedChildrenByParent)> {
-        self.seed_once()?;
-        let state = self.replay_cached()?;
-        Ok((state.edges.clone(), self.deleted_children_of(&state)?))
-    }
-
-    /// The billable tombstoned children keyed by the parent's canonical
-    /// session path, each with its folded spend: a deleted subagent keeps
-    /// no row anywhere, so nothing re-adds its spend once the tombstone
-    /// drops its row - this folds the captured spend back per family so
-    /// cost surfaces bill it to the parent that spent it. Live paths never
-    /// contribute (their own rows carry their spend); a tombstoned path
-    /// that still has a catalog row bills through that row instead (see
-    /// the skip in the fold); the first tombstoned edge claims a path (a
-    /// raced ledger must not bill one child to two parents); a child's
-    /// entry folds its tombstoned descendants in (an iterative post-order
-    /// walk: a pathological chain must not overflow the stack), reading
-    /// each tombstoned child's captured own usage first and falling back
-    /// to the transcript's own-usage fold (the resumable
-    /// `read_session_info` scan) for legacy tombstones that predate the
-    /// capture - a path with neither a snapshot nor a readable transcript
-    /// is the documented historical gap (no fabricated backfill: zero,
-    /// and a zero entry is dropped).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a deleted child's file cannot be stat'ed or a
-    /// prior panic poisoned the deleted-usage cache.
-    fn deleted_children_of(&self, state: &ReplayState) -> Result<DeletedChildrenByParent> {
-        let inputs = state
-            .edges
-            .iter()
-            .filter(|edge| edge.deleted.is_some())
-            .map(|edge| file_identity(Path::new(&edge.child)))
-            .collect::<Result<Vec<_>>>()?;
-        let mut cached = state
-            .deleted_bucket
-            .lock()
-            .map_err(|_| anyhow::anyhow!("deleted bucket lock poisoned"))?;
-        if let Some(bucket) = cached.as_ref().filter(|bucket| bucket.inputs == inputs) {
-            return Ok(bucket.children.clone());
-        }
-        let children = self.fold_deleted_children(&state.edges);
-        *cached = Some(DeletedBucket {
-            inputs,
-            children: children.clone(),
-        });
-        Ok(children)
     }
 
     /// Seed and replay the ledger ahead of its first reader; a failed
@@ -725,154 +543,6 @@ impl RlmSpawnLedger {
         Ok(edges)
     }
 
-    fn fold_deleted_children(&self, edges: &[RlmLedgerEdge]) -> DeletedChildrenByParent {
-        use crate::session_usage::{ModelUsageSummary, SessionUsageSummary};
-        let canonical = |path: &str| {
-            canonical_session_path(Path::new(path))
-                .to_string_lossy()
-                .to_string()
-        };
-        let mut live_paths: HashSet<String> = HashSet::new();
-        for edge in edges {
-            if edge.deleted.is_none() {
-                live_paths.insert(canonical(&edge.child));
-            }
-        }
-        // First writer wins per path: the earliest tombstoned edge claims
-        // the child (and its snapshot) for its parent.
-        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
-        let mut edge_by_path: HashMap<String, &RlmLedgerEdge> = HashMap::new();
-        for edge in edges {
-            if edge.deleted.is_none() {
-                continue;
-            }
-            let child = canonical(&edge.child);
-            if live_paths.contains(&child) || edge_by_path.contains_key(&child) {
-                continue;
-            }
-            // A tombstoned path that still has a catalog row bills
-            // through that row instead (the rollup sums the child row
-            // AND the parent bucket, so billing both would double the
-            // spend): the flat catalog scans this ledger's sessions dir,
-            // so the row exists exactly while the file sits directly in
-            // it. Real RLM children persist under session-artifacts,
-            // where the flat catalog never lists them - the RLM delete
-            // keeps that transcript and no row anywhere bills it, so the
-            // bucket is the only surface that keeps its spend.
-            let child_file = Path::new(&child);
-            if child_file.is_file()
-                && child_file.parent() == Some(self.canonical_sessions_dir.as_path())
-            {
-                continue;
-            }
-            let parent = canonical(&edge.parent);
-            edge_by_path.insert(child.clone(), edge);
-            children_by_parent.entry(parent).or_default().push(child);
-        }
-        // A path's own spend and its per-model split.
-        let tombstone_usage =
-            |path: &str| -> (SessionUsageSummary, Option<Vec<ModelUsageSummary>>) {
-                let edge = edge_by_path.get(path);
-                match edge.and_then(|edge| edge.deleted_usage.clone()) {
-                    Some(snapshot) => (
-                        snapshot,
-                        edge.and_then(|edge| edge.deleted_usage_by_model.clone()),
-                    ),
-                    // The legacy fallback is the same own-usage fold, read
-                    // through the resumable scan: a repeat bucket fold on a
-                    // surviving legacy transcript is one stat per child. It has
-                    // no split (a per-model read would reparse the transcript on
-                    // every fold); the historical gap bills zero, which needs none.
-                    None => match crate::session_store::read_session_info(Path::new(path))
-                        .and_then(|info| info.usage)
-                    {
-                        Some(usage) => (usage, None),
-                        None => (zero_usage(), Some(Vec::new())),
-                    },
-                }
-            };
-        // Iterative post-order fold with per-path memoization.
-        let mut contribution: HashMap<
-            String,
-            (SessionUsageSummary, Option<Vec<ModelUsageSummary>>),
-        > = HashMap::new();
-        let mut on_stack: HashSet<String> = HashSet::new();
-        for children in children_by_parent.values() {
-            for root in children {
-                if contribution.contains_key(root) {
-                    continue;
-                }
-                let mut stack = vec![root.clone()];
-                on_stack.insert(root.clone());
-                while let Some(current) = stack.last().cloned() {
-                    if contribution.contains_key(&current) {
-                        stack.pop();
-                        on_stack.remove(&current);
-                        continue;
-                    }
-                    let pending: Vec<String> = children_by_parent
-                        .get(&current)
-                        .map(|children| {
-                            children
-                                .iter()
-                                .filter(|path| {
-                                    !contribution.contains_key(*path) && !on_stack.contains(*path)
-                                })
-                                .cloned()
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !pending.is_empty() {
-                        for path in pending {
-                            on_stack.insert(path.clone());
-                            stack.push(path);
-                        }
-                        continue;
-                    }
-                    stack.pop();
-                    on_stack.remove(&current);
-                    let (mut total, mut by_model) = tombstone_usage(&current);
-                    for descendant in children_by_parent
-                        .get(&current)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default()
-                    {
-                        if let Some((folded, folded_by_model)) = contribution.get(descendant) {
-                            total = add_usage(total, folded);
-                            by_model = add_usage_by_model(by_model, folded_by_model.as_ref());
-                        }
-                    }
-                    contribution.insert(current, (total, by_model));
-                }
-            }
-        }
-        let mut deleted_by_parent: DeletedChildrenByParent = HashMap::new();
-        for (parent, children) in &children_by_parent {
-            let billed: Vec<DeletedChildUsage> = children
-                .iter()
-                .filter_map(|child| {
-                    let (usage, by_model) = contribution.get(child)?.clone();
-                    if usage.input_tokens == 0 && usage.output_tokens == 0 && usage.cost <= 0.0 {
-                        return None;
-                    }
-                    let edge = edge_by_path.get(child)?;
-                    Some(DeletedChildUsage {
-                        child_id: edge.child_id.clone(),
-                        child_file: child.clone(),
-                        name: edge.name.clone(),
-                        factory: edge.factory.clone(),
-                        usage,
-                        by_model,
-                    })
-                })
-                .collect();
-            if !billed.is_empty() {
-                deleted_by_parent.insert(parent.clone(), billed);
-            }
-        }
-        deleted_by_parent
-    }
-
     /// Replay edges without liveness reconciliation. Deleted edges are
     /// filtered by default; tombstones carry their delete reason.
     ///
@@ -933,6 +603,27 @@ impl RlmSpawnLedger {
         let mut edges = resolve_live_edges(&state, &mut resolver)?;
         edges.retain(|edge| canonical_session_path(Path::new(&edge.parent)) == parent_file);
         Ok(edges)
+    }
+
+    /// The opened parent file's tombstoned edges, at their recorded paths
+    /// (a deleted child's transcript may be gone, so nothing resolves).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized ledger).
+    pub fn tombstoned_edges_of_parent(&self, parent_file: &Path) -> Result<Vec<RlmLedgerEdge>> {
+        self.seed_once()?;
+        let parent_file = canonical_session_path(parent_file);
+        let state = self.replay_of_parent(&parent_file)?;
+        Ok(state
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.deleted.is_some()
+                    && canonical_session_path(Path::new(&edge.parent)) == parent_file
+            })
+            .cloned()
+            .collect())
     }
 
     /// Whether the given spawn edge is still live (not tombstoned, and

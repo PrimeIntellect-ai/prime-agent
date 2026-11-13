@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use super::retirement::{FinishStep, Retirement, RetirementEvent, RetirementIntent};
 use super::run_state::{RunEvent, RunState, RunVerdict};
 use super::{
-    bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
-    DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
+    bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, ChildSpendSource, Context,
+    DaemonCommand, DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
 
 use pa_core::session_engine::semantic_edges::ChildCancelledReason;
@@ -86,10 +86,6 @@ impl SupervisorChildSessionsInner {
                 continue;
             };
             self.emit_child_update(record).await;
-            // Capture before the abort: the completed turns' usage (the
-            // aborted turn's partial row folds nowhere) must not die with
-            // the run.
-            self.emit_child_usage(record).await;
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
@@ -114,6 +110,7 @@ impl SupervisorChildSessionsInner {
             if cancelled_confirmed {
                 self.record_child_cancelled(record, ChildCancelledReason::UserCancel)
                     .await;
+                self.snapshot_child_spend(record).await;
             } else {
                 // The abort was refused for a real reason: the child never
                 // got the command, so undo the whole pre-abort claim — the
@@ -148,9 +145,6 @@ impl SupervisorChildSessionsInner {
     /// Delete one inactive child by id: refresh the registry row first, refuse one still in flight,
     /// and tear a settled one down with its ledger tombstone (same as `rlm.delete_subagent`).
     pub(super) async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {
-        if !self.replay_retired_usage(Some(child_id)).await {
-            bail!("RLM child usage remains owed after retirement; retry deletion");
-        }
         let children = self.children.lock().await.clone();
         for record in &children {
             let matched = record.lock().await.rlm_child_id == child_id;
@@ -181,10 +175,7 @@ impl SupervisorChildSessionsInner {
             if running && !already_terminated {
                 return Ok("running");
             }
-            // Capture before the unlink: a deleted child's already-durable
-            // rows are its only remaining spend record on the parent side.
             if !already_terminated {
-                self.emit_child_usage(record).await;
                 let command = DaemonCommand::Kill {
                     id: None,
                     active_session_id: active_session_id.clone(),
@@ -196,21 +187,17 @@ impl SupervisorChildSessionsInner {
                 self.command(&command, KILL_TIMEOUT_MS)
                     .await
                     .with_context(|| format!("kill RLM child \"{child_id}\""))?;
-                // Rows can land between the pre-kill capture and the kill
-                // (a settle racing the kill): the post-kill walk is the last
-                // observation; the cursor keeps it free of double-billing.
-                self.retain_retired_usage(record, RetirementIntent::Delete { was_running: false })
-                    .await;
-                self.emit_child_usage(record).await;
+                record
+                    .lock()
+                    .await
+                    .retirement
+                    .apply(RetirementEvent::KillConfirmed(RetirementIntent::Delete {
+                        was_running: false,
+                    }));
             }
-            let usage_persisted = self.forget_child_usage(record).await;
+            // The child's final snapshot: its spend stays on this parent.
+            self.snapshot_child_spend(record).await;
             self.finish_retirement(record).await;
-            if usage_persisted {
-                self.remove_retired_usage(record);
-            }
-            if !usage_persisted {
-                bail!("RLM child usage remains owed after retirement; retry deletion");
-            }
             return Ok("deleted");
         }
         if self
@@ -228,10 +215,8 @@ impl SupervisorChildSessionsInner {
     /// A child whose session is already gone is a completed no-op; every
     /// other close failure is kept (walk all children, rethrow the first error).
     pub(super) async fn close_children_inner(&self, reason: ChildCloseReason) -> Result<()> {
-        let usage_persisted = self.replay_retired_usage(None).await;
         let children = self.children.lock().await.clone();
-        let mut close_error = (!usage_persisted)
-            .then(|| anyhow::anyhow!("RLM child usage remains owed after retirement; retry close"));
+        let mut close_error = None;
         for record in &children {
             let rename_lock = record.lock().await.rename_lock.clone();
             let _guard = rename_lock.lock().await;
@@ -250,7 +235,6 @@ impl SupervisorChildSessionsInner {
                     record.retirement.apply(RetirementEvent::BeginClose);
                     record.notice_delivered = true;
                 }
-                self.emit_child_usage(record).await;
                 let (active_session_id, was_running) = {
                     let mut record = record.lock().await;
                     // A close that kills a live run settles the row
@@ -288,19 +272,14 @@ impl SupervisorChildSessionsInner {
                     self.record_child_cancelled(record, ChildCancelledReason::CloseKilled)
                         .await;
                 }
-                self.retain_retired_usage(record, RetirementIntent::Close)
-                    .await;
-                self.emit_child_usage(record).await;
+                record
+                    .lock()
+                    .await
+                    .retirement
+                    .apply(RetirementEvent::KillConfirmed(RetirementIntent::Close));
+                self.snapshot_child_spend(record).await;
             }
-            let usage_persisted = self.forget_child_usage(record).await;
             self.finish_retirement(record).await;
-            if usage_persisted {
-                self.remove_retired_usage(record);
-            } else {
-                close_error.get_or_insert_with(|| {
-                    anyhow::anyhow!("RLM child usage remains owed after retirement; retry close")
-                });
-            }
         }
         // The walk changed the registry: wake a parked barrier (a closed
         // child is settled work, settled here by its removal).
@@ -436,18 +415,6 @@ impl SupervisorChildSessionsInner {
         }
     }
 
-    /// The one record matching a selector, or `None` (the send hook's
-    /// silent miss: a delivered message may target a non-child family member).
-    pub(super) async fn find_record(&self, target: &str) -> Option<Arc<Mutex<ChildRecord>>> {
-        let children = self.children.lock().await;
-        for record in children.iter() {
-            if record.lock().await.matches(target) {
-                return Some(Arc::clone(record));
-            }
-        }
-        None
-    }
-
     /// The one record matching a selector, or the TS selector errors
     /// (`No direct RLM {kind} matches ...` / `... is ambiguous ...`).
     pub(super) async fn resolve_record(
@@ -476,9 +443,10 @@ impl SupervisorChildSessionsInner {
     /// Rebuild the children registry from the spawn ledger (TS
     /// `listPassiveRlmSubagents`): a restarted parent worker lists its
     /// non-deleted ledger children again, addressed by their durable
-    /// session ids. Every reseeded row is settled (nothing is owed), and
-    /// its usage cursor starts lazy: the first delivery primes it at the
-    /// file's tail.
+    /// session ids. Every reseeded row is settled (nothing is owed). Each
+    /// ledger child, live or tombstoned, then gets one spend snapshot: the
+    /// parent catches up on everything its children spent while it had no
+    /// worker (an unchanged total appends nothing).
     pub(super) async fn reseed_from_ledger(&self) {
         let Some(parent_file) = self
             .identity
@@ -492,51 +460,104 @@ impl SupervisorChildSessionsInner {
         let agent_dir = self.agent_dir.clone();
         let supervisor_socket = self.link.socket_path().clone();
         let parent_file_read = parent_file.clone();
-        let records = tokio::task::spawn_blocking(move || {
-            ledger_child_records(&agent_dir, &supervisor_socket, Path::new(&parent_file_read))
+        let (records, spend) = tokio::task::spawn_blocking(move || {
+            ledger_children(&agent_dir, &supervisor_socket, Path::new(&parent_file_read))
         })
         .await
         .unwrap_or_default();
-        let mut children = self.children.lock().await;
-        // A swap rebound the identity mid-read: its own reseed lists the new session's children.
-        if self
-            .identity
-            .lock()
-            .expect("identity lock")
-            .session_file
-            .as_deref()
-            != Some(parent_file.as_str())
         {
-            return;
+            let mut children = self.children.lock().await;
+            // A swap rebound the identity mid-read: its own reseed lists the new session's children.
+            if self
+                .identity
+                .lock()
+                .expect("identity lock")
+                .session_file
+                .as_deref()
+                != Some(parent_file.as_str())
+            {
+                return;
+            }
+            children.extend(
+                records
+                    .into_iter()
+                    .map(|record| Arc::new(Mutex::new(record))),
+            );
         }
-        children.extend(
-            records
-                .into_iter()
-                .map(|record| Arc::new(Mutex::new(record))),
-        );
+        for source in spend {
+            self.record_child_spend(source).await;
+        }
     }
 }
 
-/// One parent file's non-deleted ledger edges as settled registry rows
-/// (TS `listPassiveRlmSubagents`), read from the ledger the supervisor
-/// writes (its persisted default sessions dir): the child file's stem
-/// addresses each row both ways - resolve for a resident child, wake
-/// for a passive one; an unreadable ledger reads as empty.
-fn ledger_child_records(
+/// The parent's spawn ledger (the one the supervisor writes, over its
+/// persisted default sessions dir); `None` when the config is unreadable.
+fn parent_ledger(
     agent_dir: &Path,
     supervisor_socket: &Path,
-    parent_file: &Path,
-) -> Vec<ChildRecord> {
-    let Some(sessions_dir) = crate::descriptor::load_supervisor_config(
+) -> Option<crate::rlm_ledger::RlmSpawnLedger> {
+    let sessions_dir = crate::descriptor::load_supervisor_config(
         &crate::descriptor::descriptor_dir(agent_dir, supervisor_socket)
             .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
         supervisor_socket,
     )
-    .and_then(|config| config.default_session_dir) else {
-        return Vec::new();
+    .and_then(|config| config.default_session_dir)?;
+    Some(crate::rlm_ledger::RlmSpawnLedger::new(
+        agent_dir,
+        Path::new(&sessions_dir),
+        |_| {},
+    ))
+}
+
+/// The total a transcript-removing delete captured on the child's tombstone.
+pub(super) fn tombstoned_child_total(
+    agent_dir: &Path,
+    supervisor_socket: &Path,
+    child_file: &str,
+) -> Option<pa_types::ai::Usage> {
+    let child = crate::lease::canonical_session_path(Path::new(child_file));
+    parent_ledger(agent_dir, supervisor_socket)?
+        .edges(true)
+        .ok()?
+        .into_iter()
+        .filter(|edge| crate::lease::canonical_session_path(Path::new(&edge.child)) == child)
+        .find_map(|edge| edge.deleted_total)
+}
+
+/// One parent's ledger children: the live edges as registry rows, plus the
+/// spend source of every edge, tombstoned ones carrying their captured total.
+fn ledger_children(
+    agent_dir: &Path,
+    supervisor_socket: &Path,
+    parent_file: &Path,
+) -> (Vec<ChildRecord>, Vec<ChildSpendSource>) {
+    let Some(ledger) = parent_ledger(agent_dir, supervisor_socket) else {
+        return (Vec::new(), Vec::new());
     };
-    let ledger =
-        crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, Path::new(&sessions_dir), |_| {});
+    let records = ledger_child_records(&ledger, parent_file);
+    let mut spend: Vec<ChildSpendSource> = records
+        .iter()
+        .filter_map(|record| ChildSpendSource::of_file(record.session_file.as_deref()?, None))
+        .collect();
+    match ledger.tombstoned_edges_of_parent(parent_file) {
+        Ok(edges) => spend.extend(
+            edges
+                .iter()
+                .filter_map(|edge| ChildSpendSource::of_file(&edge.child, edge.deleted_total)),
+        ),
+        Err(error) => eprintln!("pa-daemon: RLM ledger spend reseed skipped: {error:#}"),
+    }
+    (records, spend)
+}
+
+/// One parent file's non-deleted ledger edges as settled registry rows
+/// (TS `listPassiveRlmSubagents`): the child file's stem addresses each row
+/// both ways - resolve for a resident child, wake for a passive one; an
+/// unreadable ledger reads as empty.
+fn ledger_child_records(
+    ledger: &crate::rlm_ledger::RlmSpawnLedger,
+    parent_file: &Path,
+) -> Vec<ChildRecord> {
     let edges = ledger
         .live_edges_of_parent(parent_file)
         .unwrap_or_else(|error| {
@@ -611,13 +632,7 @@ fn ledger_child_records(
             factory: edge.factory.is_some(),
             prompt_admitted: true,
             retirement: Retirement::live(),
-            usage_registration_forgotten: false,
             session_file: Some(edge.child),
-            attributed_rows: None,
-            pending_usage_report: None,
-            usage_watch_live: false,
-            usage_rearm: false,
-            emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_emitted_status: None,
             rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         });
