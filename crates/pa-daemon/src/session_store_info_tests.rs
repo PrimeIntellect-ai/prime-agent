@@ -154,6 +154,10 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
         },
         usage: usage_scan.summary(),
         totals: usage_scan.totals(),
+        child_spend: usage_scan
+            .child_spend()
+            .map(|(id, usage)| (id.to_string(), usage))
+            .collect(),
     })
 }
 

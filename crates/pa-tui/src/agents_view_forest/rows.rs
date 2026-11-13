@@ -336,8 +336,6 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
     }
 }
 
-/// One session row's rendered fields (the display-side slice the layout
-/// and the open action read).
 /// One spend field's cost on a session summary (`usage` own, `totalUsage`
 /// own plus descendants); a session without billable work omits it.
 fn summary_cost(summary: &Value, field: &str) -> f64 {
@@ -348,6 +346,8 @@ fn summary_cost(summary: &Value, field: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// One session row's rendered fields (the display-side slice the layout
+/// and the open action read).
 fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> AgentsViewRow {
     AgentsViewRow {
         kind: row.kind,

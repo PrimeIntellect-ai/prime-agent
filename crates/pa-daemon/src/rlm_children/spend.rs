@@ -5,8 +5,14 @@ use super::{Arc, ChildRecord, Mutex, SupervisorChildSessionsInner};
 use pa_types::{ai::Usage, session::ChildSpendEntry};
 use std::path::Path;
 
-/// One child the parent snapshots, keyed by its durable session id (the
-/// session file's stem).
+/// A child's durable session id, the key its `child_spend` rows carry: its
+/// session file's stem.
+#[must_use]
+pub fn child_session_id(session_file: &Path) -> Option<String> {
+    Some(session_file.file_stem()?.to_string_lossy().into_owned())
+}
+
+/// One child the parent snapshots, keyed by [`child_session_id`].
 #[derive(Debug, Clone)]
 pub struct ChildSpendSource {
     pub session_id: String,
@@ -20,12 +26,8 @@ pub struct ChildSpendSource {
 impl ChildSpendSource {
     #[must_use]
     pub fn of_file(session_file: &str, fallback_total: Option<Usage>) -> Option<Self> {
-        let session_id = Path::new(session_file)
-            .file_stem()?
-            .to_string_lossy()
-            .into_owned();
         Some(Self {
-            session_id,
+            session_id: child_session_id(Path::new(session_file))?,
             session_file: session_file.to_string(),
             fallback_total,
         })

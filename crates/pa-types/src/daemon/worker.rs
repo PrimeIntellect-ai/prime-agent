@@ -188,7 +188,6 @@ pub enum DaemonWorkerCommand {
     ChildSpendChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        child_session_id: String,
         child_session_file: String,
         #[serde(flatten)]
         rest: JsonMap,

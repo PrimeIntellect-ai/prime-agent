@@ -125,9 +125,13 @@ struct ChildSpendById {
 }
 
 impl ChildSpendById {
+    /// A snapshot raises the child's latest total field by field and never
+    /// lowers it: a stale or out-of-order row restates less than the child
+    /// already billed.
     fn fold(&mut self, child_session_id: &str, total: Usage) {
         if let Some(at) = self.index.get(child_session_id) {
-            self.entries[*at].2 = total;
+            let latest = &mut self.entries[*at].2;
+            *latest = field_max(latest, &total);
         } else {
             self.index
                 .insert(child_session_id.to_string(), self.entries.len());
@@ -143,6 +147,25 @@ impl ChildSpendById {
             subtract_assistant_usage(&mut billed, first);
             (id.as_str(), billed)
         })
+    }
+}
+
+/// The field-wise maximum of two usage blocks.
+fn field_max(left: &Usage, right: &Usage) -> Usage {
+    let cost = |left: JsNumber, right: JsNumber| JsNumber(left.as_f64().max(right.as_f64()));
+    Usage {
+        input: left.input.max(right.input),
+        output: left.output.max(right.output),
+        cache_read: left.cache_read.max(right.cache_read),
+        cache_write: left.cache_write.max(right.cache_write),
+        total_tokens: left.total_tokens.max(right.total_tokens),
+        cost: UsageCost {
+            input: cost(left.cost.input, right.cost.input),
+            output: cost(left.cost.output, right.cost.output),
+            cache_read: cost(left.cost.cache_read, right.cost.cache_read),
+            cache_write: cost(left.cost.cache_write, right.cost.cache_write),
+            total: cost(left.cost.total, right.cost.total),
+        },
     }
 }
 
@@ -177,10 +200,6 @@ pub struct SessionUsageTotals {
     pub own: Usage,
     pub total: Usage,
 }
-
-/// Total for the same reason as [`SessionUsageSummary`]'s: the cost floats
-/// come from JSON numbers, which are always finite.
-impl Eq for SessionUsageTotals {}
 
 /// The persisted form of one usage block (the scan-state sidecar's
 /// encoding): token counts unchanged, the five cost floats as
@@ -471,17 +490,6 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
 #[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
-}
-
-/// Each direct child's spend billed to the session at `path` (its
-/// `child_spend` rows), by child session id; empty when unreadable.
-#[must_use]
-pub fn read_child_spend(path: &Path) -> Vec<(String, Usage)> {
-    scan_file(path).map_or_else(Vec::new, |scan| {
-        scan.child_spend()
-            .map(|(id, usage)| (id.to_string(), usage))
-            .collect()
-    })
 }
 
 /// Whole-file own + total usage.
@@ -835,6 +843,26 @@ mod tests {
                 cost: 0.0
             })
         );
+    }
+
+    /// A smaller later snapshot never lowers a child's billed spend: the
+    /// fold keeps each field's maximum.
+    #[test]
+    fn a_smaller_later_child_spend_snapshot_never_lowers_the_total() {
+        let snapshot = |cost: f64| {
+            json!({
+                "type": "child_spend", "id": format!("s{cost}"),
+                "childSessionId": "child", "childSessionFile": "/c/child.jsonl",
+                "total": serde_json::to_value(usage(10, 1, cost)).unwrap(),
+            })
+        };
+        let mut scan = UsageScan::default();
+        for row in [snapshot(0.0), snapshot(0.5), snapshot(0.25)] {
+            serde_json::from_value::<ScanEntry>(row)
+                .unwrap()
+                .fold_into(&mut scan, None);
+        }
+        assert!((scan.totals().total.cost.total.as_f64() - 0.5).abs() < 1e-12);
     }
 
     #[test]
