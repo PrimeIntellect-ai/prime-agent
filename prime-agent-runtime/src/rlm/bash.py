@@ -164,6 +164,20 @@ def _is_redirect_operator(token: str) -> bool:
     return token.lstrip("0123456789") in _REDIRECT_OPERATORS
 
 
+# Options whose operand is the next token, so that operand is neither the
+# pattern nor a root. Type and glob filters take operands only in rg (GNU
+# grep's -T takes none).
+_GREP_VALUE_OPTIONS = frozenset(
+    {
+        "-e", "--regexp", "-f", "--file", "-m", "--max-count",
+        "-A", "-B", "-C", "--after-context", "--before-context", "--context",
+    }
+)
+_RG_VALUE_OPTIONS = _GREP_VALUE_OPTIONS | {
+    "-g", "--glob", "--iglob", "-t", "-T", "--type", "--type-not",
+}
+
+
 # find's global options precede the paths, so they do not start the
 # expression; `-O level` / `-D debugopts` take an operand when bare.
 _FIND_GLOBAL_OPTIONS = frozenset(
@@ -438,9 +452,11 @@ def _mask_scan_literals(command: str) -> str:
                         if c.isspace() or c in "|;&":
                             chars[k] = MASK_PLACEHOLDER
                         k += 1
-                chars[i] = " "
+                # Remove the quotes as the shell does, so a glued suffix
+                # (`"$HOME"/work/repo`) stays part of the same token.
+                chars[i] = ""
                 if close < n:
-                    chars[close] = " "
+                    chars[close] = ""
                 i = close + 1
                 continue
             chars[i] = MASK_PLACEHOLDER
@@ -557,14 +573,10 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         # leaves a placeholder in its position). When the pattern came from
         # a pattern option (-e/--regexp/-f/--file), every non-option
         # argument is a root and none is skipped.
-        # Pattern options (-e/--regexp/-f/--file) supply the pattern: their
-        # operands are skipped, not roots. Count bounds (-m/--max-count) take
-        # their numeric operand the same way, so `grep -rl -m 1 "$HOME" src/`
-        # skips `1`, takes "$HOME" as the pattern, and leaves src/ the only
-        # root. rg's glob filters (-g/--glob) take their glob operand the same
-        # way, so `rg -g '*.rs' "$HOME/needle" src/` skips the glob and takes
-        # "$HOME/needle" as the pattern. rg's --files listing mode takes no
-        # pattern at all, so every positional is a path.
+        # A value-taking option's operand is skipped, so
+        # `grep -rl -m 1 "$HOME" src/` skips `1`, takes "$HOME" as the
+        # pattern, and leaves src/ the only root. rg's --files listing mode
+        # takes no pattern at all, so every positional is a path.
         # Pattern options belong to grep-family and rg only: BSD find's
         # `-f` supplies the hierarchy to walk, not a pattern file.
         if tokens[0] == "find":
@@ -610,6 +622,9 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
             or t.startswith(("--regexp=", "--file="))
             for t in rest
         )
+        value_options = (
+            _RG_VALUE_OPTIONS if tokens[0] == "rg" else _GREP_VALUE_OPTIONS
+        )
         root_tokens = []
         skip_next = False
         pattern_skipped = rg_files_mode or pattern_from_option
@@ -626,14 +641,8 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                 # pattern even when it starts with `-`.
                 seen_ddash = True
                 continue
-            if not seen_ddash and takes_pattern_options and (
-                t in ("-e", "--regexp", "-f", "--file")
-                or (tokens[0] == "rg" and t in ("-g", "--glob"))
-            ):
-                skip_next = True
-                continue
-            if not seen_ddash and takes_pattern_options and t in ("-m", "--max-count"):
-                skip_next = True  # the count bound's operand, not the pattern
+            if not seen_ddash and takes_pattern_options and t in value_options:
+                skip_next = True  # the option's operand, not the pattern
                 continue
             if takes_pattern_options and t.startswith(("--regexp=", "--file=")):
                 continue

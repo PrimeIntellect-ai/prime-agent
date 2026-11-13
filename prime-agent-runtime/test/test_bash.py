@@ -1712,6 +1712,13 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_scan("rg -g '*.rs' needle $HOME"))
         self.assertTrue(is_scan("rg -g '*.rs' needle \"$HOME/Documents\""))
         self.assertFalse(is_scan("rg -g '*.rs' -- \"$HOME/needle\" src/"))
+        # Type, context, and iglob options take an operand the same way;
+        # type options only in rg (grep's -T takes none).
+        self.assertFalse(is_scan('rg -t py "$HOME" src/'))
+        self.assertFalse(is_scan('rg -A 2 "$HOME/x" src/'))
+        self.assertFalse(is_scan('rg --iglob "*.py" "$HOME/x" src/'))
+        self.assertFalse(is_scan('grep -r -C 3 "$HOME/x" src/'))
+        self.assertTrue(is_scan("grep -r -T needle ~/Documents"))
 
     def test_home_span_separators_do_not_split_scan_roots(self):
         # A quoted separator inside a home-prefixed span is data, so a real
@@ -1721,6 +1728,12 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_scan('rg "$HOME/a|$HOME/b" ~/Documents'))
         self.assertTrue(is_scan('rg "$HOME/a;$HOME/b" ~/Documents'))
         self.assertTrue(is_scan('rg "$HOME/a&&$HOME/b" ~/Documents'))
+        # A quoted expansion glued to a suffix stays one path token.
+        self.assertFalse(is_scan('find "$HOME"/work/repo/src -name x'))
+        self.assertFalse(is_scan('rg foo "${HOME}"/work/repo/src'))
+        self.assertFalse(is_scan('grep -r foo "$HOME"/work/repo'))
+        self.assertTrue(is_scan('rg foo "$HOME"'))
+        self.assertTrue(is_scan('rg foo "$HOME"/Documents'))
 
     def test_standalone_background_ampersand_is_a_segment_separator(self):
         # A lone `&` backgrounds the left side and starts a new command, so
