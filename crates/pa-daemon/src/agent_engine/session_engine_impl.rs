@@ -3,11 +3,11 @@
 //! turn state machine, and the export/telemetry reads.
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
-    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    artifact_reference, json, map_thinking_level, AgentSessionEngine, Arc, BranchSummaryOutcome,
+    BranchSummaryRequest, BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun,
+    EngineEvent, EngineModelSelection, ParentIdentity, PromptContextBoundary, PromptRequest,
+    ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest, StartupScope,
+    TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -963,17 +963,6 @@ impl SessionEngine for AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock") = None;
-        self.runtime.block_on(async {
-            let core = self.session.lock().await.clone();
-            if let Some(core) = core {
-                core.session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .replay_admitted_user_rows(Vec::new())
-                    .expect("clearing admitted rows cannot fail");
-            }
-        });
         if let Some(children) = &self.children {
             children.notify_turn_done();
         }
@@ -1336,14 +1325,14 @@ impl SessionEngine for AgentSessionEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         let mut emit = self.goal_tracking_emit(emit);
-        // The accepted-turn row carries the skill-expanded text (the
+        // The admitted user row carries the skill-expanded text (the
         // transcript renders the skill card).
         if request.message.starts_with("/skill:") {
             request.message = self.expand_skill_submission(&request.message);
         }
-        // The batched rows expand in place BEFORE the accepted rows emit:
-        // the core's batch admission re-expands each row itself, so the raw
-        // command must never reach it.
+        // The batched rows expand in place before admission: the core's
+        // batch admission re-expands each row itself, so the raw command must
+        // never reach it.
         for row in &mut request.batch {
             if row.text.starts_with("/skill:") {
                 row.text = self.expand_skill_submission(&row.text);
@@ -1432,56 +1421,17 @@ impl SessionEngine for AgentSessionEngine {
             }
             None => None,
         };
-        // The accepted turn row: an injected custom row replaces the user
-        // message; the plain turn records the accepted row, images after.
-        // The injected row the client sees IS the parsed row (one
-        // normalized representation): the frames carry exactly what the
-        // model context holds, a default-filled clock included.
-        let accepted = if let Some(parsed) = &injected {
-            EngineEvent::CustomMessage(crate::session_commands::custom_message_value(parsed))
-        } else {
-            let mut content = vec![json!({ "type": "text", "text": request.message })];
-            for image in &request.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))
-        };
-        if !emit(accepted) {
+        // An injected custom row is host-emitted here, as the parsed row (one
+        // normalized representation): the frame carries exactly what the model
+        // context holds, a default-filled clock included. User rows come from
+        // the core's MessageEnd after admission (`run_turn_once`), so a prompt
+        // that fails before admission leaves no row.
+        if injected.as_ref().is_some_and(|parsed| {
+            !emit(EngineEvent::CustomMessage(
+                crate::session_commands::custom_message_value(parsed),
+            ))
+        }) {
             return;
-        }
-        // The batched co-delivery rows: one accepted user row per batched
-        // message, in delivery order, already expanded above.
-        for row in &request.batch {
-            let text = row.text.clone();
-            let mut content = vec![json!({ "type": "text", "text": text })];
-            for image in &row.images {
-                let mut block = match serde_json::to_value(image) {
-                    Ok(Value::Object(block)) => Value::Object(block),
-                    _ => continue,
-                };
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("type".to_string(), json!("image"));
-                }
-                content.push(block);
-            }
-            if !emit(EngineEvent::UserMessage(json!({
-                "role": "user",
-                "content": content,
-                "timestamp": now_millis(),
-            }))) {
-                return;
-            }
         }
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),

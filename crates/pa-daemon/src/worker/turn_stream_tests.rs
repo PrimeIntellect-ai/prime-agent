@@ -306,6 +306,31 @@ async fn a_later_run_without_its_end_still_gets_the_fallback_closer() {
     );
 }
 
+/// An abort that lands after core admission keeps the admitted user row,
+/// with or without row suppression: the live context already holds it.
+#[tokio::test]
+async fn an_abort_after_admission_keeps_the_admitted_user_row() {
+    for suppress_aborted_row in [false, true] {
+        let row = json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": "admitted" }],
+            "timestamp": 1,
+        });
+        let events = gate_sighting_events(
+            vec![EngineEvent::UserMessage(row), EngineEvent::DoneAborted],
+            true,
+            suppress_aborted_row,
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "message_start" && event["message"]["role"] == "user"),
+            "the admitted row reaches the store and clients: {events:?}"
+        );
+    }
+}
+
 /// A turn aborted under row suppression (a manual compaction or tree move)
 /// still reaches the engine's turn boundary at its swallowed `Done`, so
 /// child prompts held for that turn are released.
