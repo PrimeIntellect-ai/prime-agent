@@ -211,11 +211,8 @@ pub fn passive_child_summary(child: &PassiveRlmChild) -> Value {
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
     }
-    // The saved session's own-usage summary rides the row too, so
-    // passivated children never read as zero.
-    if let Some(usage) = &info.usage {
-        object.insert("usage".to_string(), json!(usage));
-    }
+    // The saved session's spend rides the row too.
+    info.insert_spend(object);
     row
 }
 
@@ -263,8 +260,7 @@ mod tests {
                 depth: 1,
                 name: "worker-a".to_string(),
                 deleted: None,
-                deleted_usage: None,
-                deleted_usage_by_model: None,
+                deleted_total: None,
                 factory: None,
             },
             info,
@@ -286,8 +282,7 @@ mod tests {
                 depth: 1,
                 name: "worker-b".to_string(),
                 deleted: None,
-                deleted_usage: None,
-                deleted_usage_by_model: None,
+                deleted_total: None,
                 factory: None,
             },
             info: plain_info,
@@ -322,8 +317,7 @@ mod tests {
                 depth: 1,
                 name: "worker-c".to_string(),
                 deleted: None,
-                deleted_usage: None,
-                deleted_usage_by_model: None,
+                deleted_total: None,
                 factory: None,
             },
             info,

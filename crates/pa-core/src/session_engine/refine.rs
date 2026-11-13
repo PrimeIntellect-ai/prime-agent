@@ -745,7 +745,7 @@ pub(crate) fn recorded_refiner_call(
     call: crate::refinement::executor::RefinerFn,
     source: &'static str,
     session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
-    usage_store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
+    usage_store: std::sync::Arc<dyn super::usage_store::UsageStore>,
 ) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
         let reply = call(model, system_prompt, prompt);
@@ -776,7 +776,7 @@ async fn review_compact_refinement(
     session: &std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
     branch_state: &std::sync::Mutex<super::auto_refine_trigger::CompactAutoRefineState>,
     auxiliary: Option<super::auxiliary_model::AuxiliaryModelContext>,
-    usage_store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
+    usage_store: std::sync::Arc<dyn super::usage_store::UsageStore>,
     model: &pa_types::ai::Model,
     api_key: Option<String>,
     global_harness_dir: &Path,

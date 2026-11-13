@@ -279,6 +279,14 @@ pub fn entry_display_text<S: std::hash::BuildHasher + Default>(
                 format!("[child usage: {input} input, {output} output]"),
             )]
         }
+        FileEntry::ChildSpend { payload, .. } => vec![color(
+            ThemeColor::Dim,
+            format!(
+                "[child spend: {} ${:.2}]",
+                payload.child_session_id,
+                payload.total.cost.total.as_f64()
+            ),
+        )],
         FileEntry::Label { payload, .. } => vec![color(
             ThemeColor::Dim,
             format!(
@@ -392,6 +400,10 @@ pub fn searchable_text(node: &TreeNodeData) -> String {
         FileEntry::ChildUsageAttributed { payload, .. } => {
             parts.push("child usage".to_string());
             parts.push(payload.target_id.clone());
+        }
+        FileEntry::ChildSpend { payload, .. } => {
+            parts.push("child spend".to_string());
+            parts.push(payload.child_session_id.clone());
         }
         FileEntry::Label { payload, .. } => {
             parts.push("label".to_string());

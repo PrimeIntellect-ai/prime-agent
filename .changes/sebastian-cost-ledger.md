@@ -1,0 +1,1 @@
+- Session spend totals now include every subagent's spend and never drop when a subagent is deleted, archived, or idle-stopped, or when the daemon restarts; the title, the agents view, and /context all show the same total. For older sessions whose subagent spend was never recorded, the first view after the upgrade can show a lower total, once.

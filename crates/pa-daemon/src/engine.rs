@@ -475,6 +475,17 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(async { false })
     }
 
+    /// The supervisor's notice that one direct child's spend changed: record
+    /// a fresh `child_spend` snapshot of it. An engine without children has
+    /// none to record.
+    fn child_spend_changed<'a>(
+        &'a self,
+        child_session_file: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let _ = child_session_file;
+        Box::pin(async {})
+    }
+
     /// Delete one inactive RLM child by id (TS `deleteInactiveRlmSubagent`).
     /// Outcomes are TS-verbatim (`"deleted"` | `"not_found"` | `"running"`).
     fn delete_rlm_subagent<'a>(

@@ -233,25 +233,28 @@ pub struct CustomEntry {
     pub rest: JsonMap,
 }
 
-/// Origin of a child-usage attribution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChildUsageOrigin {
-    SpawnTask,
-    AgentMessage,
-    DirectUser,
-}
-
-/// `type: "child_usage_attributed"`: RLM child usage folded into a parent
-/// assistant message, kept separately for audit/UI.
+/// `type: "child_usage_attributed"`: a legacy RLM child usage delta folded
+/// into a parent assistant message. Read for old transcripts; never written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildUsageAttributionEntry {
     pub target_id: String,
     pub child_usage: Usage,
     pub aggregate_usage: Usage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<ChildUsageOrigin>,
+    /// Fields old writers recorded (the `origin` label), kept verbatim.
+    #[serde(flatten)]
+    pub rest: JsonMap,
+}
+
+/// `type: "child_spend"`: one snapshot of a direct child session's total
+/// spend (its own spend plus its descendants'). Snapshots are cumulative:
+/// the parent bills each child's latest snapshot minus its first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildSpendEntry {
+    pub child_session_id: String,
+    pub child_session_file: String,
+    pub total: Usage,
 }
 
 /// `type: "label"`: a tree-node label set from the UI.
@@ -412,6 +415,12 @@ pub enum FileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
+    ChildSpend {
+        #[serde(flatten)]
+        payload: ChildSpendEntry,
+        #[serde(flatten)]
+        base: EntryBase,
+    },
     Label {
         #[serde(flatten)]
         payload: LabelEntry,
@@ -523,6 +532,12 @@ enum KnownFileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
+    ChildSpend {
+        #[serde(flatten)]
+        payload: ChildSpendEntry,
+        #[serde(flatten)]
+        base: EntryBase,
+    },
     Label {
         #[serde(flatten)]
         payload: LabelEntry,
@@ -577,6 +592,7 @@ impl From<KnownFileEntry> for FileEntry {
             KnownFileEntry::ChildUsageAttributed { payload, base } => {
                 Self::ChildUsageAttributed { payload, base }
             }
+            KnownFileEntry::ChildSpend { payload, base } => Self::ChildSpend { payload, base },
             KnownFileEntry::Label { payload, base } => Self::Label { payload, base },
             KnownFileEntry::SessionInfo { payload, base } => Self::SessionInfo { payload, base },
             KnownFileEntry::SessionState { payload, base } => Self::SessionState { payload, base },
@@ -621,6 +637,7 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
+            | FileEntry::ChildSpend { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -648,6 +665,7 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
+            | FileEntry::ChildSpend { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -678,6 +696,7 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
+            | FileEntry::ChildSpend { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }

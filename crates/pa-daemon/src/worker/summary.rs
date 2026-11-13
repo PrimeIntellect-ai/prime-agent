@@ -551,17 +551,21 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         .map(crate::util::iso_from_unix_ms)
         .or_else(|| modified.clone())
         .or_else(|| store.map(|store| store.header.timestamp.clone()));
-    // Usage: the whole-file own-usage fold (TS `getOwnUsageSummary`);
-    // a pathless store folds its in-memory entries.
-    let usage = store
-        .and_then(|store| {
-            if store.path.as_os_str().is_empty() {
-                crate::session_usage::own_usage_summary_of(store.entries())
-            } else {
-                crate::session_store::read_session_info(&store.path).and_then(|info| info.usage)
-            }
-        })
-        .map(|usage| json!(usage));
+    // Spend: the whole-file usage fold, own and total (own plus every
+    // descendant's); a pathless store folds its in-memory entries.
+    let totals = store.and_then(|store| {
+        if store.path.as_os_str().is_empty() {
+            Some(crate::session_usage::usage_totals_of(store.entries()))
+        } else {
+            crate::session_store::read_session_info(&store.path).map(|info| info.totals)
+        }
+    });
+    let usage = totals
+        .and_then(|totals| crate::session_usage::session_usage_summary_from(&totals.own))
+        .map(|summary| json!(summary));
+    let total_usage = totals
+        .and_then(|totals| crate::session_usage::session_usage_summary_from(&totals.total))
+        .map(|summary| json!(summary));
     SessionSummary {
         id: core.active_session_id.clone(),
         lifecycle: active_lifecycle(&core.runtime_kind, scalars.message_count == 0, streaming)
@@ -606,6 +610,7 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         parent_session_id: core.parent_session_id.clone(),
         rlm_child_id: core.rlm_child_id.clone(),
         usage,
+        total_usage,
         worker_state: Some("ready".to_string()),
         worker_pid: Some(std::process::id()),
         // Set by the caller when the snapshot backs a roster push; authoritative

@@ -798,52 +798,6 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
     );
 }
 
-/// The saved-session surfaces (the `list --all` summary row and the
-/// `list_saved_sessions` catalog row) carry the persisted thinking
-/// level: the agents-view Model column renders "model:level" for
-/// sessions without a live worker, top-level and subagent alike.
-/// TS #2506's `serializeSavedSessionInfo`: the listing arm's bucket
-/// attach publishes `deletedDescendantUsage` on the saved row - the
-/// agents-view recursive rollup's deleted-descendant term. Absent
-/// rows (no tombstoned descendants) carry no field, matching the
-/// optional wire shape.
-#[test]
-fn saved_session_rows_publish_deleted_descendant_usage() {
-    let dir = std::env::temp_dir().join(format!("pa-saved-dd-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
-    let path = dir.join(format!("{}.jsonl", session.session_id()));
-    session.set_path(path.clone());
-    session.rewrite().unwrap();
-    let mut info = crate::session_store::read_session_info(&path).unwrap();
-    assert!(
-        info.deleted_descendant_usage.is_none(),
-        "the file scan never sets the ledger-derived field"
-    );
-    info.deleted_descendant_usage = Some(crate::session_usage::SessionUsageSummary {
-        input_tokens: 1_100,
-        output_tokens: 110,
-        cost: 0.5,
-    });
-    let row = saved_session_row(
-        &info,
-        &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
-    );
-    assert_eq!(
-        row["deletedDescendantUsage"],
-        json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
-    );
-    // Absent again: the field never rides as a null.
-    info.deleted_descendant_usage = None;
-    let row = saved_session_row(
-        &info,
-        &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
-    );
-    assert!(row.get("deletedDescendantUsage").is_none());
-}
-
 /// A catalog row carries the session's own stored factory specs (its local harness store's factory
 /// entries), read from disk without a kernel; a session without any carries no field.
 #[tokio::test]
@@ -1164,6 +1118,7 @@ fn saved_session_rows_match_the_catalog_row_golden() {
             "parentSessionPath": "/s/parent.jsonl",
             "model": { "provider": "p", "modelId": "m" },
             "usage": { "inputTokens": 105, "outputTokens": 10, "cost": 0.25 },
+            "totalUsage": { "inputTokens": 105, "outputTokens": 10, "cost": 0.25 },
             "thinkingLevel": "high"
         })
     );
@@ -2231,13 +2186,10 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
 /// The stopped-child delete settles the roster the way the resident
 /// delete does (the D1b composition with the idle passivation): a
 /// `rlmLedgerDelete` aimed at an idle-passivated child finds no stop to
-/// settle the row, so the passivation's unowned row would linger while
-/// the bucket bills the captured spend on the parent - the same child
-/// billed twice until some later stop's unowned sweep catches the row.
-/// The delete's own push carries both halves together: the parent's
-/// refreshed bucket AND the child's row removal, one `roster_update`.
+/// settle the row, so the delete's own push removes the passivation's
+/// lingering unowned row.
 #[tokio::test]
-async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
+async fn the_stopped_childs_delete_removes_its_row() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -2352,8 +2304,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
         )
         .await
         .expect("the stopped child's delete tombstones");
-    // ONE push carries both halves of the settle: the parent's
-    // refreshed bucket and the child's row removal.
+    // ONE push removes the lingering row.
     let mut pushes = Vec::new();
     loop {
         match events.try_recv() {
@@ -2372,24 +2323,6 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
         pushes.len(),
         1,
         "the stopped child's delete settles in one push: {pushes:?}"
-    );
-    let parent_after = supervisor
-        .roster
-        .lock()
-        .unwrap()
-        .entries()
-        .into_iter()
-        .find(|entry| entry.summary.get("sessionId").and_then(Value::as_str) == Some("p"))
-        .expect("the parent row");
-    assert_eq!(
-        pushes[0]["changed"],
-        serde_json::to_value(vec![parent_after]).expect("serialized parent"),
-        "the push carries the parent's refreshed row: {pushes:?}"
-    );
-    assert_eq!(
-        pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
-        json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
-        "the deleted child's captured spend bills through the parent"
     );
     assert_eq!(
         pushes[0]["removed"],

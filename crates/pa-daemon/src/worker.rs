@@ -459,8 +459,6 @@ impl Worker {
                 // The in-run autonomous continuation seam: the hook holds
                 // itself weakly through the registered arc.
                 concrete.register_arc();
-                concrete
-                    .set_rlm_usage_store(std::sync::Arc::new(CoreUsageStore(Arc::clone(&core))));
                 let sink_core = Arc::clone(&core);
                 let sink_notify = Arc::clone(&work_notify);
                 let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
@@ -691,6 +689,13 @@ impl Worker {
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                 });
             crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
+            if let Some(concrete) = agent_engine.as_ref() {
+                let usage_store = std::sync::Arc::new(CoreUsageStore {
+                    core: Arc::clone(&core),
+                    roster_pushes: roster_pushes.clone(),
+                });
+                concrete.set_usage_store(usage_store.clone(), usage_store);
+            }
             if let Some(children) = agent_engine
                 .as_ref()
                 .and_then(|engine| engine.children.as_ref())
@@ -1008,72 +1013,33 @@ pub(crate) fn emit_refinement_row_for_generation(
     true
 }
 
-struct CoreUsageStore(Arc<Mutex<SessionCore>>);
-
-fn missing_usage_target(target_id: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        format!("Assistant message entry {target_id} not found"),
-    )
+/// The worker's session transcript as the engine's usage boundary. Every
+/// row it appends changes the session's published spend, so each append
+/// queues a roster push: a parent's total moves without waiting for its
+/// next turn, and a grandchild's spend climbs one level per push.
+struct CoreUsageStore {
+    core: Arc<Mutex<SessionCore>>,
+    roster_pushes: crate::roster_activity::RosterPushQueue,
 }
 
-fn assistant_message(entry: &crate::session_store::SessionEntry) -> Option<&Value> {
-    if entry.type_ != "message" {
-        return None;
-    }
-    let message = entry.fields.get("message")?;
-    (crate::types::message_role(message) == Some("assistant")).then_some(message)
-}
-
-impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
-    fn last_assistant(
+impl crate::rlm_children::ChildSpendStore for CoreUsageStore {
+    fn append_child_spend(
         &self,
-    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
-        '_,
-        Option<(String, pa_types::ai::Usage)>,
-    > {
-        let core = Arc::clone(&self.0);
-        Box::pin(async move {
-            let core = core.lock().unwrap();
-            let store = core.store.as_ref()?;
-            store.entries().iter().rev().find_map(|entry| {
-                let message = assistant_message(entry)?;
-                Some((
-                    entry.id.clone(),
-                    message
-                        .get("usage")
-                        .cloned()
-                        .and_then(|usage| serde_json::from_value(usage).ok())
-                        .unwrap_or_default(),
-                ))
-            })
-        })
-    }
-
-    fn append_attribution(
-        &self,
-        row_id: &str,
-        target_id: &str,
-        child_usage: pa_types::ai::Usage,
-        origin: Option<pa_types::session::ChildUsageOrigin>,
-    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
-        '_,
-        std::io::Result<pa_core::session_engine::rlm_usage::ChildUsageAppendResult>,
-    > {
-        let core = Arc::clone(&self.0);
-        let row_id = row_id.to_owned();
-        let target_id = target_id.to_owned();
-        Box::pin(async move {
-            let mut core = core.lock().unwrap();
+        entry: &pa_types::session::ChildSpendEntry,
+    ) -> anyhow::Result<Option<pa_types::ai::Usage>> {
+        let added = {
+            let mut core = self.core.lock().unwrap();
             let Some(store) = core.store.as_mut() else {
-                return Err(missing_usage_target(&target_id));
+                anyhow::bail!("session store not created");
             };
-            store
-                .append_child_usage_once(&row_id, &target_id, child_usage, origin)
-                .map_err(|error| std::io::Error::other(format!("{error:#}")))
-        })
+            store.append_child_spend(entry)?
+        };
+        self.roster_pushes.push();
+        Ok(added)
     }
+}
 
+impl pa_core::session_engine::usage_store::UsageStore for CoreUsageStore {
     /// The worker swaps `core.store` on a session replace, so a bill made
     /// before the swap lands only if its session is still the open one
     /// (the fence `emit_refinement_event_for_session` applies to events).
@@ -1081,8 +1047,9 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
         &self,
         session_id: String,
         usage: pa_core::session_engine::model_usage::ModelUsage,
-    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
-        let core = Arc::clone(&self.0);
+    ) -> pa_core::session_engine::usage_store::UsageStoreFuture<'_, std::io::Result<()>> {
+        let core = Arc::clone(&self.core);
+        let roster_pushes = self.roster_pushes.clone();
         Box::pin(async move {
             let data = serde_json::to_value(&usage)?;
             let mut core = core.lock().unwrap();
@@ -1105,7 +1072,7 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
                         "data": data,
                     }),
                 )
-                .map(|_| ())
+                .map(|_| roster_pushes.push())
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
         })
     }
@@ -1115,8 +1082,8 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
     fn observe_billed_rows(
         &self,
         sink: pa_core::session::billed_row::BilledRowSink,
-    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, ()> {
-        let core = Arc::clone(&self.0);
+    ) -> pa_core::session_engine::usage_store::UsageStoreFuture<'_, ()> {
+        let core = Arc::clone(&self.core);
         Box::pin(async move {
             if let Some(store) = core.lock().unwrap().store.as_mut() {
                 store.billed_row_sink = crate::session_store::BilledRowSinkSlot(Some(sink));

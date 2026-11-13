@@ -159,7 +159,6 @@ impl SessionFile {
             branch_roles: Some(HashMap::new()),
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
@@ -223,7 +222,6 @@ impl SessionFile {
             branch_roles: None,
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             trace_upload: None,
             anthropic_warning_shown,
             skipped_lines: 0,
@@ -297,8 +295,6 @@ impl SessionFile {
         full.lease.clone_from(&self.lease);
         full.trace_upload.clone_from(&self.trace_upload);
         full.billed_row_sink.clone_from(&self.billed_row_sink);
-        full.child_usage_recovery
-            .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
         // can disagree, a post-snapshot marker must hydrate, and an
@@ -329,7 +325,6 @@ impl SessionFile {
             branch_roles: Some(HashMap::new()),
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,

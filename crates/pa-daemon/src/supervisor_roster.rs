@@ -98,6 +98,7 @@ impl Supervisor {
         // apply order.
         let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
+        let spend_changed;
         {
             let mut descriptor = resident.descriptor.lock().await;
             {
@@ -109,6 +110,10 @@ impl Supervisor {
                 ) {
                     return response_success(Some(command_id), type_name, None);
                 }
+                let previous_total = roster
+                    .get(&pa_types::daemon::agent_roster::roster_agent_id_for_summary(&summary))
+                    .and_then(|entry| entry.summary.get("totalUsage").cloned());
+                spend_changed = previous_total.as_ref() != summary.get("totalUsage");
                 let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
                 // The worker's root slot can swap to a new durable
                 // session: the superseded row must not present as live.
@@ -134,7 +139,70 @@ impl Supervisor {
             }
         }
         self.push_roster_update(changed, removed_ids);
+        // A subagent's spend changed: its parent's worker records the new
+        // snapshot (detached - the delta's answer never waits on the parent).
+        if spend_changed && summary.get("rlmChildId").is_some() {
+            if let (Some(parent), Some(child)) = (
+                summary.get("parentSessionPath").and_then(Value::as_str),
+                summary.get("sessionFile").and_then(Value::as_str),
+            ) {
+                let supervisor = Arc::clone(self);
+                let (parent, child) = (parent.to_string(), child.to_string());
+                drop(tokio::spawn(async move {
+                    supervisor.notify_child_spend_changed(&parent, &child).await;
+                }));
+            }
+        }
         response_success(Some(command_id), type_name, None)
+    }
+
+    /// Tell a resident parent's worker that one direct child's spend changed:
+    /// the worker records a fresh `child_spend` snapshot of that child. A
+    /// passive parent catches up when its worker starts (its reseed snapshots
+    /// every ledger child).
+    pub(crate) async fn notify_child_spend_changed(
+        self: &Arc<Self>,
+        parent_session_path: &str,
+        child_session_file: &str,
+    ) {
+        let Some(parent) = self
+            .registry
+            .find_by_session_file(parent_session_path)
+            .await
+        else {
+            return;
+        };
+        let Some(child_session_id) = Path::new(child_session_file)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let command = pa_types::daemon::DaemonWorkerCommand::ChildSpendChanged {
+            id: None,
+            child_session_id,
+            child_session_file: child_session_file.to_string(),
+            rest: Map::default(),
+        };
+        let payload = match serde_json::to_value(&command) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.log_line(&format!("child spend notice not serialized: {error}"));
+                return;
+            }
+        };
+        if let Err(error) = self
+            .route_command_typed(
+                &parent,
+                "child_spend_changed",
+                payload,
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
+            .await
+        {
+            self.log_line(&format!("child spend notice not delivered: {error:#}"));
+        }
     }
 
     /// Test-support arm: production paths write through the sequence-gated
@@ -279,12 +347,6 @@ impl Supervisor {
             .map(|edges| edges.into_iter().map(|edge| edge.child.into()).collect());
         let empty_view = HashSet::new();
         let anchored_children = ledger_view.as_ref().unwrap_or(&empty_view);
-        // The stop's own ledger event: an RLM delete tombstoned its child
-        // before the stop began, and the shutdown route was the
-        // transcript's flush barrier, so the fold beside the ledger view
-        // reads the final bucket - the later capture amendment yields the
-        // same value, so no second push follows it.
-        let bucket_fold = self.deleted_descendant_usage_bucket().await;
         // The ledger/roots awaits opened a late-write window. Only
         // rows that carry the STOPPED generation settle here: the
         // stopped worker's own in-flight delta can have written a row
@@ -309,14 +371,6 @@ impl Supervisor {
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
-            // The refreshed bucket applies FIRST: the settle loop's
-            // passivated rewrites then attach the new value at store
-            // time, and the rewritten rows ship in this same push - the
-            // child's removal and its parent's new bucket together, with
-            // no frame in between where the spend dips.
-            if let Some((ticket, bucket)) = bucket_fold {
-                changed.extend(roster.set_deleted_descendant_usage(ticket, bucket));
-            }
             let mut settle: Vec<AgentRosterEntry> = owned;
             for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
                 if !settle

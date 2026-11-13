@@ -2,6 +2,13 @@
 use super::*;
 use std::io::Write;
 
+/// One usage block the way the scan reads it: absent fields count as zero.
+fn scan_usage(usage: &Value) -> Option<pa_types::ai::Usage> {
+    serde_json::from_value::<crate::session_usage::ScanUsage>(usage.clone())
+        .ok()
+        .map(pa_types::ai::Usage::from)
+}
+
 fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
     let content = fs::read_to_string(path).ok()?;
     let mut header: Option<SessionHeader> = None;
@@ -65,11 +72,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                 }
             }
             "child_usage_attributed" => {
-                let usage_field = |name: &str| {
-                    entry.fields.get(name).and_then(|usage| {
-                        serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
-                    })
-                };
+                let usage_field = |name: &str| entry.fields.get(name).and_then(scan_usage);
                 usage_scan.fold_child_attribution(
                     &entry.id,
                     entry.fields.get("targetId").and_then(Value::as_str),
@@ -77,6 +80,10 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     usage_field("aggregateUsage"),
                 );
             }
+            "child_spend" => usage_scan.fold_child_spend(
+                entry.fields.get("childSessionId").and_then(Value::as_str),
+                entry.fields.get("total").and_then(scan_usage),
+            ),
             "message" => {
                 message_count += 1;
                 if let Some(message) = entry.fields.get("message") {
@@ -84,9 +91,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     usage_scan.fold_message(
                         &entry.id,
                         role,
-                        message.get("usage").and_then(|usage| {
-                            serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
-                        }),
+                        message.get("usage").and_then(scan_usage),
                     );
                     if role == Some("assistant") {
                         if let (Some(provider), Some(model_id)) = (
@@ -148,7 +153,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
             first_message
         },
         usage: usage_scan.summary(),
-        deleted_descendant_usage: None,
+        totals: usage_scan.totals(),
     })
 }
 

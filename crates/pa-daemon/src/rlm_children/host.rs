@@ -8,11 +8,11 @@ use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_cwd, resolve_child_model, rlm_child_label, rlm_depth_limit_error,
     spawn_name_unavailable_error, Arc, ChildCloseReason, ChildObservationSource, ChildRecord,
-    Context, DaemonCommand, Duration, Instant, Mutex, Path, Result, RlmChildResult,
-    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
-    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
-    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
-    RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
+    ChildSpendSource, Context, DaemonCommand, Duration, Instant, Mutex, Path, Result,
+    RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult,
+    RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost,
+    SpawnNameReservationGuard, SupervisorChildSessions, SupervisorChildSessionsInner, Value,
+    KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -190,13 +190,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     factory: request.factory.is_some(),
                     prompt_admitted: false,
                     retirement: Retirement::live(),
-                    usage_registration_forgotten: false,
                     session_file: created.session_file.clone(),
-                    attributed_rows: Some(0),
-                    pending_usage_report: None,
-                    usage_watch_live: false,
-                    usage_rearm: false,
-                    emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                     last_emitted_status: None,
                     rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 };
@@ -204,6 +198,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 this.children.lock().await.push(Arc::clone(&record));
                 this.refresh_running().await;
                 this.emit_child_update(&record).await;
+                // The child's first snapshot is its zero row: everything it
+                // spends from here on bills to this parent.
+                if let Some(source) = created
+                    .session_file
+                    .as_deref()
+                    .and_then(|file| ChildSpendSource::of_file(file, None))
+                {
+                    this.record_child_spawn(source);
+                }
                 anyhow::Ok((record, created, model))
             }
             .await;
@@ -452,9 +455,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
     fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult> {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
-            if !this.replay_retired_usage(Some(&target)).await {
-                bail!("RLM child usage remains owed after retirement; retry deletion");
-            }
             // Selector errors surface unwrapped (the TS message is the
             // product surface); only the kill below gets a delete context.
             let record = match this.resolve_record(&target, "subagent").await {
@@ -547,10 +547,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 }
                 was_running
             };
-            // Capture before the kill: a deleted running child's durable
-            // rows are its last observable spend on the parent side.
             if !already_terminated {
-                this.emit_child_usage(&record).await;
                 if let Err(error) = this
                     .command(&command, KILL_TIMEOUT_MS)
                     .await
@@ -566,24 +563,21 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         .apply(RetirementEvent::KillRefused);
                     return Err(error);
                 }
-                this.retain_retired_usage(&record, RetirementIntent::Delete { was_running })
-                    .await;
-                // Observe any rows that landed before the acknowledged kill.
-                this.emit_child_usage(&record).await;
+                record
+                    .lock()
+                    .await
+                    .retirement
+                    .apply(RetirementEvent::KillConfirmed(RetirementIntent::Delete {
+                        was_running,
+                    }));
             }
-            // The final observation landed: the registration drops.
-            let usage_persisted = this.forget_child_usage(&record).await;
+            // The child's final snapshot: its spend stays on this parent.
+            this.snapshot_child_spend(&record).await;
             this.finish_retirement(&record).await;
             let entry = {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
-            if usage_persisted {
-                this.remove_retired_usage(&record);
-            }
-            if !usage_persisted {
-                bail!("RLM child usage remains owed after retirement; retry deletion");
-            }
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),
@@ -634,15 +628,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let mut results = Vec::with_capacity(records.len());
             for record in &records {
                 this.refresh_record(record).await;
-                // A settled child that is busy again runs a follow-up turn:
-                // re-arm usage observation (the task-run watcher retired at
-                // its settle).
-                if !record.lock().await.run.is_running() {
-                    let active_session_id = record.lock().await.active_session_id.clone();
-                    if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
-                        SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
-                    }
-                }
                 let still_running = record.lock().await.run.is_running();
                 if still_running {
                     // Wait inside the shared budget, then re-read the child:

@@ -278,6 +278,7 @@ pub(crate) fn entry_type(entry: &FileEntry) -> &'static str {
         FileEntry::BranchSummary { .. } => "branch_summary",
         FileEntry::Custom { .. } => "custom",
         FileEntry::ChildUsageAttributed { .. } => "child_usage_attributed",
+        FileEntry::ChildSpend { .. } => "child_spend",
         FileEntry::CustomMessage { .. } => "custom_message",
         FileEntry::Label { .. } => "label",
         FileEntry::SessionInfo { .. } => "session_info",

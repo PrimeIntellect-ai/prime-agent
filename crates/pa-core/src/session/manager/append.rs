@@ -1,9 +1,9 @@
 //! The append family: messages, retained variants, changes, compactions,
-//! customs, attributions, session info/state - and the leaf/label mutators.
+//! customs, session info/state - and the leaf/label mutators.
 
 use super::{
-    format_iso_now, generate_id, AgentMessage, ChildUsageOrigin, EntryBase, FileEntry,
-    SessionManager, SessionState, SessionStateStatus,
+    format_iso_now, generate_id, AgentMessage, EntryBase, FileEntry, SessionManager, SessionState,
+    SessionStateStatus,
 };
 
 impl SessionManager {
@@ -361,62 +361,6 @@ impl SessionManager {
             self.leaf_id = Some(id);
         }
         (id, write_error)
-    }
-
-    /// Fold child usage into the target assistant and record the attribution
-    /// under the caller's row id (the idempotent retry's stable identity).
-    ///
-    /// # Errors
-    ///
-    /// Invalid input when the target assistant message is missing, or the
-    /// durable append's I/O error.
-    pub fn append_child_usage_attribution(
-        &mut self,
-        row_id: &str,
-        target_id: &str,
-        child_usage: pa_types::ai::Usage,
-        aggregate_usage: pa_types::ai::Usage,
-        origin: Option<ChildUsageOrigin>,
-    ) -> std::io::Result<String> {
-        let target_index = self.by_id.get(target_id).copied().filter(|&index| {
-            matches!(
-                self.file_entries[index],
-                FileEntry::Message {
-                    message: AgentMessage::Assistant(_),
-                    ..
-                }
-            )
-        });
-        let target_index = target_index.ok_or_else(|| {
-            // TS `appendChildUsageAttribution` throws the same text; the
-            // caller treats a failed append as recoverable bookkeeping.
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Assistant message entry {target_id} not found"),
-            )
-        })?;
-        let mut base = self.next_base();
-        base.id = Some(row_id.to_owned());
-        let id = row_id.to_owned();
-        self.append_entry(FileEntry::ChildUsageAttributed {
-            payload: pa_types::session::ChildUsageAttributionEntry {
-                target_id: target_id.to_string(),
-                child_usage,
-                aggregate_usage,
-                origin,
-            },
-            base,
-        })?;
-        // Fold only after the durable append: a failed write must not leave
-        // phantom usage for a later rewrite to persist.
-        if let FileEntry::Message {
-            message: AgentMessage::Assistant(assistant),
-            ..
-        } = &mut self.file_entries[target_index]
-        {
-            assistant.usage = aggregate_usage;
-        }
-        Ok(id)
     }
 
     /// Append a session-info row (the session name).

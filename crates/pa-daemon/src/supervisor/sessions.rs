@@ -377,23 +377,6 @@ impl Supervisor {
             let _ = stream.send((vec![Outbound::Line(item)], false)).await;
         }
         infos.append(&mut merged);
-        // Every row carries its tombstoned descendants' spend, attached by canonical
-        // parent path so the rollup bills deleted subagents to the parent that spent them.
-        match ledger.deleted_descendant_usage_by_parent() {
-            Ok(bucket) => {
-                for info in &mut infos {
-                    let path = crate::lease::canonical_session_path(&info.path)
-                        .to_string_lossy()
-                        .to_string();
-                    info.deleted_descendant_usage = bucket.get(&path).cloned();
-                }
-            }
-            Err(error) => {
-                self.log_line(&format!(
-                    "Could not attach deleted-descendant usage: {error:#}"
-                ));
-            }
-        }
         // The scan's completion marker: the progress counts DIRECTORY entries while rows
         // only stream for valid files, so the last progress can land short of the total; a
         // consumer waiting for `loaded == total` observes completion on the final frame.
@@ -709,11 +692,6 @@ impl Supervisor {
             if !seeded.is_empty() {
                 drop(self.spawn_seeded_hydration(seeded));
             }
-            let supervisor = Arc::clone(self);
-            drop(tokio::spawn(async move {
-                let refreshed = supervisor.refresh_deleted_descendant_usage().await;
-                supervisor.push_roster_update(refreshed, Vec::new());
-            }));
         }
         drop(opening_guard);
         Ok(summary)
@@ -839,13 +817,9 @@ pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) ->
             object.insert("thinkingLevel".to_string(), json!(level));
         }
     }
-    // TS `summaryForInactiveSession` publishes the scan's own-usage summary:
-    // the roster record reads it before the saved catalog row's (own cost
-    // `daemon.usage ?? saved.usage`), so rollups never double count.
-    if let Some(usage) = &info.usage {
-        if let Some(object) = row.as_object_mut() {
-            object.insert("usage".to_string(), json!(usage));
-        }
+    // The scan's own and total spend (total = own + every descendant's).
+    if let Some(object) = row.as_object_mut() {
+        info.insert_spend(object);
     }
     row
 }
@@ -925,18 +899,7 @@ pub(super) fn saved_session_row(
             json!({ "provider": provider, "modelId": model_id }),
         );
     }
-    // TS `serializeSavedSessionInfo` publishes the scan's own-usage summary:
-    // the spend columns and the archived-row keep-condition read
-    // `saved.usage.cost`, so rollups never double count.
-    if let Some(usage) = &info.usage {
-        object.insert("usage".to_string(), json!(usage));
-    }
-    // TS #2506 `serializeSavedSessionInfo`'s optional `deletedDescendantUsage`: the
-    // recursive spend of tombstoned descendants — the deleted child keeps no row anywhere,
-    // its spend bills here exactly once.
-    if let Some(deleted) = &info.deleted_descendant_usage {
-        object.insert("deletedDescendantUsage".to_string(), json!(deleted));
-    }
+    info.insert_spend(object);
     // The persisted thinking level rides the catalog row too: the TUI merges it into
     // live summaries that lack one.
     if let Some(level) = &info.thinking_level {

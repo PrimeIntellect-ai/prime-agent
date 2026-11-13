@@ -66,6 +66,24 @@ impl Worker {
         }
     }
 
+    /// `child_spend_changed`: the supervisor's notice that one direct child's
+    /// published spend changed; this session records a fresh snapshot of it.
+    pub(crate) async fn handle_child_spend_changed(&self, payload: &Value) -> DaemonResponse {
+        let Ok(pa_types::daemon::DaemonWorkerCommand::ChildSpendChanged {
+            child_session_file, ..
+        }) = serde_json::from_value(payload.clone())
+        else {
+            return response_failure(
+                None,
+                "child_spend_changed",
+                "child_spend_changed requires a childSessionFile",
+                None,
+            );
+        };
+        self.engine.child_spend_changed(&child_session_file).await;
+        response_success(None, "child_spend_changed", None)
+    }
+
     /// `set_rlm_max_depth`: set the session's recursion bound, optionally persisting it as the
     /// global settings default. The response is the TS `SetRlmMaxDepthResult` wire object.
     pub(crate) async fn handle_set_rlm_max_depth(&self, payload: &Value) -> DaemonResponse {

@@ -683,9 +683,9 @@ impl SessionTelemetry {
         self.counters.with(|values| values.skill_use_count += 1);
     }
 
-    /// One durable child-usage attribution row landed in the parent
-    /// session (the RLM producer's flush), summed into the `rlm_child_*`
-    /// counters on `agent session ended`.
+    /// One durable `child_spend` snapshot landed in the parent session with
+    /// the spend it added over the child's previous one, summed into the
+    /// `rlm_child_*` counters on `agent session ended`.
     pub fn note_child_usage_attributed(
         &self,
         input_tokens: u64,

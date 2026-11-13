@@ -8,9 +8,9 @@ use super::{
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn_with_live_auth, AgentEngineConfig, AgentSessionEngine, Arc,
     CoreSessionEngine, EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
-    LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, PromptContextBoundary,
-    ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
-    SessionEngineConfig, SupervisorChildSessions, Value,
+    LinkAgentObserveController, Model, OverflowRecovery, PromptContextBoundary, ProviderTarget,
+    QuotaParkState, SessionCommandExecution, SessionCommandParams, SessionEngineConfig,
+    SupervisorChildSessions, Value,
 };
 
 /// The instruction the floor appends to a bare skill invocation: ask what
@@ -170,8 +170,7 @@ impl AgentSessionEngine {
             )),
             link,
             children,
-            usage_producer: std::sync::Mutex::new(None),
-            rlm_usage_store: std::sync::Mutex::new(None),
+            usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
             quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             autonomous_driver,
@@ -281,11 +280,19 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
-    pub(crate) fn set_rlm_usage_store(
+    /// Bind the worker's session transcript: the engine's billed rows and
+    /// the children's `child_spend` snapshots land in it.
+    pub(crate) fn set_usage_store(
         &self,
-        store: std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>,
+        store: std::sync::Arc<dyn pa_core::session_engine::usage_store::UsageStore>,
+        spend_store: std::sync::Arc<dyn crate::rlm_children::ChildSpendStore>,
     ) {
-        *self.rlm_usage_store.lock().expect("rlm usage store lock") = Some(store);
+        *self.usage_store.lock().expect("usage store lock") = Some(store);
+        if let Some(children) = &self.children {
+            children.set_spend_sink(std::sync::Arc::new(
+                crate::rlm_children::ChildSpendWriter::new(spend_store),
+            ));
+        }
     }
 
     /// Installs the worker's accepted-note announcer, threaded into every
@@ -349,23 +356,9 @@ impl AgentSessionEngine {
         }
         // The in-run autonomous continuation hook (the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
-        // Live children outlive the rebuild and registered their spawns on the old producer:
-        // adopt those registrations before the new sink observes, or the first post-swap
-        // report drops against a producer that never saw the spawn.
+        // The children's spend writer counts into this build's telemetry.
         if let Some(children) = &self.children {
-            let retired = self
-                .usage_producer
-                .lock()
-                .expect("usage producer lock")
-                .take();
-            if let Some(retired) = retired {
-                built.rlm_usage.adopt_registrations(&retired).await;
-            }
-            children.set_usage_sink(std::sync::Arc::new(ProducerUsageSink(
-                std::sync::Arc::clone(&built.rlm_usage),
-            )));
-            *self.usage_producer.lock().expect("usage producer lock") =
-                Some(std::sync::Arc::clone(&built.rlm_usage));
+            children.set_spend_telemetry(built.telemetry.clone());
             // The semantic-edge handoff (the same per-build pattern): the
             // settle watcher records a returned child's last committed
             // request into this recorder.
@@ -1026,11 +1019,7 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal queue purge lock")
             .clone();
-        let rlm_usage_store = self
-            .rlm_usage_store
-            .lock()
-            .expect("rlm usage store lock")
-            .clone();
+        let usage_store = self.usage_store.lock().expect("usage store lock").clone();
         let progress_note_emit = self
             .progress_note_emit
             .lock()
@@ -1093,7 +1082,7 @@ impl AgentSessionEngine {
             rlm_subagent_host: self.children.clone().map(|children| {
                 children as Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>
             }),
-            rlm_usage_store,
+            usage_store,
             progress_note_emit,
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             factory_child: self

@@ -102,34 +102,6 @@ pub(super) struct StartupScope {
     pub(super) is_continuing: bool,
 }
 
-/// The daemon-side adapter onto the engine's attribution producer: the
-/// children registry's observation sites deliver per-origin batches
-/// through this sink.
-pub(super) struct ProducerUsageSink(
-    pub(super) std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>,
-);
-
-impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for ProducerUsageSink {
-    fn record(
-        &self,
-        report: pa_core::session_engine::rlm_usage::RlmChildUsageReport,
-    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = bool> + Send + '_>> {
-        let producer = std::sync::Arc::clone(&self.0);
-        Box::pin(async move { producer.record_child_usage(report).await })
-    }
-
-    fn forget(
-        &self,
-        rlm_child_id: &str,
-    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        let producer = std::sync::Arc::clone(&self.0);
-        let rlm_child_id = rlm_child_id.to_string();
-        Box::pin(async move {
-            producer.forget_child(&rlm_child_id).await;
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::CreateSessionResources;

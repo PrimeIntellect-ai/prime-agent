@@ -1288,6 +1288,17 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
+    fn child_spend_changed<'a>(
+        &'a self,
+        child_session_file: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(children) = &self.children {
+                children.child_spend_changed(child_session_file).await;
+            }
+        })
+    }
+
     fn delete_rlm_subagent<'a>(
         &'a self,
         child_id: &'a str,

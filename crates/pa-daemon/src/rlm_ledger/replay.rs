@@ -29,47 +29,12 @@ pub(super) enum LedgerRecord {
         child_id: String,
         child: String,
         reason: RlmLedgerDeleteReason,
-        usage: Option<crate::session_usage::SessionUsageSummary>,
-        usage_by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
+        total: Option<pa_types::ai::Usage>,
     },
 }
 
 fn str_field(record: &Value, key: &str) -> Option<String> {
     record.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-/// Parse one delete record's usage snapshot (TS `SessionUsageSummary`
-/// wire shape). A present-but-malformed snapshot is a corrupt record: the
-/// record is rejected rather than billing a partial number.
-fn parse_deleted_usage(
-    usage: &Value,
-    line_no: usize,
-) -> Result<crate::session_usage::SessionUsageSummary> {
-    let invalid = || {
-        anyhow::Error::msg(format!(
-            "malformed RLM ledger line {line_no}: invalid delete usage"
-        ))
-    };
-    let input_tokens = usage
-        .get("inputTokens")
-        .and_then(Value::as_u64)
-        .ok_or_else(invalid)?;
-    let output_tokens = usage
-        .get("outputTokens")
-        .and_then(Value::as_u64)
-        .ok_or_else(invalid)?;
-    let cost = usage
-        .get("cost")
-        .and_then(Value::as_f64)
-        .ok_or_else(invalid)?;
-    if cost.is_nan() || cost.is_sign_negative() {
-        bail!("malformed RLM ledger line {line_no}: invalid delete usage");
-    }
-    Ok(crate::session_usage::SessionUsageSummary {
-        input_tokens,
-        output_tokens,
-        cost,
-    })
 }
 
 /// Parse one ledger line: `v:1` records with a known op, `None` for a known
@@ -142,24 +107,20 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
             else {
                 bail!("malformed RLM ledger line {line_no}: invalid delete record");
             };
-            // The amendment record carries the deleted child's captured
-            // own usage; old readers skip unknown fields (no version bump).
-            let usage = match record.get("usage") {
+            // A transcript-removing delete records the child's total spend;
+            // old readers skip the unknown field (no version bump). A
+            // present-but-malformed total is a corrupt record.
+            let total = match record.get("total") {
                 None => None,
-                Some(usage) => Some(parse_deleted_usage(usage, line_no)?),
+                Some(total) => Some(serde_json::from_value(total.clone()).with_context(|| {
+                    format!("malformed RLM ledger line {line_no}: invalid delete total")
+                })?),
             };
-            // The snapshot's optional per-model split: a malformed one reads
-            // as unsplit, so the billed snapshot itself survives.
-            let usage_by_model = record
-                .get("usage")
-                .and_then(|usage| usage.get("byModel"))
-                .and_then(|by_model| serde_json::from_value(by_model.clone()).ok());
             Ok(Some(LedgerRecord::Delete {
                 child_id,
                 child,
                 reason,
-                usage,
-                usage_by_model,
+                total,
             }))
         }
         _ => Ok(None),
@@ -172,18 +133,9 @@ pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<Mutex<ArtifactIndex>>,
-    pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
     /// Live edges by the durable session id (file-name stem) of their
     /// recorded parent: the family walk's entry into the replay.
     pub(super) children_by_parent_id: HashMap<String, Vec<usize>>,
-}
-
-/// Ledger rows are immutable within a replay, but file moves and transcript
-/// edits can change the inputs of the deleted-spend fold without any append.
-#[derive(Debug)]
-pub(super) struct DeletedBucket {
-    pub(super) inputs: Vec<Option<FileIdentity>>,
-    pub(super) children: super::DeletedChildrenByParent,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {
