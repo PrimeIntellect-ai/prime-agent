@@ -167,6 +167,7 @@ impl AgentView {
             return Ok(false);
         }
         let mut chunk = String::new();
+        let mut row_ends = Vec::new();
         let mut written = base.len();
         // The run's first flush starts BELOW the launching shell line: the main-screen
         // cursor parked at that line's end, and a row's bare `\r` never clears the rest
@@ -176,14 +177,16 @@ impl AgentView {
         }
         for (index, row) in rows[base.len()..].iter().enumerate() {
             crate::interactive::write_flush_rows(&mut chunk, std::slice::from_ref(row));
+            row_ends.push(chunk.len());
             if chunk.len() >= CHUNK_BYTES {
-                if let Err(error) = out.write_all(chunk.as_bytes()) {
-                    bases.transcript = texts[..written].to_vec();
+                if let Err((landed_rows, error)) = write_settle_chunk(out, &chunk, &row_ends) {
+                    bases.transcript = texts[..written + landed_rows].to_vec();
                     bases.frame = self.seeded_frame(&layout.splash, &rows, &layout.tail, width);
                     store_scrollback_bases(&self.scrollback_session, bases);
                     return Err(error);
                 }
                 chunk.clear();
+                row_ends.clear();
                 // A completed chunk write is exit-path progress for the
                 // exit guard's force-quit hold.
                 crate::exit_guard::note_exit_progress();
@@ -191,8 +194,8 @@ impl AgentView {
             }
         }
         if !chunk.is_empty() {
-            if let Err(error) = out.write_all(chunk.as_bytes()) {
-                bases.transcript = texts[..written].to_vec();
+            if let Err((landed_rows, error)) = write_settle_chunk(out, &chunk, &row_ends) {
+                bases.transcript = texts[..written + landed_rows].to_vec();
                 bases.frame = self.seeded_frame(&layout.splash, &rows, &layout.tail, width);
                 store_scrollback_bases(&self.scrollback_session, bases);
                 return Err(error);
@@ -255,6 +258,31 @@ impl AgentView {
 /// The encoded flush rows leave the process in slices of at most this many bytes: each PTY
 /// write stays one syscall, and a completed chunk write is the exit guard's progress proof.
 const CHUNK_BYTES: usize = 32 * 1024;
+
+/// Write one settle chunk like `write_all`, except that an error also reports how many of the
+/// chunk's rows landed whole (`row_ends` holds each row's end offset in `chunk`): a short
+/// write before the error left those rows in scrollback, and a row it cut short is not
+/// durable.
+fn write_settle_chunk(
+    out: &mut dyn std::io::Write,
+    chunk: &str,
+    row_ends: &[usize],
+) -> Result<(), (usize, std::io::Error)> {
+    let mut landed = 0;
+    let error = loop {
+        if landed == chunk.len() {
+            return Ok(());
+        }
+        match out.write(&chunk.as_bytes()[landed..]) {
+            Ok(0) => break std::io::Error::from(std::io::ErrorKind::WriteZero),
+            Ok(count) => landed += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => break error,
+        }
+    };
+    let landed_rows = row_ends.iter().take_while(|end| **end <= landed).count();
+    Err((landed_rows, error))
+}
 
 /// The streaming main-screen flush state: feeds rows section by section, routes them between
 /// the append stream and the repaint ring, writes in bounded chunks.
