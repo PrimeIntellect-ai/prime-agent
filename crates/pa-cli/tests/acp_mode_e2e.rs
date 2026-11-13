@@ -1940,10 +1940,11 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
 
 #[test]
 fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
-    // A one-token budget is exhausted by the first turn: the driver stops
-    // with the token limit, the completion envelope carries the autonomous
-    // accounting, and the stop reason is `max_tokens`.
-    let script = json!({ "engine": "faux", "responses": ["an answer"] });
+    // A one-token budget is exhausted by the first turn: the driver mints the
+    // one finalize wake, its turn settles, and the limit stop carries the
+    // token limit, the completion envelope's autonomous accounting, and the
+    // `max_tokens` stop reason.
+    let script = json!({ "engine": "faux", "responses": ["an answer", "finalizing"] });
     let mut client = AcpChild::spawn(
         &[
             "--mode",
@@ -1980,7 +1981,9 @@ fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
     let autonomous =
         &completion["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["autonomous"];
     assert_eq!(autonomous["enabled"], true);
-    assert_eq!(autonomous["turnsUsed"], 1);
+    // The exhausted token budget mints the one finalize wake, so the run
+    // settles its wake turn before the limit stop.
+    assert_eq!(autonomous["turnsUsed"], 2);
     let quiescence =
         &completion["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["quiescence"];
     assert_eq!(quiescence["outstandingSubagents"], 0);
@@ -2118,7 +2121,8 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
         &["--mode", "acp", "--no-session"],
         &json!({ "engine": "faux", "responses": [
             "enabling the run",
-            "one turn runs, then the limit stops the run",
+            "one turn runs, then the limit mints the finalize wake",
+            "the wake turn finalizes, then the limit stops the run",
         ] }),
     );
     let init = client.request("initialize", &initialize_params());
@@ -2166,9 +2170,11 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     let accounted = updates.iter().find_map(|update| {
         let meta =
             &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["autonomous"];
-        (meta["enabled"] == json!(true) && meta["turnsUsed"] == json!(1)).then(|| meta.clone())
+        (meta["enabled"] == json!(true) && meta["turnsUsed"] == json!(2)).then(|| meta.clone())
     });
     let accounted = accounted.expect("the limited turn's accounting reached the surface");
+    // The exhausted turn budget mints the one finalize wake (its turn is the
+    // second), and the wake spends no continuation.
     assert_eq!(accounted["continuationsUsed"], 0);
     // The named `--max-turns 1` flag makes the unnamed limits the JSON-safe
     // unlimited sentinel (TS parseAutonomousCommand budget fill).
@@ -2233,7 +2239,10 @@ fn acp_daemon_attached_forwards_cli_session_options() {
             "--autonomous-max-turns",
             "1",
         ],
-        &json!({ "engine": "faux", "responses": ["one turn, then the limit stops"] }),
+        &json!({ "engine": "faux", "responses": [
+            "one turn, then the limit mints the finalize wake",
+            "the wake turn finalizes, then the limit stops",
+        ] }),
     );
     let socket = client.socket.clone();
     let init = client.request("initialize", &initialize_params());

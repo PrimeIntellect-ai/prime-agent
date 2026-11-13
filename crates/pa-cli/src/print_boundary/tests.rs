@@ -519,6 +519,8 @@ async fn autonomous_continuation_turns_cross_the_boundary_arms() {
                 overflow_error(0),
                 {"text": "the summary"},
                 {"text": "recovered reply"},
+                {"text": "the last-call continuation reply"},
+                {"text": "the compact auto-refine consult's reply"},
             ]
         }),
         compactable_settings(),
@@ -566,11 +568,14 @@ async fn autonomous_continuation_turns_cross_the_boundary_arms() {
             _ => None,
         })
         .collect::<String>();
-    assert_eq!(text, "recovered reply");
-    // The CLI prompt plus the injected continuation (the retry re-issued
-    // without re-adding a user message).
-    assert_eq!(user_texts(&engine).await.len(), 2);
-    assert!(user_texts(&engine).await[1].starts_with("[autonomous-continuation]"));
+    assert_eq!(text, "the last-call continuation reply");
+    // The CLI prompt, the thin last-call continuation, and the finalize
+    // wake (the retry re-issued without re-adding a user message): the
+    // wake's own turn lands beyond this harness's boundary scope — the
+    // engine and e2e suites pin it.
+    assert_eq!(user_texts(&engine).await.len(), 3);
+    assert!(user_texts(&engine).await[1].starts_with("[autonomous-continuation: last-call]"));
+    assert!(user_texts(&engine).await[2].starts_with("[autonomous-continuation: finalize-wake]"));
     // The limit stop surfaces only through the headless exit contract:
     // no durable `autonomous_status` row.
     assert!(engine

@@ -24,24 +24,34 @@ fn autonomous_on_enables_the_driver_loop() {
 }
 
 #[test]
-fn autonomous_limit_stops_the_run_without_a_row() {
+fn autonomous_limit_mints_last_call_wake_then_stops_without_a_row() {
     let (engine, events) = run_prompts(
-        &serde_json::json!({ "responses": ["first", "second"] }),
+        &serde_json::json!({ "responses": ["first", "second", "submitted"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5", "go"],
     );
     // The continuation churns INSIDE the one run (the TS in-run shape):
-    // no run boundary between the settled turn and the continuation. Turn
-    // 2 hits the cap; the stop writes no row.
-    assert_eq!(assistant_texts(&events), vec!["first", "second"]);
-    let texts = user_texts(&events);
+    // no run boundary between the settled turn and the continuation. The
+    // only continuation carries the last-call text (the turn it drives may
+    // be the model's last); the spent budget then mints the one finalize
+    // wake before the stop, and the stop writes no row.
     assert_eq!(
-        texts,
-        vec![
-            "go".to_string(),
-            "[autonomous-continuation]\n\nNo human input is available in autonomous mode. Continue working until the host evaluator, verifier, or configured autonomous limits stop the run. If you were asking the user a question, make a reasonable assumption and verify it. If you believe you are blocked, prove it with host-observable evidence, preserve that evidence, and keep looking for safe progress while budget remains. Do not end the session yourself; the verifier/evaluator decides completion when configured gates pass.".to_string()
-        ]
+        assistant_texts(&events),
+        vec!["first", "second", "submitted"]
     );
-    // One `turn_start` frame between the settled `turn_end` and the continuation user row.
+    let texts = user_texts(&events);
+    assert_eq!(texts.len(), 3, "user rows: {texts:?}");
+    assert_eq!(texts[0], "go");
+    assert!(
+        texts[1].starts_with("[autonomous-continuation: last-call]\n\nBudget is nearly exhausted: turns 1/5, continuations 1/1,"),
+        "{texts:?}"
+    );
+    assert!(
+        texts[2].starts_with("[autonomous-continuation: finalize-wake]\n\nThe autonomous budget is exhausted: maxContinuations reached (1/1)."),
+        "{texts:?}"
+    );
+    assert!(texts[2].contains("This is your FINAL turn"), "{texts:?}");
+    // One `turn_start` frame per settled turn between its predecessor's
+    // `turn_end` and the continuation user row.
     let turn_ends = events
         .iter()
         .filter(|event| matches!(event, EngineEvent::TurnEnd { .. }))
@@ -50,8 +60,8 @@ fn autonomous_limit_stops_the_run_without_a_row() {
         .iter()
         .filter(|event| matches!(event, EngineEvent::TurnStart))
         .count();
-    assert_eq!(turn_ends, 2);
-    assert_eq!(turn_starts, 1, "the continuation turn's inner start");
+    assert_eq!(turn_ends, 3);
+    assert_eq!(turn_starts, 2, "the continuation turns' inner starts");
     // The stop surfaces no `autonomous_status` row: the enable announcement is the only one.
     let status_rows: Vec<_> = custom_rows(&events)
         .into_iter()
@@ -63,10 +73,81 @@ fn autonomous_limit_stops_the_run_without_a_row() {
         .unwrap_or_default()
         .starts_with("[autonomous-status: on]"));
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
-    // Per-turn usage accounting: two settled turns.
+    // Per-turn usage accounting: three settled turns, one continuation; the
+    // wake spends none.
     let state = engine.autonomous.blocking_lock();
-    assert_eq!(state.turns_used, 2);
+    assert_eq!(state.turns_used, 3);
     assert_eq!(state.continuations_used, 1);
+    assert!(state.finalize_wake_used);
+}
+
+#[test]
+fn a_wake_admitted_as_a_new_run_keeps_its_spent_flag_and_re_arms_per_prompt_wait() {
+    // The queued threshold/RLM paths deliver the finalize wake as a new run:
+    // a prompt wait admitted with the wake prefix must keep the spent flag
+    // (the wake cannot chain into itself), while any other prompt wait
+    // re-arms it (each new run owns one wake).
+    let (engine, events) = run_prompts(
+        &serde_json::json!({ "responses": [
+            "turn one",
+            "the last-call turn",
+            "the wake turn",
+            "the re-admitted wake turn",
+            "a fresh prompt after exhaustion",
+            "the second minted wake turn",
+        ] }),
+        &[
+            "/autonomous on --max-continuations 1 --max-turns 5",
+            "go",
+            "[autonomous-continuation: finalize-wake]\n\nthe harness re-admits a queued wake as a new run",
+            "a fresh prompt after exhaustion",
+        ],
+    );
+    let texts = user_texts(&events);
+    // go, the last-call continuation, the first minted wake, the re-admitted
+    // wake, the fresh prompt, the second minted wake: nothing more.
+    assert_eq!(texts.len(), 6, "user rows: {texts:?}");
+    assert!(
+        texts[1].starts_with("[autonomous-continuation: last-call]"),
+        "{texts:?}"
+    );
+    assert!(
+        texts[2].starts_with(
+            "[autonomous-continuation: finalize-wake]\n\nThe autonomous budget is exhausted"
+        ),
+        "{texts:?}"
+    );
+    // The re-admitted wake keeps the spent flag: its turn settles into the
+    // limit stop, minting nothing.
+    assert_eq!(
+        texts[3],
+        "[autonomous-continuation: finalize-wake]\n\nthe harness re-admits a queued wake as a new run",
+        "{texts:?}"
+    );
+    assert_eq!(texts[4], "a fresh prompt after exhaustion", "{texts:?}");
+    // A non-wake prompt wait re-arms the flag: the fresh run mints its own
+    // wake.
+    assert!(
+        texts[5].starts_with(
+            "[autonomous-continuation: finalize-wake]\n\nThe autonomous budget is exhausted"
+        ),
+        "{texts:?}"
+    );
+    assert_eq!(
+        assistant_texts(&events),
+        vec![
+            "turn one".to_string(),
+            "the last-call turn".to_string(),
+            "the wake turn".to_string(),
+            "the re-admitted wake turn".to_string(),
+            "a fresh prompt after exhaustion".to_string(),
+            "the second minted wake turn".to_string(),
+        ]
+    );
+    let state = engine.autonomous.blocking_lock();
+    assert!(state.finalize_wake_used);
+    assert_eq!(state.continuations_used, 1, "no wake spends a continuation");
+    drop(state);
 }
 
 #[test]

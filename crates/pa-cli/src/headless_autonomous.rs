@@ -142,12 +142,16 @@ impl HeadlessAutonomous {
 
     /// Hold the continuation while inline-subagent work settles (TS
     /// `_holdAutonomousContinuationForRlmWork`): nothing is spent on the
-    /// pre-settle turn — a disabled mode or a spent run holds nothing, so
-    /// the normal mint applies their stop. Returns whether the hold owns
-    /// the boundary (the hook mints no row).
+    /// pre-settle turn — a disabled mode or a spent run whose finalize wake
+    /// already ran holds nothing, so the normal mint applies their stop; a
+    /// spent run still owed its wake holds, so the wake runs after the
+    /// settle. Returns whether the hold owns the boundary (the hook mints
+    /// no row).
     pub(crate) async fn hold_rlm_continuation(&self) -> bool {
         let state = self.state.lock().await;
-        if !state.enabled || autonomous_limit_reason(&state, now_millis()).is_some() {
+        if !state.enabled
+            || (state.finalize_wake_used && autonomous_limit_reason(&state, now_millis()).is_some())
+        {
             return false;
         }
         self.awaits_rlm_work
@@ -288,4 +292,24 @@ pub(crate) async fn latest_assistant_error(engine: &SessionEngine) -> Option<Opt
 pub fn custom_row_wire_value(row: &CustomMessage) -> serde_json::Value {
     serde_json::to_value(pa_types::session::AgentMessage::Custom(row.clone()))
         .unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_exhausted_run_holds_behind_rlm_work_until_its_finalize_wake_is_spent() {
+        let run = HeadlessAutonomous::from_cli(
+            &AutonomousConfig {
+                max_continuations: Some(1),
+                ..Default::default()
+            },
+            std::env::temp_dir(),
+        );
+        run.state.lock().await.continuations_used = 1;
+        assert!(run.hold_rlm_continuation().await);
+        run.state.lock().await.finalize_wake_used = true;
+        assert!(!run.hold_rlm_continuation().await);
+    }
 }

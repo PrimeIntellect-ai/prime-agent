@@ -422,10 +422,14 @@ fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
 }
 
 #[test]
-fn autonomous_limit_reached_stops_the_run_without_a_row() {
+fn autonomous_limit_reached_mints_last_call_wake_then_stops_without_a_row() {
     let mut harness = setup(
         "limit",
-        &json!([{ "text": "still working" }, { "text": "more work" }]),
+        &json!([
+            { "text": "still working" },
+            { "text": "more work" },
+            { "text": "finalizing" }
+        ]),
     );
     harness.prompt(
         "enable",
@@ -433,8 +437,9 @@ fn autonomous_limit_reached_stops_the_run_without_a_row() {
     );
     harness.prompt("go", "build the feature");
 
-    // Turn 1 has no terminal evidence, so it consumes the only continuation; turn 2
-    // hits the max-continuations cap and the run stops.
+    // Turn 1 has no terminal evidence, so it consumes the only continuation —
+    // the last-call text, the turn it drives may be the model's last; the
+    // spent budget then mints the one finalize wake before the stop.
     let assistants: Vec<String> = harness
         .message_ends("assistant")
         .iter()
@@ -442,15 +447,27 @@ fn autonomous_limit_reached_stops_the_run_without_a_row() {
         .collect();
     assert_eq!(
         assistants,
-        vec!["still working".to_string(), "more work".to_string()]
+        vec![
+            "still working".to_string(),
+            "more work".to_string(),
+            "finalizing".to_string()
+        ]
     );
     let user_texts: Vec<String> = harness.message_ends("user").iter().map(text_of).collect();
-    assert_eq!(user_texts.len(), 2, "user rows: {user_texts:?}");
+    assert_eq!(user_texts.len(), 3, "user rows: {user_texts:?}");
     assert_eq!(user_texts[0], "build the feature");
     assert!(
-        user_texts[1].starts_with("[autonomous-continuation]\n\nNo human input is available"),
-        "plain continuation: {}",
         user_texts[1]
+            .starts_with("[autonomous-continuation: last-call]\n\nBudget is nearly exhausted"),
+        "last-call continuation: {}",
+        user_texts[1]
+    );
+    assert!(
+        user_texts[2].starts_with(
+            "[autonomous-continuation: finalize-wake]\n\nThe autonomous budget is exhausted: maxContinuations reached (1/1)."
+        ),
+        "finalize wake: {}",
+        user_texts[2]
     );
     // The limit stop writes no row and no stream frame (the TS shape, probed
     // against the binary): the durable autonomous_status rows are the command's alone.
