@@ -117,6 +117,7 @@ impl Origin {
                         engine,
                         &mut params,
                         &command,
+                        &[],
                     ),
                 )
                 .await
@@ -160,7 +161,6 @@ impl Origin {
 /// entry, and the next user turn must complete before the planner is released.
 #[tokio::test]
 async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_prefix() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     for origin in [Origin::Slash, Origin::Requested, Origin::Auto] {
         let (engine, dir, model) = faux_engine_with_settings(
             json!({ "responses": [{"text": "seed"}, {"text": "next user reply"}] }),
@@ -252,7 +252,6 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
 /// would let the session drop abort the planning.
 #[tokio::test]
 async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
@@ -308,7 +307,6 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
 /// the drain cannot wait for.
 #[tokio::test]
 async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
@@ -354,6 +352,7 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
         &autonomous,
         &mut boundary,
         &command,
+        &[],
     )
     .await;
     tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
@@ -381,7 +380,6 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
 /// run returns — the session drop would abort it.
 #[tokio::test(start_paused = true)]
 async fn a_failed_print_run_still_drains_an_in_flight_refine() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
@@ -500,7 +498,6 @@ async fn refine_status(engine: &SessionEngine) -> serde_json::Value {
 /// the model-requested boundary consumption.
 #[tokio::test]
 async fn refine_status_reports_a_user_refine_in_flight() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
@@ -556,7 +553,6 @@ async fn refine_status_reports_a_user_refine_in_flight() {
 /// fresh timestamp after the fact.
 #[tokio::test]
 async fn background_completion_replays_the_persisted_refinement_rows() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
