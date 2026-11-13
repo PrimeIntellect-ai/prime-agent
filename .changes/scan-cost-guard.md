@@ -1,0 +1,1 @@
+- `bash()` warns when a recursive search (`grep -r`, `rg`, or `find`) scans your home directory or a folder directly under it with no depth bound, since piping to `head` does not limit scan time. Set the opt-in `PRIME_AGENT_SCAN_TIMEOUT` env var to a number of seconds to stop such searches after that time; the result keeps the partial output.
