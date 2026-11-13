@@ -1,0 +1,1 @@
+- The kernel's Python runtime now requires patched releases of mcp (>= 2.2), PyJWT (>= 2.15), and opentelemetry-api (>= 1.45.1), which clears the open security advisories against its locked versions.

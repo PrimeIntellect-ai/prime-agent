@@ -1,0 +1,1 @@
+- Every model request a session makes now carries an `X-PI-Session-Id` header with the session's stable id, so the Prime Inference gateway aggregates one session's calls into a single trace instead of one trace per request; requests without a session context send no header.

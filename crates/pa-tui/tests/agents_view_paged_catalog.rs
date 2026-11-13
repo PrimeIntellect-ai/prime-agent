@@ -3,14 +3,17 @@
 //! rest of the store so the oldest session is still found.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+mod support;
+
+use std::io::BufReader;
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
+use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewUiMode};
 use serde_json::{json, Value};
+
+use support::{read_line, respond, view_options, write_json};
 
 const FILES: usize = 600;
 
@@ -23,7 +26,7 @@ fn serve(listener: &UnixListener, saved_requests: &Mutex<Vec<Value>>) {
         .expect("read timeout");
     let mut writer = stream.try_clone().expect("clone socket");
     let mut reader = BufReader::new(stream);
-    write_line(
+    write_json(
         &mut writer,
         &json!({
             "type": "daemon_hello",
@@ -54,7 +57,7 @@ fn serve(listener: &UnixListener, saved_requests: &Mutex<Vec<Value>>) {
                     .map(|index| saved_row(FILES - 1 - index))
                     .collect();
                 for row in &rows {
-                    write_line(
+                    write_json(
                         &mut writer,
                         &json!({
                             "id": id,
@@ -92,78 +95,6 @@ fn saved_row(index: usize) -> Value {
         "messageCount": 3,
         "name": name,
     })
-}
-
-fn write_line(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize line");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write");
-    writer.flush().expect("flush");
-}
-
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
-    write_line(
-        writer,
-        &json!({
-            "id": id,
-            "type": "response",
-            "command": command,
-            "success": true,
-            "data": data,
-        }),
-    );
-}
-
-/// One line with a bounded quiet window (the view connection sits quiet between its inputs); `None`
-/// ends the serve loop on EOF or the quiet cap.
-fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
-    const QUIET_WINDOW_MS: u32 = 90;
-    let mut quiet_windows: u32 = 0;
-    let mut line = String::new();
-    loop {
-        match reader.read_line(&mut line) {
-            Ok(0) => return None,
-            Ok(_) if line.trim().is_empty() => {
-                line.clear();
-            }
-            Ok(_) => return Some(line),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                quiet_windows += 1;
-                if quiet_windows >= QUIET_WINDOW_MS {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-                line.clear();
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
-    AgentsViewOptions {
-        socket_path: socket.to_path_buf(),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: Some(PathBuf::from("/tmp/sessions")),
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: None,
-        scope: None,
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
-    }
 }
 
 #[tokio::test]

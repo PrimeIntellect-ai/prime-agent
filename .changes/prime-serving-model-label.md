@@ -1,1 +1,0 @@
-- The /model picker labels live-catalog Prime Inference routes with their declared serving class (`prime-hosted` on Prime's clusters, `prime-gateway` through the Prime gateway) instead of the plain provider id.

@@ -85,6 +85,25 @@ pub struct AuthApiKeyResult {
     pub api_key: Option<String>,
     pub source_token: Option<AuthSourceToken>,
     pub credential_type: Option<&'static str>,
+    /// Set when the stored OAuth credential's refresh failed and no environment key serves.
+    pub refresh_failure: Option<OAuthRefreshFailure>,
+}
+
+/// A failed OAuth refresh; `Display` is the user-facing re-login sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthRefreshFailure {
+    pub provider: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for OAuthRefreshFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let OAuthRefreshFailure { provider, reason } = self;
+        write!(
+            f,
+            "Authentication failed for \"{provider}\": the stored credential could not be refreshed ({reason}).\n\nRun /login to update credentials."
+        )
+    }
 }
 
 /// OAuth integration seam, implemented by the pa-ai oauth registry; a
@@ -92,8 +111,16 @@ pub struct AuthApiKeyResult {
 pub trait OAuthIntegration: Send + Sync {
     /// The resolved API key for stored OAuth credentials (bearer/token form).
     fn api_key_for(&self, provider_id: &str, credential: &AuthCredential) -> Option<String>;
-    /// Refresh an expired credential; `None` = refresh failed.
-    fn refresh(&self, provider_id: &str, credentials: &AuthStorageData) -> Option<AuthCredential>;
+    /// Refresh the provider's stored credential at its token endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the refresh failed, without credential values (it is shown and logged).
+    fn refresh(
+        &self,
+        provider_id: &str,
+        credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String>;
 }
 
 /// No OAuth provider registry available (embedded hosts); stored OAuth
@@ -109,8 +136,12 @@ impl OAuthIntegration for NoOAuth {
         }
     }
 
-    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
-        None
+    fn refresh(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Result<AuthCredential, String> {
+        Err("no OAuth integration is available".to_string())
     }
 }
 
@@ -228,11 +259,21 @@ pub struct AuthStorage {
     stale_auth_sources: HashMap<String, Vec<AuthSourceToken>>,
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
+    /// The retained load/parse/persist diagnostics, bounded to the most
+    /// recent [`MAX_RETAINED_ERRORS`] entries: TS's `recordError` is
+    /// unbounded, but its CLI process is short-lived — the daemon's
+    /// engine-lived store reloads per provider call, so a persistently
+    /// failing auth file would otherwise grow the list for the session
+    /// lifetime.
     errors: Vec<String>,
     /// Memoized candidates (TS `authCandidateMemos`), keyed by `source:provider`,
     /// superseded when the hashed material changes.
     candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
+
+/// The retained diagnostic cap: the newest [`AuthStorage::errors`] entries
+/// stay, the oldest drop.
+const MAX_RETAINED_ERRORS: usize = 32;
 
 impl AuthStorage {
     pub fn from_storage(
@@ -346,9 +387,17 @@ impl AuthStorage {
             }
             Err(error) => {
                 self.load_error = Some(error.to_string());
-                self.errors.push(error.to_string());
+                self.record_error(&error);
             }
         }
+    }
+
+    /// Retain one diagnostic, dropping the oldest past the cap.
+    fn record_error(&mut self, error: &anyhow::Error) {
+        if self.errors.len() >= MAX_RETAINED_ERRORS {
+            self.errors.remove(0);
+        }
+        self.errors.push(error.to_string());
     }
 
     /// Runtime API-key override (CLI `--api-key`); not persisted.
@@ -451,15 +500,58 @@ impl AuthStorage {
         ))
     }
 
-    fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
+    /// The stored candidate (TS `getStoredAuthCandidate`): a `!command`
+    /// key's value material is deferred (`resolveValueMaterial`), so
+    /// building the candidate — every lookup, every status probe — never
+    /// runs the command; only staleness matching against recorded marks
+    /// and stale-marking pay the resolution. The lookup that just
+    /// resolved the command passes its value through (TS's
+    /// `resolvedCommandValue` option): the candidate then carries the
+    /// resolved material and no deferred fingerprint.
+    fn stored_candidate(
+        &self,
+        provider: &str,
+        resolved_command_value: Option<&str>,
+    ) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
-        let value_material = self.stored_value_material(&credential);
-        let key = format!(
-            "identity:auth.json {}",
-            value_material
-                .as_deref()
-                .unwrap_or(Self::auth_source_lazy_value_key()),
-        );
+        let command_key = match &credential {
+            AuthCredential::ApiKey { key, .. } if key.starts_with('!') => Some(key.clone()),
+            _ => None,
+        };
+        let command_identity = command_key
+            .as_ref()
+            .map(|key| format!("api_key:command:{key}"));
+        let resolved_material = command_identity
+            .as_ref()
+            .zip(resolved_command_value)
+            .map(|(identity, resolved)| format!("{identity} {resolved}"));
+        let value_material = if command_identity.is_some() {
+            resolved_material
+        } else {
+            self.stored_value_material(&credential)
+        };
+        let identity_half = value_material
+            .clone()
+            .or(command_identity)
+            .unwrap_or_else(|| Self::auth_source_lazy_value_key().to_string());
+        let key = format!("identity:auth.json {identity_half}");
+        // The deferred fingerprint exists only for a command key the caller
+        // did not already resolve.
+        let lazy_value_fingerprint: Option<ValueFingerprintResolver> =
+            match (command_key, resolved_command_value) {
+                (Some(key), None) => {
+                    let resolver: ValueFingerprintResolver = Arc::new(move || {
+                        resolve_config_value_uncached(&key).map(|resolved| {
+                            fingerprint(
+                                AuthSource::Stored,
+                                &format!("value:auth.json api_key:command:{key} {resolved}"),
+                            )
+                        })
+                    });
+                    Some(resolver)
+                }
+                _ => None,
+            };
         Some(
             self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
                 AuthSourceCandidate {
@@ -467,10 +559,10 @@ impl AuthStorage {
                     configured: true,
                     label: None,
                     identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
-                    value_fingerprint: value_material.map(|material| {
+                    value_fingerprint: value_material.clone().map(|material| {
                         fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
                     }),
-                    resolve_value_fingerprint: None,
+                    resolve_value_fingerprint: lazy_value_fingerprint.clone(),
                 }
             }),
         )
@@ -545,13 +637,13 @@ impl AuthStorage {
             vec![
                 self.runtime_candidate(provider),
                 self.environment_candidate(provider),
-                self.stored_candidate(provider),
+                self.stored_candidate(provider, /*resolved_command_value*/ None),
                 fallback,
             ]
         } else {
             vec![
                 self.runtime_candidate(provider),
-                self.stored_candidate(provider),
+                self.stored_candidate(provider, /*resolved_command_value*/ None),
                 self.environment_candidate(provider),
                 fallback,
             ]
@@ -719,7 +811,7 @@ impl AuthStorage {
             Ok(((), Some(content)))
         });
         if let Err(error) = result {
-            self.errors.push(error.to_string());
+            self.record_error(&error);
             return;
         }
         // Reload from what we wrote.
@@ -742,8 +834,11 @@ impl AuthStorage {
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .or_else(|| {
-                // The stored primeTeam survives runtime and environment API-key
-                // overrides: an ambient `PRIME_API_KEY` supplies the key, never the team.
+                // The stored primeTeam rides only with the stored key: a
+                // runtime or environment key never borrows the login's team.
+                if self.get_auth_status(provider_id).source != Some(AuthSource::Stored) {
+                    return None;
+                }
                 match self.data.credential(provider_id) {
                     Some(AuthCredential::ApiKey { prime_team, .. }) => {
                         prime_team.as_ref().map(|team| team.team_id.clone())

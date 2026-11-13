@@ -690,10 +690,10 @@ fn append_rotating_log(log_path: &Path, message: &str) {
             let _ = std::fs::remove_file(log_path.with_extension("log.old"));
             let _ = std::fs::rename(log_path, log_path.with_extension("log.old"));
         }
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.append(true).create(true);
+        crate::platform::perms::set_private_mode(&mut options);
+        let mut file = options.open(log_path)?;
         writeln!(file, "{message}")?;
         Ok(())
     };

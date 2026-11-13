@@ -588,7 +588,10 @@ pub fn merge_prime_inference_models(bundled: &[Model], live: Option<&[Model]>) -
 }
 
 /// The scope-keyed Prime Inference catalog: one last-good snapshot per
-/// credential+team scope, fetched live with credentials.
+/// credential+team scope, fetched live with credentials. The snapshot keeps
+/// the scope's private routes, so it is the private-model authorization. The
+/// coverage gate counts only public templates: an empty or thin response
+/// keeps the last-good snapshot instead of wiping the public routes.
 pub struct PrimeInferenceCatalog {
     cache: CatalogCache<Vec<Model>>,
 }
@@ -603,7 +606,7 @@ impl PrimeInferenceCatalog {
         let parse_templates = Arc::clone(&templates);
         let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
             let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
+            build_prime_inference_models(&parse_templates, &entries, true, None)
                 .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
         });
         Self {
@@ -628,7 +631,7 @@ impl PrimeInferenceCatalog {
         let parse_templates = Arc::clone(&templates);
         let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
             let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
+            build_prime_inference_models(&parse_templates, &entries, true, None)
                 .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
         });
         Self {

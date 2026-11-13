@@ -9,7 +9,7 @@ pub(crate) mod resolve_config_value;
 pub(crate) mod storage;
 pub(crate) mod types;
 
-pub use manager::{AuthApiKeyResult, AuthStorage, NoOAuth, OAuthIntegration};
+pub use manager::{AuthApiKeyResult, AuthStorage, NoOAuth, OAuthIntegration, OAuthRefreshFailure};
 pub use prime_inference::{
     check_prime_inference_access, default_prime_cli_config_path, fetch_prime_teams,
     read_prime_cli_config, resolve_prime_inference_auth_config, PrimeAccessError,
@@ -32,6 +32,7 @@ pub use provider_oauth::{
 };
 pub use storage::{
     parse_storage_data, AuthStorageBackend, FileAuthStorageBackend, InMemoryAuthStorageBackend,
+    RefreshLock,
 };
 pub use types::{
     AuthCredential, AuthSource, AuthSourceToken, AuthStatus, AuthStorageData, PrimeTeamAssignment,

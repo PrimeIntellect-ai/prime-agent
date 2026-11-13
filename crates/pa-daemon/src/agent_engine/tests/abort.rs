@@ -7,9 +7,6 @@ use crate::test_support::{live_kernel_python, KernelEnvOverride};
 /// never the goal accounting.
 #[test]
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -23,7 +20,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         json!({
             "providers": {
                 "faux": {
-                    "api": "faux",
+                    "api": registration.api,
                     "baseUrl": "http://localhost:0",
                     "apiKey": "sk-faux",
                     "models": [{
@@ -64,6 +61,9 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let turn_engine = std::sync::Arc::clone(&engine);
     let turn_events = std::sync::Arc::clone(&events);
@@ -173,9 +173,6 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
 /// untouched (the next delivery serves it).
 #[test]
 fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": ["raced reply", "next reply"] }),
         1,
@@ -277,9 +274,6 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
 
 #[test]
 fn settled_turn_emits_the_terminal_turn_end_payload() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -320,9 +314,6 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
 
 #[test]
 fn settled_turn_emits_the_run_agent_end_payload() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -385,9 +376,6 @@ fn settled_turn_emits_the_run_agent_end_payload() {
 /// failed row left the loop context first), and its opening frames forward.
 #[test]
 fn retried_run_restarts_with_its_own_agent_frames() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("agent")).unwrap();
     std::fs::write(
@@ -423,6 +411,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "retried turn".to_string(), &mut events);
     let agent_end_indexes = events
@@ -516,9 +508,6 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),

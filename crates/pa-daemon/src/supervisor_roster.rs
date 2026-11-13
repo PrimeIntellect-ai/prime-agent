@@ -301,7 +301,7 @@ impl Supervisor {
             .registry
             .get(worker_id)
             .await
-            .is_some_and(|resident| !resident.route_state().retired);
+            .is_some_and(|resident| !resident.route_state().retired());
         if replacement_live {
             return;
         }

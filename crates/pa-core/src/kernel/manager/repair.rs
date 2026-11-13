@@ -3,8 +3,8 @@
 
 use super::{
     anyhow, live_kernels, lock, AbortSignal, Arc, AtomicBool, ExecuteOptions, ExecuteStatus, Inner,
-    KernelStartOptions, KernelState, MemoSlot, Ordering, RepairHandle, RepairOwner, Request,
-    Signal, REPAIR_STEP_TIMEOUT_MS,
+    KernelStartOptions, Lifecycle, MemoSlot, Ordering, RepairHandle, RepairOwner, Request, Signal,
+    REPAIR_STEP_TIMEOUT_MS,
 };
 
 impl Inner {
@@ -16,21 +16,15 @@ impl Inner {
         }
         self.append_diagnostic(diagnostic);
         let error = format!("Kernel protocol error: {diagnostic}");
-        {
-            let mut g = lock(&self.guarded);
-            if g.state == KernelState::Starting {
-                g.startup_protocol_error = Some(error.clone());
+        if let Some(starting) = lock(&self.guarded).lifecycle.starting_mut() {
+            starting.protocol_error = Some(error.clone());
+            if let Some(tx) = starting.ready_tx.take() {
+                let _ = tx.send(Err(anyhow!("{error}")));
             }
-        }
-        if let Some(tx) = lock(&self.guarded).ready_tx.take() {
-            let _ = tx.send(Err(anyhow!("{error}")));
         }
         self.reject_active_execution(&error);
-        {
-            let g = lock(&self.guarded);
-            if g.teardown_in_flight > 0 || g.state != KernelState::Running {
-                return;
-            }
+        if lock(&self.shutdown_memo).is_some() || !lock(&self.guarded).lifecycle.is_running() {
+            return;
         }
         let existing = lock(&self.guarded).protocol_repair.clone();
         if let Some(existing) = existing {
@@ -86,7 +80,7 @@ impl Inner {
     /// Replace the corrupted child: fresh spawn, restore the saved namespace,
     /// re-run the runtime bootstrap. Never lets a failure wedge the kernel.
     async fn repair_protocol_child(self: &Arc<Self>, generation: u64, owner: Arc<RepairOwner>) {
-        if self.start_stale(generation) || lock(&self.guarded).state == KernelState::Shutdown {
+        if self.start_stale(generation) || lock(&self.guarded).lifecycle.is_shut_down() {
             return;
         }
         self.kill_child_to_idle();
@@ -96,13 +90,13 @@ impl Inner {
             return;
         }
         let generation = self.current_generation();
-        if self.start_stale(generation) || lock(&self.guarded).state != KernelState::Running {
+        if self.start_stale(generation) || !lock(&self.guarded).lifecycle.is_running() {
             self.finish_failed_protocol_repair(&owner, None);
             return;
         }
 
         let restored = self.perform_restore(true).await;
-        if self.start_stale(generation) || lock(&self.guarded).state != KernelState::Running {
+        if self.start_stale(generation) || !lock(&self.guarded).lifecycle.is_running() {
             self.finish_failed_protocol_repair(&owner, None);
             return;
         }
@@ -126,7 +120,7 @@ impl Inner {
             return;
         };
         let bootstrapped = self.bootstrap_repaired_kernel(&code).await;
-        if self.start_stale(generation) || lock(&self.guarded).state != KernelState::Running {
+        if self.start_stale(generation) || !lock(&self.guarded).lifecycle.is_running() {
             self.finish_failed_protocol_repair(&owner, None);
             return;
         }
@@ -199,8 +193,8 @@ impl Inner {
         // and a teardown's final snapshot must never trigger reprovisioning.
         if (!needs_restore && !needs_bootstrap)
             || lock(&self.guarded).protocol_repair.is_some()
-            || lock(&self.guarded).teardown_in_flight > 0
-            || lock(&self.guarded).state != KernelState::Running
+            || lock(&self.shutdown_memo).is_some()
+            || !lock(&self.guarded).lifecycle.is_running()
         {
             return Ok(());
         }
@@ -245,7 +239,7 @@ impl Inner {
             self.perform_restore(true).await; // clears pendingRestore on success
                                               // Corrupted during the restore: the spawned repair owns the kernel now.
             if lock(&self.guarded).protocol_repair.is_some()
-                || lock(&self.guarded).state != KernelState::Running
+                || !lock(&self.guarded).lifecycle.is_running()
             {
                 return false;
             }
@@ -260,7 +254,7 @@ impl Inner {
             return true;
         }
         let ok = self.bootstrap_repaired_kernel(&code).await;
-        if !ok && lock(&self.guarded).state == KernelState::Running {
+        if !ok && lock(&self.guarded).lifecycle.is_running() {
             self.kill_child_to_idle();
         }
         ok
@@ -274,11 +268,11 @@ impl Inner {
             let mut g = lock(&self.guarded);
             g.pending_rebootstrap = true;
             g.pending_restore = true;
-            g.state = KernelState::Shutdown;
+            g.lifecycle.transition(Lifecycle::Discarding);
         }
         live_kernels::remove(self);
         self.cleanup_resources(Signal::Kill);
-        lock(&self.guarded).state = KernelState::Idle;
+        lock(&self.guarded).lifecycle.transition(Lifecycle::Idle);
     }
 
     fn finish_failed_protocol_repair(&self, owner: &Arc<RepairOwner>, error: Option<String>) {
@@ -288,8 +282,9 @@ impl Inner {
         if owner.superseded.load(Ordering::SeqCst) || !self.repair_owner_is(owner) {
             return;
         }
-        if lock(&self.guarded).state == KernelState::Shutdown {
-            lock(&self.guarded).state = KernelState::Idle;
+        let mut g = lock(&self.guarded);
+        if g.lifecycle.is_shut_down() {
+            g.lifecycle.transition(Lifecycle::Idle);
         }
     }
 

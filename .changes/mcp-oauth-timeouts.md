@@ -1,0 +1,1 @@
+- `/mcp login` and MCP OAuth token refresh now give up after 8 seconds on an unresponsive authorization server instead of hanging, which also blocked other processes waiting on the same refresh.

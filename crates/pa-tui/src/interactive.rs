@@ -39,14 +39,14 @@ use render::{
     TerminalHandoff,
 };
 
-mod reconnect;
+pub(crate) mod reconnect;
 
 use reconnect::{
-    arm_shutdown_recovery, ReconnectConnect, ReconnectLoop, SessionReconnect,
+    Connection, ConnectionEffect, ConnectionEvent, ReconnectConnect,
     SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
 };
 #[cfg(test)]
-use reconnect::{DAEMON_SHUTDOWN_RECONNECT_WINDOW, SHUTDOWN_RECONNECT_RETRY};
+use reconnect::{ReconnectLoop, DAEMON_SHUTDOWN_RECONNECT_WINDOW, SHUTDOWN_RECONNECT_RETRY};
 
 mod run;
 

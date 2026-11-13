@@ -118,53 +118,6 @@ pub fn sent_agent_message_json(
     value
 }
 
-/// The kernel is still running a previously interrupted cell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KernelBusyAfterInterruptError {
-    pub message: String,
-}
-
-impl std::fmt::Display for KernelBusyAfterInterruptError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl Default for KernelBusyAfterInterruptError {
-    fn default() -> Self {
-        Self {
-            message: "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.".to_string(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum KernelExecError {
-    /// The kernel is busy with a previously interrupted cell.
-    BusyAfterInterrupt(KernelBusyAfterInterruptError),
-    /// Any other kernel failure.
-    Other(anyhow::Error),
-}
-
-impl KernelExecError {
-    /// True when this error is a busy-after-interrupt error.
-    #[must_use]
-    pub fn is_busy_after_interrupt(&self) -> bool {
-        matches!(self, KernelExecError::BusyAfterInterrupt(_))
-    }
-
-    /// The model-facing message.
-    #[must_use]
-    pub fn message(&self) -> String {
-        match self {
-            KernelExecError::BusyAfterInterrupt(err) => err.message.clone(),
-            // The full context chain, not just the outermost layer: a bare
-            // top-level message hides the actual cause of kernel failures.
-            KernelExecError::Other(err) => format!("{err:#}"),
-        }
-    }
-}
-
 pub type StreamFn<'a> = Option<&'a (dyn Fn(&str, &'static str) + Send + Sync)>;
 
 pub type LateSentAgentMessageHandler =
@@ -180,8 +133,7 @@ pub struct KernelExecuteOptions<'a> {
     pub on_late_sent_agent_message: Option<crate::kernel::shared::LateSentAgentMessageCallback>,
 }
 
-type ExecuteCellFuture =
-    Pin<Box<dyn Future<Output = Result<ExecuteResult, KernelExecError>> + Send>>;
+type ExecuteCellFuture = Pin<Box<dyn Future<Output = anyhow::Result<ExecuteResult>> + Send>>;
 
 /// A running kernel able to execute code cells.
 pub trait KernelExecutor: Send + Sync {
@@ -210,36 +162,8 @@ pub trait IpythonKernelProvisioner: Send + Sync {
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
-// Busy-kernel choice UI
-
-pub const BUSY_KERNEL_WAIT_CHOICE: &str = "Wait and preserve state";
-pub const BUSY_KERNEL_KILL_CHOICE: &str = "Kill kernel and restart";
-
-pub fn busy_kernel_prompt() -> String {
-    [
-        "Interrupted Python cell is still running",
-        "Ctrl+C sent an interrupt, but the previous cell has not stopped yet. A new command cannot start until it finishes.",
-        "Waiting preserves the current kernel state. Killing restarts the kernel and loses in-memory variables, imports, and running tasks.",
-    ]
-    .join("\n")
-}
-
 pub fn kernel_restart_notice() -> &'static str {
     "<ipython_kernel_reset>\nThe Python kernel was restarted after a previous interrupted cell kept running. Variables, imports, async tasks, and open resources from before the restart are no longer available; recreate them before using them.\n</ipython_kernel_reset>"
-}
-
-/// The UI surface the ipython tool needs from the host session (the TS tool context).
-pub trait IpythonToolUi: Send + Sync {
-    /// Prompt the user to choose between `choices`.
-    fn select(
-        &self,
-        prompt: &str,
-        choices: &[&str],
-        signal: Option<&AbortSignal>,
-    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
-
-    /// Show/hide a transient working message.
-    fn set_working_message(&self, message: Option<&str>);
 }
 
 // Tool definition
@@ -318,84 +242,28 @@ fn humanize_ms(ms: u64) -> String {
     }
 }
 
-async fn execute_with_busy_kernel_choice(
+async fn execute_cell(
     provisioner: &dyn IpythonKernelProvisioner,
-    report_startup_progress: &BootstrapProgressHandler,
+    report_startup_progress: BootstrapProgressHandler,
     code: &str,
     execute: KernelExecuteOptions<'_>,
-    on_working_message: &(dyn Fn(Option<&str>) + Send + Sync),
-    ui: Option<&Arc<dyn IpythonToolUi>>,
-) -> Result<(ExecuteResult, bool), KernelExecError> {
-    let mut kernel_restarted = false;
-    loop {
-        let manager = provisioner
-            .ensure(
-                Some(report_startup_progress.clone()),
-                execute.signal.clone(),
-            )
-            .await
-            .map_err(KernelExecError::Other)?;
-        let result = manager
-            .execute(
-                code,
-                KernelExecuteOptions {
-                    signal: execute.signal.clone(),
-                    timeout_ms: execute.timeout_ms,
-                    on_stream: execute.on_stream,
-                    on_late_sent_agent_message: execute.on_late_sent_agent_message.clone(),
-                },
-            )
-            .await;
-        match result {
-            Ok(result) => {
-                if result.timed_out_after_ms.is_some() && result.status == ExecuteStatus::Aborted {
-                    // The cell outlived its limit and ignored the interrupt:
-                    // no one is there to choose, so take the Kill choice.
-                    provisioner.kill().await;
-                    kernel_restarted = true;
-                }
-                return Ok((result, kernel_restarted));
-            }
-            Err(err) => {
-                let aborted = execute
-                    .signal
-                    .as_ref()
-                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
-                if !err.is_busy_after_interrupt() || aborted {
-                    return Err(err);
-                }
-                // No UI (headless): cancel immediately.
-                let Some(ui) = ui else {
-                    return Err(err);
-                };
-                let choice = ui
-                    .select(
-                        &busy_kernel_prompt(),
-                        &[BUSY_KERNEL_WAIT_CHOICE, BUSY_KERNEL_KILL_CHOICE],
-                        execute.signal.as_ref(),
-                    )
-                    .await;
-                match choice.as_deref() {
-                    Some(BUSY_KERNEL_WAIT_CHOICE) => {
-                        on_working_message(Some("Waiting for Python kernel..."));
-                    }
-                    Some(BUSY_KERNEL_KILL_CHOICE) => {
-                        on_working_message(Some("Restarting Python kernel..."));
-                        provisioner.kill().await;
-                        kernel_restarted = true;
-                    }
-                    _ => return Err(err),
-                }
-            }
-        }
+) -> anyhow::Result<(ExecuteResult, bool)> {
+    let manager = provisioner
+        .ensure(Some(report_startup_progress), execute.signal.clone())
+        .await?;
+    let result = manager.execute(code, execute).await?;
+    // The cell outlived its limit and ignored the interrupt: restart the kernel.
+    let kernel_restarted =
+        result.timed_out_after_ms.is_some() && result.status == ExecuteStatus::Aborted;
+    if kernel_restarted {
+        provisioner.kill().await;
     }
+    Ok((result, kernel_restarted))
 }
 
 pub struct IpythonToolOptions {
     /// Shared provisioner owning the kernel lifecycle.
     pub provisioner: Arc<dyn IpythonKernelProvisioner>,
-    /// UI surface; `None` in headless sessions.
-    pub ui: Option<Arc<dyn IpythonToolUi>>,
     pub on_late_sent_agent_message: Option<LateSentAgentMessageHandler>,
 }
 
@@ -447,20 +315,9 @@ pub async fn execute_ipython(
     on_update: Option<OnUpdate>,
     on_late_sent_agent_message: Option<crate::kernel::shared::LateSentAgentMessageCallback>,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let set_tool_working_message = |message: Option<&str>| {
-        if let Some(ui) = &options.ui {
-            ui.set_working_message(message);
-        }
-    };
-
-    let ui = options.ui.clone();
     let report_startup_progress: BootstrapProgressHandler = {
         let on_update = on_update.clone();
-        let ui = ui.clone();
         Arc::new(move |message: &str| {
-            if let Some(ui) = &ui {
-                ui.set_working_message(Some(message));
-            }
             if let Some(on_update) = &on_update {
                 on_update(ToolUpdate {
                     content: vec![ToolContentBlock::text(message.to_string())],
@@ -480,9 +337,9 @@ pub async fn execute_ipython(
         }
     };
 
-    let result = execute_with_busy_kernel_choice(
+    let result = execute_cell(
         options.provisioner.as_ref(),
-        &report_startup_progress,
+        report_startup_progress,
         code,
         KernelExecuteOptions {
             signal,
@@ -490,16 +347,12 @@ pub async fn execute_ipython(
             on_stream: Some(&stream_update),
             on_late_sent_agent_message,
         },
-        &|message| {
-            set_tool_working_message(message);
-        },
-        options.ui.as_ref(),
     )
     .await;
 
-    set_tool_working_message(None);
-
-    let (r, kernel_restarted) = result.map_err(|err| anyhow::anyhow!("{}", err.message()))?;
+    // The full context chain, not just the outermost layer: a bare top-level
+    // message hides the actual cause of kernel failures.
+    let (r, kernel_restarted) = result.map_err(|err| anyhow::anyhow!("{err:#}"))?;
 
     let mut text = format_execute_text(&r, r.background_output.as_deref(), kernel_restarted);
     if kernel_restarted {

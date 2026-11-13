@@ -96,9 +96,6 @@ fn prompt_templates_persist_expanded() {
 
 #[test]
 fn assistant_updates_stream_live_while_the_turn_runs() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     // A paced script: if the engine buffered events until the turn
     // settled, every update would share one emit timestamp; live
@@ -131,6 +128,10 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let start = std::time::Instant::now();
     let mut updates: Vec<(std::time::Duration, usize)> = Vec::new();
     engine.run_prompt(
@@ -186,9 +187,6 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
 
 #[test]
 fn agent_engine_streams_updates_and_final_message() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -206,6 +204,10 @@ fn agent_engine_streams_updates_and_final_message() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let mut events: Vec<EngineEvent> = Vec::new();
     engine.run_prompt(
         0,
@@ -245,9 +247,6 @@ fn agent_engine_streams_updates_and_final_message() {
 /// and image blocks remain distinct turns after a runtime rebuild.
 #[test]
 fn lazy_build_restores_only_the_pre_admission_prompt_context() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut store =
@@ -272,6 +271,10 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let expected_content = json!([
         { "type": "text", "text": "repeat this exact prompt" },
         { "type": "image", "mimeType": "image/png", "data": "QUJD" },

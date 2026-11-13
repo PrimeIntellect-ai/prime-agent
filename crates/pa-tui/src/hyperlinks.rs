@@ -237,7 +237,9 @@ pub fn strip_osc8(line: &mut Line) {
 }
 
 /// Remove OSC 8 open/close sequences from a string, preserving every other
-/// escape sequence (OSC 133 zone markers ride in the same contents).
+/// escape sequence (OSC 133 zone markers ride in the same contents). An ESC
+/// that starts no complete sequence drops too (it never paints), so a removal
+/// cannot join the bytes around it into a new opener.
 ///
 /// # Panics
 ///
@@ -258,7 +260,9 @@ pub fn strip_osc8_content(text: &str) -> String {
             continue;
         }
         let ch = text[i..].chars().next().expect("char at byte index");
-        out.push(ch);
+        if ch != '\x1b' {
+            out.push(ch);
+        }
         i += ch.len_utf8();
     }
     out

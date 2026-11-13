@@ -228,9 +228,6 @@ impl AgentsViewMode {
 
     /// One key while the bash view is open: it owns every key; its close returns to the list.
     pub(super) fn handle_shell_view_key(&mut self, key: &str) {
-        if key == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let Some(view) = self.shell_view.as_mut() else {
             return;
         };

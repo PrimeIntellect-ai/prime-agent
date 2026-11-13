@@ -15,6 +15,8 @@
 // fn-length gate is style, not correctness).
 #![allow(clippy::too_many_lines)]
 #![cfg(unix)]
+// Two of the three tests are Linux-only; their imports and helpers idle elsewhere.
+#![cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -204,6 +206,8 @@ fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
 /// the parent's roster row (done — the POSITIVE verdict), the parent's
 /// `agent_message.send` WAKES a fresh worker over the child's session
 /// file and delivers.
+// Worker liveness and identity are read from /proc: Linux only.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message() {
     let Some(kernel_python) = kernel_python() else {
@@ -785,6 +789,8 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
 /// (TS `canEvictWorker` reaches roots and children alike) and resumes
 /// by its durable session id: the attach wakes a fresh worker over the
 /// saved file and the snapshot carries the pre-passivation transcript.
+// Worker liveness and identity are read from /proc: Linux only.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_idle_root_passivates_and_resumes_by_its_durable_id_with_its_transcript() {
     let Some(kernel_python) = kernel_python() else {

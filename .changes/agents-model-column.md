@@ -1,0 +1,1 @@
+- The agents view's Model column now widens to fit the longest model name when the terminal has room, instead of cutting names at 32 characters. In narrow terminals the model name is shortened first, and the Session column keeps at least half of the shared space.

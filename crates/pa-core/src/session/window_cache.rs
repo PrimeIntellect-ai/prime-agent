@@ -140,10 +140,10 @@ pub(super) fn evict_live_snapshot(path: &Path) {
 pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     let temp = path.with_extension(format!("window-cache-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        crate::platform::perms::set_private_mode(&mut options);
+        let mut file = options.open(&temp)?;
         serde_json::to_writer(&mut file, snapshot)?;
         file.flush()?;
         std::fs::rename(&temp, cache_path(path))

@@ -1,0 +1,1 @@
+- Accepting an `@` file, path, or slash-command suggestion right after typing more characters now replaces the whole typed token. Before, part of the old token stayed in front of the completion (`@pr@prime-agent/`).
