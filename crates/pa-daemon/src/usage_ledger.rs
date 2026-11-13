@@ -257,7 +257,15 @@ impl UsageLedger {
     }
 
     fn reconcile_id(&self, session_id: &str, session_file: &Path) -> Result<Vec<String>> {
-        if !session_file.exists() {
+        // A transcript that moved after its spawn record reconciles from where
+        // it lives now; only a session gone everywhere falls back to its
+        // tombstone's delete snapshot.
+        let live = if session_file.exists() {
+            Some(session_file.to_path_buf())
+        } else {
+            self.spawns.resolve_live_path(session_file)?
+        };
+        let Some(session_file) = live else {
             let mut state = self.lock();
             let tree = self.tree(&mut state);
             let Some(snapshot) = tree
@@ -285,14 +293,14 @@ impl UsageLedger {
                 session_id,
                 vec![(LEGACY_DELETE_SNAPSHOT_ID.to_string(), usage)],
             );
-        }
+        };
         let counted =
-            crate::session_store::read_session_info(session_file).map(|info| info.usage_rows);
+            crate::session_store::read_session_info(&session_file).map(|info| info.usage_rows);
         let recorded = self.shard(&mut self.lock().shards, session_id).ids.len() as u64;
         if counted == Some(recorded) {
             return Ok(Vec::new());
         }
-        let Some(rows) = crate::session_usage::read_usage_rows(session_file) else {
+        let Some(rows) = crate::session_usage::read_usage_rows(&session_file) else {
             return Ok(Vec::new());
         };
         self.append(session_id, rows)
@@ -547,5 +555,18 @@ mod tests {
             fs::read_to_string(home.agent.join(USAGE_LEDGER_DIR).join("child.jsonl")).unwrap();
         assert_eq!(shard.lines().count(), 1, "{shard}");
         assert!(shard.contains(LEGACY_DELETE_SNAPSHOT_ID), "{shard}");
+    }
+
+    /// A child whose transcript moved after its spawn record (the spawn
+    /// ledger's live resolver finds it by its durable session id) reconciles
+    /// its real rows into the root's total.
+    #[test]
+    fn a_moved_child_transcript_reconciles_from_where_it_lives() {
+        let home = home();
+        append_turn(&home.root, "r1", 1.0);
+        append_turn(&home.agent.join("sessions/child.jsonl"), "c1", 0.5);
+        let ledger = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
+        ledger.reconcile_family(&home.root).unwrap();
+        assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
     }
 }
