@@ -682,6 +682,56 @@ async fn queued_inbox_notices_mark_their_own_rider() {
     );
 }
 
+/// The idle admission's side of the same exclusivity: an idle-admitted
+/// notice row (`TurnPolicy::Injected`, `queue_visible: false` — the
+/// invisible shape `is_injected_prompt_item` matches) rides the
+/// inboxNotice rider ONLY. The injectedPrompts rider must not
+/// double-mark it: one row, one internal class, so a client summing the
+/// riders counts the notice once.
+#[tokio::test]
+async fn an_idle_inbox_notice_rides_only_the_inbox_rider() {
+    let (worker, _) = snapshot_after_create().await;
+    let notice = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 1. Read them with rlm.inbox.read().",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1_730_000_000_000,
+    );
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            message: "[inbox 14:03 UTC] 1 new message (bash-done)".to_string(),
+            preview: Some("Inbox: 1 new message (bash-done)".to_string()),
+            custom_message: Some(notice),
+            agent_message: None,
+            queue_key: Some("inbox:arrival".to_string()),
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: false,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
+        });
+    }
+    let snapshot = {
+        let core = worker.core.lock().unwrap();
+        Worker::snapshot_locked(&core)
+    };
+    assert_eq!(
+        snapshot.inbox_notice.steering,
+        vec![0],
+        "the idle notice row rides its own rider: {snapshot:?}"
+    );
+    assert!(
+        snapshot.injected_prompts.steering.is_empty(),
+        "the idle inbox row never rides the injected rider: {snapshot:?}"
+    );
+    assert!(
+        snapshot.rlm_child_status.steering.is_empty(),
+        "the inbox row never rides the child-status rider: {snapshot:?}"
+    );
+}
+
 /// Operator safeguard: journal restore must preserve the typed provenance.
 #[tokio::test]
 async fn restored_lane_rows_keep_the_child_status_provenance() {
