@@ -71,6 +71,7 @@ pub(crate) fn restore_terminal() {
     // and starve the drain. A no-op when no reader is alive.
     crate::input::request_reader_stop();
     if out.is_terminal() {
+        crate::osc7501::emit(crate::osc7501::StatusState::Clear);
         crate::enhanced_keys::drain_for_exit(&mut out);
         let _ = crate::mouse_tracking::disable(&mut out);
         let _ = crate::enhanced_keys::disable(&mut out);
@@ -109,6 +110,7 @@ pub(crate) fn terminal_release_tail(out: &mut Stdout) {
     // inside the alt screen, never lands on the relay's stack (see
     // enhanced_keys::pop_stale_levels).
     crate::enhanced_keys::pop_stale_levels(out);
+    let _ = crate::osc7501::emit_to(out, crate::osc7501::StatusState::Clear);
     let _ = out.write_all(SYNC_OUTPUT_OFF);
     let _ = out.write_all(SGR_RESET);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);

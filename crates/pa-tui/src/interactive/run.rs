@@ -834,6 +834,7 @@ async fn run_interactive_surface(
     // Whether the Ctrl+C exit hint painted a frame that the expiry must clear.
     let mut hint_painted = false;
     let mut running = true;
+    let mut last_status: Option<crate::osc7501::StatusState> = None;
     let mut wait_idle_deadline: Option<Instant> = None;
     // The headless `SubmitAndSettle` barrier's target and deadline.
     let mut settle_target: Option<(u64, Instant)> = None;
@@ -1754,6 +1755,21 @@ async fn run_interactive_surface(
         // the select's sleep: the expiry wake would repaint the hint with the pre-sleep value.
         view.chrome.tray_override = session.tray_override(&view);
 
+        let current_status =
+            if session.turn_active || view.working.is_some() || view.compaction.is_some() {
+                crate::osc7501::StatusState::Working
+            } else if view.confirm.is_some() {
+                crate::osc7501::StatusState::Blocked(crate::osc7501::BlockedKind::Permission)
+            } else {
+                crate::osc7501::StatusState::Idle
+            };
+        if last_status != Some(current_status) {
+            if renderer.is_terminal() {
+                crate::osc7501::emit(current_status);
+            }
+            last_status = Some(current_status);
+        }
+
         // The frame gate: at most one render per MIN_RENDER_INTERVAL_MS — every state change inside
         // the window coalesces into the next frame (a stream burst renders at most one frame per
         // tick), and a dirty state waits for the deadline arm above instead of burning a render
@@ -1819,6 +1835,7 @@ async fn run_interactive_surface(
         session.collapse_transcript_window(&mut view);
     }
     if renderer.is_terminal() && !handing_off {
+        crate::osc7501::emit(crate::osc7501::StatusState::Clear);
         exit_guard.arm_for_exit();
     }
     // A handoff stashes the live draft for the session being left; every exit releases the

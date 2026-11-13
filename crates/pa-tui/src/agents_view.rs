@@ -758,6 +758,7 @@ async fn run_agents_view_surface(
     surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<AgentsViewRun> {
     crossterm::style::force_color_output(true);
+    let is_terminal = matches!(ui, AgentsViewUiMode::Terminal);
     let session_activity = link
         .as_mut()
         .map(|link| std::mem::take(&mut link.session_activity))
@@ -811,6 +812,9 @@ async fn run_agents_view_surface(
     // The first frame renders from the live roster the moment the surface mounts: the
     // saved-catalog fetch applies as an input when it lands instead of holding the frame.
     renderer.draw(&mut mode);
+    if is_terminal {
+        crate::osc7501::emit(crate::osc7501::StatusState::Idle);
+    }
     // The saved catalog feeds the Inactive section (cwd + sessionDir scope); the scan runs while
     // the view is already interactive, so a large catalog never delays the first frame. The re-arm
     // closure shares these clones (the mode never holds the client).
@@ -1394,6 +1398,7 @@ async fn run_agents_view_surface(
     // The force-quit deadline arms only after the drain; a selection is a view switch, not an
     // exit, so the deadline covers only the leaves that end this process.
     if terminal_exit {
+        crate::osc7501::emit(crate::osc7501::StatusState::Clear);
         exit_guard.arm_for_exit();
     }
     // A handoff returns the roster connection for the flow's next view run
