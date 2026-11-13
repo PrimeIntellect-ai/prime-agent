@@ -1241,8 +1241,13 @@ pub(crate) fn inbox_notice_intake_error() -> String {
 
 /// One parked item's engine-minted internal-prompt provenance: the turn
 /// policy marks the admission class and `queue_visible` the invisible shape.
+/// The typed notice rows (child status, inbox notices) carry their OWN
+/// riders instead — one row, one internal class, never both.
 fn is_injected_prompt_item(item: &QueuedItem) -> bool {
-    item.policy == TurnPolicy::Injected && !item.queue_visible && !is_rlm_child_status_item(item)
+    item.policy == TurnPolicy::Injected
+        && !item.queue_visible
+        && !is_rlm_child_status_item(item)
+        && !is_inbox_notice_item(item)
 }
 
 #[cfg(test)]
