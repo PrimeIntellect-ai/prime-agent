@@ -130,10 +130,8 @@ impl AgentSessionEngine {
             runtime,
             config,
             mcp,
-            published_goal: std::sync::Mutex::new(None),
+            refinement_completion_sink: std::sync::Mutex::new(None),
             late_agent_message_sink: std::sync::Mutex::new(None),
-            goal_runtime: std::sync::Mutex::new(None),
-            pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
@@ -142,11 +140,7 @@ impl AgentSessionEngine {
             goal_queue_purge: std::sync::Mutex::new(None),
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
-            turn_agent: std::sync::Mutex::new(None),
             queue_modes,
-            autonomous_boundary: std::sync::Mutex::new(None),
-            background_bash_probe: std::sync::Mutex::new(None),
-            kernel_release_probe: std::sync::Mutex::new(None),
             registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
@@ -156,6 +150,7 @@ impl AgentSessionEngine {
             effective_thinking: std::sync::RwLock::new(None),
             service_tier: std::sync::RwLock::new(None),
             session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            core_state: std::sync::Mutex::new(super::core_state::CoreSessionState::Unbuilt),
             threshold_yielded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             threshold_checks_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
@@ -184,7 +179,6 @@ impl AgentSessionEngine {
             held_autonomous_continuation: std::sync::Mutex::new(None),
             autonomous_admission: std::sync::Mutex::new(None),
             autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool::new(false),
-            session_closed: std::sync::atomic::AtomicBool::new(false),
             self_weak: std::sync::Mutex::new(None),
             autonomous_queue_purge: std::sync::Mutex::new(None),
             cwd,
@@ -197,7 +191,6 @@ impl AgentSessionEngine {
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
-            progress_notes: std::sync::Mutex::new(None),
             progress_note_emit: std::sync::Mutex::new(None),
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
@@ -265,7 +258,10 @@ impl AgentSessionEngine {
             }
         }
         let built = Arc::new(self.build_session(model).await?);
-        self.adopt_built_session(&built).await?;
+        if let Err(error) = self.adopt_built_session(&built).await {
+            self.retire_handles();
+            return Err(error);
+        }
         self.session.lock().await.replace(built);
         Ok(())
     }
@@ -320,10 +316,10 @@ impl AgentSessionEngine {
         let Some(terminal) = terminal else {
             return;
         };
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let Some(handles) = self.built_handles() else {
             return;
         };
-        let mut session = handles.session.lock().await;
+        let mut session = handles.goal.session.lock().await;
         let normalized = pa_core::goals::normalize_goal_state(terminal);
         match serde_json::to_value(&normalized) {
             Ok(value) => {
@@ -342,12 +338,7 @@ impl AgentSessionEngine {
     }
 
     async fn adopt_built_session(&self, built: &Arc<CoreSessionEngine>) -> anyhow::Result<()> {
-        self.mirror_goal_runtime(built).await;
-        *self
-            .progress_notes
-            .lock()
-            .expect("progress notes mirror lock") =
-            Some(std::sync::Arc::clone(&built.rlm_progress_notes));
+        self.adopt_handles(Arc::new(super::core_state::BuiltHandles::of(built).await));
         if let Some(sink) = self
             .compaction_summary_sink
             .lock()
@@ -356,49 +347,6 @@ impl AgentSessionEngine {
         {
             built.session.set_compaction_summary_sink(sink);
         }
-        // The in-run consult's mirror: the session mutex is held across
-        // compaction turns, and the consult runs inside one.
-        *self
-            .autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock") =
-            Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
-                turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
-                agent: std::sync::Arc::clone(built.session.agent()),
-                session: Arc::downgrade(built),
-            });
-        // The background-bash liveness probe: a deadlock-free read over the
-        // build's provisioner (the handle count: `0` = no live handle).
-        let provisioner = built.kernel_provisioner_weak();
-        *self
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = Some(std::sync::Arc::new(move || {
-            provisioner
-                .upgrade()
-                .and_then(|provisioner| provisioner.manager())
-                .map_or(0, |manager| manager.background_bash_handle_count())
-        }));
-        // The settled-child kernel release handle: the park arm stops the
-        // kernel without taking the session mutex (a dead weak reference
-        // releases nothing).
-        let release_provisioner = built.kernel_provisioner_weak();
-        *self
-            .kernel_release_probe
-            .lock()
-            .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
-            let provisioner = release_provisioner.clone();
-            Box::pin(async move {
-                if let Some(provisioner) = provisioner.upgrade() {
-                    provisioner
-                        .stop_kernel(Some(pa_core::kernel::shared::KernelShutdownOptions {
-                            snapshot: true,
-                            drain_host_requests: true,
-                        }))
-                        .await;
-                }
-            })
-        }));
         // The in-run autonomous continuation hook (the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
         // Live children outlive the rebuild and registered their spawns on the old producer:
@@ -423,14 +371,9 @@ impl AgentSessionEngine {
             // request into this recorder.
             children.set_semantic_edges(built.session.semantic_edges());
         }
-        *self.turn_agent.lock().expect("turn agent lock") =
-            Some(std::sync::Arc::clone(built.session.agent()));
-        {
-            let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
-            if let Some(handles) = handles {
-                let mut manager = handles.session.lock().await;
-                self.flush_pending_max_depth(&mut manager);
-            }
+        if let Some(handles) = self.built_handles() {
+            let mut manager = handles.goal.session.lock().await;
+            self.flush_pending_max_depth(&mut manager);
         }
         let pending_branch = self
             .pending_branch
@@ -595,28 +538,24 @@ impl AgentSessionEngine {
                     last_error: Some(error),
                     ..state.clone()
                 };
-                let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
-                if let Some(handles) = handles {
-                    let mut driver = handles.driver.lock().await;
+                if let Some(handles) = self.built_handles() {
+                    let mut driver = handles.goal.driver.lock().await;
                     driver.restore_from_persisted(terminal.clone());
                     drop(driver);
+                    // The published baseline keeps the RAW row: the first
+                    // `goal_update_if_changed` EMITS — the worker's durable
+                    // mirror is the ONE path the terminal row reaches the file.
+                    *handles.published_goal.lock().expect("published goal lock") = Some(state);
                 }
                 *self
                     .stale_goal_terminal_pending
                     .lock()
                     .expect("stale terminal pending lock") = Some(terminal);
-                // The published baseline keeps the RAW row: the first
-                // `goal_update_if_changed` EMITS — the worker's durable
-                // mirror is the ONE path the terminal row reaches the file.
-                *self.published_goal.lock().expect("published goal lock") = Some(state);
-            } else {
-                let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
-                if let Some(handles) = handles {
-                    let mut driver = handles.driver.lock().await;
-                    driver.restore_from_persisted(state.clone());
-                    drop(driver);
-                }
-                *self.published_goal.lock().expect("published goal lock") = Some(state);
+            } else if let Some(handles) = self.built_handles() {
+                let mut driver = handles.goal.driver.lock().await;
+                driver.restore_from_persisted(state.clone());
+                drop(driver);
+                *handles.published_goal.lock().expect("published goal lock") = Some(state);
             }
         }
         if let Some(entries) = pending_branch {
@@ -757,6 +696,7 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) {
         let _build = self.session_build.lock().await;
         let built = self.session.lock().await.take();
+        self.retire_handles();
         *self
             .prompt_context_boundary
             .lock()
@@ -765,22 +705,6 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        *self.goal_runtime.lock().expect("goal runtime lock") = None;
-        *self.progress_notes.lock().expect("progress notes lock") = None;
-        *self.turn_agent.lock().expect("turn agent lock") = None;
-        *self
-            .autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock") = None;
-        *self
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = None;
-        *self
-            .kernel_release_probe
-            .lock()
-            .expect("kernel release probe lock") = None;
-        *self.published_goal.lock().expect("published goal lock") = None;
         // The retired session's provider target goes with it: a pre-build demand seam resolves the
         // CURRENT model.
         *self.provider_target.write().expect("provider target lock") = None;
@@ -804,41 +728,6 @@ impl AgentSessionEngine {
         if let Some(engine) = guard.as_deref() {
             engine.dispose_kernel().await;
         }
-    }
-
-    /// Mark the session closed and retire the closed runtime's continuation
-    /// mirrors — a stopped session never continues.
-    ///
-    /// # Panics
-    ///
-    /// Panics when an internal mutex is poisoned.
-    pub fn mark_session_closed(&self) {
-        self.session_closed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        *self.goal_runtime.lock().expect("goal runtime lock") = None;
-        *self
-            .autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock") = None;
-        *self
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = None;
-        *self
-            .kernel_release_probe
-            .lock()
-            .expect("kernel release probe lock") = None;
-    }
-
-    /// The create path's live reset: a fresh (or replaced) session starts live.
-    pub fn clear_session_closed(&self) {
-        self.session_closed
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn session_is_closed(&self) -> bool {
-        self.session_closed
-            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Session-scoped kernel shell activity; never builds a new session/kernel.

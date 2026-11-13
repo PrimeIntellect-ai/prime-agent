@@ -60,6 +60,7 @@ mod model;
 pub(crate) use model::saved_session_context_from_parts;
 
 mod config;
+mod core_state;
 
 mod artifacts;
 
@@ -107,26 +108,26 @@ enum PromptContextBoundary {
     Leaf(String),
 }
 
+/// Transfers completion reporting to the worker without retaining its turn runner.
+pub(crate) type RefinementCompletionSink = std::sync::Arc<
+    dyn Fn(
+            tokio::task::JoinHandle<
+                anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+            >,
+        ) + Send
+        + Sync,
+>;
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.
     pub(crate) mcp: std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>,
-    /// The last emitted `goal_update`; unchanged states stay silent.
-    pub(crate) published_goal: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
+    /// Transfers refinement completion reporting to the worker sink.
+    pub(crate) refinement_completion_sink: std::sync::Mutex<Option<RefinementCompletionSink>>,
     pub(crate) late_agent_message_sink:
         std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,
-    /// The session's goal driver and session-manager handles, mirrored from
-    /// the core session at build time: the core session's own mutex is held
-    /// across a turn's admission, so goal checks inside emit callbacks
-    /// (which may run in async context) must not lock it.
-    pub(crate) goal_runtime: std::sync::Mutex<Option<GoalRuntimeHandles>>,
-    /// The pending-continuation guard, mirrored lock-free at build: contexts
-    /// that cannot take the async driver lock release it through this atomic
-    /// handle.
-    pub(crate) pending_goal_continuation:
-        std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Whether this run's usage crossed the goal's token budget: the boundary
     /// mints the budget-limit wrap-up steer. Shared with the agent-loop
     /// subscription (a plain field cannot cross the 'static handler).
@@ -150,29 +151,12 @@ pub struct AgentSessionEngine {
     /// row. `None` outside a daemon worker.
     pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
-    /// The live agent handle: the eager turn-abort funnel's target, mirrored
-    /// because a running turn holds the core session's mutex.
-    pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
     /// Whether the settled turn parked: the park's pause, not the goal's death.
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The queue delivery modes: seeded from the start config, switched live;
     /// `None` keeps the default ("one-at-a-time").
     queue_modes: std::sync::Mutex<(Option<String>, Option<String>)>,
-    /// The in-run autonomous consult's deadlock-free mirror (see
-    /// [`crate::autonomous_continuation`]): read without the session mutex
-    /// (a compaction run holds it).
-    pub(crate) autonomous_boundary:
-        std::sync::Mutex<Option<crate::autonomous_continuation::AutonomousBoundaryMirror>>,
-    /// The count of live kernel background `bash()` handles (`0` = none),
-    /// so the continuation gates and the quiescence observation read the
-    /// kernel manager without the session mutex. `None` (unwired) answers `0`.
-    pub(crate) background_bash_probe:
-        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> usize + Send + Sync>>>,
-    /// The current session's stop-with-snapshot handle, adopted as a weak
-    /// provisioner reference (the park arm never takes the session mutex).
-    /// `None` when no session is built.
-    pub(crate) kernel_release_probe: std::sync::Mutex<Option<SettledKernelRelease>>,
     /// `true` while this session still owns an active or paused scheduled job
     /// (must not lose its kernel). `None` keeps the release open.
     pub(crate) registered_jobs_probe:
@@ -201,6 +185,7 @@ pub struct AgentSessionEngine {
     /// arms clone the Arc and release this mutex before their awaits, so
     /// every read seam answers while a turn streams.
     pub(crate) session: Arc<tokio::sync::Mutex<Option<Arc<CoreSessionEngine>>>>,
+    core_state: std::sync::Mutex<core_state::CoreSessionState>,
     threshold_yielded: Arc<std::sync::atomic::AtomicBool>,
     threshold_checks_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// The build gate: at most one `build_session` in flight; the eager build
@@ -242,11 +227,6 @@ pub struct AgentSessionEngine {
     /// session. `None` without a worker pump.
     compaction_summary_sink:
         std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
-    /// The built session's progress-note store, mirrored at every build
-    /// adoption; `None` until the first build.
-    pub(crate) progress_notes: std::sync::Mutex<
-        Option<std::sync::Arc<pa_core::session_engine::rlm_host::RlmProgressNotes>>,
-    >,
     /// The worker's accepted-note announcer, threaded into every session
     /// build; `None` without a worker pump.
     progress_note_emit:
@@ -280,10 +260,6 @@ pub struct AgentSessionEngine {
     /// Whether the in-run hook deferred the continuation behind unsettled
     /// RLM descendant work: the settle hook delivers it.
     pub(crate) autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool,
-    /// Set by the worker's kill/shutdown closes: the continuation mint sites
-    /// and settle-hook retries bail — a stopped session stays stopped. The
-    /// create path clears it.
-    pub(crate) session_closed: std::sync::atomic::AtomicBool,
     /// The engine's own arc: the in-run continuation hook upgrades the weak so the agent's loop
     /// never pins the engine.
     pub(crate) self_weak: std::sync::Mutex<Option<std::sync::Weak<AgentSessionEngine>>>,

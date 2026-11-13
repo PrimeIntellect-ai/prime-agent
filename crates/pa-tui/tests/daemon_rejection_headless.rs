@@ -130,6 +130,8 @@ impl SharedAnswers {
         reason = "mock daemon request loop: one match arm per scripted request method"
     )]
     fn serve_connection(self: std::sync::Arc<Self>, stream: UnixStream) {
+        // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+        stream.set_nonblocking(false).expect("blocking mock stream");
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 
@@ -359,6 +361,7 @@ impl SharedAnswers {
                             }),
                         );
                         write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                        write_session_event(&mut writer, &json!({ "type": "agent_end" }));
                     } else {
                         let mut delayed = writer.try_clone().expect("clone delayed writer");
                         let delay = self.hold_turn_ms;
@@ -378,6 +381,7 @@ impl SharedAnswers {
                                 }),
                             );
                             write_session_event(&mut delayed, &json!({ "type": "turn_end" }));
+                            write_session_event(&mut delayed, &json!({ "type": "agent_end" }));
                         });
                     }
                 }

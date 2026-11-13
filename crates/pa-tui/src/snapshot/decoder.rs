@@ -65,7 +65,7 @@ pub enum TurnUpdate {
         final_error: Option<String>,
         restored_model: Option<String>,
     },
-    /// `agent_end`: the prompt queue drained.
+    /// `agent_end`: the agent run ended.
     Idle,
     /// `compaction_start`: a compaction run began.
     CompactionStart {

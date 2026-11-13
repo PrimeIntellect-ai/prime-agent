@@ -317,15 +317,12 @@ pub(crate) fn assert_cancelled_end_event(
     );
 }
 
-/// A driver loop test harness: faux script + collected events, holding the faux lock.
+/// A driver loop test harness: faux script + collected events.
 #[cfg(test)]
 fn run_prompts(
     script: &serde_json::Value,
     prompts: &[&str],
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),

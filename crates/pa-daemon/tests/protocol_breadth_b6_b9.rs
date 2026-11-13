@@ -523,6 +523,9 @@ fn wave_b8_held_pause_gates_queued_input() {
     assert_eq!(response["data"]["steering"], json!([]), "{response}");
 }
 
+// Relies on Linux AF_UNIX semantics: after the peer's `shutdown(Read)` the
+// supervisor's writes fail (EPIPE). Darwin keeps accepting them.
+#[cfg(target_os = "linux")]
 #[test]
 fn disconnect_mid_write_releases_the_held_input_pause() {
     let _serial = serial_lock();

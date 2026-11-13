@@ -59,6 +59,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "editorPaddingX",
     "autocompleteMaxVisible",
     "showHardwareCursor",
+    "emojiShortcodes",
     "markdown",
     "warnings",
     "sessionDir",

@@ -259,6 +259,12 @@ impl Worker {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         };
+        let origin = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| (store.session_id().to_string(), core.generation.clone()))
+        };
         let engine = std::sync::Arc::clone(&self.engine);
         let result = tokio::task::spawn_blocking(move || engine.run_refinement(options))
             .await
@@ -266,24 +272,38 @@ impl Worker {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                self.emit_worker_event(json!({
-                    "type": "refine_failed",
-                    "error": format!("{error:#}"),
-                }));
+                if let Some((session_id, generation)) = &origin {
+                    crate::worker::emit_refinement_event_for_generation(
+                        &self.core,
+                        &self.events,
+                        session_id,
+                        Some(generation),
+                        json!({
+                            "type": "refine_failed", "error": format!("{error:#}"),
+                        }),
+                    );
+                }
                 return response_failure(None, "refine", &format!("{error:#}"), None);
             }
         };
         // The refinement's durable rows: the TUI outcome, plus the model-facing
         // notice when edits applied.
-        if let Ok(typed) =
-            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone())
-        {
+        if let (Some((session_id, generation)), Ok(typed)) = (
+            &origin,
+            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone()),
+        ) {
             let outcome =
                 pa_core::session_engine::refine::create_refinement_outcome_message(&typed);
             if let Ok(value) =
                 serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome))
             {
-                self.emit_custom_row(&value);
+                crate::worker::emit_refinement_row_for_generation(
+                    &self.core,
+                    &self.events,
+                    session_id,
+                    Some(generation),
+                    &value,
+                );
             }
             if typed.applied_edits.iter().any(|edit| edit.applied) {
                 let notice = pa_core::session_engine::refine::create_refinement_notice_message(
@@ -293,12 +313,20 @@ impl Worker {
                 if let Ok(value) =
                     serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
                 {
-                    self.emit_custom_row(&value);
+                    crate::worker::emit_refinement_row_for_generation(
+                        &self.core,
+                        &self.events,
+                        session_id,
+                        Some(generation),
+                        &value,
+                    );
                 }
             }
-            crate::user_bash::emit_session_event_frame(
+            crate::worker::emit_refinement_event_for_generation(
                 &self.core,
                 &self.events,
+                session_id,
+                Some(generation),
                 crate::worker::refine_complete_event(&typed),
             );
         }
@@ -1009,12 +1037,8 @@ mod tests {
     /// the reload reaches the MCP auth store's blocking lock, which panics
     /// when taken on the runtime — this fails if the blocking work moves
     /// back onto the executor.
-    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     #[tokio::test]
     async fn reload_parks_the_engine_reload_off_the_runtime() {
-        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A TempDir keeps the worker's files from piling up in /tmp.
         let dir = tempfile::TempDir::new().unwrap();
         let dir_path = dir.path().to_path_buf();
