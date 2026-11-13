@@ -9,6 +9,9 @@ pub(crate) enum RunState {
     Idle,
     /// A prompt was submitted on an idle session and its run has not started yet.
     Submitted,
+    /// The daemon accepted a submitted prompt and its run has not started yet: a later submit's
+    /// failure keeps the state.
+    Admitted,
     /// `agent_start` .. `agent_end`.
     Running,
 }
@@ -16,6 +19,9 @@ pub(crate) enum RunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunEvent {
     Submitted,
+    /// The daemon accepted a submit; an ack that arrives after its run started or ended changes
+    /// nothing.
+    Admitted,
     /// A submit failed or its outcome is unknown; a run the daemon did start still arrives as
     /// `Started`. `others_in_flight` keeps the state while another submit can still start it.
     SubmitFailed {
@@ -33,25 +39,26 @@ pub(crate) enum RunEvent {
 
 impl RunState {
     fn next(self, event: RunEvent) -> RunState {
-        use RunState::{Idle, Running, Submitted};
+        use RunState::{Admitted, Idle, Running, Submitted};
         match (self, event) {
             (
-                Idle | Submitted | Running,
+                Idle | Submitted | Admitted | Running,
                 RunEvent::Started | RunEvent::Attached { streaming: true },
             ) => Running,
             (
-                Idle | Submitted | Running,
+                Idle | Submitted | Admitted | Running,
                 RunEvent::Ended | RunEvent::Attached { streaming: false },
             )
+            | (Submitted | Admitted, RunEvent::Interrupted)
             | (
                 Submitted,
-                RunEvent::Interrupted
-                | RunEvent::SubmitFailed {
+                RunEvent::SubmitFailed {
                     others_in_flight: false,
                 },
             ) => Idle,
             (Idle, RunEvent::Submitted) => Submitted,
-            (Idle, RunEvent::Interrupted | RunEvent::SubmitFailed { .. })
+            (Submitted, RunEvent::Admitted) => Admitted,
+            (Idle, RunEvent::Interrupted | RunEvent::SubmitFailed { .. } | RunEvent::Admitted)
             | (
                 Submitted,
                 RunEvent::Submitted
@@ -60,8 +67,15 @@ impl RunState {
                 },
             )
             | (
+                Admitted,
+                RunEvent::Submitted | RunEvent::SubmitFailed { .. } | RunEvent::Admitted,
+            )
+            | (
                 Running,
-                RunEvent::Submitted | RunEvent::Interrupted | RunEvent::SubmitFailed { .. },
+                RunEvent::Submitted
+                | RunEvent::Interrupted
+                | RunEvent::SubmitFailed { .. }
+                | RunEvent::Admitted,
             ) => self,
         }
     }
@@ -71,7 +85,7 @@ impl SessionUi {
     pub(crate) fn run_busy(&self) -> bool {
         match self.run_state {
             RunState::Idle => false,
-            RunState::Submitted | RunState::Running => true,
+            RunState::Submitted | RunState::Admitted | RunState::Running => true,
         }
     }
 
@@ -89,7 +103,7 @@ impl SessionUi {
                 Self::flush_pending_bash(view);
                 return;
             }
-            RunState::Submitted | RunState::Running => {}
+            RunState::Submitted | RunState::Admitted | RunState::Running => {}
         }
         let since = match event {
             RunEvent::Started => Instant::now(),
@@ -99,9 +113,12 @@ impl SessionUi {
                 .unwrap_or_else(Instant::now),
             RunEvent::Submitted => match was {
                 RunState::Idle => Instant::now(),
-                RunState::Submitted | RunState::Running => return,
+                RunState::Submitted | RunState::Admitted | RunState::Running => return,
             },
-            RunEvent::SubmitFailed { .. } | RunEvent::Interrupted | RunEvent::Ended => return,
+            RunEvent::Admitted
+            | RunEvent::SubmitFailed { .. }
+            | RunEvent::Interrupted
+            | RunEvent::Ended => return,
         };
         view.working = Some(WorkingState {
             activity: "Waiting",
@@ -155,6 +172,21 @@ mod tests {
             "a failed submit keeps the state while another submit is still in flight"
         );
         assert_eq!(
+            after(&[
+                RunEvent::Submitted,
+                RunEvent::Admitted,
+                RunEvent::Submitted,
+                FAILED
+            ]),
+            RunState::Admitted,
+            "a later submit's failure keeps an admitted prompt whose run has not started"
+        );
+        assert_eq!(
+            after(&[RunEvent::Started, RunEvent::Ended, RunEvent::Admitted]),
+            RunState::Idle,
+            "an ack that arrives after its run ended changes nothing"
+        );
+        assert_eq!(
             after(&[RunEvent::Submitted, RunEvent::Interrupted]),
             RunState::Idle,
             "an abort before the run starts clears the loader"
@@ -167,6 +199,15 @@ mod tests {
             ]),
             RunState::Running,
             "a prompt the daemon had already picked up still shows its run"
+        );
+        assert_eq!(
+            after(&[
+                RunEvent::Submitted,
+                RunEvent::Admitted,
+                RunEvent::Interrupted
+            ]),
+            RunState::Idle,
+            "an abort withdraws an admitted prompt before its run starts"
         );
         assert_eq!(
             after(&[RunEvent::Started, RunEvent::Interrupted]),
