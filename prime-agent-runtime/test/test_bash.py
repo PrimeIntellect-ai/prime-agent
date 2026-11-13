@@ -1510,6 +1510,8 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_scan("echo 'example | grep -r needle ~/Documents'"))
         self.assertFalse(is_scan("rg -d 2 pattern ~/Downloads"))
         self.assertFalse(is_scan("rg --max-depth=3 pattern ~/Downloads"))
+        self.assertFalse(is_scan('rg --max-depth="3" needle "$HOME"'))
+        self.assertFalse(is_scan("rg --max-depth='3' needle ~"))
         self.assertFalse(is_scan("find ~/Documents -maxdepth 2 -name '*.pdf'"))
         self.assertFalse(is_scan("grep -rl needle src # ~/Documents"))
         self.assertFalse(is_scan("grep -rl needle $HOMEDIR"))

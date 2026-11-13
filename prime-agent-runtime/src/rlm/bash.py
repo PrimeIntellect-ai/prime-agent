@@ -236,8 +236,8 @@ def _mask_scan_literals(command: str) -> str:
             while j < n and chars[j].isascii() and chars[j].isdigit():
                 j += 1
             if j > i + 1 and j < n and chars[j] == "'":
-                chars[i] = " "
-                chars[j] = " "
+                chars[i] = ""
+                chars[j] = ""
                 i = j + 1
                 continue
             j = i + 1
@@ -405,8 +405,8 @@ def _mask_scan_literals(command: str) -> str:
             while j < n and chars[j].isascii() and chars[j].isdigit():
                 j += 1
             if j > i + 1 and j < n and chars[j] == '"':
-                chars[i] = " "
-                chars[j] = " "
+                chars[i] = ""
+                chars[j] = ""
                 i = j + 1
                 continue
             # A span that starts with a home expansion is a path argument:
