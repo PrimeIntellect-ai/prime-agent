@@ -838,31 +838,6 @@ async fn review_compact_refinement(
 }
 
 impl AgentSession {
-    /// The refiner model call on the session model, with the merged request
-    /// headers (the Prime team header) the session's own requests send.
-    pub(super) async fn refiner_call(
-        &self,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-    ) -> anyhow::Result<crate::refinement::executor::RefinerFn> {
-        let (api_key, headers) = match self.auxiliary_model.clone() {
-            Some(context) => {
-                let model = model.clone();
-                let routed = tokio::task::spawn_blocking(move || {
-                    super::auxiliary_model::session_fallback_with_headers(&context, &model, api_key)
-                })
-                .await?;
-                (routed.api_key, routed.headers)
-            }
-            None => (api_key, None),
-        };
-        Ok(default_refiner_call(
-            api_key,
-            headers,
-            self.session_id().await,
-        ))
-    }
-
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
     /// decline; `Ok(Some(review))` a fresh approval.
