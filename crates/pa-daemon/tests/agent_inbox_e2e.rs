@@ -535,6 +535,28 @@ fn delivered_rows(messages: &Value) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// The session's durable inbox journal: the daemon resolves the
+/// per-session artifact dir off the session file's grandparent
+/// (`session_artifact_dir_for_log`), so the journal sits at
+/// `session-artifacts/<session id>/inbox.jsonl` beside the session dir.
+fn inbox_journal_path(sessions: &Path) -> Option<PathBuf> {
+    let session_file = sessions
+        .read_dir()
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))?;
+    let session_id = session_file.file_stem()?.to_string_lossy().to_string();
+    Some(
+        session_file
+            .parent()?
+            .parent()?
+            .join("session-artifacts")
+            .join(session_id)
+            .join("inbox.jsonl"),
+    )
+}
+
 fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + deadline;
     loop {
@@ -1040,10 +1062,19 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     wait_until(Duration::from_secs(60), || {
         (NEXT_AM.load(Ordering::SeqCst) >= 1).then_some(())
     });
-    // The detached command completes ~1s in and its notice fires once
-    // the starting cell ends; this window lands the delivery after that
-    // notice, so both arrivals extend ONE queued batch.
-    std::thread::sleep(Duration::from_secs(3));
+    // The batch's order contract: the delivery must EXTEND the detached
+    // command's waiting batch, never start a second one. The durable
+    // journal is the observable arrival — wait for the completion's
+    // record instead of a fixed delay, which a cold first cell can
+    // outlast (an early delivery would deliver alone at the cell
+    // boundary and split the batch into two notices).
+    wait_until(Duration::from_secs(120), || {
+        let journal =
+            inbox_journal_path(&sessions).and_then(|path| std::fs::read_to_string(path).ok())?;
+        journal
+            .contains("\"class\":\"bash-done\"")
+            .then_some(journal)
+    });
     let delivered = client.request(
         "m1",
         &json!({
