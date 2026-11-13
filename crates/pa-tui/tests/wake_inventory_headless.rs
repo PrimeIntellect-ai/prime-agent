@@ -4,14 +4,17 @@
 //! without them, so each member needs its own frame-arm deadline.
 #![cfg(unix)]
 
+mod support;
+
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+
+use support::options;
 
 /// The plan height and the mock, in the same shape the other headless
 /// batteries use (the mock serves one session and answers the boot handshake).
@@ -45,6 +48,8 @@ impl MockBoot {
                 Err(_) => return,
             }
         };
+        // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+        stream.set_nonblocking(false).expect("blocking mock stream");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = BufReader::new(stream);
@@ -129,7 +134,11 @@ fn run_boot_plan(steps: Vec<HeadlessStep>) -> pa_tui::interactive::InteractiveOu
         .expect("tokio runtime");
     let outcome = runtime
         .block_on(run_interactive(
-            options(socket),
+            InteractiveOptions {
+                show_images: false,
+                fullscreen_mouse: false,
+                ..options(socket)
+            },
             UiMode::Headless(HeadlessPlan {
                 steps,
                 width: 100,
@@ -139,44 +148,6 @@ fn run_boot_plan(steps: Vec<HeadlessStep>) -> pa_tui::interactive::InteractiveOu
         .expect("interactive run");
     let _ = handle.join();
     outcome
-}
-
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: false,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
 }
 
 /// The first frame paints without any input after the open: the open's rebuild leaves the surface

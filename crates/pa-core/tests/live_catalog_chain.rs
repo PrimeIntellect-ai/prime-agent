@@ -174,9 +174,7 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
             .to_string(),
             None,
         ),
-        // Layer B (credentialed public Prime Inference).
-        common::ok_json(&pi.clone(), None),
-        // The private-authorization fetch.
+        // Layer B (the credentialed Prime Inference snapshot).
         common::ok_json(&pi, None),
     ])
     .await;
@@ -204,7 +202,7 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
             .any(|model| model.id == "anthropic/live-only-model"),
         "live-only public entry"
     );
-    // The private entitlement, visible because the authorized set adopted it.
+    // The private route, served because the account's scoped snapshot carries it.
     let private = all
         .iter()
         .find(|model| model.id == "internal/glm-5.3-fast")
@@ -216,9 +214,9 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
         .iter()
         .any(|model| model.id == "internal/glm-5.3-fast"));
 
-    // Exactly the three fetches (layer A, layer B, private lane).
+    // Exactly the two fetches (layer A, layer B): no second private lane.
     let requests = server.recorded_requests();
-    assert_eq!(requests.len(), 3, "got {}: {requests:#?}", requests.len());
+    assert_eq!(requests.len(), 2, "got {}: {requests:#?}", requests.len());
     // Layer A is unauthenticated.
     assert!(requests[0].contains("GET /catalog"));
     assert!(!requests[0].to_lowercase().contains("authorization:"));
@@ -300,12 +298,9 @@ async fn without_credentials_the_compiled_fallback_serves_unchanged() {
         .expect("compiled fallback model");
     assert_eq!(glm.cost.input.as_f64(), compiled_glm.cost.input.as_f64());
     assert!(!all.iter().any(|model| model.id == LAYER_A_PROBE_ID));
-    assert!(!all.iter().any(|model| model.id == "internal/glm-5.3-fast"));
-    assert!(all.iter().any(|model| model.id == "internal/glm-5.2-fast"));
-    assert!(!registry
-        .get_available()
+    assert!(!all
         .iter()
-        .any(|model| model.id == "internal/glm-5.2-fast"));
+        .any(pa_core::models::is_private_prime_inference_model));
 }
 
 #[tokio::test]
@@ -427,7 +422,6 @@ async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
     let slow = std::time::Duration::from_millis(300);
     let server = common::MockServer::start_scripted(vec![
         common::Scripted::Delayed(common::ok_json(&layer_a, None), slow),
-        common::Scripted::Delayed(common::ok_json(&pi.clone(), None), slow),
         common::Scripted::Delayed(common::ok_json(&pi, None), slow),
     ])
     .await;
@@ -487,7 +481,6 @@ async fn session_model_restore_fast_path_never_fetches() {
     .to_string();
     let server = common::MockServer::start(vec![
         common::ok_json(&layer_a, None),
-        common::ok_json(&pi.clone(), None),
         common::ok_json(&pi, None),
     ])
     .await;

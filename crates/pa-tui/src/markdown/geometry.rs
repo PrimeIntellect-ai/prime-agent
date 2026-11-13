@@ -1,7 +1,7 @@
 //! Geometry uses the same wrapping traversal as painted Markdown rows.
 use super::{
-    block_cache_key, code_rows, heading_spans, parse_blocks, render_inline, wrapped_span_count,
-    Block, BlockKind, MarkdownBlockCache, MarkdownStyle,
+    block_cache_key, code_rows, heading_spans, normalize_source, parse_blocks, render_inline,
+    wrapped_span_count, Block, BlockKind, MarkdownBlockCache, MarkdownStyle,
 };
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -82,7 +82,7 @@ pub(crate) fn markdown_row_count_tagged(
     if text.trim().is_empty() {
         return 0;
     }
-    let normalized = text.replace('\t', "   ");
+    let normalized = normalize_source(text);
     let blocks = parse_blocks(&normalized);
     let width = width.max(1);
     let mut total = 0;

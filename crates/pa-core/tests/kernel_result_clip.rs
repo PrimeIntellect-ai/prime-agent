@@ -3,8 +3,10 @@
 // Kernel manager futures follow the crate's existing integration-test disposition.
 #![allow(clippy::large_futures)]
 
+mod script;
+
+use script::write_executable;
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
@@ -29,8 +31,7 @@ for line in sys.stdin:
 async fn result_clipping_counts_characters_and_preserves_follow_up_cells() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let python = dir.path().join("fake-kernel");
-    std::fs::write(&python, FAKE_RUNTIME).expect("write fake runtime");
-    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_executable(&python, FAKE_RUNTIME);
     let manager = ReplKernelManager::new(KernelManagerOptions {
         python: Some(python),
         cwd: Some(dir.path().to_path_buf()),

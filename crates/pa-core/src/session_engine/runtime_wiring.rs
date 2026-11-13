@@ -18,7 +18,7 @@ use crate::session::manager::SessionManager;
 use crate::skills::{get_python_skill_runtime_info, Skill};
 use crate::tools::ipython::{
     IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
-    KernelExecError, KernelExecuteOptions, KernelExecutor,
+    KernelExecuteOptions, KernelExecutor,
 };
 
 use super::host_requests::SessionBinding;
@@ -155,14 +155,10 @@ pub fn wire_session_runtime(
     runtime.register_host_handlers(session.clone(), &mut handlers);
     let model_registry = rlm.model_registry.unwrap_or_else(|| {
         let auth = crate::auth::AuthStorage::create(agent_dir);
-        let mut registry =
-            crate::models::registry::ModelRegistry::create(auth, agent_dir.join("models.json"));
-        // Adopt the on-disk private authorization before freezing the Arc:
-        // `rlm.find_models` and child-spawn resolution search this registry, and a
-        // fresh registry otherwise gates every private `internal/*` model out (only
-        // the async refresh populates the authorized set).
-        registry.load_private_authorization_from_cache();
-        Arc::new(registry)
+        Arc::new(crate::models::registry::ModelRegistry::create(
+            auth,
+            agent_dir.join("models.json"),
+        ))
     });
     let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
         rlm.usage_store
@@ -251,13 +247,14 @@ pub fn kernel_provisioner(
     agent_dir: &std::path::Path,
     shell_path: Option<std::path::PathBuf>,
     command_prefix: Option<String>,
-    serper_api_key: Option<String>,
+    websearch_env: Vec<(String, String)>,
     session_artifact_dir: Option<std::path::PathBuf>,
     cell_timeout_ms: Option<u64>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
+    ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
 ) -> Arc<KernelProvisioner> {
     let mut env = HashMap::with_capacity(3);
     env.insert(
@@ -283,9 +280,7 @@ pub fn kernel_provisioner(
             env.insert(key.to_string(), value.to_string_lossy().to_string());
         }
     }
-    if let Some(serper_api_key) = serper_api_key {
-        env.insert("SERPER_API_KEY".to_string(), serper_api_key);
-    }
+    env.extend(websearch_env);
     Arc::new(KernelProvisioner::new(
         cwd,
         IpythonKernelProvisionerOptions {
@@ -302,7 +297,7 @@ pub fn kernel_provisioner(
             // The engine-resolved default cell time limit (`None`: daemonless;
             // the runtime bootstrap and state ops never arm it).
             cell_timeout_ms,
-            ready_gate: None,
+            ready_gate,
             on_restore,
             on_background_work_settled,
             on_unavailable_skills,
@@ -311,32 +306,43 @@ pub fn kernel_provisioner(
     ))
 }
 
-/// TS `_addWebsearchKeyEnv` (agent-session.ts:11137-11158): the serper key
-/// rides the kernel env only when a websearch skill is loaded, the ambient
-/// env does not already carry one, and the stored `serper` credential is an
-/// api key that resolves non-empty. The websearch skill's own `!command`
-/// key refs cannot resolve in-kernel, so the host resolves them here; the
-/// caller reads the credential and runs this off the async runtime, because
-/// a `!command` key can block.
+/// The websearch skill's kernel env, only when a websearch skill is loaded:
+/// the selected provider (`PRIME_AGENT_WEBSEARCH_PROVIDER`, so the settings
+/// choice stays host-side) and, per TS `_addWebsearchKeyEnv`
+/// (agent-session.ts:11137-11158), the provider's stored key under its env
+/// var when the ambient env does not already carry a nonblank one and the
+/// stored credential is an api key that resolves non-empty. The websearch
+/// skill's own `!command` key refs cannot resolve in-kernel, so the host
+/// resolves them here; the caller reads the credential and runs this off the
+/// async runtime, because a `!command` key can block.
 #[must_use]
-pub(crate) fn websearch_api_key(
+pub(crate) fn websearch_env(
     skills: &[Skill],
+    provider: crate::settings::WebSearchProvider,
     credential: Option<crate::auth::AuthCredential>,
-) -> Option<String> {
-    if std::env::var("SERPER_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-        return None;
-    }
+) -> Vec<(String, String)> {
     if !skills.iter().any(|skill| skill.name == "websearch") {
-        return None;
+        return Vec::new();
     }
-    match credential {
+    let mut env = vec![(
+        "PRIME_AGENT_WEBSEARCH_PROVIDER".to_string(),
+        provider.id().to_string(),
+    )];
+    if std::env::var(provider.api_key_env()).is_ok_and(|value| !value.trim().is_empty()) {
+        return env;
+    }
+    let key = match credential {
         Some(crate::auth::AuthCredential::ApiKey { key, .. }) => {
             crate::auth::resolve_config_value::resolve_config_value(&key)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         }
         _ => None,
+    };
+    if let Some(key) = key {
+        env.push((provider.api_key_env().to_string(), key));
     }
+    env
 }
 
 impl IpythonKernelProvisioner for KernelProvisioner {
@@ -377,12 +383,8 @@ impl KernelExecutor for KernelManagerExecutor {
         &self,
         code: &str,
         options: KernelExecuteOptions<'_>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<crate::tools::ipython::ExecuteResult, KernelExecError>>
-                + Send,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::tools::ipython::ExecuteResult>> + Send>>
+    {
         let manager = self.manager.clone();
         let code = code.to_string();
         let signal = options.signal;
@@ -404,8 +406,7 @@ impl KernelExecutor for KernelManagerExecutor {
                         ..Default::default()
                     },
                 )
-                .await
-                .map_err(KernelExecError::Other)?;
+                .await?;
             Ok(convert_execute_result(result))
         })
     }
@@ -476,7 +477,6 @@ pub fn ipython_tool_options(
 ) -> IpythonToolOptions {
     IpythonToolOptions {
         provisioner,
-        ui: None,
         on_late_sent_agent_message,
     }
 }

@@ -29,6 +29,7 @@ pub struct CompletionItem {
 pub enum SuggestionKind {
     SlashCommand,
     File,
+    Emoji,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +70,6 @@ pub trait AutocompleteProvider: Send {
         cursor_line: usize,
         cursor_col: usize,
         item: &CompletionItem,
-        prefix: &str,
     ) -> CompletionResult;
     fn should_trigger_file_completion(
         &self,
@@ -305,7 +305,6 @@ pub struct AutocompleteState {
     pub items: Vec<CompletionItem>,
     pub selected_index: usize,
     pub max_visible: usize,
-    pub prefix: String,
     pub kind: Option<SuggestionKind>,
     pub forced: bool,
 }
@@ -315,14 +314,12 @@ impl AutocompleteState {
     pub fn new(
         items: Vec<CompletionItem>,
         max_visible: usize,
-        prefix: String,
         kind: Option<SuggestionKind>,
     ) -> Self {
         Self {
             items,
             selected_index: 0,
             max_visible: max_visible.clamp(3, 20),
-            prefix,
             kind,
             forced: false,
         }
@@ -956,29 +953,43 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         }))
     }
 
+    /// Replace the token at the cursor as the current text reads, never as the lookup that
+    /// built the menu read it (typing runs ahead of an open menu): the `@` token, else a
+    /// `/name` token, else the path token — `get_suggestions`' extraction order.
     fn apply_completion(
         &self,
         lines: &[String],
         cursor_line: usize,
         cursor_col: usize,
         item: &CompletionItem,
-        prefix: &str,
     ) -> CompletionResult {
-        let is_slash = get_slash_command_context(lines, cursor_line, cursor_col)
-            .is_some_and(|context| context.kind == SlashKind::Name && context.prefix == prefix);
+        let line: Vec<char> = lines[cursor_line].chars().collect();
+        let before = &line[..cursor_col.min(line.len())];
+        if let Some(at_prefix) = extract_at_prefix(before) {
+            return apply_file_completion(lines, cursor_line, cursor_col, item, &at_prefix);
+        }
         // TS `applyCompletion` finds the item over its whole command list
         // (builtins and skills share one array), so a `skill:` item applies
         // through the slash path — the line keeps its leading `/`.
-        if is_slash
-            && self
-                .commands
-                .iter()
-                .chain(self.skill_commands.iter())
-                .any(|command| command.name == item.value)
-        {
-            return self.apply_slash_completion(lines, cursor_line, cursor_col, item, prefix);
+        if let Some(context) = get_slash_command_context(lines, cursor_line, cursor_col) {
+            if context.kind == SlashKind::Name
+                && self
+                    .commands
+                    .iter()
+                    .chain(self.skill_commands.iter())
+                    .any(|command| command.name == item.value)
+            {
+                return self.apply_slash_completion(
+                    lines,
+                    cursor_line,
+                    cursor_col,
+                    item,
+                    &context.prefix,
+                );
+            }
         }
-        apply_file_completion(lines, cursor_line, cursor_col, item, prefix)
+        let path_prefix = extract_path_prefix(before, true).unwrap_or_default();
+        apply_file_completion(lines, cursor_line, cursor_col, item, &path_prefix)
     }
 
     fn should_trigger_file_completion(

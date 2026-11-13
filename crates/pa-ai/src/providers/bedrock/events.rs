@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use base64::Engine;
 use serde_json::{Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
@@ -136,8 +137,7 @@ pub(crate) fn handle_event(
     }
 
     if let Some(content_block_delta) = parsed.get("contentBlockDelta") {
-        handle_content_block_delta(content_block_delta, model, output, writer, state);
-        return Ok(());
+        return handle_content_block_delta(content_block_delta, model, output, writer, state);
     }
 
     if let Some(content_block_stop) = parsed.get("contentBlockStop") {
@@ -205,6 +205,32 @@ fn handle_content_block_start(
     }
 }
 
+/// Push a fresh empty thinking block, bind it to `content_block_index`, and announce it: the first
+/// reasoning delta of an index and the rotation onto a new block after a closed one share it.
+fn start_thinking_block(
+    output: &mut AssistantMessage,
+    writer: &AssistantMessageEventWriter,
+    state: &mut BedrockStreamState,
+    content_block_index: u64,
+) {
+    output
+        .content
+        .push(AssistantContent::Thinking(ThinkingContent {
+            thinking: String::new(),
+            thinking_signature: Some(String::new()),
+            redacted: None,
+            rest: Map::default(),
+        }));
+    let index = output.content.len() - 1;
+    state
+        .slots
+        .insert(content_block_index, BlockSlot::Thinking { index });
+    writer.push(AssistantMessageEvent::ThinkingStart {
+        content_index: index as u64,
+        partial: output.clone(),
+    });
+}
+
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 fn handle_content_block_delta(
@@ -213,7 +239,7 @@ fn handle_content_block_delta(
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) {
+) -> Result<(), ProviderError> {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
@@ -254,7 +280,7 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Text { index } => *index,
-            _ => return,
+            BlockSlot::Thinking { .. } | BlockSlot::ToolUse { .. } => return Ok(()),
         };
         if let AssistantContent::Text(block) = &mut output.content[index] {
             block.text.push_str(text);
@@ -264,7 +290,7 @@ fn handle_content_block_delta(
             delta: text.to_string(),
             partial: output.clone(),
         });
-        return;
+        return Ok(());
     }
 
     if let Some(tool_input) = tool_input {
@@ -287,29 +313,57 @@ fn handle_content_block_delta(
                 partial,
             });
         }
-        return;
+        return Ok(());
     }
 
     if let Some(reasoning) = reasoning {
+        let text_delta = reasoning.get("text").and_then(Value::as_str);
+        let redacted_delta = reasoning.get("redactedContent").and_then(Value::as_str);
+
+        // Bedrock streams reasoning as a list of independent blocks and can deliver TWO signed
+        // thinking blocks under ONE contentBlockIndex with no contentBlockStop between them
+        // (live wire case, claude-sonnet-5-5 adaptive thinking): text("first") ->
+        // signature("SIG1") -> text("second") -> signature("SIG2"). A signature signs only its
+        // own block, so a text or redactedContent delta arriving after the current block is
+        // already closed finalizes that block exactly like the contentBlockStop thinking arm
+        // and starts a new one. Signature chunks keep joining within one block, and
+        // redactedContent chunks keep byte-joining within one redacted block.
+        if let Some(BlockSlot::Thinking { index }) = state.slots.get(&content_block_index) {
+            let index = *index;
+            let closed = match &output.content[index] {
+                AssistantContent::Thinking(block) => {
+                    let signed = matches!(
+                        block.thinking_signature.as_deref(),
+                        Some(signature) if !signature.is_empty()
+                    );
+                    let redacted = block.redacted.unwrap_or(false);
+                    if redacted_delta.is_some() {
+                        // Redacted bytes never join onto a text signature.
+                        signed && !redacted
+                    } else {
+                        text_delta.is_some() && (signed || redacted)
+                    }
+                }
+                _ => false,
+            };
+            if closed {
+                let content = match &output.content[index] {
+                    AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
+                    _ => String::new(),
+                };
+                writer.push(AssistantMessageEvent::ThinkingEnd {
+                    content_index: index as u64,
+                    content,
+                    partial: output.clone(),
+                });
+                start_thinking_block(output, writer, state, content_block_index);
+            }
+        }
+
         let slot = if let Some(slot) = state.slots.get(&content_block_index) {
             slot
         } else {
-            output
-                .content
-                .push(AssistantContent::Thinking(ThinkingContent {
-                    thinking: String::new(),
-                    thinking_signature: Some(String::new()),
-                    redacted: None,
-                    rest: Map::default(),
-                }));
-            let index = output.content.len() - 1;
-            state
-                .slots
-                .insert(content_block_index, BlockSlot::Thinking { index });
-            writer.push(AssistantMessageEvent::ThinkingStart {
-                content_index: index as u64,
-                partial: output.clone(),
-            });
+            start_thinking_block(output, writer, state, content_block_index);
             state
                 .slots
                 .get(&content_block_index)
@@ -317,28 +371,38 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Thinking { index } => *index,
-            _ => return,
+            BlockSlot::Text { .. } | BlockSlot::ToolUse { .. } => return Ok(()),
         };
-        let mut signature_delta = None;
         if let AssistantContent::Thinking(block) = &mut output.content[index] {
-            if let Some(text) = reasoning.get("text").and_then(Value::as_str) {
+            if let Some(text) = text_delta {
                 block.thinking.push_str(text);
             }
             if let Some(signature) = reasoning.get("signature").and_then(Value::as_str) {
-                signature_delta = Some(signature.to_string());
                 block.thinking_signature =
                     Some(block.thinking_signature.take().unwrap_or_default() + signature);
             }
+            if let Some(data) = redacted_delta {
+                // Binary deltas are independently base64-encoded; join bytes, not encoded strings.
+                let base64 = base64::engine::general_purpose::STANDARD;
+                let mut bytes = base64
+                    .decode(block.thinking_signature.as_deref().unwrap_or_default())
+                    .map_err(|error| ProviderError::Message(error.to_string()))?;
+                base64
+                    .decode_vec(data, &mut bytes)
+                    .map_err(|error| ProviderError::Message(error.to_string()))?;
+                block.thinking_signature = Some(base64.encode(bytes));
+                block.redacted = Some(true);
+            }
         }
-        if let Some(text) = reasoning.get("text").and_then(Value::as_str) {
+        if let Some(text) = text_delta {
             writer.push(AssistantMessageEvent::ThinkingDelta {
                 content_index: index as u64,
                 delta: text.to_string(),
                 partial: output.clone(),
             });
         }
-        let _ = signature_delta;
     }
+    Ok(())
 }
 
 fn handle_content_block_stop(
@@ -461,6 +525,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         };
         let request_id = None;
         let mut output = crate::event_stream::initial_assistant_message(
@@ -519,6 +584,7 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
         }
     }
 
@@ -544,6 +610,138 @@ mod tests {
                 .expect("event handled");
         }
         output
+    }
+
+    #[test]
+    fn signed_thinking_without_text_survives_replay() {
+        let output = run_wire_events(&[
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "sig-"}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "A"}}}),
+            ),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+        ]);
+        let replay = crate::providers::bedrock::convert::convert_messages(
+            &crate::types::Context {
+                system_prompt: None,
+                messages: vec![crate::types::Message::Assistant(output)],
+                tools: None,
+            },
+            &wire_model(),
+            crate::types::CacheRetention::None,
+        );
+        assert_eq!(
+            replay,
+            vec![json!({"role": "assistant", "content": [
+                {"reasoningContent": {"reasoningText": {"text": "", "signature": "sig-A"}}}
+            ]})]
+        );
+    }
+
+    /// Live wire case (claude-sonnet-5-5, adaptive thinking): Bedrock delivered TWO signed
+    /// thinking blocks under ONE contentBlockIndex with no contentBlockStop between them:
+    /// text("first") -> signature("SIG1") -> text("second") -> signature("SIG2"). A signature
+    /// signs only its own block, so they must stay two separate `ThinkingContent` blocks.
+    #[test]
+    fn two_signed_thinking_blocks_under_one_index_stay_separate() {
+        let output = run_wire_events(&[
+            ("messageStart", json!({"role": "assistant"})),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"text": "first"}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "SIG1"}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"text": "second"}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"signature": "SIG2"}}}),
+            ),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+            ("messageStop", json!({"stopReason": "end_turn"})),
+        ]);
+        assert_eq!(
+            output.content,
+            vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "first".into(),
+                    thinking_signature: Some("SIG1".into()),
+                    redacted: None,
+                    rest: Map::default(),
+                }),
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "second".into(),
+                    thinking_signature: Some("SIG2".into()),
+                    redacted: None,
+                    rest: Map::default(),
+                }),
+            ]
+        );
+        let replay = crate::providers::bedrock::convert::convert_messages(
+            &crate::types::Context {
+                system_prompt: None,
+                messages: vec![crate::types::Message::Assistant(output)],
+                tools: None,
+            },
+            &wire_model(),
+            crate::types::CacheRetention::None,
+        );
+        assert_eq!(
+            replay,
+            vec![json!({"role": "assistant", "content": [
+                {"reasoningContent": {"reasoningText": {"text": "first", "signature": "SIG1"}}},
+                {"reasoningContent": {"reasoningText": {"text": "second", "signature": "SIG2"}}},
+            ]})]
+        );
+    }
+
+    #[test]
+    fn redacted_reasoning_survives_replay() {
+        // Each binary delta is base64-encoded independently, including its padding.
+        let output = run_wire_events(&[
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"redactedContent": "AQIDBA=="}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"reasoningContent": {"redactedContent": "/wA="}}}),
+            ),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+        ]);
+        assert_eq!(
+            output.content,
+            vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: String::new(),
+                thinking_signature: Some("AQIDBP8A".into()),
+                redacted: Some(true),
+                rest: Map::default(),
+            })]
+        );
+        let replay = crate::providers::bedrock::convert::convert_messages(
+            &crate::types::Context {
+                system_prompt: None,
+                messages: vec![crate::types::Message::Assistant(output)],
+                tools: None,
+            },
+            &wire_model(),
+            crate::types::CacheRetention::None,
+        );
+        assert_eq!(
+            replay,
+            vec![json!({"role": "assistant", "content": [
+                {"reasoningContent": {"redactedContent": "AQIDBP8A"}}
+            ]})]
+        );
     }
 
     #[test]

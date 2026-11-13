@@ -51,6 +51,7 @@ EXPECTED_TOP_LEVEL = {
     "prime-agent-runtime",
     "skills",
     "LICENSE",
+    "THIRD-PARTY-NOTICES.txt",
     "README.md",
     "package.json",
     # The bundled catalog assets (spec §3.2): the installed artifact must
@@ -60,6 +61,9 @@ EXPECTED_TOP_LEVEL = {
     "mcp-services.bundled.json",
 }
 CONTINUOUS_EXTRA_TOP_LEVEL = {"package.json"}
+# The notices measure about 370 KB on every target; a file this large means the
+# generation pulled in far more than the shipped binary's crates.
+MAX_THIRD_PARTY_NOTICES_BYTES = 1_500_000
 NATIVE_COMPAT_TOP_LEVEL = {"theme", "export-html", "photon_rs_bg.wasm", "PHOTON-LICENSE.md", "install.sh"}
 
 # Same shape as `continuous_version` in assemble_artifacts.py.
@@ -140,6 +144,10 @@ def main() -> int:
             if member.uid != 0 or member.gid != 0 or member.mtime != 0:
                 fail(f"tarball entry {member.name!r} is not deterministic "
                      f"(uid={member.uid} gid={member.gid} mtime={member.mtime})")
+            if (member.name == "THIRD-PARTY-NOTICES.txt"
+                    and member.size > MAX_THIRD_PARTY_NOTICES_BYTES):
+                fail(f"THIRD-PARTY-NOTICES.txt is {member.size} bytes, above the "
+                     f"{MAX_THIRD_PARTY_NOTICES_BYTES}-byte cap")
 
     # 2. Checksums agree with SHA256SUMS and manifest.json.
     archive_sha = sha256_file(archive)

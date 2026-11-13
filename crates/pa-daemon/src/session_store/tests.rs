@@ -31,6 +31,18 @@ fn bounded_header_matches_the_line_read() {
     assert!(is_valid_session_file(&path));
 }
 
+#[cfg(unix)]
+#[test]
+fn rewrite_keeps_the_transcript_owner_only() {
+    let dir = temp_dir();
+    let mut session = SessionFile::create("/repo", None, 0);
+    let path = dir.join(session_file_name(session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    let mode = pa_core::platform::perms::file_mode(&path).unwrap();
+    assert_eq!(mode & 0o077, 0, "transcript mode {mode:o}");
+}
+
 #[test]
 fn bounded_header_rejects_a_non_json_first_line() {
     let dir = temp_dir();

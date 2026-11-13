@@ -95,11 +95,6 @@ impl AgentsViewMode {
     /// draft, other keys go to the editor's grammar (not the search field's subset).
     /// The composer comes in owned and goes back only where the mode continues.
     pub(super) fn handle_rename_key(&mut self, mut rename: Box<RenameComposer>, key: &str) {
-        // Every ctrl+c in rename mode counts as handled for the force-quit guard (the default
-        // cancel binding includes ctrl+c).
-        if key == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         if self.keybindings.matches(key, "tui.select.cancel") {
             return;
         }

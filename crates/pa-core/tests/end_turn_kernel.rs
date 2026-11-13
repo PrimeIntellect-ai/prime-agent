@@ -203,6 +203,7 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         telemetry: None,
         model_info: Some(registry_model()),
         mcp_manager: None,
+        kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
         bash_notice_wake: Some(wake),

@@ -1,0 +1,1 @@
+- When a provider rejects a signed-in OAuth credential that has not expired yet, the session now refreshes the token and retries once. When the refresh fails, the turn ends with a message that names the provider and the reason and asks you to run `/login`, instead of a bare provider error or "No API key".
