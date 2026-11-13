@@ -37,6 +37,26 @@ fn next_spinner_deadline(started: Instant, now: Instant) -> Instant {
     now + Duration::from_millis((SPINNER_INTERVAL_MS - into_phase) as u64)
 }
 
+/// Whether one applied event batch settled an agent run: the session rests idle after it and
+/// either a run was live before it or a turn ended inside it. The daemon can stream a whole
+/// short run into one batch (even before the prompt's ACK), which the `turn_active` edge
+/// alone never sees.
+fn batch_settles_run(
+    was_active: bool,
+    turn_ends_before: u64,
+    turn_active: bool,
+    turn_ends_after: u64,
+) -> bool {
+    !turn_active && (was_active || turn_ends_after > turn_ends_before)
+}
+
+/// Whether this iteration's frame gate paints: a dirty frame, or a settle's pending scrollback
+/// flush. Only the gate's paint runs the flush, and a keystroke's inline paint clears `dirty`
+/// without it.
+fn frame_gate_due(dirty: bool, scrollback_flush_pending: bool) -> bool {
+    dirty || scrollback_flush_pending
+}
+
 /// Run the interactive UI until the user exits (terminal) or the plan
 /// completes (headless).
 ///
@@ -299,7 +319,7 @@ async fn run_interactive_surface(
         );
     if opening_paints {
         if let Some(renderer) = renderer.is_terminal_mut() {
-            crate::app::draw(renderer, &mut view)?;
+            crate::app::draw(renderer, &mut view, crate::app::ScrollbackFlush::Off)?;
         }
     }
     // The startup open (TS `runAgentsViewLoop` -> `openAgentsViewSession`,
@@ -576,7 +596,11 @@ async fn run_interactive_surface(
                         .is_none_or(|at| now.duration_since(at) >= MIN_RENDER_INTERVAL)
                     {
                         if let Some(renderer) = renderer.is_terminal_mut() {
-                            crate::app::draw(renderer, &mut view)?;
+                            crate::app::draw(
+                                renderer,
+                                &mut view,
+                                crate::app::ScrollbackFlush::Off,
+                            )?;
                         }
                         last_render_at = Some(now);
                         opening_dirty = false;
@@ -599,7 +623,7 @@ async fn run_interactive_surface(
             }, if render_deadline.is_some() => {
                 render_deadline = None;
                 if let Some(renderer) = renderer.is_terminal_mut() {
-                    crate::app::draw(renderer, &mut view)?;
+                    crate::app::draw(renderer, &mut view, crate::app::ScrollbackFlush::Off)?;
                 }
                 last_render_at = Some(Instant::now());
                 opening_dirty = false;
@@ -806,7 +830,7 @@ async fn run_interactive_surface(
     // verifier never saw rendered.
     if !pending.is_empty() && session.dirty {
         if let Some(renderer) = renderer.is_terminal_mut() {
-            crate::app::draw(renderer, &mut view)?;
+            crate::app::draw(renderer, &mut view, crate::app::ScrollbackFlush::Off)?;
         } else {
             renderer.render_headless(&mut session, &mut view);
         }
@@ -828,6 +852,9 @@ async fn run_interactive_surface(
     let mut render_deadline: Option<Instant> = None;
     let mut quiet_tick_deadline: Option<Instant> = None;
     let mut anim_started: Option<Instant> = None;
+    // A turn settled since the last frame-gate paint: the settle arms the one-shot scrollback
+    // flush, and the frame gate's paint runs it (every gate re-evaluates there, at flush time).
+    let mut scrollback_flush_pending = false;
     // The spinner phase painted by the last frame (`usize::MAX` before the first): a quiet turn
     // only dirties when the 80ms phase advances.
     let mut last_pulse_phase: usize = usize::MAX;
@@ -1198,7 +1225,7 @@ async fn run_interactive_surface(
                         // gate, and the inline paint clears `dirty` — an idle terminal would
                         // otherwise never show the armed hint.
                         view.chrome.tray_override = session.tray_override(&view);
-                        crate::app::draw(renderer, &mut view)?;
+                        crate::app::draw(renderer, &mut view, crate::app::ScrollbackFlush::Off)?;
                         // The 16ms gate measures its interval from this frame.
                         last_render_at = Some(Instant::now());
                         last_pulse_phase = view.pulse_frame;
@@ -1360,6 +1387,7 @@ async fn run_interactive_surface(
                 }
             } => {
                                 if let Some(event) = maybe_event {
+                    let turn_ends_before = session.turn_ends_seen;
                     session.apply_client_event(event, &mut view);
                     // Batch the rest of the queued frames: a stream burst applies as one
                     // transcript pass instead of one full re-layout per frame.
@@ -1371,6 +1399,14 @@ async fn run_interactive_surface(
                     if compaction_settled || (was_active && !session.turn_active) {
                         session.refresh_stats().await;
                         session.rebuild_tray(&mut view);
+                    }
+                    if batch_settles_run(
+                        was_active,
+                        turn_ends_before,
+                        session.turn_active,
+                        session.turn_ends_seen,
+                    ) {
+                        scrollback_flush_pending = true;
                     }
                     // A `session_binding` supersede notice: the session lives under a new active
                     // id, so re-attach to it — the transcript rebuilds from the snapshot (silent,
@@ -1758,13 +1794,38 @@ async fn run_interactive_surface(
         // the window coalesces into the next frame (a stream burst renders at most one frame per
         // tick), and a dirty state waits for the deadline arm above instead of burning a render
         // now.
-        if session.dirty {
+        if frame_gate_due(session.dirty, scrollback_flush_pending) {
             if let Some(renderer) = renderer.is_terminal_mut() {
                 let interval_elapsed =
                     last_render_at.is_none_or(|at| at.elapsed() >= MIN_RENDER_INTERVAL);
                 if interval_elapsed {
-                    crate::app::draw(renderer, &mut view)?;
+                    // The settle's one-shot flush request: every gate resolves HERE, at the
+                    // paint call site (nothing runs between this and the flush, and the
+                    // cached settings seam keeps the read off the paint bracket). A page
+                    // fetch the arm could not see may have started since.
+                    let scrollback = if scrollback_flush_pending {
+                        crate::app::ScrollbackFlush::Settle {
+                            scrollback_flush: options
+                                .client_settings
+                                .as_ref()
+                                .is_some_and(|settings| settings.scrollback_flush()),
+                            transcript_gap: session.window.scrollback_gap(),
+                        }
+                    } else {
+                        crate::app::ScrollbackFlush::Off
+                    };
+                    scrollback_flush_pending = false;
+                    let painted = crate::app::draw(renderer, &mut view, scrollback)?;
                     session.dirty = false;
+                    if let Some(error) = painted.scrollback_flush_error {
+                        // The surface recovered in place inside the paint: the run continues
+                        // with the error row (its dirty repaints it) instead of a fatal
+                        // teardown.
+                        session.error_row(&format!("scrollback flush failed: {error}"), &mut view);
+                    }
+                    if painted.scrolled_scrollback {
+                        session.track_scrollback_flush();
+                    }
                     last_render_at = Some(Instant::now());
                     last_pulse_phase = view.pulse_frame;
                     render_deadline = None;
@@ -1786,6 +1847,8 @@ async fn run_interactive_surface(
                 // harness runs the terminal's wake path.
                 renderer.render_headless(&mut session, &mut view);
                 session.dirty = false;
+                // Headless capture never writes scrollback: the settle's request is moot.
+                scrollback_flush_pending = false;
                 last_pulse_phase = view.pulse_frame;
                 render_deadline = None;
             }
@@ -1934,5 +1997,24 @@ mod tests {
         assert_eq!(next_spinner_deadline(started, at(81)), at(160));
         assert_eq!(next_spinner_deadline(started, at(161)), at(240));
         assert_eq!(next_spinner_deadline(started, at(239)), at(240));
+    }
+
+    /// A short run the daemon streams into ONE batch (start through end, possibly before
+    /// the prompt's ACK) still settles; a turn end inside a live run does not.
+    #[test]
+    fn a_whole_run_inside_one_batch_settles() {
+        assert!(batch_settles_run(false, 0, false, 1));
+        assert!(batch_settles_run(true, 3, false, 3));
+        assert!(!batch_settles_run(true, 0, true, 1));
+        assert!(!batch_settles_run(false, 2, false, 2));
+    }
+
+    /// A keystroke's inline paint clears `dirty` without running the settle's flush, so the
+    /// pending flush alone keeps the frame gate due.
+    #[test]
+    fn a_pending_scrollback_flush_keeps_the_frame_gate_due() {
+        assert!(frame_gate_due(false, true));
+        assert!(frame_gate_due(true, false));
+        assert!(!frame_gate_due(false, false));
     }
 }

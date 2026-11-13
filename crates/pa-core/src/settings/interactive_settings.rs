@@ -126,6 +126,17 @@ impl SettingsManager {
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_scrollback_flush(&mut self, enabled: bool) -> Result<()> {
+        self.global_mut()
+            .terminal
+            .get_or_insert_with(Default::default)
+            .scrollback_flush = Some(enabled);
+        self.save_global_scope(&["terminal.scrollbackFlush"])
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
     pub fn set_fullscreen_mouse(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
             .terminal

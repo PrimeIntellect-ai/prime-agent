@@ -206,6 +206,7 @@ impl SessionUi {
                 .and_then(Value::as_str)
                 .unwrap_or("one-at-a-time")
                 .to_string(),
+            scrollback_flush: true,
             thinking_level: state
                 .get("thinkingLevel")
                 .and_then(Value::as_str)
@@ -239,6 +240,7 @@ impl SessionUi {
             values.autocomplete_max_visible = settings.autocomplete_max_visible();
             values.clear_on_shrink = settings.clear_on_shrink();
             values.terminal_progress = settings.show_terminal_progress();
+            values.scrollback_flush = settings.scrollback_flush();
             values.idle_eviction_minutes = settings.idle_eviction_minutes();
             values.mermaid = settings.mermaid_rendering_mode();
             values.quiet_startup = settings.quiet_startup();
@@ -456,6 +458,13 @@ impl SessionUi {
             "terminal-progress" => {
                 self.persist_bool_setting(
                     |settings, enabled| settings.set_show_terminal_progress(enabled),
+                    value,
+                    view,
+                );
+            }
+            "scrollback-flush" => {
+                self.persist_bool_setting(
+                    |settings, enabled| settings.set_scrollback_flush(enabled),
                     value,
                     view,
                 );

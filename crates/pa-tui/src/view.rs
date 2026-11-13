@@ -164,9 +164,9 @@ pub struct AgentView {
     pub(crate) layout_width: usize,
     /// Rendering options that affect cached entry rows.
     layout_options: Option<layout::LayoutOptions>,
-    /// Row texts of the inline frame at the last main-screen flush: the
-    /// next flush diffs against this, so exits never duplicate scrollback.
-    flushed_frame: Vec<String>,
+    /// The session whose scrollback bases this view diffs against (see `view::flush`):
+    /// bound per-run to the attached session's durable id, unique per view otherwise.
+    scrollback_session: String,
     pub(crate) frame_rows: usize,
     /// The last composed frame's clickable link ranges: the click
     /// dispatch resolves a screen cell to its URL through these.
@@ -338,7 +338,7 @@ impl AgentView {
             md_caches: std::cell::RefCell::new(std::collections::HashMap::new()),
             layout_width: 0,
             layout_options: None,
-            flushed_frame: Vec::new(),
+            scrollback_session: flush::next_anonymous_scrollback_session(),
             frame_rows: 0,
             frame_links: Vec::new(),
             selection: crate::selection::SelectionState::default(),
@@ -347,6 +347,16 @@ impl AgentView {
             pending_handoff: None,
             handoff_seeds: 0,
             click: click::ClickSurface::default(),
+        }
+    }
+
+    /// Point the view's scrollback bases at the session's durable id: the bases live in the
+    /// process-wide store (see `view::flush`), so a fresh per-run view re-entering a
+    /// session, or a worker replacement re-attaching it under a new active id, resumes the
+    /// previous bases instead of re-appending its transcript into the same scrollback.
+    pub(crate) fn bind_scrollback_session(&mut self, session: &str) {
+        if self.scrollback_session != session {
+            self.scrollback_session = session.to_string();
         }
     }
 
