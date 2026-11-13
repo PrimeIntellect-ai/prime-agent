@@ -1,0 +1,1 @@
+- The agents view (`prime-agent agents`) can search saved sessions' message text: press Ctrl+F in the search bar to switch between titles and messages; the message search covers top-level session files only, so subagent transcripts are not searched yet.

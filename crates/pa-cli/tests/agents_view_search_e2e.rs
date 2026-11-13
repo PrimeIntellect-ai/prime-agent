@@ -414,3 +414,103 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
     drop(runway_path);
     drop(supervisor);
 }
+
+/// Ctrl+F switches the search to message text: a transcript-only word matches nothing by title,
+/// then finds the session whose user or assistant text holds it, and Ctrl+F switches back.
+#[tokio::test]
+async fn ctrl_f_searches_message_text() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let gateway_path = write_fixture(
+        &session_dir,
+        "gateway-01",
+        "gateway worker",
+        &[(
+            "deploy the gateway",
+            "done; bumped the Backoff ceiling to 30s",
+        )],
+    );
+    write_fixture(
+        &session_dir,
+        "migration-01",
+        "migration runner",
+        &[("run the migrations now", "migration 001 applied")],
+    );
+
+    let options = AgentsViewOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: None,
+        scope: None,
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+        create_config: serde_json::json!({}),
+    };
+    let plan = AgentsHeadlessPlan {
+        steps: vec![
+            AgentsStep::WaitRender {
+                needle: "2 inactive".to_string(),
+                timeout_ms: 10_000,
+            },
+            AgentsStep::Type("backoff".to_string()),
+            AgentsStep::WaitRender {
+                needle: "No sessions match".to_string(),
+                timeout_ms: 5_000,
+            },
+            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::WaitRender {
+                needle: "gateway worker".to_string(),
+                timeout_ms: 10_000,
+            },
+            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::WaitRender {
+                needle: "No sessions match".to_string(),
+                timeout_ms: 5_000,
+            },
+            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::WaitRender {
+                needle: "gateway worker".to_string(),
+                timeout_ms: 10_000,
+            },
+            AgentsStep::Key("enter".to_string()),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::agents_view::run_agents_view(options, AgentsViewUiMode::Headless(plan), None)
+            .await
+            .expect("agents view run")
+            .outcome;
+    dump_frames("content", &outcome.frames);
+
+    let hit = frame_of(&outcome.frames, "gateway worker");
+    assert!(
+        hit.contains("Ctrl+F search titles"),
+        "the hint offers the way back to title search:\n{hit}"
+    );
+    assert!(
+        !hit.contains("migration runner"),
+        "a session without the word hides:\n{hit}"
+    );
+    assert_eq!(
+        outcome.selection,
+        Some(SessionSelection::Resume(gateway_path)),
+        "Enter opened the message-text match"
+    );
+    assert_eq!(outcome.actions, vec!["content_search", "content_search"]);
+    drop(supervisor);
+}

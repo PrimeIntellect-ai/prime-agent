@@ -155,8 +155,13 @@ impl AgentsViewMode {
                         " ".to_string(),
                         theme.fg_style(ThemeColor::Muted),
                     ));
+                    let placeholder = if self.content_search.enabled {
+                        "Search session messages"
+                    } else {
+                        "Search sessions"
+                    };
                     prompt.push(crate::Span::styled(
-                        "Search sessions".to_string(),
+                        placeholder.to_string(),
                         theme.fg_style(ThemeColor::Dim),
                     ));
                 }
@@ -297,6 +302,13 @@ impl AgentsViewMode {
         }
         if self.rows.is_empty() {
             let text = match (self.query.trim().is_empty(), self.scope_active) {
+                (false, _) if self.content_search.enabled => {
+                    if self.content_search.pending(self.query.trim()) {
+                        "Searching session messages\u{2026}"
+                    } else {
+                        "No session messages match your search."
+                    }
+                }
                 (false, _) => "No sessions match your search.",
                 (true, true) => "No subagents yet.",
                 (true, false) => "No sessions yet.",
@@ -869,6 +881,16 @@ impl AgentsViewMode {
         }
         if let Some(new) = first("app.agents.new") {
             segments.push(format!("{new} new"));
+        }
+        if self.content_search.supported {
+            if let Some(keys) = first("app.agents.searchContent") {
+                let target = if self.content_search.enabled {
+                    "titles"
+                } else {
+                    "messages"
+                };
+                segments.push(format!("{keys} search {target}"));
+            }
         }
         let hints = segments.join("   ");
         truncate_line(&vec![theme.fg(ThemeColor::Muted, hints)], width)
