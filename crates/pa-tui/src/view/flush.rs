@@ -6,8 +6,8 @@
 use super::AgentView;
 use crate::Line;
 
-/// The process's scrollback memory: per live session, the row-text bases both flushes diff
-/// against. The bases outlive the per-run `AgentView`: the agents-view flow re-enters a
+/// The process's scrollback memory: per durable session id, the row-text bases both flushes
+/// diff against. The bases outlive the per-run `AgentView`: the agents-view flow re-enters a
 /// session in the same process and terminal, so a fresh view must resume the previous run's
 /// bases or its first settle re-appends the whole transcript into the same scrollback. An
 /// entry is bounded by its session's transcript and lives for the process's lifetime.

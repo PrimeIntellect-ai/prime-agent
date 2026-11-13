@@ -561,7 +561,7 @@ impl SessionUi {
     /// Fold the pending snapshot into the view (fresh transcript, footer
     /// labels). Called after attach and after every session switch.
     pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: &RebuildKind) {
-        view.bind_scrollback_session(&self.active_session_id);
+        view.bind_scrollback_session(&self.session_id);
         let resync_bash = self.resync_bash.take();
         // The held cards' fate diverges by rebuild: a rebind drops them with the
         // old transcript, a resync keeps them mounted above the indicator.
