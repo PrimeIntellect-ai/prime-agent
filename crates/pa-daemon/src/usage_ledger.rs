@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use pa_core::session_engine::compaction_exec::add_assistant_usage;
+use pa_core::session_engine::compaction_exec::{add_assistant_usage, subtract_assistant_usage};
 use pa_types::ai::{Usage, UsageCost};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -38,11 +38,13 @@ struct UsageRecord {
     usage: Usage,
 }
 
-/// One loaded shard: its record ids (the dedupe set) and their sum.
+/// One loaded shard: its real row ids (the dedupe set) and their sum, plus
+/// the legacy delete snapshot when one was imported.
 #[derive(Default)]
 struct Shard {
     ids: HashSet<String>,
-    own: Usage,
+    rows: Usage,
+    snapshot: Option<Usage>,
 }
 
 impl Shard {
@@ -60,12 +62,31 @@ impl Shard {
         shard
     }
 
-    fn add(&mut self, id: String, usage: &Usage) -> bool {
-        let fresh = self.ids.insert(id);
-        if fresh {
-            add_assistant_usage(&mut self.own, usage);
+    /// The session's own spend: its real rows, or the legacy snapshot while
+    /// none exist. The snapshot was the transcript's own usage when it was
+    /// captured, so the rows that replace it never sum to less.
+    fn own(&self) -> Usage {
+        if self.ids.is_empty() {
+            self.snapshot.unwrap_or_default()
+        } else {
+            self.rows
         }
-        fresh
+    }
+
+    fn has(&self, id: &str) -> bool {
+        if id == LEGACY_DELETE_SNAPSHOT_ID {
+            self.snapshot.is_some()
+        } else {
+            self.ids.contains(id)
+        }
+    }
+
+    fn add(&mut self, id: String, usage: &Usage) {
+        if id == LEGACY_DELETE_SNAPSHOT_ID {
+            self.snapshot.get_or_insert(*usage);
+        } else if self.ids.insert(id) {
+            add_assistant_usage(&mut self.rows, usage);
+        }
     }
 }
 
@@ -151,7 +172,7 @@ impl UsageLedger {
         let mut state = self.lock();
         let tree = self.tree(&mut state);
         let total = self.total_of(&mut state, &tree, &session_id, &mut HashSet::new());
-        let own = self.shard(&mut state.shards, &session_id).own;
+        let own = self.shard(&mut state.shards, &session_id).own();
         Spend { own, total }
     }
 
@@ -167,7 +188,7 @@ impl UsageLedger {
         if let Some(total) = state.totals.get(session_id) {
             return *total;
         }
-        let mut total = self.shard(&mut state.shards, session_id).own;
+        let mut total = self.shard(&mut state.shards, session_id).own();
         visiting.insert(session_id.to_string());
         for child in tree.children(session_id) {
             if !visiting.contains(child) {
@@ -274,7 +295,8 @@ impl UsageLedger {
             else {
                 return Ok(Vec::new());
             };
-            if !self.shard(&mut state.shards, session_id).ids.is_empty() {
+            let shard = self.shard(&mut state.shards, session_id);
+            if !shard.ids.is_empty() || shard.snapshot.is_some() {
                 return Ok(Vec::new());
             }
             let usage = Usage {
@@ -313,8 +335,8 @@ impl UsageLedger {
     }
 
     /// The one write path: append the rows the shard lacks (durably, before
-    /// they count), then add their sum to the cached totals of the session
-    /// and every ancestor.
+    /// they count), then add the growth of the session's own spend to the
+    /// cached totals of the session and every ancestor.
     fn append_locked(
         &self,
         state: &mut FoldState,
@@ -326,18 +348,21 @@ impl UsageLedger {
         let mut batch = HashSet::new();
         let fresh: Vec<UsageRecord> = rows
             .into_iter()
-            .filter(|(id, _)| !shard.ids.contains(id) && batch.insert(id.clone()))
+            .filter(|(id, _)| !shard.has(id) && batch.insert(id.clone()))
             .map(|(id, usage)| UsageRecord { id, usage })
             .collect();
         if fresh.is_empty() {
             return Ok(Vec::new());
         }
         append_records(&self.shard_path(session_id), &fresh)?;
-        let mut added = Usage::default();
+        // The first real rows replace a legacy snapshot: the totals move by
+        // the change in own spend, never by the rows' whole sum.
+        let before = shard.own();
         for record in fresh {
-            add_assistant_usage(&mut added, &record.usage);
             shard.add(record.id, &record.usage);
         }
+        let mut added = shard.own();
+        subtract_assistant_usage(&mut added, &before);
         let mut moved: Vec<String> = Vec::new();
         let mut current = Some(session_id.to_string());
         while let Some(member) = current {
@@ -568,5 +593,43 @@ mod tests {
         let ledger = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
         ledger.reconcile_family(&home.root).unwrap();
         assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
+    }
+
+    /// A legacy child's delete snapshot bills until its transcript reappears;
+    /// the real rows then replace it without a double count or a drop, and
+    /// later rows add exactly once.
+    #[test]
+    fn real_rows_replace_a_legacy_delete_snapshot() {
+        let home = home();
+        append_turn(&home.root, "r1", 1.0);
+        let child = crate::lease::canonical_session_path(&home.child);
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(home.spawns.ledger_path())
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "v": 1, "op": "delete", "at": "t", "childId": "sub-c",
+                "child": child.to_string_lossy(), "reason": "user",
+                "usage": {"inputTokens": 10, "outputTokens": 1, "cost": 0.5},
+            })
+        )
+        .unwrap();
+        drop(file);
+        let ledger = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
+        ledger.reconcile_family(&home.root).unwrap();
+        assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
+
+        append_turn(&home.child, "c1", 0.5);
+        ledger.reconcile_family(&home.root).unwrap();
+        assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
+        append_turn(&home.child, "c2", 0.25);
+        ledger.reconcile_family(&home.root).unwrap();
+        assert!((root_total(&home, &ledger) - 1.75).abs() < 1e-9);
+        assert!(ledger.reconcile_family(&home.root).unwrap().is_empty());
+        let restarted = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
+        assert!((root_total(&home, &restarted) - 1.75).abs() < 1e-9);
     }
 }
