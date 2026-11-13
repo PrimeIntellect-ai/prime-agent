@@ -505,6 +505,26 @@ impl RlmSpawnLedger {
         ))
     }
 
+    /// The live session file for one recorded spawn path, resolved like
+    /// [`Self::live_edges`]: the recorded path itself, or a moved transcript
+    /// found by its durable session id. `None` when the session is gone
+    /// everywhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized ledger)
+    /// or a prior panic poisoned the artifact index lock.
+    pub(crate) fn resolve_live_path(&self, recorded: &Path) -> Result<Option<PathBuf>> {
+        self.seed_once()?;
+        let state = self.replay_cached()?;
+        let mut resolver = LivePathResolver::new(
+            self.agent_dir.clone(),
+            self.canonical_sessions_dir.clone(),
+            &state.artifact_index,
+        );
+        resolver.resolve(&recorded.to_string_lossy())
+    }
+
     /// Seed and replay the ledger ahead of its first reader; a failed
     /// replay is left to that reader, which reports it.
     pub(crate) fn warm(&self) {
