@@ -191,10 +191,14 @@ impl ClientSettings for CliClientSettings {
     }
 
     /// Persists first: the cache refreshes only when the write landed, so
-    /// the in-menu toggle applies without a restart.
+    /// the in-menu toggle applies without a restart. The cache takes the
+    /// merged value, so a project-scope override still wins as it does
+    /// after a restart.
     fn set_scrollback_flush(&self, enabled: bool) -> Result<()> {
-        self.manager().set_scrollback_flush(enabled)?;
-        self.scrollback_flush.store(enabled, Ordering::Relaxed);
+        let mut manager = self.manager();
+        manager.set_scrollback_flush(enabled)?;
+        self.scrollback_flush
+            .store(manager.get_scrollback_flush(), Ordering::Relaxed);
         Ok(())
     }
     setting!(
@@ -373,6 +377,31 @@ impl ClientSettings for CliClientSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project-scope `terminal.scrollbackFlush` override outranks the global toggle: the
+    /// cached paint-gate read takes the merged value, as a restart would.
+    #[test]
+    fn the_scrollback_flush_toggle_keeps_a_project_override() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let project_dir = dir.path().join(pa_core::settings::CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        std::fs::write(
+            project_dir.join("settings.json"),
+            r#"{"terminal":{"scrollbackFlush":false}}"#,
+        )
+        .expect("project settings");
+        let settings = CliClientSettings::new(dir.path().to_path_buf(), agent_dir.clone());
+        assert!(!settings.scrollback_flush());
+
+        settings.set_scrollback_flush(true).expect("toggle");
+        assert!(
+            !settings.scrollback_flush(),
+            "the project override still wins"
+        );
+        assert!(!CliClientSettings::new(dir.path().to_path_buf(), agent_dir).scrollback_flush());
+    }
 
     /// The seam over the real pa-core settings store.
     #[test]

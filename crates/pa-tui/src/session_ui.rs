@@ -258,7 +258,7 @@ pub(crate) struct SessionUi {
     pub(crate) settled: Option<crate::program_status::Status>,
     /// Completed turns observed on this connection. A prompt ACK may arrive
     /// after its entire streamed turn; it must not restart the loader then.
-    turn_ends_seen: u64,
+    pub(crate) turn_ends_seen: u64,
     last_prompt_turn_end: u64,
     /// The session's queue delivery mode: `all` delivers the queued steering prefix as one batched
     /// turn at the boundary; `one-at-a-time` one per turn (product default `all`).
