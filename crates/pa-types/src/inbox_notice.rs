@@ -18,6 +18,9 @@ pub const INBOX_CLASS_CHILD_EXITED: &str = "child-exited";
 pub const INBOX_CLASS_CHILD_FAILED: &str = "child-failed";
 /// The heartbeat class label: one fired scheduled heartbeat's prompt.
 pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
+/// The cell-done class label: one auto-backgrounded cell's completion
+/// (the `[cell-done ...]` row) routed into the inbox.
+pub const INBOX_CLASS_CELL_DONE: &str = "cell-done";
 
 /// The `customType` of the inbox notice rows (`arrival` and `reminder`).
 pub const INBOX_NOTICE_CUSTOM_TYPE: &str = "inbox_notice";

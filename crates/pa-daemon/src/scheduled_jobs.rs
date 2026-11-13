@@ -130,7 +130,7 @@ impl QueueHooks {
         let inbox = engine.inbox()?;
         let closed_engine = Arc::clone(&engine);
         let closed = move || closed_engine.session_is_closed();
-        let admitted = {
+        let (admitted, lane) = {
             let mut core = self
                 .core
                 .lock()
@@ -175,7 +175,7 @@ impl QueueHooks {
             } else {
                 Lane::Steering
             };
-            admit_inbox_notice_locked(
+            let admitted = admit_inbox_notice_locked(
                 &mut core,
                 &inbox,
                 &seam.arrivals,
@@ -183,7 +183,8 @@ impl QueueHooks {
                 lane,
                 closed,
                 Some(engine.as_ref()),
-            )
+            );
+            (admitted, lane)
         };
         admitted.ok()?;
         crate::worker::checkpoint_queue_recovery(
@@ -194,6 +195,11 @@ impl QueueHooks {
             },
         );
         self.work_notify.notify_one();
+        // A steering fire ends a running cell's wait early, like any other
+        // steering arrival.
+        if lane == Lane::Steering {
+            engine.fire_cell_wake();
+        }
         let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
         Some(RoutedFire::Ran)
     }

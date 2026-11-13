@@ -163,6 +163,8 @@ async fn notice_rides_the_next_turn_as_model_context() {
     let stream_fn = real_stream_fn(None, model.clone());
 
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd,
         agent_dir,
         model: Some(json_round_trip(&model).expect("model conversion")),

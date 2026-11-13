@@ -344,11 +344,12 @@ fn post_compaction_goal_continuation_mint() {
     // Admission releases the pending guard: the item's OWN handle,
     // never the mutable mirror.
     AgentSessionEngine::release_goal_continuation_handle(minted.pending_handle.as_ref());
-    // TS #2465: a live background bash handle holds the post-compaction
-    // mint the same way: the mint defers (owed, not consumed) until the
-    // handle settles.
+    // TS #2465: live background kernel work holds the post-compaction
+    // mint the same way: the mint defers (owed, not consumed) until it
+    // settles. The gates read the aggregate work probe (the bash-only
+    // count stays with the bash handle APIs).
     let live_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 1);
-    engine.set_test_probes(Some(live_probe), None);
+    engine.set_test_background_work_probe(live_probe);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_none(),
         "a live handle minted the post-compaction continuation"
@@ -363,7 +364,7 @@ fn post_compaction_goal_continuation_mint() {
         );
     }
     let settled_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 0);
-    engine.set_test_probes(Some(settled_probe), None);
+    engine.set_test_background_work_probe(settled_probe);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_some(),
         "the settled handle releases the post-compaction mint"
@@ -780,13 +781,16 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
-/// T-0012: a live background `bash()` handle defers the goal continuation
-/// (owed, not consumed) and arms the fallback wake - a durable one-shot
-/// cron one skip-window out - so a shell that never completes cannot stall
-/// the goal. The shell's settle path (the `[bash-done]` sibling) delivers
-/// the owed continuation and retires the armed wake.
+/// T-0012: the goal deferral and the fallback wake read different probes.
+/// The aggregate work probe holds the deferral (owed, not consumed) but
+/// never arms the marker turn — a detached cell's terminal notice is the
+/// guaranteed retry, so its marker turn would only charge the goal. Only
+/// a live background `bash()` handle arms the fallback wake - a durable
+/// one-shot cron one skip-window out - so a shell that never completes
+/// cannot stall the goal. The shell's settle path (the `[bash-done]`
+/// sibling) delivers the owed continuation and retires the armed wake.
 #[test]
-fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
+fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -856,9 +860,13 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
     // provisioner probe); the live-handle probe is meaningful from here on.
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "warm".to_string(), &mut events);
-    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
-    // The goal start behind a live handle: its natural end holds the
-    // continuation (owed, not consumed) and arms the fallback wake.
+    // THE SPLIT: the aggregate work probe alone (a detached cell, no
+    // shell) holds the deferral but never arms the wake.
+    engine.set_test_background_work_probe(std::sync::Arc::new(|| 1));
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
+    // The goal start behind live work with no shell: its natural end
+    // holds the continuation (owed, not consumed) and arms NO wake —
+    // the detached cell's terminal notice is the guaranteed retry.
     admit(
         &engine,
         "/goal ship behind the shell".to_string(),
@@ -866,15 +874,21 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
     );
     {
         let work = goal_work.lock().unwrap();
-        assert!(
-            work.is_empty(),
-            "work minted behind a live handle: {work:?}"
-        );
+        assert!(work.is_empty(), "work minted behind live work: {work:?}");
     }
     assert_eq!(engine.goal_state_value()["status"], "active");
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
-    // THE FALLBACK WAKE: exactly one Active background-skip job, armed for
-    // this session with the honest marker prompt and a fire time.
+    assert!(
+        !engine.background_skip_wake_armed(),
+        "a shell-less detached cell must not arm the fallback wake"
+    );
+    // Only the bash handle arms: the settle consult's self-heal behind a
+    // live shell arms exactly one Active background-skip job for this
+    // session with the honest marker prompt and a fire time.
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
+    engine
+        .runtime
+        .block_on(async { engine.goal_children_settled().await });
     let wakes: Vec<pa_core::cron::AgentCronJob> = store
         .list()
         .into_iter()
@@ -1093,8 +1107,40 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         engine.background_skip_wake_armed(),
         "the settle consult must re-arm the stranded wake"
     );
-    // The shell settles: the same consult delivers the owed continuation
-    // and the successful mint retires the armed wake.
+    // A shell-less strand does NOT re-arm: the aggregate work probe alone
+    // never arms the marker turn.
+    for job in store.list() {
+        if job.label.as_deref()
+            == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+            && job.status == pa_core::cron::JobStatus::Active
+        {
+            store.cancel(&job.id, crate::util::now_ms()).unwrap();
+        }
+    }
+    assert!(
+        !engine.background_skip_wake_armed(),
+        "the test must strand the wake again"
+    );
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
+    engine
+        .runtime
+        .block_on(async { engine.goal_children_settled().await });
+    assert!(
+        !engine.background_skip_wake_armed(),
+        "the shell-less settle consult must not arm the fallback wake"
+    );
+    // The shell's return re-arms it again.
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
+    engine
+        .runtime
+        .block_on(async { engine.goal_children_settled().await });
+    assert!(
+        engine.background_skip_wake_armed(),
+        "the live shell's settle consult must re-arm the wake"
+    );
+    // The background work settles: the same consult delivers the owed
+    // continuation and the successful mint retires the armed wake.
+    engine.set_test_background_work_probe(std::sync::Arc::new(|| 0));
     engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
     engine
         .runtime

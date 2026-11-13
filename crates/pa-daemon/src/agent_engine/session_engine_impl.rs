@@ -104,15 +104,20 @@ impl SessionEngine for AgentSessionEngine {
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             // The quiescence arm: unsettled work defers the mint (owed, not
-            // consumed). A live background bash handle also arms the
-            // fallback wake: the shell's end is the normal retry (its
-            // [bash-done] notice, or the exit watch of a shell that outlived
-            // its kernel), but a shell that never completes must not stall
-            // the goal past one window.
-            let live_background_bash = self.has_live_background_bash_handles();
-            if self.has_unsettled_rlm_work().await || live_background_bash {
+            // consumed). Live background kernel work holds the deferral too
+            // (a detached cell's terminal notice is the guaranteed retry);
+            // only a live background bash() handle arms the fallback wake —
+            // its marker turn and its [bash-done] promise are
+            // shell-specific. The durable term keeps the goal-gate hold:
+            // a shell that outlived its kernel still defers the mint and
+            // arms behind its exit watch.
+            let live_background_work = self.has_live_background_kernel_work();
+            if self.has_unsettled_rlm_work().await
+                || live_background_work
+                || self.background_bash_handle_count() > 0
+            {
                 driver.mark_continuation_owed();
-                if live_background_bash {
+                if self.has_live_background_bash_handles() {
                     drop(driver);
                     self.arm_background_skip_wake().await;
                 }
@@ -1549,6 +1554,21 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(agent) = agent {
             agent.abort();
         }
+        // The session's kernel stops its current user cell too (attached or
+        // detached): the run's own signal cannot reach a cell the run left
+        // behind (an auto-backgrounded one), so the abort path targets the
+        // execution directly. The interrupt is nonblocking; the kernel's
+        // watcher owns the grace and any retirement.
+        self.abort_kernel_user_execution();
+    }
+
+    /// The scoped idle cancel: stop ONLY a detached (backgrounded) kernel
+    /// cell. The queues, the running turn, and attached work stay exactly as
+    /// they are; a session without a detached cell answers `false` and
+    /// changes nothing.
+    fn abort_background_cell(&self) -> bool {
+        self.kernel_manager()
+            .is_some_and(|manager| manager.abort_detached_execution())
     }
 
     /// `set_steering_mode` / `set_follow_up_mode`: the queue delivery modes

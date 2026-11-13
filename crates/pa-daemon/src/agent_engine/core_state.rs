@@ -23,6 +23,15 @@ pub(crate) struct BuiltHandles {
     pub(crate) autonomous_boundary: AutonomousBoundaryMirror,
     /// The count of live kernel background `bash()` handles (`0` = none).
     pub(crate) background_bash_probe: Arc<dyn Fn() -> usize + Send + Sync>,
+    /// The count of live background KERNEL work: detached cells awaiting
+    /// their terminal admission plus live `bash()` handles. The passivation
+    /// and continuation gates read this aggregate.
+    pub(crate) background_work_probe: Arc<dyn Fn() -> usize + Send + Sync>,
+    /// The built session's kernel provisioner (weak): the abort paths reach
+    /// the kernel's current user execution through it without the session
+    /// mutex.
+    pub(crate) kernel_provisioner:
+        std::sync::Weak<pa_core::kernel::provisioner::IpythonKernelProvisioner>,
     /// The stop-with-snapshot kernel release over a weak provisioner
     /// reference (the park arm never takes the session mutex).
     pub(crate) kernel_release: SettledKernelRelease,
@@ -34,6 +43,7 @@ pub(crate) struct BuiltHandles {
 impl BuiltHandles {
     pub(super) async fn of(built: &Arc<CoreSessionEngine>) -> Self {
         let provisioner = built.kernel_provisioner_weak();
+        let work_provisioner = built.kernel_provisioner_weak();
         let release_provisioner = built.kernel_provisioner_weak();
         Self {
             goal: GoalRuntimeHandles {
@@ -53,6 +63,12 @@ impl BuiltHandles {
                     .and_then(|provisioner| provisioner.manager())
                     .map_or(0, |manager| manager.background_bash_handle_count())
             }),
+            background_work_probe: Arc::new(move || {
+                work_provisioner
+                    .upgrade()
+                    .map_or(0, |provisioner| provisioner.background_work_count())
+            }),
+            kernel_provisioner: built.kernel_provisioner_weak(),
             kernel_release: Arc::new(move || {
                 let provisioner = release_provisioner.clone();
                 Box::pin(async move {
@@ -200,7 +216,35 @@ impl AgentSessionEngine {
             autonomous_boundary: handles.autonomous_boundary.clone(),
             background_bash_probe: background_bash
                 .unwrap_or_else(|| Arc::clone(&handles.background_bash_probe)),
+            background_work_probe: Arc::clone(&handles.background_work_probe),
+            kernel_provisioner: handles.kernel_provisioner.clone(),
             kernel_release: kernel_release.unwrap_or_else(|| Arc::clone(&handles.kernel_release)),
+            progress_notes: Arc::clone(&handles.progress_notes),
+            published_goal: Mutex::new(published_goal),
+        }));
+    }
+
+    /// Swap the background-work probe into the built session's handles
+    /// (tests stand in for a kernel's detached cells and bash handles).
+    #[cfg(test)]
+    pub(crate) fn set_test_background_work_probe(
+        &self,
+        probe: Arc<dyn Fn() -> usize + Send + Sync>,
+    ) {
+        let mut state = self.core_state();
+        let CoreSessionState::Built(handles) = &*state else {
+            panic!("probes need a built session");
+        };
+        let published_goal = handles.published_goal.lock().unwrap().clone();
+        *state = CoreSessionState::Built(Arc::new(BuiltHandles {
+            goal: handles.goal.clone(),
+            pending_goal_continuation: Arc::clone(&handles.pending_goal_continuation),
+            turn_agent: Arc::clone(&handles.turn_agent),
+            autonomous_boundary: handles.autonomous_boundary.clone(),
+            background_bash_probe: Arc::clone(&handles.background_bash_probe),
+            background_work_probe: probe,
+            kernel_provisioner: handles.kernel_provisioner.clone(),
+            kernel_release: Arc::clone(&handles.kernel_release),
             progress_notes: Arc::clone(&handles.progress_notes),
             published_goal: Mutex::new(published_goal),
         }));

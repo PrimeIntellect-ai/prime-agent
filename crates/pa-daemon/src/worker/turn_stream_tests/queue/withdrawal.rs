@@ -255,14 +255,14 @@ async fn headless_completion_counts_the_bash_lane() {
     })
     .join()
     .unwrap();
-    agent_engine.set_test_probes(Some(Arc::new(|| 1)), None);
+    agent_engine.set_test_background_work_probe(Arc::new(|| 1));
     worker.agent_engine = Some(agent_engine.clone());
     assert_eq!(
         worker.outstanding_background_jobs(),
         1,
         "a live kernel handle counts once; the durable journal must not double the wire field"
     );
-    agent_engine.set_test_probes(Some(Arc::new(|| 0)), None);
+    agent_engine.set_test_background_work_probe(Arc::new(|| 0));
     assert_eq!(
         worker.outstanding_background_jobs(),
         0,

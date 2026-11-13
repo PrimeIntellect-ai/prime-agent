@@ -112,6 +112,10 @@ impl Inner {
         }
     }
 
+    pub(crate) fn is_running_state(&self) -> bool {
+        lock(&self.guarded).lifecycle.is_running()
+    }
+
     /// The recurring capture-freshness skip (see `CaptureFreshness`):
     /// `Some(result)` replays the last committed capture.
     async fn fresh_capture(self: &Arc<Self>, prune_oversized: bool) -> Option<SnapshotResult> {
@@ -360,6 +364,17 @@ impl Inner {
         *timer = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(debounce)).await;
             if let Some(inner) = inner.upgrade() {
+                // A detached cell owns the runtime until it settles: the
+                // capture would only burn the busy window and fail. Keep
+                // the snapshot owed instead — the cell's settle (any
+                // status, kernel alive) retries it — so the settled
+                // namespace cannot stay unsnapshotted behind it.
+                if inner.has_detached_active_execution() {
+                    inner
+                        .snapshot_owed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
                 // The bootstrap schedules this flush; rewriting the just-restored payload while the
                 // namespace is unchanged is the one write that must not happen.
                 if inner.consume_restored_snapshot_skip().await {

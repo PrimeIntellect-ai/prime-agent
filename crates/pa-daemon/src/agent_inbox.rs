@@ -238,14 +238,18 @@ pub(crate) fn spawn_inbox_reminder(
                 let engine = std::sync::Arc::clone(&engine);
                 move || engine.session_is_closed()
             };
-            crate::worker::admit_inbox_reminder(
+            // An admitted reminder rides the steering lane: it must reach a
+            // sleeping turn too. A cycle that admits nothing wakes nothing.
+            if crate::worker::admit_inbox_reminder(
                 &recovery,
                 &core,
                 &work_notify,
                 &inbox,
                 closed,
                 Some(engine.as_ref()),
-            );
+            ) {
+                engine.fire_cell_wake();
+            }
         }
     });
 }

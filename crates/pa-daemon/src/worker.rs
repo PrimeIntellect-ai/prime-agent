@@ -30,12 +30,12 @@ pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
     admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
     enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
-    queue_lanes, queued_bash_completion_notices, refresh_inbox_wake_rows_locked,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
-    withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle,
-    ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    queue_lanes, queued_bash_completion_notices, queued_cell_completion_deliveries,
+    refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy, row_wakes_a_cell,
+    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -408,6 +408,23 @@ impl Worker {
             let orphan_journal_path =
                 std::env::var_os(pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV)
                     .map(std::path::PathBuf::from);
+            // The worker's queue-backed cell wake: the pending predicate
+            // reads the live steering lane (wakeable rows only — a
+            // cell-done row never detaches a later cell), so an arrival
+            // that lands while the model is still streaming the tool call
+            // ends the cell's wait at once instead of waiting out the
+            // budget. Installed on the engine before it is shared.
+            let wake_core = Arc::clone(&core);
+            let cell_wake_pending: pa_core::kernel::cell_wake::CellWakePending =
+                std::sync::Arc::new(move || {
+                    let core = wake_core
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    core.steering.iter().any(row_wakes_a_cell)
+                });
+            let worker_cell_wake = std::sync::Arc::new(
+                pa_core::kernel::cell_wake::CellWake::with_pending(cell_wake_pending),
+            );
             let engine: std::sync::Arc<dyn SessionEngine> = match &script {
                 // A `{"engine": "faux", ...}` script drives the real agent
                 // engine over the scripted faux provider (verification only).
@@ -430,7 +447,11 @@ impl Worker {
                         queued_steering_probe: queued_steering_probe.clone(),
                         orphan_journal_path,
                     }) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
+                            // The queue-backed wake installs before the
+                            // engine is shared: its session builds then
+                            // hand the same wake to every provisioner.
+                            engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));
                             let concrete = std::sync::Arc::new(engine);
                             agent_engine = Some(std::sync::Arc::clone(&concrete));
                             concrete
@@ -461,7 +482,8 @@ impl Worker {
                         queued_steering_probe: queued_steering_probe.clone(),
                         orphan_journal_path,
                     }) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
+                            engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));
                             let concrete = std::sync::Arc::new(engine);
                             agent_engine = Some(std::sync::Arc::clone(&concrete));
                             concrete
@@ -669,6 +691,7 @@ impl Worker {
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
                     let closed = || engine.session_is_closed();
+                    let wakes_cell = notice.wakes_cell_wait();
                     if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
                         if let (Some(inbox), Some(fields)) = (
                             engine.inbox(),
@@ -686,6 +709,11 @@ impl Worker {
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {
+                                // The arrival rides the steering lane: it must
+                                // reach a running (possibly sleeping) cell too.
+                                if wakes_cell {
+                                    engine.fire_cell_wake();
+                                }
                                 return true;
                             }
                             // The store moved on between the capture and
@@ -694,13 +722,19 @@ impl Worker {
                             // steer the full row like the inbox-off lane.
                         }
                     }
-                    admit_kernel_notice(
+                    let admitted = admit_kernel_notice(
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
                         notice,
                         closed,
-                    )
+                    );
+                    // The full-row steer wakes a running cell the same way:
+                    // the arrival is a steering-class interrupt either way.
+                    if wakes_cell {
+                        engine.fire_cell_wake();
+                    }
+                    admitted
                 });
                 crate::agent_inbox::spawn_inbox_reminder(
                     std::sync::Arc::downgrade(concrete),
@@ -1338,6 +1372,8 @@ mod agent_message_tests;
 #[cfg(test)]
 mod prompt_image_tests;
 
+#[cfg(test)]
+mod abort_scope_tests;
 #[cfg(test)]
 mod compaction_admission_tests;
 #[cfg(test)]
