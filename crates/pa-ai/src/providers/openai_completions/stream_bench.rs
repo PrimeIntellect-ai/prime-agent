@@ -71,12 +71,13 @@ fn stream_event_snapshots() {
         snapshots.push(serde_json::to_value(event).unwrap());
     }
     assert_eq!(snapshots.len(), 13);
-    assert_eq!(snapshots[0]["type"], "text_start");
-    assert_eq!(snapshots[0]["partial"]["content"][0]["text"], "");
-    assert_eq!(snapshots[1]["partial"]["content"][0]["text"], "hello");
-    assert_eq!(snapshots[7]["partial"]["content"][0]["text"], "hello world");
+    assert_eq!(snapshots[0]["type"], "thinking_start");
+    assert_eq!(snapshots[2]["type"], "text_start");
+    assert_eq!(snapshots[2]["partial"]["content"][1]["text"], "");
+    assert_eq!(snapshots[3]["partial"]["content"][1]["text"], "hello");
+    assert_eq!(snapshots[7]["partial"]["content"][1]["text"], "hello world");
     assert_eq!(
-        snapshots.last().unwrap()["partial"]["content"][0]["text"],
+        snapshots.last().unwrap()["partial"]["content"][1]["text"],
         "hello world"
     );
     if std::env::var_os("PA_STREAM_PARITY_DUMP").is_some() {
