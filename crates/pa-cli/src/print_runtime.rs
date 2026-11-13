@@ -1761,7 +1761,6 @@ async fn run_prompts(
             | GoalContinuationDecision::NothingOwed
             | GoalContinuationDecision::Owed => {}
         }
-        }
         if autonomous
             .deliver_rlm_continuation(
                 engine,

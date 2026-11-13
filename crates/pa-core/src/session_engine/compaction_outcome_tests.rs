@@ -717,14 +717,15 @@ async fn refinement_and_auto_review_send_the_session_request_identity() {
     let model = registration.get_model();
     let global = tmp.path().join("harness");
     session
-        .refine(
-            &refine::RefineOptions::default(),
+        .start_refinement(
+            refine::RefineOptions::default(),
             refine::RefinementSource::User,
-            &model,
+            model.clone(),
             None,
             global.clone(),
         )
         .await
+        .expect("the refinement task joined")
         .unwrap();
     session
         .review_compact_auto_refine(&model, None, &global, 5, 0)
