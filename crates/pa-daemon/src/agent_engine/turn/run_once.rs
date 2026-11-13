@@ -36,9 +36,8 @@ impl AgentSessionEngine {
             return Vec::new();
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
+        let registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        registry.load_private_authorization_from_cache();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
         let candidates = pa_core::models::failover_candidates(model, &available);
@@ -81,7 +80,7 @@ impl AgentSessionEngine {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.
-        let goal_runtime = self.goal_runtime.lock().expect("goal runtime lock").clone();
+        let goal_runtime = self.live_handles().map(|live| live.goal.clone());
         let goal_budget_crossed = std::sync::Arc::clone(&self.goal_budget_crossed);
         // The run-opening boundary frames are the worker's own for the
         // item's first run; this subscription forwards them only once a

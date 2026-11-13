@@ -11,9 +11,8 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -49,12 +48,45 @@ pub enum AutoRetryEvent {
     },
 }
 
+/// The host's verdict on a credential rejection (kind `auth`) about to be retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthRecovery {
+    Retry,
+    /// End the turn with this user-facing error.
+    EndTurn(String),
+}
+
+pub type AuthRecoveryFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = AuthRecovery> + Send>>;
+
+/// Consulted before a credential rejection's one retry.
+pub type AuthRecoveryCallback<'a> = &'a mut dyn FnMut(&AssistantMessage) -> AuthRecoveryFuture;
+
+/// The failed turn carrying the recovery's error, when the recovery ends it.
+pub(super) async fn end_turn_on_auth_rejection(
+    message: &AssistantMessage,
+    auth_recovery: Option<&mut AuthRecoveryCallback<'_>>,
+) -> Option<AssistantMessage> {
+    if provider_stream_failure_kind(message).as_deref() != Some("auth") {
+        return None;
+    }
+    match auth_recovery?(message).await {
+        AuthRecovery::Retry => None,
+        AuthRecovery::EndTurn(error) => {
+            let mut message = message.clone();
+            message.error_message = Some(error);
+            Some(message)
+        }
+    }
+}
+
 /// Drive `attempt` under the shared retry policy until it settles: a turn
 /// with stop reason `Error` is classified against the policy; `emit` observes
 /// retry events, `wait` sleeps one delay (returning `false` aborts).
 ///
 /// `park` is the quota-park seam, consulted when a server-requested wait
 /// exceeds the policy cap: `Some` parks the session, `None` gives up.
+/// `auth_recovery` is consulted before a credential rejection's retry.
 ///
 /// # Errors
 ///
@@ -69,6 +101,7 @@ pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     mut emit: E,
     mut wait: W,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -99,7 +132,6 @@ where
         // Non-retryable failures never enter the retry bookkeeping: a
         // permanent failure only closes the active retry.
         let non_retryable = is_agent_lifecycle_failure(&message)
-            || is_faux_provider_queue_exhausted(&message)
             // A context overflow can never succeed unchanged: the
             // compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
@@ -126,6 +158,16 @@ where
                 })
                 .await?;
             }
+            return Ok(message);
+        }
+        if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
+            emit(AutoRetryEvent::End {
+                success: false,
+                attempt: retries_performed,
+                final_error: Some(final_error_of(&message)),
+                restored_model: None,
+            })
+            .await?;
             return Ok(message);
         }
         // The attempt counter bumps before deciding, so the exhaustion

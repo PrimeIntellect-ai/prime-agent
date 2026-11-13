@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
+use pa_core::session_engine::goal_continuation::{ContinuationTrigger, GoalContinuationDecision};
 use pa_core::session_engine::provider_adapter::{
     json_round_trip, map_thinking_level, stream_once, switchable_stream_fn, ProviderTarget,
 };
@@ -315,6 +316,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                 pa_daemon::rpc::session::RpcEngineRequest::Open {
                     session_path,
                     reuse_lease,
+                    ..
                 } => {
                     let session_dir = replacement_session_dir(&options);
                     let cwd = options.config.cwd.clone();
@@ -334,12 +336,18 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     (manager, lease)
                 }
             };
+            let kernel_ready_gate = match &request {
+                pa_daemon::rpc::session::RpcEngineRequest::Open { ready_gate, .. } => {
+                    ready_gate.clone()
+                }
+                pa_daemon::rpc::session::RpcEngineRequest::New { .. } => None,
+            };
             let engine = build_engine(
                 &options,
                 faux_script_env()?.as_ref(),
                 Some(manager),
                 "rpc",
-                &HeadlessEmbedding::Rpc,
+                &HeadlessEmbedding::Rpc { kernel_ready_gate },
             )
             .await?;
             let mut handle = pa_daemon::rpc::session::RpcEngineHandle::from(engine);
@@ -496,7 +504,10 @@ pub(crate) enum HeadlessEmbedding {
         node: std::sync::Arc<crate::print_rlm::InlineSessionNode>,
     },
     Child(Box<ChildEngineOverrides>),
-    Rpc,
+    Rpc {
+        /// A same-path reopen's gate: the replaced kernel's final snapshot flush.
+        kernel_ready_gate: Option<pa_core::kernel::provisioner::KernelReadyGate>,
+    },
 }
 
 /// One spawned inline child's engine deltas: its model lane, the
@@ -537,6 +548,7 @@ pub(crate) struct HeadlessEmbeddingFields {
     /// The late fire-and-forget `agent_message.send` receipt sink
     /// (#10-print); `None` for the RPC embedding (no print node).
     pub(crate) on_late_sent_agent_message: Option<pa_core::LateSentAgentMessageHandler>,
+    pub(crate) kernel_ready_gate: Option<pa_core::kernel::provisioner::KernelReadyGate>,
 }
 
 /// The embedding-owned fields for one headless engine build: print
@@ -546,7 +558,7 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
     let node = match embedding {
         HeadlessEmbedding::Root { node } => Some(Arc::clone(node)),
         HeadlessEmbedding::Child(overrides) => Some(Arc::clone(&overrides.node)),
-        HeadlessEmbedding::Rpc => None,
+        HeadlessEmbedding::Rpc { .. } => None,
     };
     let (rlm_subagent_host, extra_host_handlers) = match &node {
         Some(node) => {
@@ -579,7 +591,7 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         extra_host_handlers,
         rlm_depth: match embedding {
             HeadlessEmbedding::Child(overrides) => Some(overrides.node.depth),
-            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => None,
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => None,
         },
         factory_child: matches!(
             embedding,
@@ -588,6 +600,10 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
+        kernel_ready_gate: match embedding {
+            HeadlessEmbedding::Rpc { kernel_ready_gate } => kernel_ready_gate.clone(),
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Child(_) => None,
+        },
     }
 }
 
@@ -625,7 +641,9 @@ async fn build_headless_engine_parts(
         faux_script_env()?.as_ref(),
         session_manager,
         execution_mode,
-        &HeadlessEmbedding::Rpc,
+        &HeadlessEmbedding::Rpc {
+            kernel_ready_gate: None,
+        },
     )
     .await
 }
@@ -664,7 +682,6 @@ pub(crate) async fn build_headless_engine_with(
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
     let mut registry =
         pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
     let model = match embedding {
         HeadlessEmbedding::Child(overrides) => match &overrides.lane {
             ChildLane::Real(model) => (**model).clone(),
@@ -672,7 +689,7 @@ pub(crate) async fn build_headless_engine_with(
                 return Err("a scripted child builds through the faux builder".to_string());
             }
         },
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => {
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => {
             // The opened session's active context joins the selection (TS
             // `createAgentSession`); `--no-session` selects from no session.
             let session = session_manager
@@ -730,7 +747,7 @@ pub(crate) async fn build_headless_engine_with(
     let telemetry = (!config.telemetry_disabled
         && matches!(
             embedding,
-            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. }
         ))
     .then(|| {
         let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
@@ -778,6 +795,7 @@ pub(crate) async fn build_headless_engine_with(
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
+        kernel_ready_gate,
     } = headless_embedding_fields(embedding);
     let (semantic_edges, thinking_level) = match embedding {
         HeadlessEmbedding::Child(overrides) => (
@@ -795,7 +813,7 @@ pub(crate) async fn build_headless_engine_with(
             ),
             Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking)),
         ),
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => (
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => (
             Some(
                 pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
                     session_id: session_manager.get_session_id().to_string(),
@@ -854,6 +872,7 @@ pub(crate) async fn build_headless_engine_with(
             // child boots lazily on first use.
             prewarm_ipython_kernel: (!matches!(embedding, HeadlessEmbedding::Child(_)))
                 .then_some(true),
+            kernel_ready_gate,
             // The background-bash wake pair: the completion row's
             // admission fires it, and the kernel's background settle does
             // too, so the embedding's parked drive or pump re-checks.
@@ -964,7 +983,6 @@ fn headless_image_model_router(
             let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
             let mut registry =
                 pa_core::models::ModelRegistry::create(auth, decide_agent_dir.join("models.json"));
-            registry.load_private_authorization_from_cache();
             let available: Vec<pa_types::ai::Model> =
                 registry.get_available().into_iter().cloned().collect();
             // Route acceptance uses the same resolved-auth result the arm path
@@ -1008,7 +1026,6 @@ fn headless_image_model_router(
                 let auth = pa_core::auth::AuthStorage::create(&agent_dir);
                 let mut registry =
                     pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-                registry.load_private_authorization_from_cache();
                 let resolved_auth = registry
                     .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());
                 let target = pa_core::session_engine::provider_adapter::ProviderTarget {
@@ -1495,12 +1512,51 @@ fn builtin_tools(_cwd: &std::path::Path) -> Vec<Arc<dyn pa_agent::types::AgentTo
 
 /// Admit prompts, stream json events when requested, and decide the exit code
 /// from the headless terminal result plus the autonomous gate contract.
-async fn run_prompts_and_emit(
+pub(crate) async fn run_prompts_and_emit(
     engine: &std::sync::Arc<pa_core::session_engine::engine::SessionEngine>,
     model: &Model,
     api_key: Option<String>,
     options: &RunOptions,
     root_node: &std::sync::Arc<crate::print_rlm::InlineSessionNode>,
+) -> Result<i32, String> {
+    let global_harness_dir =
+        pa_core::refinement::get_global_harness_state_dir(&options.config.agent_dir);
+    let mut boundary = crate::print_boundary::TurnBoundary::new(options.app_mode == AppMode::Json);
+    let exit = run_prompts(
+        engine,
+        model,
+        api_key.clone(),
+        options,
+        root_node,
+        &mut boundary,
+        global_harness_dir.clone(),
+    )
+    .await;
+    // The disposal drain runs on every exit path, errors included: the
+    // session drops once this returns, which aborts refinement still planning
+    // (a `/refine` command's too) and loses a compact-trigger auto-refine no
+    // boundary consumed. A failed `/refine` fails the run once awaited.
+    boundary
+        .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
+        .await;
+    let exit_code = exit?;
+    Ok(if boundary.refine_command_failed() {
+        1
+    } else {
+        exit_code
+    })
+}
+
+/// The prompt loop, the quiescence drive, and the terminal selection behind
+/// [`run_prompts_and_emit`], which owns the disposal drain.
+async fn run_prompts(
+    engine: &std::sync::Arc<pa_core::session_engine::engine::SessionEngine>,
+    model: &Model,
+    api_key: Option<String>,
+    options: &RunOptions,
+    root_node: &std::sync::Arc<crate::print_rlm::InlineSessionNode>,
+    boundary: &mut crate::print_boundary::TurnBoundary,
+    global_harness_dir: std::path::PathBuf,
 ) -> Result<i32, String> {
     let json_mode = options.app_mode == AppMode::Json;
     let mut unsubscribe: Option<pa_agent::agent::Subscription> = None;
@@ -1547,9 +1603,6 @@ async fn run_prompts_and_emit(
         &autonomous,
         Some(root_node),
     );
-    let global_harness_dir =
-        pa_core::refinement::get_global_harness_state_dir(&options.config.agent_dir);
-    let mut boundary = crate::print_boundary::TurnBoundary::new(json_mode);
     // The autonomous runtime state the session-command executor mutates —
     // `/autonomous` rewrites what the hook, accounting, and exit contract read.
     let autonomous_state = autonomous.state_handle();
@@ -1573,6 +1626,7 @@ async fn run_prompts_and_emit(
                 api_key.clone(),
                 global_harness_dir.clone(),
                 &autonomous_state,
+                boundary,
                 &command,
                 &images,
             )
@@ -1586,7 +1640,7 @@ async fn run_prompts_and_emit(
             if let Some(continuation) = execution.continuation_message {
                 goal.run_session_command_continuation(
                     engine,
-                    &mut boundary,
+                    boundary,
                     model,
                     api_key.clone(),
                     global_harness_dir.clone(),
@@ -1598,7 +1652,7 @@ async fn run_prompts_and_emit(
             // this prompt's follow-up turns.
             goal.drive_boundary(
                 engine,
-                &mut boundary,
+                boundary,
                 model,
                 api_key.clone(),
                 global_harness_dir.clone(),
@@ -1624,7 +1678,7 @@ async fn run_prompts_and_emit(
             .await?;
         goal.drive_boundary(
             engine,
-            &mut boundary,
+            boundary,
             model,
             api_key.clone(),
             global_harness_dir.clone(),
@@ -1638,7 +1692,7 @@ async fn run_prompts_and_emit(
             autonomous
                 .drive_boundary(
                     engine,
-                    &mut boundary,
+                    boundary,
                     model,
                     api_key.clone(),
                     global_harness_dir.clone(),
@@ -1648,7 +1702,7 @@ async fn run_prompts_and_emit(
         }
     }
     // The rejected prompt wait: print the raw command error to stderr and
-    // exit 1 — no later prompts ran, and the disposal drain still runs.
+    // exit 1 — no later prompts ran.
     if let Some(error) = command_failure {
         eprintln!("{error}");
         goal_accounting.unsubscribe().await;
@@ -1656,9 +1710,6 @@ async fn run_prompts_and_emit(
         if let Some(subscription) = unsubscribe {
             subscription.unsubscribe().await;
         }
-        boundary
-            .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
-            .await;
         return Ok(1);
     }
     // The #2270 fix: print waits for RLM quiescence — every admitted
@@ -1674,7 +1725,7 @@ async fn run_prompts_and_emit(
         if crate::print_rlm::drive_to_quiescence(
             root_node,
             engine,
-            &mut boundary,
+            boundary,
             model,
             api_key.clone(),
             global_harness_dir.clone(),
@@ -1683,23 +1734,37 @@ async fn run_prompts_and_emit(
         {
             continue;
         }
-        if let Some(continuation) = engine.take_owed_goal_continuation().await {
-            goal.publish_goal_update(engine).await;
-            goal.run_queued_turn(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-                &continuation,
-            )
-            .await?;
-            continue;
+        // Quiescence settled every descendant: only an owed continuation delivers.
+        match engine
+            .consult_goal_continuation(ContinuationTrigger::OwedRetry, false)
+            .await
+        {
+            GoalContinuationDecision::Minted {
+                message: continuation,
+                ..
+            } => {
+                goal.publish_goal_update(engine).await;
+                goal.run_queued_turn(
+                    engine,
+                    boundary,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                    &continuation,
+                )
+                .await?;
+                continue;
+            }
+            // A refused or failed mint can still move the goal (a failed persist fails it).
+            GoalContinuationDecision::NotMinted { .. } => goal.publish_goal_update(engine).await,
+            GoalContinuationDecision::NotOwned
+            | GoalContinuationDecision::NothingOwed
+            | GoalContinuationDecision::Owed => {}
         }
         if autonomous
             .deliver_rlm_continuation(
                 engine,
-                &mut boundary,
+                boundary,
                 model,
                 api_key.clone(),
                 global_harness_dir.clone(),
@@ -1715,7 +1780,7 @@ async fn run_prompts_and_emit(
         let mut boundary_ran = goal
             .drive_boundary(
                 engine,
-                &mut boundary,
+                boundary,
                 model,
                 api_key.clone(),
                 global_harness_dir.clone(),
@@ -1725,7 +1790,7 @@ async fn run_prompts_and_emit(
             boundary_ran |= autonomous
                 .drive_boundary(
                     engine,
-                    &mut boundary,
+                    boundary,
                     model,
                     api_key.clone(),
                     global_harness_dir.clone(),
@@ -1782,11 +1847,6 @@ async fn run_prompts_and_emit(
         eprintln!("{stderr}");
         exit_code = 1;
     }
-    // The disposal order: the exit code first, then the teardown drains a
-    // compact-trigger auto-refine no later boundary consumed.
-    boundary
-        .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
-        .await;
     Ok(exit_code)
 }
 
@@ -1910,6 +1970,7 @@ mod tests {
                 max_tokens: 8192,
                 max_tokens_explicit: false,
                 featured: None,
+                serving: None,
                 headers: None,
                 compat: None,
             }

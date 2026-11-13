@@ -684,6 +684,39 @@ fn signal(pid: u32, signal: &str) {
     assert!(status.success(), "kill {signal} {pid} failed");
 }
 
+/// SIGSTOP the worker and wait until every one of its threads is parked:
+/// `kill` returns once the stop is queued, and a runtime thread still running
+/// serves the next command before it stops.
+fn freeze(pid: u32) {
+    let status = Command::new("kill")
+        .arg("-STOP")
+        .arg(pid.to_string())
+        .status()
+        .expect("SIGSTOP the worker");
+    assert!(status.success(), "SIGSTOP must reach the worker");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !all_threads_stopped(pid) {
+        assert!(Instant::now() < deadline, "the worker never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether every `/proc/<pid>/task/<tid>/stat` reads `T` (stopped).
+fn all_threads_stopped(pid: u32) -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    let states: Vec<Option<char>> = tasks
+        .flatten()
+        .map(|task| {
+            let stat = std::fs::read_to_string(task.path().join("stat")).ok()?;
+            let (_, rest) = stat.rsplit_once(')')?;
+            rest.split_whitespace().next()?.chars().next()
+        })
+        .collect();
+    !states.is_empty() && states.iter().all(|state| *state == Some('T'))
+}
+
 #[test]
 fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -789,7 +822,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let attached2 = second.read_response("a2");
     assert_eq!(attached2["success"], true, "second attach: {attached2}");
     let pid = worker_pid(&agent_dir);
-    signal(pid, "-STOP");
+    freeze(pid);
 
     // The abort acknowledges immediately from the supervisor plane (TS daemon-mode's
     // in-process `abortCompaction` always replies instantly; never the 30s route timeout).

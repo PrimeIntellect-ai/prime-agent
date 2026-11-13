@@ -138,6 +138,7 @@ async fn engine_runs_tool_loop_and_persists() {
         model_info: None,
         on_background_work_settled: None,
         bash_notice_wake: None,
+        kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })
@@ -248,6 +249,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         model_info: None,
         on_background_work_settled: None,
         bash_notice_wake: None,
+        kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })
@@ -321,6 +323,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             model_info: None,
             on_background_work_settled: None,
             bash_notice_wake: None,
+            kernel_ready_gate: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
         }
@@ -511,6 +514,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
         model_info: None,
         on_background_work_settled: None,
         bash_notice_wake: None,
+        kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })
@@ -894,6 +898,7 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         model_info: None,
         on_background_work_settled: None,
         bash_notice_wake: None,
+        kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
     })

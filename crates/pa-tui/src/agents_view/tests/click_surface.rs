@@ -258,6 +258,30 @@ fn long_session_names_clip_to_the_name_column() {
     assert!(text.ends_with("$0.00   1s"));
 }
 
+/// The model column is as wide as the widest model name when the row has room; when tight it
+/// truncates first, and the name column keeps its full width or at least half of the space beside
+/// the cost/age details.
+#[test]
+fn the_model_column_fits_the_widest_model_name_and_gives_way_first() {
+    let model = "llama-4-maverick-17b-128e-instruct-fp8:high";
+    let title = "a".repeat(100);
+    let (mode, index) = mode_with_row(&title, model);
+    for width in [140, 80, 60] {
+        let layout = build_layout(&mode.rows, width);
+        let text = flat(&mode.render_row(&mode.rows[index], &layout, width, false));
+        let available = width - 4 - str_width(&layout.details[&title]);
+        if width == 140 {
+            assert!(text.contains(model), "{text:?}");
+            assert_eq!(layout.name_width, 28);
+            assert!(str_width(&text) <= width);
+        } else {
+            assert!(!text.contains(model), "{text:?}");
+            assert_eq!(str_width(&text), width);
+            assert!(layout.name_width >= available.div_ceil(2).min(28));
+        }
+    }
+}
+
 /// A nesting deeper than the name column clips its indent there: the row keeps the pane width
 /// and its model cell stays under the legend's Model heading.
 #[test]

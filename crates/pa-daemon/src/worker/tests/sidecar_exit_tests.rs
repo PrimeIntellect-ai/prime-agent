@@ -64,12 +64,8 @@ async fn kill(worker: &Worker) {
 /// is current only if the END wrote it — not a warm tail of the kill's own
 /// archived row.
 #[cfg(unix)]
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn an_ended_worker_session_leaves_a_current_info_sidecar() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-sidecar-exit-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let worker = faux_worker(&dir, "sidecar reply");
@@ -92,12 +88,8 @@ async fn an_ended_worker_session_leaves_a_current_info_sidecar() {
 /// The bump-day shape: a reopened session over a dead-version sidecar ends
 /// with a sidecar at the served version, current to the file's final bytes.
 #[cfg(unix)]
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn a_reopened_session_ends_with_a_current_info_sidecar() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-sidecar-reopen-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let create = json!({

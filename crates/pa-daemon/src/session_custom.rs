@@ -259,6 +259,12 @@ impl Worker {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         };
+        let origin = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| (store.session_id().to_string(), core.generation.clone()))
+        };
         let engine = std::sync::Arc::clone(&self.engine);
         let result = tokio::task::spawn_blocking(move || engine.run_refinement(options))
             .await
@@ -266,24 +272,38 @@ impl Worker {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                self.emit_worker_event(json!({
-                    "type": "refine_failed",
-                    "error": format!("{error:#}"),
-                }));
+                if let Some((session_id, generation)) = &origin {
+                    crate::worker::emit_refinement_event_for_generation(
+                        &self.core,
+                        &self.events,
+                        session_id,
+                        Some(generation),
+                        json!({
+                            "type": "refine_failed", "error": format!("{error:#}"),
+                        }),
+                    );
+                }
                 return response_failure(None, "refine", &format!("{error:#}"), None);
             }
         };
         // The refinement's durable rows: the TUI outcome, plus the model-facing
         // notice when edits applied.
-        if let Ok(typed) =
-            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone())
-        {
+        if let (Some((session_id, generation)), Ok(typed)) = (
+            &origin,
+            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone()),
+        ) {
             let outcome =
                 pa_core::session_engine::refine::create_refinement_outcome_message(&typed);
             if let Ok(value) =
                 serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome))
             {
-                self.emit_custom_row(&value);
+                crate::worker::emit_refinement_row_for_generation(
+                    &self.core,
+                    &self.events,
+                    session_id,
+                    Some(generation),
+                    &value,
+                );
             }
             if typed.applied_edits.iter().any(|edit| edit.applied) {
                 let notice = pa_core::session_engine::refine::create_refinement_notice_message(
@@ -293,26 +313,35 @@ impl Worker {
                 if let Ok(value) =
                     serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
                 {
-                    self.emit_custom_row(&value);
+                    crate::worker::emit_refinement_row_for_generation(
+                        &self.core,
+                        &self.events,
+                        session_id,
+                        Some(generation),
+                        &value,
+                    );
                 }
             }
-            crate::user_bash::emit_session_event_frame(
+            crate::worker::emit_refinement_event_for_generation(
                 &self.core,
                 &self.events,
+                session_id,
+                Some(generation),
                 crate::worker::refine_complete_event(&typed),
             );
         }
         response_success(None, "refine", Some(result))
     }
 
-    /// `reload`: re-read the session's live inputs — the request auth
-    /// rebinds from the credential store (a `/login` from another process
-    /// never reaches the running session's request path otherwise), and
-    /// the MCP manager re-reads its settings and auth state. Settings and
-    /// the model catalog resolve per use and need no re-read. The reload
-    /// touches the MCP auth store, whose snapshot takes a blocking lock —
-    /// it parks on a blocking thread, the same posture as
-    /// `get_mcp_connections`.
+    /// `reload`: re-read the session's live inputs — the MCP manager
+    /// re-reads its settings and auth state. Request auth needs no
+    /// re-read: the live session's stream re-resolves it from the
+    /// credential store on every provider call, so a `/login` from
+    /// another process serves the next request with or without a reload.
+    /// Settings and the model catalog resolve per use and need no
+    /// re-read. The reload touches the MCP auth store, whose snapshot
+    /// takes a blocking lock — it parks on a blocking thread, the same
+    /// posture as `get_mcp_connections`.
     pub(crate) async fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
@@ -958,6 +987,151 @@ mod tests {
         }
     }
 
+    /// A queued row restored WITHOUT a timestamp (the crash-recovery
+    /// snapshot shape the restore fixtures carry) delivers as one
+    /// normalized row: the type default fills the clock at the
+    /// injected-row parse, so the frames clients get carry the same row
+    /// the model context holds.
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    #[tokio::test]
+    async fn a_restored_row_without_a_timestamp_delivers_one_normalized_row() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let config = crate::worker::WorkerConfig {
+            socket_path: dir_path.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "restored-row-session".to_string(),
+            agent_dir: dir_path.join("agent"),
+            recovery_journal_path: dir_path.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(
+                json!({ "engine": "faux", "responses": [{ "text": "notice acknowledged" }] }),
+            ),
+        };
+        let worker = Arc::new(crate::worker::Worker::new(config, None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        assert!(
+            worker.agent_engine.is_some(),
+            "the faux script must build a real agent engine"
+        );
+        let mut subscription = worker.events.subscribe();
+        let content = "[heartbeat: every 10m run#0]\n\nnudge the mission";
+        let response = worker
+            .dispatch(
+                "restore_actions",
+                &json!({
+                    "activeSessionId": "restored-row-session",
+                    "snapshot": {
+                        "formatVersion": 1,
+                        "actions": [
+                            {
+                                "id": "hb-restored",
+                                "source": "user",
+                                "delivery": "next_turn_boundary",
+                                "wake": "wake",
+                                "queueKey": "heartbeat:hb-restored",
+                                "payload": {
+                                    "kind": "turn",
+                                    "text": content,
+                                    "records": [],
+                                    // The snapshot row carries NO timestamp.
+                                    "customMessage": {
+                                        "role": "custom",
+                                        "customType": "heartbeat_prompt",
+                                        "content": content,
+                                        "display": true
+                                    },
+                                    "executionPolicy": { "preparation": {} },
+                                    "queueVisible": true,
+                                    "acceptedAgentMessage": false,
+                                    "acceptedBeforeCompletion": false,
+                                },
+                            },
+                        ],
+                    },
+                }),
+            )
+            .await;
+        assert!(response.success, "restore failed: {response:?}");
+        assert_eq!(response.data, Some(json!({ "restored": 1 })));
+        // The runner delivers the restored row; the idle wait holds while
+        // the lanes carry it and returns only after the turn settled.
+        let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+        assert!(idle.success, "the restored turn never settled: {idle:?}");
+        let mut events = Vec::new();
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type == "session_event" {
+                let outbound: Value = serde_json::from_slice(&frame.payload).unwrap();
+                events.push(outbound["event"].clone());
+            }
+        }
+        // The turn admitted: no parse-failure settle frame.
+        let parse_failed = events.iter().any(|event| {
+            event["type"] == "turn_end"
+                && event["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("parse failed"))
+        });
+        assert!(
+            !parse_failed,
+            "the missing clock killed the restored turn: {events:?}"
+        );
+        // The turn ran to its model response.
+        assert!(
+            events.iter().any(|event| {
+                event["type"] == "message_end" && event["message"]["role"] == "assistant"
+            }),
+            "the restored turn never reached its model response: {events:?}"
+        );
+        // The frames carry the row WITH the default-filled clock...
+        let frame_row = events
+            .iter()
+            .find_map(|event| {
+                (event["type"] == "message_start"
+                    && event["message"]["customType"] == "heartbeat_prompt")
+                    .then(|| event["message"].clone())
+            })
+            .expect("the restored row's message_start frame");
+        let frame_timestamp = frame_row["timestamp"]
+            .as_u64()
+            .expect("the frame row carries the filled clock");
+        assert!(frame_timestamp > 0);
+        // ...and the model context holds the SAME row (frame/context match).
+        let built = {
+            let engine = worker.agent_engine.as_ref().expect("the real agent engine");
+            let session = engine.session.lock().await;
+            Arc::clone(session.as_ref().expect("the built session"))
+        };
+        let state = built.session.agent().state().await;
+        let context_row = state
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                pa_agent::types::AgentMessage::Custom(custom)
+                    if custom.payload["customType"] == "heartbeat_prompt" =>
+                {
+                    Some(custom.payload.clone())
+                }
+                _ => None,
+            })
+            .expect("the model context admitted the restored row");
+        assert_eq!(
+            context_row["timestamp"],
+            json!(frame_timestamp),
+            "the frames and the model context hold one normalized row"
+        );
+        assert_eq!(frame_row["role"], "custom");
+        assert_eq!(frame_row["content"], json!(content));
+    }
+
     /// The scripted harness has no refiner: `refine` answers the failure the engine seam
     /// carries.
     #[tokio::test]
@@ -1008,12 +1182,8 @@ mod tests {
     /// the reload reaches the MCP auth store's blocking lock, which panics
     /// when taken on the runtime — this fails if the blocking work moves
     /// back onto the executor.
-    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     #[tokio::test]
     async fn reload_parks_the_engine_reload_off_the_runtime() {
-        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A TempDir keeps the worker's files from piling up in /tmp.
         let dir = tempfile::TempDir::new().unwrap();
         let dir_path = dir.path().to_path_buf();

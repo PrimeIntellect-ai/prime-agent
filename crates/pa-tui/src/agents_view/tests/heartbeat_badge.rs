@@ -94,7 +94,7 @@ fn a_rows_heartbeat_count_renders_before_its_title() {
     );
     // A name column too narrow for the row's fixed prefix plus the badge
     // renders exactly as a badge-less row: the model and cost/age cells
-    // never move right (width 19 squeezes `name_width` to 5, one cell
+    // never move right (width 23 squeezes `name_width` to 5, one cell
     // short of the badge's 6-cell prefix).
     let (mut mode, index) = mode_with_row("worker", "mock-1");
     mode.rows[index].summary = serde_json::json!({
@@ -109,8 +109,8 @@ fn a_rows_heartbeat_count_renders_before_its_title() {
     .iter()
     .map(entry)
     .collect();
-    let layout = build_layout(&mode.rows, 19);
-    let line = mode.render_row(&mode.rows[index], &layout, 19, false);
+    let layout = build_layout(&mode.rows, 23);
+    let line = mode.render_row(&mode.rows[index], &layout, 23, false);
     let expected: crate::Line = vec![
         crate::Span::styled(
             "\u{2022}".to_string(),

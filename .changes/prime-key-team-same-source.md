@@ -1,0 +1,1 @@
+- When `PRIME_API_KEY` or `--api-key` supplies the Prime Inference key, requests no longer send the team saved by `/login` with it. The team now comes from the same place as the key: `PRIME_TEAM_ID` (or no team) for an environment or command-line key, the saved team for the saved login.

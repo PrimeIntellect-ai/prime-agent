@@ -102,18 +102,6 @@ pub fn is_thinking_part(part: &Value) -> bool {
     part.get("thought") == Some(&json!(true))
 }
 
-/// Retain thought signatures during streaming: some backends only send `thoughtSignature` on the
-/// first delta of a block; keep the last non-empty one. Never merges or moves signatures across
-/// distinct parts.
-pub fn retain_thought_signature(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
-    if let Some(incoming) = incoming {
-        if !incoming.is_empty() {
-            return Some(incoming.to_string());
-        }
-    }
-    existing.map(std::string::ToString::to_string)
-}
-
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
 fn is_valid_thought_signature(signature: Option<&str>) -> bool {
     let Some(signature) = signature else {
@@ -232,21 +220,26 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                 for block in &assistant.content {
                     match block {
                         AssistantContent::Text(text) => {
-                            if text.text.trim().is_empty() {
+                            let signature = resolve_thought_signature(
+                                is_same_provider_and_model,
+                                text.text_signature.as_deref(),
+                            );
+                            if text.text.trim().is_empty() && signature.is_none() {
                                 continue;
                             }
                             let mut part = Map::new();
                             part.insert("text".into(), json!(sanitize_surrogates(&text.text)));
-                            if let Some(signature) = resolve_thought_signature(
-                                is_same_provider_and_model,
-                                text.text_signature.as_deref(),
-                            ) {
+                            if let Some(signature) = signature {
                                 part.insert("thoughtSignature".into(), json!(signature));
                             }
                             parts.push(Value::Object(part));
                         }
                         AssistantContent::Thinking(thinking) => {
-                            if thinking.thinking.trim().is_empty() {
+                            let signature = resolve_thought_signature(
+                                is_same_provider_and_model,
+                                thinking.thinking_signature.as_deref(),
+                            );
+                            if thinking.thinking.trim().is_empty() && signature.is_none() {
                                 continue;
                             }
                             // Only keep as thinking block if same provider AND same model;
@@ -254,10 +247,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                             let mut part = Map::new();
                             if is_same_provider_and_model {
                                 part.insert("thought".into(), json!(true));
-                                if let Some(signature) = resolve_thought_signature(
-                                    is_same_provider_and_model,
-                                    thinking.thinking_signature.as_deref(),
-                                ) {
+                                if let Some(signature) = signature {
                                     part.insert("thoughtSignature".into(), json!(signature));
                                 }
                             }

@@ -102,7 +102,7 @@ pub fn render_markdown_tagged(
     if text.trim().is_empty() {
         return Vec::new();
     }
-    let normalized = text.replace('\t', "   ");
+    let normalized = normalize_source(text);
     let mut lines: Vec<Line> = Vec::new();
     let blocks = parse_blocks(&normalized);
     for (i, block) in blocks.iter().enumerate() {
@@ -137,6 +137,13 @@ pub fn render_markdown_tagged(
         }
     }
     lines
+}
+
+/// The source both the render and the row count parse. Every escape sequence in the text is
+/// dropped (none paints), so backslash decoding cannot reassemble one and every link in the
+/// rows is one the renderer added.
+fn normalize_source(text: &str) -> String {
+    crate::ansi::strip_ansi(text).replace('\t', "   ")
 }
 
 /// Per-block render cache (TS `Markdown.blockCache`): a streaming append re-renders only

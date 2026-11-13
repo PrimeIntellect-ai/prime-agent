@@ -499,29 +499,28 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
             .and_then(Value::as_str)
             .map(str::to_string),
     };
-    // The handle guard stays held through the refinement: no replacement
-    // or `set_model` interleaves before the file writes.
     let handle = state.session.handle().await;
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
-    // Refine appends durable rows into the live loop context; it shares
-    // compact's one-command-at-a-time serialization.
-    let _ops = state.session_ops.lock().await;
-    let result = engine
-        .session
-        .refine(
-            &options,
-            pa_core::session_engine::refine::RefinementSource::User,
-            &model,
-            api_key,
-            global_harness_dir,
-        )
+    // Register the job against this session, then release the lease before
+    // waiting. Other prompts and session replacement must not await planning.
+    let pending = engine.session.start_refinement(
+        options,
+        pa_core::session_engine::refine::RefinementSource::User,
+        model,
+        api_key,
+        global_harness_dir,
+    );
+    drop(handle);
+    drop(engine);
+    let committed = pending
         .await
+        .map_err(|error| format!("refinement task failed: {error}"))?
         .map_err(|error| format!("{error:#}"))?;
     Ok(ResponseData::Present(
-        serde_json::to_value(result).unwrap_or(Value::Null),
+        serde_json::to_value(committed.result).unwrap_or(Value::Null),
     ))
 }
 

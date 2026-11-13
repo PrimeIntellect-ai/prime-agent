@@ -513,3 +513,82 @@ async fn turn_requests_carry_both_headers_and_settle_by_stop_reason() {
         ]
     );
 }
+
+/// A wrapped call dropped before the inner call returns — a turn abort
+/// while the live-auth resolution is in flight, what the agent loop's
+/// unbiased abort select does — still fails its started request: the
+/// ledger keeps its one-request-one-terminal-event contract, exactly
+/// like a dropped unsettled stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_call_mid_resolution_fails_its_started_request() {
+    use std::time::Duration;
+
+    use crate::models::ResolvedRequestAuth;
+    use crate::session_engine::provider_adapter::{
+        switchable_stream_fn_with_live_auth, LiveAuthResolver, ProviderTarget,
+    };
+
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("semantic-dropped-call-test".to_owned()),
+            ..Default::default()
+        });
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "ok",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    let (identity, _dir) = identity("session-dropped-mid-resolution");
+    let recorder = Arc::new(SemanticEdgeRecorder::open(identity.clone()));
+    // A resolver that blocks until released: the wrapped call parks on
+    // the live-auth resolution after `request_started` landed.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = Mutex::new(entered_tx);
+    let release_rx = Mutex::new(release_rx);
+    let resolver: LiveAuthResolver = Arc::new(move |_model| {
+        let _ = entered_tx.lock().unwrap().send(());
+        let _ = release_rx.lock().unwrap().recv();
+        ResolvedRequestAuth::default()
+    });
+    let stream_fn = wrap_stream_fn(
+        Arc::clone(&recorder),
+        switchable_stream_fn_with_live_auth(
+            Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+                api_key: Some("captured-key".to_string()),
+                model: registration.get_model(),
+                service_tier: None,
+                headers: None,
+            }))),
+            resolver,
+        ),
+    );
+    let mut call = stream_fn(
+        Model::unknown(),
+        LlmContext::default(),
+        StreamRequestOptions::default(),
+    );
+    let pending = futures::poll!(&mut call).is_pending();
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the resolution entered");
+    drop(call);
+    release_tx.send(()).expect("the release channel is open");
+    registration.unregister();
+    assert!(pending, "the wrapped call parks on the resolution");
+    let events = read_ledger(&identity);
+    let Some(SemanticEdgeLedgerEvent::RequestStarted { request_id, .. }) = events.get(1) else {
+        panic!("the ledger must carry the started request: {events:?}");
+    };
+    let request_id = request_id.clone();
+    assert_eq!(
+        events,
+        vec![
+            session_registered("session-dropped-mid-resolution"),
+            request_started("session-dropped-mid-resolution", &request_id),
+            SemanticEdgeLedgerEvent::RequestFailed { request_id },
+        ]
+    );
+}

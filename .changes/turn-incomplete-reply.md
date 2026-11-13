@@ -1,1 +1,0 @@
-- A turn no longer ends silently when the model's final reply has no visible answer or was cut off at its output limit: the reply is retried once, and a second failure ends the turn with a visible error (ACP clients receive an error instead of `end_turn`). Harness notices and agent messages may still be acknowledged silently.

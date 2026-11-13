@@ -138,6 +138,10 @@ pub trait SessionEngine: Send + Sync {
     /// also aborts the auto controller, not just the manual run.
     fn abort_auto_compaction(&self) {}
 
+    /// Toggle automatic compaction on the built session; an unbuilt session
+    /// reads the persisted setting at its build. Blocking: call off the runtime.
+    fn set_auto_compaction_enabled(&self, _enabled: bool) {}
+
     /// Consume a pending compact-trigger auto-refine review: the engine
     /// resolves the model and runs the gated round. `Ok(None)` is every
     /// silent outcome — no trigger armed, a gate drop, cooldown, or decline.

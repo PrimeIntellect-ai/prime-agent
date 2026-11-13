@@ -3,13 +3,10 @@
 //! by-model attribution computations.
 use super::{json, ModelRegistry, Value};
 
-/// The worker's model registry (auth storage + `models.json`, the
-/// private-authorization cache adopted so create-time resolution agrees).
+/// The worker's model registry (auth storage + `models.json`).
 pub(crate) fn worker_model_registry(agent_dir: &std::path::Path) -> ModelRegistry {
     let auth = pa_core::auth::AuthStorage::create(agent_dir);
-    let mut registry = ModelRegistry::create(auth, agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
-    registry
+    ModelRegistry::create(auth, agent_dir.join("models.json"))
 }
 
 /// The TS `Usage` wire shape (the TS `emptyUsage`).
