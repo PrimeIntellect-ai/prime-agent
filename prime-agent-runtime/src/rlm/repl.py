@@ -109,6 +109,22 @@ _sigint_target: str | None = None
 _finishing_rid: str | None = None
 _handoff_interrupted = False
 
+# The in-cell span guard: the same cell budget the Rust watchdog notes
+# (`DEFAULT_PYTHON_CELL_TIMEOUT_MS`, 60s), reached INTO the cell. The
+# watchdog teaches only after the settle; the guard interrupts a cell still
+# running at the budget, so one giant cell — pure compute, no banned shape,
+# invisible to the discipline screen — cannot hold the turn until the agent
+# timeout. The interrupt rides the SIGINT path and the cell's error event
+# teaches the parked-turn alternative. `0` (or an unparsable value) disables.
+try:
+    _CELL_SPAN_GUARD_SECONDS = max(
+        0.0, float(os.environ.get("PRIME_AGENT_CELL_SPAN_GUARD_SECONDS", "60"))
+    )
+except ValueError:
+    _CELL_SPAN_GUARD_SECONDS = 60.0
+# Request ids the span guard interrupted (a request may still be unwinding).
+_span_guard_fired: set[str] = set()
+
 
 def _send(event: dict[str, Any]) -> None:
     """Write one protocol frame; the locked single write keeps frames atomic."""
@@ -152,6 +168,15 @@ def emit(data: dict[str, Any]) -> None:
 def is_active() -> bool:
     """True when this process serves the repl protocol (not merely imported)."""
     return _protocol_fd >= 0
+
+
+def request_in_flight() -> bool:
+    """True when a request (a cell or state op) is executing right now.
+
+    Lock-free like the SIGINT handler's own read: a torn read can only miss
+    one keepalive tick or send one that queues behind the running turn.
+    """
+    return _active["task"] is not None
 
 
 def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
@@ -594,6 +619,220 @@ def _interrupt_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     return {"event": "error", "id": cell_id, "ename": "KeyboardInterrupt", "evalue": "", "traceback": lines}
 
 
+def _arm_span_guard(rid: str) -> threading.Timer | None:
+    """Arm the in-cell budget timer for one user cell; `cancel()` disarms.
+
+    The timer rides the request-interrupt path (a per-rid target, dropped for
+    finished or unknown requests), so a guard that fires after the cell's
+    settle can never leak onto a later request. `_handle_execute`'s outer
+    finally discards the request's parked entry.
+
+    Armed only in sessions whose host wires completion notices: the guard's
+    teaching promises a `[bash-done]` resume that a handler-less host (the
+    print embeddings) cannot deliver, and there an unbounded await is the
+    documented contract, exactly as on main. The bootstrap flips the wiring
+    flag from the host-handler registry.
+    """
+    if _CELL_SPAN_GUARD_SECONDS <= 0:
+        return None
+    from .bash import _completion_notices_are_wired
+
+    if not _completion_notices_are_wired():
+        return None
+
+    def fire() -> None:
+        # Mark before interrupting: the flag is what decides between the
+        # teaching event and a bare KeyboardInterrupt in the except arms.
+        _span_guard_fired.add(rid)
+        _request_interrupt(rid)
+
+    timer = threading.Timer(_CELL_SPAN_GUARD_SECONDS, fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _span_guard_event(rid: str, exc: BaseException) -> dict[str, Any]:
+    """The span guard's teaching error: where the cell was interrupted, plus
+    the parked-turn alternative (bash() auto-backgrounds; a [bash-done]
+    notice resumes) — the in-cell sibling of the Rust watchdog's post-hoc
+    note."""
+    stack = _cell_stack(traceback.extract_tb(exc.__traceback__))
+    lines = ["Traceback (most recent call last):\n"] if stack else []
+    if stack:
+        lines.extend(stack.format())
+    lines.append(
+        f"CellSpanGuard: python cell interrupted at the {_CELL_SPAN_GUARD_SECONDS:g}s "
+        "inline budget; prior REPL state persists.\n"
+        "[cell-span] Long work belongs in bash() — launch it there (it "
+        "auto-backgrounds) and end the turn; a [bash-done] notification "
+        "resumes you. Split long compute into smaller cells; do not hold "
+        "the turn inside one.\n"
+    )
+    return {
+        "event": "error",
+        "id": rid,
+        "ename": "CellSpanGuard",
+        "evalue": f"python cell interrupted at the {_CELL_SPAN_GUARD_SECONDS:g}s inline budget",
+        "traceback": _cap_traceback_lines([_cap_text(line) for line in lines]),
+    }
+
+
+# ── the discipline screen: banned in-cell shapes ────────────────────────────
+#
+# The shipped prompt's contract bans waiting and process spawning from cells
+# ("bash() is the shell surface"; "do not keep the turn open by polling with
+# time.sleep()"), and both classes park the whole turn: nothing can wake a
+# kernel cell from inside. The screen declines the cell before it runs, with
+# the allowed alternative in the error itself — a declined wait is a teaching
+# moment, not a held turn. Detection stays on the charged surface: literal
+# sleeps of 5s or more, and the subprocess family (import, call, os.system,
+# os.popen, pty.spawn). Anything else — short backoff sleeps, sleeps computed
+# from variables, library internals, sleeps and spawns inside string literals
+# or comments — is invisible to the screen and keeps running untouched.
+
+_DECLINE_SLEEP_SECONDS = 5.0
+_WATCHED_MODULES = ("time", "asyncio", "subprocess", "os", "pty")
+_SUBPROCESS_CALLS = (
+    "run",
+    "Popen",
+    "call",
+    "check_call",
+    "check_output",
+    "getoutput",
+    "getstatusoutput",
+)
+
+
+class CellDeclinedError(Exception):
+    """The kernel refused to run a cell: a banned shape under the discipline
+    contract. The message names the offending call and the allowed alternative."""
+
+
+def _declined_reason(code: str) -> CellDeclinedError | None:
+    """The decline for a banned cell shape, or None when the cell may run.
+
+    Import-aware where it can be (aliases bind through `import time as t` and
+    `from time import sleep`), name-based where it must be (the contract's
+    `time.sleep(...)` shape is charged as written, imports or not). A cell
+    that does not parse declines nothing: the compile step reports the
+    SyntaxError.
+    """
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return None
+    module_alias: dict[str, str] = {}
+    function_alias: dict[str, tuple[str, str]] = {}
+    subprocess_import: ast.AST | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _WATCHED_MODULES:
+                    module_alias[alias.asname or root] = root
+                    if root == "subprocess" and subprocess_import is None:
+                        subprocess_import = node
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root in _WATCHED_MODULES:
+                for alias in node.names:
+                    function_alias[alias.asname or alias.name] = (root, alias.name)
+                if root == "subprocess" and subprocess_import is None:
+                    subprocess_import = node
+
+    def head(node: ast.AST) -> str:
+        source = ast.get_source_segment(code, node)
+        return (source or "").replace("\n", " ")[:60]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            root = module_alias.get(func.value.id) or func.value.id
+            member = func.attr
+        elif isinstance(func, ast.Name):
+            bound = function_alias.get(func.id)
+            if bound is None:
+                continue
+            root, member = bound
+        else:
+            continue
+        if root in ("time", "asyncio") and member == "sleep":
+            seconds = _literal_seconds(node)
+            if seconds is not None and seconds >= _DECLINE_SLEEP_SECONDS:
+                return CellDeclinedError(
+                    f"{head(node)}: the kernel declines in-cell sleeps of "
+                    f"{_DECLINE_SLEEP_SECONDS:g}s or longer - a sleeping cell parks "
+                    "the whole turn and nothing can wake it. End the turn instead: "
+                    "start the work with bash() (it returns immediately), reply with "
+                    "a short status text, and the [bash-done] notification wakes the "
+                    "session with the result; arm rlm_heartbeat.create for scheduled "
+                    "wakes. Remove the sleep and rerun the cell."
+                )
+        if (
+            (root == "subprocess" and member in _SUBPROCESS_CALLS)
+            or (
+                root == "os"
+                and member in ("system", "popen", "getoutput", "getstatusoutput")
+            )
+            or (root == "pty" and member == "spawn")
+        ):
+            return CellDeclinedError(
+                f"{head(node)}: the kernel declines process spawning from a cell - "
+                "bash() is the shell surface, never subprocess/os.system/pty. Run "
+                "the command with bash('...') instead: it returns immediately, "
+                "await it bounded or read the handle later, and the [bash-done] "
+                "notification delivers the result. Remove the subprocess call and "
+                "rerun the cell."
+            )
+    if subprocess_import is not None:
+        return CellDeclinedError(
+            f"{head(subprocess_import)}: the kernel declines process spawning from "
+            "a cell - bash() is the shell surface, never subprocess/os.system/pty. "
+            "Run the command with bash('...') instead: it returns immediately, "
+            "await it bounded or read the handle later, and the [bash-done] "
+            "notification delivers the result. Remove the subprocess import and "
+            "rerun the cell."
+        )
+    return None
+
+
+def _literal_seconds(call: ast.Call) -> float | None:
+    """The call's first positional argument as a number literal, else None.
+
+    The charged surface is literal-only: a sleep computed from a variable is
+    invisible to the screen exactly as it is to the contract's literal shape."""
+    if not call.args:
+        return None
+    arg = call.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)) and not isinstance(
+        arg.value, bool
+    ):
+        return float(arg.value)
+    return None
+
+
+def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
+    """A declined cell's error event: the failed-cell header the host's result
+    rendering carries, with the decline's teaching message as the exception
+    line (the cell never ran, so there are no frames to show)."""
+    message = _cap_text(_safe_str(error))
+    return {
+        "event": "error",
+        "id": cell_id,
+        "ename": type(error).__name__,
+        "evalue": message,
+        "traceback": _cap_traceback_lines(
+            [
+                "Traceback (most recent call last):\n",
+                f"{type(error).__name__}: {message}\n",
+            ]
+        ),
+    }
+
+
 def _compile_cell(code: str, filename: str) -> tuple[list[types.CodeType], bool]:
     """Compile a cell; a trailing expression compiles separately in eval mode."""
     linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
@@ -633,10 +872,14 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
         value = await task
         return "ok", value, None
     except asyncio.CancelledError as exc:
+        if rid in _span_guard_fired:
+            return "error", None, _span_guard_event(rid, exc)
         if _active["interrupted"]:
             return "error", None, _interrupt_event(rid, exc)
         return "error", None, _error_event(rid, exc)
     except BaseException as exc:  # noqa: BLE001 - every cell failure becomes an error event
+        if rid in _span_guard_fired:
+            return "error", None, _span_guard_event(rid, exc)
         return "error", None, _error_event(rid, exc)
     finally:
         with _interrupt_lock:
@@ -659,17 +902,43 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
     try:
+        declined = _declined_reason(req["code"])
+        if declined is not None:
+            # Refused before it runs: nothing executed, so the decline's
+            # teaching message is the whole result. Same drain/finish/send
+            # order as a completed cell.
+            try:
+                _drain_output()
+            finally:
+                _finish_request(cell_id)
+            _send(_declined_event(cell_id, declined))
+            _send({"event": "done", "id": cell_id, "status": "error"})
+            return
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))
         execution.owner = task
-        status, value, error = await _run_guarded(task, cell_id)
+        # The in-cell span guard: armed where the session's host wires
+        # completion notices, disarmed at settle. Protocol repair's internal
+        # executes pass through here too (the runtime bootstrap): the decline
+        # screen applies to them, benignly today — the bootstrap carries no
+        # banned shape — and the guard disarms until the flag flips.
+        span_guard = _arm_span_guard(cell_id)
+        try:
+            status, value, error = await _run_guarded(task, cell_id)
+        finally:
+            if span_guard is not None:
+                span_guard.cancel()
         result_text: str | None = None
         try:
             if _consume_handoff_interrupt() and status == "ok":
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
-                status, error = "error", _error_event(cell_id, KeyboardInterrupt())
+                status, error = "error", (
+                    _span_guard_event(cell_id, KeyboardInterrupt())
+                    if cell_id in _span_guard_fired
+                    else _error_event(cell_id, KeyboardInterrupt())
+                )
             if status == "ok" and has_trailing and value is not None:
                 try:
                     ns["_"] = value
@@ -689,6 +958,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
+        _span_guard_fired.discard(cell_id)
         execution.owner = None
         execution.finished.set()
         _current_cell_execution.reset(execution_token)
@@ -1767,6 +2037,14 @@ def main() -> None:
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    # The kernel owns its signal mask. A host that blocks SIGINT on the
+    # spawning thread (tokio-style signal handling) leaks that mask through
+    # fork+exec — an inherited-blocked SIGINT silences the whole interrupt
+    # machinery: user interrupts and the cell span guard raise a signal
+    # that never delivers, and a stuck cell wedges the session until the
+    # agent clock. Unblock before arming the handler.
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 

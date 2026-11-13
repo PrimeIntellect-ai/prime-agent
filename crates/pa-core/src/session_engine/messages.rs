@@ -50,6 +50,18 @@ pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
+/// The durable row the kernel's waiting keepalive admits on the owning
+/// session's steering lane: one paced notice per window while background
+/// commands run and the session is parked.
+pub const BASH_WAITING_NOTICE_CUSTOM_TYPE: &str = "bash_waiting_notice";
+/// The queue-strip label the waiting keepalive's queued row carries.
+pub const BASH_WAITING_PREVIEW_LABEL: &str = "Waiting on background commands";
+/// The durable row the worker's turn-held pacing window admits on the
+/// session's steering lane: one notice per delivery that stays busy past
+/// the window, cutting the held turn at its next boundary.
+pub const TURN_HELD_NOTICE_CUSTOM_TYPE: &str = "turn_held_notice";
+/// The queue-strip label the turn-held notice's queued row carries.
+pub const TURN_HELD_PREVIEW_LABEL: &str = "Turn held";
 
 /// Why an unsuccessful compaction ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,20 +230,91 @@ pub fn create_async_bash_completion_message(
     pid: u32,
     command: &str,
     exit_code: i64,
+    output: Option<&str>,
     timestamp: u64,
 ) -> pa_types::session::CustomMessage {
     // TS `JSON.stringify(details.command)`: the quoted, escaped command.
     let encoded_command = serde_json::to_string(command).unwrap_or_default();
-    let content = format!("[bash-done pid:{pid} exit:{exit_code}]\n\nCommand: {encoded_command}");
+    // The result rides the wake: a completion notice that only points at the
+    // handle makes every wake cost a retrieval turn. The tail is pre-capped
+    // kernel-side; an empty or absent tail keeps the pointer-only shape.
+    let mut content =
+        format!("[bash-done pid:{pid} exit:{exit_code}]\n\nCommand: {encoded_command}");
+    let output = output.filter(|output| !output.is_empty());
+    if let Some(output) = output {
+        let _ = write!(content, "\n\nOutput (tail):\n{output}");
+    }
+    let mut details = serde_json::json!({
+        "pid": pid,
+        "command": command,
+        "exitCode": exit_code,
+    });
+    if let Some(output) = output {
+        details["output"] = serde_json::json!(output);
+    }
     pa_types::session::CustomMessage {
         custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
         content: UserContent::Text(content),
         display: true,
-        details: Some(serde_json::json!({
-            "pid": pid,
-            "command": command,
-            "exitCode": exit_code,
-        })),
+        details: Some(details),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The waiting keepalive notice: `[waiting] ...`, one paced row per window
+/// while background commands run and the session is parked, keeping the
+/// session's idle clocks warm and the parked-turn contract visible.
+#[must_use]
+pub fn create_bash_waiting_message(
+    pids: &[u32],
+    commands: &[String],
+    count: usize,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    let mut described = String::new();
+    for (pid, command) in pids.iter().zip(commands) {
+        let _ = write!(described, " pid {pid} `{command}`;");
+    }
+    let more = count.saturating_sub(pids.len());
+    if more > 0 {
+        let _ = write!(described, " and {more} more");
+    }
+    let content = format!(
+        "[waiting] Background work still running: {count} command(s) —{described}. \
+No action needed — end the turn and park; a [bash-done] notification wakes you as each finishes."
+    );
+    pa_types::session::CustomMessage {
+        custom_type: BASH_WAITING_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::json!({ "pids": pids, "count": count })),
+        timestamp,
+        rest: serde_json::Map::default(),
+    }
+}
+
+/// The turn-held pacing notice: `[turn-held] ...`, the one-row teaching
+/// nudge the daemon worker admits when a delivery stays busy past its
+/// turn-held window. The details keep the window in milliseconds.
+#[must_use]
+pub fn create_turn_held_message(
+    elapsed_ms: u64,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    let seconds = elapsed_ms / 1000;
+    let content = format!(
+        "[turn-held] This turn has been open for {seconds}s. If you are waiting on background \
+work, end the turn now: [bash-done] and agent-message notifications resume a parked turn, while \
+sleep(), subprocess polling, and repeated handle awaits inside cells just hold the kernel. If \
+background work cannot wake you (a subprocess or detached pid), wrap it in a bash() wait \
+command or relaunch it via bash(). Keep python cells short; long work belongs in bash()."
+    );
+    pa_types::session::CustomMessage {
+        custom_type: TURN_HELD_NOTICE_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::json!({ "elapsedMs": elapsed_ms })),
         timestamp,
         rest: serde_json::Map::default(),
     }
@@ -743,9 +826,80 @@ state
     }
 
     #[test]
+    fn bash_waiting_message_carries_the_notice_contract() {
+        let message = create_bash_waiting_message(
+            &[7227, 7228],
+            &["heavy.py alpha".into(), "heavy.py beta".into()],
+            2,
+            1_000,
+        );
+        assert_eq!(message.custom_type, "bash_waiting_notice");
+        assert!(message.display);
+        assert_eq!(message.timestamp, 1_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(
+            text.starts_with("[waiting] Background work still running: 2 command(s)"),
+            "{text}"
+        );
+        assert!(text.contains("pid 7227 `heavy.py alpha`"), "{text}");
+        assert!(
+            text.contains("end the turn and park"),
+            "the notice teaches the parked-turn contract: {text}"
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["pids"], serde_json::json!([7227, 7228]));
+        assert_eq!(details["count"], 2);
+        // Capped descriptions carry the remainder count.
+        let message = create_bash_waiting_message(&[42], &["build.sh".into()], 5, 2_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(text.contains("pid 42 `build.sh`"), "{text}");
+        assert!(text.contains("and 4 more"), "{text}");
+    }
+
+    #[test]
+    fn turn_held_message_carries_the_notice_contract() {
+        let message = create_turn_held_message(60_000, 1_000);
+        assert_eq!(message.custom_type, "turn_held_notice");
+        assert!(message.display);
+        assert_eq!(message.timestamp, 1_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(
+            text.starts_with("[turn-held] This turn has been open for 60s."),
+            "the header carries the elapsed window: {text}"
+        );
+        assert!(
+            text.contains("end the turn now"),
+            "the notice teaches the parked-turn contract: {text}"
+        );
+        assert!(
+            text.contains("sleep(), subprocess polling"),
+            "the notice names the in-cell waiting anti-patterns: {text}"
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["elapsedMs"], 60_000);
+        let message = create_turn_held_message(150_000, 2_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(text.starts_with("[turn-held] This turn has been open for 150s."));
+        assert_eq!(message.timestamp, 2_000);
+    }
+
+    #[test]
     fn async_bash_completion_message_matches_the_ts_shape() {
-        let message =
-            create_async_bash_completion_message(4321, "sleep 12; echo RW_WAKE_DONE", 0, 1_000);
+        let message = create_async_bash_completion_message(
+            4321,
+            "sleep 12; echo RW_WAKE_DONE",
+            0,
+            None,
+            1_000,
+        );
         assert_eq!(message.custom_type, "async_bash_completion");
         assert!(message.display);
         assert_eq!(message.timestamp, 1_000);
@@ -760,12 +914,32 @@ state
         assert_eq!(details["pid"], 4321);
         assert_eq!(details["command"], "sleep 12; echo RW_WAKE_DONE");
         assert_eq!(details["exitCode"], 0);
-        let message = create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, 2_000);
+        let message =
+            create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, None, 2_000);
         assert_eq!(message.timestamp, 2_000);
         assert!(matches!(message.content, UserContent::Text(text)
             if text.starts_with("[bash-done pid:11 exit:2]\n\nCommand: \"echo \\\"done\\\" && exit 2\"")));
         let details = message.details.unwrap();
         assert_eq!(details["exitCode"], 2);
+        // The output tail rides the wake when the kernel sends one.
+        let message =
+            create_async_bash_completion_message(7, "make gates", 0, Some("gates ok\n"), 3_000);
+        let UserContent::Text(text) = &message.content else {
+            panic!("the notice is text content: {message:?}");
+        };
+        assert!(
+            text.ends_with("Output (tail):\ngates ok\n"),
+            "the tail renders after the command: {text}"
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["output"], "gates ok\n");
+        // An empty tail keeps the pointer-only shape.
+        let message = create_async_bash_completion_message(8, "silent", 0, Some(""), 4_000);
+        assert!(
+            !matches!(&message.content, UserContent::Text(text) if text.contains("Output")),
+            "an empty tail renders no output section: {message:?}"
+        );
+        assert!(message.details.unwrap().get("output").is_none());
     }
 
     #[test]

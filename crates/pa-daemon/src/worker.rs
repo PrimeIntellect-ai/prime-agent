@@ -25,7 +25,7 @@ mod queue;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice,
+    admit_autonomous_follow_up, admit_goal_follow_up, admit_kernel_notice, admit_turn_held_notice,
     checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
     gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
     restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
@@ -624,8 +624,9 @@ impl Worker {
                     refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
                 );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
-                // for `bash.completed` and `factory.progress`): the handlers
-                // validate, the sinks admit/withdraw through the queue lanes.
+                // for `bash.completed`, `bash.waiting` and `factory.progress`):
+                // the handlers validate, the sinks admit/withdraw through the
+                // queue lanes.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
@@ -636,6 +637,21 @@ impl Worker {
                     };
                     if engine.session_is_closed() {
                         return;
+                    }
+                    // A [waiting] keepalive is only for the parked session: a
+                    // busy session's own turn keeps its clocks warm, and a
+                    // queued waiting row would only add boundary noise. The
+                    // kernel skips in-flight ticks too; this closes the race.
+                    if notice.row.custom_type
+                        == pa_core::session_engine::messages::BASH_WAITING_NOTICE_CUSTOM_TYPE
+                    {
+                        let busy = {
+                            let core = notice_core.lock().unwrap();
+                            core.busy || core.compacting
+                        };
+                        if busy {
+                            return;
+                        }
                     }
                     admit_kernel_notice(
                         &notice_recovery,

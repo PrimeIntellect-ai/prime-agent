@@ -1,6 +1,7 @@
 //! The kernel notice seam (the TS async-bash-completion wake): the
-//! `bash.completed`/`bash.consumed` notices plus the `factory.progress`
-//! run-milestone notice that rides the same steering delivery. Here live
+//! `bash.completed`/`bash.consumed` notices, the `bash.waiting` keepalive,
+//! plus the `factory.progress` run-milestone notice that rides the same
+//! steering delivery. Here live
 //! the shared notice types, the TS payload validation, and the
 //! host-handler registration, plus the in-process sinks a daemonless
 //! embedding uses — the notice row steers onto the session's own agent
@@ -33,17 +34,47 @@ pub struct KernelNotice {
 }
 
 impl KernelNotice {
-    /// The `[bash-done]` notice for one finished detached command.
+    /// The `[bash-done]` notice for one finished detached command, with the
+    /// command's capped output tail riding the wake.
     #[must_use]
-    pub fn bash_completion(pid: u32, command: &str, exit_code: i64) -> Self {
+    pub fn bash_completion(pid: u32, command: &str, exit_code: i64, output: Option<&str>) -> Self {
         Self {
             row: messages::create_async_bash_completion_message(
                 pid,
                 command,
                 exit_code,
+                output,
                 crate::autonomous::now_millis(),
             ),
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+        }
+    }
+
+    /// The `[turn-held]` pacing notice for one delivery that outlived the
+    /// worker's turn-held window: it rides the same steering lane as a
+    /// bash completion, so the queued row cuts the held turn at its next
+    /// boundary and delivers as the next turn's injected prompt.
+    #[must_use]
+    pub fn turn_held(elapsed_ms: u64) -> Self {
+        Self {
+            row: messages::create_turn_held_message(elapsed_ms, crate::autonomous::now_millis()),
+            preview_label: messages::TURN_HELD_PREVIEW_LABEL,
+        }
+    }
+
+    /// The `[waiting]` keepalive for a parked session whose background
+    /// commands are still running: one paced notice per window so idle
+    /// clocks never close a session mid-wait.
+    #[must_use]
+    pub fn bash_waiting(pids: &[u32], commands: &[String], count: usize) -> Self {
+        Self {
+            row: messages::create_bash_waiting_message(
+                pids,
+                commands,
+                count,
+                crate::autonomous::now_millis(),
+            ),
+            preview_label: messages::BASH_WAITING_PREVIEW_LABEL,
         }
     }
 }
@@ -68,8 +99,8 @@ pub type BashConsumedSink = Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
 /// notice admits its row, so the embedding resumes the idle run.
 pub type BashNoticeWake = Arc<dyn Fn() + Send + Sync>;
 
-/// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
-/// handlers (TS `createAsyncBashCompletionHostHandler`,
+/// The `bash.completed`/`bash.consumed`/`bash.waiting`/`factory.progress`
+/// kernel host handlers (TS `createAsyncBashCompletionHostHandler`,
 /// `createAsyncBashConsumedHostHandler`, `createFactoryProgressHostHandler`).
 pub fn register_kernel_notice_host_handlers(
     notice: KernelNoticeSink,
@@ -102,6 +133,18 @@ pub fn register_kernel_notice_host_handlers(
             })
         }),
     );
+    let waiting = Arc::clone(&notice);
+    handlers.register(
+        "bash.waiting",
+        host_handler(move |payload| {
+            let waiting = waiting.clone();
+            Box::pin(async move {
+                let notice = validate_bash_waiting(&payload.data)?;
+                waiting(notice);
+                Ok(serde_json::json!({}))
+            })
+        }),
+    );
     handlers.register(
         "factory.progress",
         host_handler(move |payload| {
@@ -122,11 +165,63 @@ fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
         .get("exitCode")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("bash.completed exitCode must be an integer"))?;
+    // The output tail is optional (silent commands send the empty string;
+    // older kernels omit the key) and must be a string when present.
+    let output = data
+        .get("output")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Ok(KernelNotice::bash_completion(
         consumed.pid,
         &consumed.command,
         exit_code,
+        output.as_deref(),
     ))
+}
+
+/// The kernel's waiting keepalive payload (`_waiting_keepalive_loop` in
+/// `rlm/bash.py`): one non-empty array of positive integer pids, the
+/// same-length array of non-empty command strings, and a `count` of live
+/// commands at least as large as the pid list (the payload caps the
+/// described commands).
+fn validate_bash_waiting(data: &Value) -> anyhow::Result<KernelNotice> {
+    let pids: Vec<u32> = data
+        .get("pids")
+        .and_then(Value::as_array)
+        .filter(|pids| !pids.is_empty())
+        .and_then(|pids| {
+            pids.iter()
+                .map(|pid| {
+                    pid.as_u64()
+                        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
+                        .map(|pid| pid as u32)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| anyhow::anyhow!("bash.waiting pids must be positive integers"))?;
+    let commands: Vec<String> = data
+        .get("commands")
+        .and_then(Value::as_array)
+        .filter(|commands| commands.len() == pids.len())
+        .and_then(|commands| {
+            commands
+                .iter()
+                .map(|command| {
+                    command
+                        .as_str()
+                        .filter(|command| !command.is_empty())
+                        .map(str::to_string)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| anyhow::anyhow!("bash.waiting commands must be non-empty strings"))?;
+    let count = data
+        .get("count")
+        .and_then(Value::as_u64)
+        .filter(|count| *count >= pids.len() as u64)
+        .ok_or_else(|| anyhow::anyhow!("bash.waiting count must cover the pids"))?
+        as usize;
+    Ok(KernelNotice::bash_waiting(&pids, &commands, count))
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
