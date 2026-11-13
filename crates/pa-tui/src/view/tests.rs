@@ -816,6 +816,27 @@ impl std::io::Write for FailingWriter {
     }
 }
 
+/// A writer that takes `budget` bytes in total, cutting short the write that crosses it, then
+/// refuses every later write: a non-blocking terminal's short write followed by `EAGAIN`.
+struct ShortWriter {
+    budget: usize,
+}
+
+impl std::io::Write for ShortWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.budget == 0 {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+        let taken = buf.len().min(self.budget);
+        self.budget -= taken;
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[test]
 fn transcript_delta_flush_appends_only_new_rows() {
     let mut v = view();
@@ -1033,6 +1054,41 @@ fn transcript_delta_flush_advances_the_base_to_the_durable_prefix_on_error() {
     assert!(
         joined.contains("scrollback row 799"),
         "the rows the failed write never landed append on the retry"
+    );
+}
+
+#[test]
+fn transcript_delta_flush_keeps_the_rows_a_short_write_landed() {
+    let mut v = view();
+    v.chrome.version = "0.0.0".to_string();
+    v.chrome.cwd = "/w".to_string();
+    v.chrome.chat_name = "w".to_string();
+    for index in 0..800 {
+        v.push(TranscriptItem::UserMessage {
+            text: format!("scrollback row {index:03}"),
+        });
+    }
+    // A clean flush maps the first chunk's bytes; a fresh session then streams the same bytes
+    // into a sink that takes them up to the middle of row 002 and refuses the rest.
+    let clean = transcript_delta_bytes(&mut v, 80);
+    let cut = String::from_utf8_lossy(&clean)
+        .find("scrollback row 002")
+        .expect("the clean flush carries row 002")
+        + "scrollback".len();
+    v.bind_scrollback_session("the short-write session");
+    v.stream_transcript_delta_to(&mut ShortWriter { budget: cut }, 80)
+        .expect_err("the sink refuses the rest of the chunk");
+
+    let retry = transcript_delta_bytes(&mut v, 80);
+    let joined = String::from_utf8_lossy(&retry);
+    assert!(
+        !joined.contains("scrollback row 001"),
+        "the rows that landed whole before the error are never re-appended"
+    );
+    assert_eq!(
+        joined.matches("scrollback row 002").count(),
+        1,
+        "the row the error cut short appends exactly once"
     );
 }
 
