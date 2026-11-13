@@ -191,7 +191,7 @@ struct ChildRecord {
     /// The delete or close of this child, kept apart from `run` so a live run
     /// is never faked settled during a delete's kill.
     retirement: Retirement,
-    /// The child's durable session file: the spend snapshots' source.
+    /// The child's durable session file.
     session_file: Option<String>,
     last_emitted_status: Option<&'static str>,
     /// Serializes parent-directed rename and delete for this child.
@@ -364,8 +364,6 @@ struct SupervisorChildSessionsInner {
     /// The model-allowlist refusal telemetry: `spawn`/`create_session`
     /// refusals emit through the engine's shared lazily-built client.
     model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
-    /// The parent's `child_spend` writer (wired once the session engine is built).
-    spend_sink: std::sync::Mutex<Option<std::sync::Arc<ChildSpendWriter>>>,
     /// The delete notification hook: a deleted child must leave the cached
     /// `/context` children immediately, not wait for the next refresh.
     delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
@@ -417,7 +415,6 @@ impl SupervisorChildSessions {
                 running: tokio::sync::watch::Sender::new(false),
                 settle_notify: tokio::sync::Notify::new(),
                 model_refusal_telemetry,
-                spend_sink: std::sync::Mutex::new(None),
                 delete_notifier: std::sync::Mutex::new(None),
                 child_update_sink: std::sync::Mutex::new(None),
                 semantic_edges: std::sync::Mutex::new(None),
@@ -473,55 +470,8 @@ impl SupervisorChildSessions {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
     }
 
-    /// Wire the parent's `child_spend` writer.
-    pub fn set_spend_sink(&self, sink: Arc<ChildSpendWriter>) {
-        *self
-            .inner
-            .spend_sink
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
-    }
-
-    /// Count the children's spend growth into this session build's telemetry.
-    pub fn set_spend_telemetry(
-        &self,
-        telemetry: Option<Arc<pa_core::session_engine::telemetry::SessionTelemetry>>,
-    ) {
-        let sink = self
-            .inner
-            .spend_sink
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(sink) = sink {
-            sink.set_telemetry(telemetry);
-        }
-    }
-
-    /// The supervisor's notice that one child's published spend changed:
-    /// record a fresh snapshot of it. A child whose delete removed its
-    /// transcript records the ledger tombstone's captured total.
-    pub async fn child_spend_changed(&self, child_session_file: &str) {
-        let fallback_total = if Path::new(child_session_file).exists() {
-            None
-        } else {
-            let agent_dir = self.inner.agent_dir.clone();
-            let socket = self.inner.link.socket_path().clone();
-            let file = child_session_file.to_string();
-            tokio::task::spawn_blocking(move || {
-                registry::tombstoned_child_total(&agent_dir, &socket, &file)
-            })
-            .await
-            .ok()
-            .flatten()
-        };
-        if let Some(source) = ChildSpendSource::of_file(child_session_file, fallback_total) {
-            self.inner.record_child_spend(source).await;
-        }
-    }
-
     /// Wire the parent session's semantic-edge recorder (the per-build
-    /// handoff beside the spend sink): the settle watcher records a
+    /// handoff): the settle watcher records a
     /// returned child's last committed request into it.
     ///
     /// # Panics
@@ -1080,15 +1030,8 @@ mod lifecycle;
 mod registry;
 mod retirement;
 mod run_state;
-mod spend;
-
-pub use spend::{child_session_id, ChildSpendSource, ChildSpendStore, ChildSpendWriter};
-
 #[cfg(test)]
 mod watch_tests;
-
-#[cfg(test)]
-mod spend_invariant_tests;
 
 /// A gated fake supervisor parks each `create` until the test answers,
 /// so the reservation's lifecycle is observable.

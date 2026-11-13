@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use super::retirement::{FinishStep, Retirement, RetirementEvent, RetirementIntent};
 use super::run_state::{RunEvent, RunState, RunVerdict};
 use super::{
-    bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, ChildSpendSource, Context,
-    DaemonCommand, DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
+    bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
+    DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
 
 use pa_core::session_engine::semantic_edges::ChildCancelledReason;
@@ -110,7 +110,6 @@ impl SupervisorChildSessionsInner {
             if cancelled_confirmed {
                 self.record_child_cancelled(record, ChildCancelledReason::UserCancel)
                     .await;
-                self.snapshot_child_spend(record).await;
             } else {
                 // The abort was refused for a real reason: the child never
                 // got the command, so undo the whole pre-abort claim — the
@@ -195,8 +194,6 @@ impl SupervisorChildSessionsInner {
                         was_running: false,
                     }));
             }
-            // The child's final snapshot: its spend stays on this parent.
-            self.snapshot_child_spend(record).await;
             self.finish_retirement(record).await;
             return Ok("deleted");
         }
@@ -277,7 +274,6 @@ impl SupervisorChildSessionsInner {
                     .await
                     .retirement
                     .apply(RetirementEvent::KillConfirmed(RetirementIntent::Close));
-                self.snapshot_child_spend(record).await;
             }
             self.finish_retirement(record).await;
         }
@@ -443,10 +439,7 @@ impl SupervisorChildSessionsInner {
     /// Rebuild the children registry from the spawn ledger (TS
     /// `listPassiveRlmSubagents`): a restarted parent worker lists its
     /// non-deleted ledger children again, addressed by their durable
-    /// session ids. Every reseeded row is settled (nothing is owed). Each
-    /// ledger child, live or tombstoned, then gets one spend snapshot: the
-    /// parent catches up on everything its children spent while it had no
-    /// worker (an unchanged total appends nothing).
+    /// session ids. Every reseeded row is settled (nothing is owed).
     pub(super) async fn reseed_from_ledger(&self) {
         let Some(parent_file) = self
             .identity
@@ -460,104 +453,51 @@ impl SupervisorChildSessionsInner {
         let agent_dir = self.agent_dir.clone();
         let supervisor_socket = self.link.socket_path().clone();
         let parent_file_read = parent_file.clone();
-        let (records, spend) = tokio::task::spawn_blocking(move || {
-            ledger_children(&agent_dir, &supervisor_socket, Path::new(&parent_file_read))
+        let records = tokio::task::spawn_blocking(move || {
+            ledger_child_records(&agent_dir, &supervisor_socket, Path::new(&parent_file_read))
         })
         .await
         .unwrap_or_default();
+        let mut children = self.children.lock().await;
+        // A swap rebound the identity mid-read: its own reseed lists the new session's children.
+        if self
+            .identity
+            .lock()
+            .expect("identity lock")
+            .session_file
+            .as_deref()
+            != Some(parent_file.as_str())
         {
-            let mut children = self.children.lock().await;
-            // A swap rebound the identity mid-read: its own reseed lists the new session's children.
-            if self
-                .identity
-                .lock()
-                .expect("identity lock")
-                .session_file
-                .as_deref()
-                != Some(parent_file.as_str())
-            {
-                return;
-            }
-            children.extend(
-                records
-                    .into_iter()
-                    .map(|record| Arc::new(Mutex::new(record))),
-            );
+            return;
         }
-        for source in spend {
-            self.record_child_spend(source).await;
-        }
+        children.extend(
+            records
+                .into_iter()
+                .map(|record| Arc::new(Mutex::new(record))),
+        );
     }
 }
 
-/// The parent's spawn ledger (the one the supervisor writes, over its
-/// persisted default sessions dir); `None` when the config is unreadable.
-fn parent_ledger(
+/// One parent file's non-deleted ledger edges as settled registry rows
+/// (TS `listPassiveRlmSubagents`), read from the ledger the supervisor
+/// writes (its persisted default sessions dir): the child file's stem
+/// addresses each row both ways - resolve for a resident child, wake
+/// for a passive one; an unreadable ledger reads as empty.
+fn ledger_child_records(
     agent_dir: &Path,
     supervisor_socket: &Path,
-) -> Option<crate::rlm_ledger::RlmSpawnLedger> {
-    let sessions_dir = crate::descriptor::load_supervisor_config(
+    parent_file: &Path,
+) -> Vec<ChildRecord> {
+    let Some(sessions_dir) = crate::descriptor::load_supervisor_config(
         &crate::descriptor::descriptor_dir(agent_dir, supervisor_socket)
             .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
         supervisor_socket,
     )
-    .and_then(|config| config.default_session_dir)?;
-    Some(crate::rlm_ledger::RlmSpawnLedger::new(
-        agent_dir,
-        Path::new(&sessions_dir),
-        |_| {},
-    ))
-}
-
-/// The total a transcript-removing delete captured on the child's tombstone.
-pub(super) fn tombstoned_child_total(
-    agent_dir: &Path,
-    supervisor_socket: &Path,
-    child_file: &str,
-) -> Option<pa_types::ai::Usage> {
-    let child = crate::lease::canonical_session_path(Path::new(child_file));
-    parent_ledger(agent_dir, supervisor_socket)?
-        .edges(true)
-        .ok()?
-        .into_iter()
-        .filter(|edge| crate::lease::canonical_session_path(Path::new(&edge.child)) == child)
-        .find_map(|edge| edge.deleted_total)
-}
-
-/// One parent's ledger children: the live edges as registry rows, plus the
-/// spend source of every edge, tombstoned ones carrying their captured total.
-fn ledger_children(
-    agent_dir: &Path,
-    supervisor_socket: &Path,
-    parent_file: &Path,
-) -> (Vec<ChildRecord>, Vec<ChildSpendSource>) {
-    let Some(ledger) = parent_ledger(agent_dir, supervisor_socket) else {
-        return (Vec::new(), Vec::new());
+    .and_then(|config| config.default_session_dir) else {
+        return Vec::new();
     };
-    let records = ledger_child_records(&ledger, parent_file);
-    let mut spend: Vec<ChildSpendSource> = records
-        .iter()
-        .filter_map(|record| ChildSpendSource::of_file(record.session_file.as_deref()?, None))
-        .collect();
-    match ledger.tombstoned_edges_of_parent(parent_file) {
-        Ok(edges) => spend.extend(
-            edges
-                .iter()
-                .filter_map(|edge| ChildSpendSource::of_file(&edge.child, edge.deleted_total)),
-        ),
-        Err(error) => eprintln!("pa-daemon: RLM ledger spend reseed skipped: {error:#}"),
-    }
-    (records, spend)
-}
-
-/// One parent file's non-deleted ledger edges as settled registry rows
-/// (TS `listPassiveRlmSubagents`): the child file's stem addresses each row
-/// both ways - resolve for a resident child, wake for a passive one; an
-/// unreadable ledger reads as empty.
-fn ledger_child_records(
-    ledger: &crate::rlm_ledger::RlmSpawnLedger,
-    parent_file: &Path,
-) -> Vec<ChildRecord> {
+    let ledger =
+        crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, Path::new(&sessions_dir), |_| {});
     let edges = ledger
         .live_edges_of_parent(parent_file)
         .unwrap_or_else(|error| {

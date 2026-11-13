@@ -1,6 +1,6 @@
-//! RLM child spend end to end: a spawned child settles, and the parent's durable
-//! transcript records its spend as `child_spend` snapshots, so the parent's published
-//! total includes the child's. Tests skip without a live kernel install.
+//! RLM child spend end to end: a spawned child replies, its worker reports the spend to
+//! the supervisor's usage ledger, and the parent's published total includes the child's.
+//! Tests skip without a live kernel install.
 // Stack-resident futures by design; boxing for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
 // Fn length is a style gate, not correctness.
@@ -272,11 +272,10 @@ fn settled_child_rows(child_file: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// A spawned child's spend reaches the parent's durable transcript: the zero
-/// snapshot at spawn, then the child's settled total, and the parent's
-/// whole-file total adds the child's spend once.
+/// A spawned child's spend reaches its parent's published total through the
+/// supervisor's usage ledger.
 #[test]
-fn child_spend_reaches_the_parent_transcript() {
+fn child_spend_reaches_the_parents_total() {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -341,54 +340,62 @@ fn child_spend_reaches_the_parent_transcript() {
         })
         .expect("one child session file");
 
-    // Observable readiness: the child's settled total lands in the parent's
-    // durable transcript once the child replied.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    let (snapshots, child_cost) = loop {
-        let child_cost = pa_daemon::session_store::read_session_info(&child_session_file)
-            .map(|info| info.totals.total.cost.total.as_f64())
-            .unwrap_or_default();
-        let snapshots: Vec<Value> = transcript_rows(Path::new(&parent_session_file))
-            .into_iter()
-            .filter(|row| row["type"] == "child_spend")
-            .collect();
-        let replied = !settled_child_rows(&child_session_file).is_empty();
-        if replied
-            && snapshots
-                .last()
-                .is_some_and(|row| row["total"]["cost"]["total"].as_f64() == Some(child_cost))
-        {
-            break (snapshots, child_cost);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the child's settled total never reached the parent transcript; parent rows: {:?}; child file: {}",
-            transcript_rows(Path::new(&parent_session_file)),
-            std::fs::read_to_string(&child_session_file).unwrap_or_default(),
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
     let child_id = child_session_file
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .expect("child session id");
+        .expect("child session id")
+        .to_string();
+    let parent_id_of_file = Path::new(&parent_session_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("parent session id")
+        .to_string();
+
+    // Observable readiness: once the child replied, its reports reached the
+    // supervisor's usage ledger, and the parent's published total adds the
+    // child's spend to its own. The parent's transcript gains no spend rows.
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let id = format!("list-{attempt}");
+        client.send_command(&id, &json!({ "type": "list" }));
+        let listed = client.read_response(&id);
+        let sessions = listed["data"]["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let input = |session_id: &str, key: &str| {
+            sessions
+                .iter()
+                .find(|session| {
+                    session["sessionFile"]
+                        .as_str()
+                        .and_then(|file| Path::new(file).file_stem())
+                        .and_then(|stem| stem.to_str())
+                        == Some(session_id)
+                })
+                .and_then(|session| session[key]["inputTokens"].as_u64())
+                .unwrap_or(0)
+        };
+        let child_own = input(&child_id, "usage");
+        let parent_own = input(&parent_id_of_file, "usage");
+        let parent_total = input(&parent_id_of_file, "totalUsage");
+        let replied = !settled_child_rows(&child_session_file).is_empty();
+        if replied && child_own > 0 && parent_total == parent_own + child_own {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child's spend never reached the parent's total: {sessions:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     assert!(
-        snapshots
-            .iter()
-            .all(|row| row["childSessionId"] == json!(child_id)),
-        "every snapshot names the child: {snapshots:?}"
-    );
-    assert_eq!(
-        snapshots[0]["total"]["cost"]["total"].as_f64(),
-        Some(0.0),
-        "the first snapshot is the spawn's zero row"
-    );
-    let info = pa_daemon::session_store::read_session_info(Path::new(&parent_session_file))
-        .expect("parent info");
-    let own = info.totals.own.cost.total.as_f64();
-    let total = info.totals.total.cost.total.as_f64();
-    assert!(
-        (total - own - child_cost).abs() < 1e-12,
-        "the parent total adds the child's spend once: own {own}, total {total}, child {child_cost}"
+        agent_dir
+            .join("usage-ledger")
+            .join(format!("{child_id}.jsonl"))
+            .is_file(),
+        "the child's spend lives in its own usage-ledger shard"
     );
 }

@@ -11,8 +11,8 @@ use crate::JsonMap;
 
 pub const DAEMON_PROTOCOL_NAME: &str = "prime-agent.daemon";
 pub const DAEMON_PROTOCOL_VERSION: u64 = 7;
-/// Revision 31 publishes `totalUsage` (own plus every descendant's spend, from the session's
-/// `child_spend` rows) on session rows and drops revision 30's `deletedDescendantUsage`.
+/// Revision 31 publishes `totalUsage` (own plus every descendant's spend, from the supervisor's
+/// usage ledger) on session rows and drops revision 30's `deletedDescendantUsage`.
 pub const DAEMON_SCHEMA_REVISION: u64 = 31;
 pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-31-8a8a7105aeeb";
 

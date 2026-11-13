@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use pa_types::daemon::agent_roster::{
     classify_summary_value, roster_agent_id_for_summary, slim_roster_summary, AgentRosterEntry,
@@ -32,6 +33,8 @@ pub(crate) struct AgentRoster {
     /// The TS worker never needs any of this — its roster deltas ride
     /// one ordered supervisor client socket.
     delta_watermarks: HashMap<String, DeltaWatermark>,
+    /// Every row's `usage` and `totalUsage` are stamped from this fold.
+    usage: Arc<crate::usage_ledger::UsageLedger>,
 }
 
 /// One worker's stale-delta slot: the process generation the watermark
@@ -42,12 +45,13 @@ struct DeltaWatermark {
 }
 
 impl AgentRoster {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(usage: Arc<crate::usage_ledger::UsageLedger>) -> Self {
         AgentRoster {
             entries: HashMap::new(),
             agent_id_by_active_session_id: HashMap::new(),
             agent_id_by_session_file: HashMap::new(),
             delta_watermarks: HashMap::new(),
+            usage,
         }
     }
 
@@ -186,12 +190,12 @@ impl AgentRoster {
     }
 
     /// The shared write path behind [`AgentRoster::write_summary`] and
-    /// [`AgentRoster::write_seeded`]: classify once, attach the
-    /// deleted-descendant bucket, converge the indexes, and evict a
-    /// previous owner of the same session file.
+    /// [`AgentRoster::write_seeded`]: classify once, stamp the spend from
+    /// the usage ledger, converge the indexes, and evict a previous owner of
+    /// the same session file.
     fn store(
         &mut self,
-        summary: Value,
+        mut summary: Value,
         queued_child: Option<bool>,
         worker_id: Option<&str>,
         status_label: Option<&str>,
@@ -204,6 +208,9 @@ impl AgentRoster {
             .and_then(Value::as_str)
             .filter(|file| !file.is_empty())
             .map(canonical_roster_path);
+        if let (Some(file), Some(object)) = (&file, summary.as_object_mut()) {
+            self.usage.stamp(object, Path::new(file));
+        }
         let stored = AgentRosterEntry {
             agent_id: agent_id.clone(),
             queued_child,
@@ -242,6 +249,29 @@ impl AgentRoster {
         }
         self.entries.insert(agent_id, stored.clone());
         stored
+    }
+
+    /// Re-stamp the spend of every row whose session's total the usage
+    /// ledger moved; returns the rewritten rows for the caller's push.
+    pub(crate) fn restamp_spend(&mut self, session_ids: &[String]) -> Vec<AgentRosterEntry> {
+        let mut changed = Vec::new();
+        for entry in self.entries.values_mut() {
+            let Some(file) = entry
+                .summary
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+            else {
+                continue;
+            };
+            let moved = crate::rlm_ledger::durable_session_id(&file)
+                .is_some_and(|session_id| session_ids.contains(&session_id));
+            if let (true, Some(object)) = (moved, entry.summary.as_object_mut()) {
+                self.usage.stamp(object, &file);
+                changed.push(entry.clone());
+            }
+        }
+        changed
     }
 
     pub(crate) fn delete(&mut self, agent_id: &str) {
@@ -366,7 +396,15 @@ mod tests {
     /// The store is not Sync-friendly in tests through `&mut`; the
     /// supervisor holds it behind a lock, so tests do too.
     fn locked() -> Mutex<AgentRoster> {
-        Mutex::new(AgentRoster::new())
+        let agent_dir = std::env::temp_dir().join(format!("pa-roster-{}", uuid::Uuid::new_v4()));
+        let spawns = Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+            &agent_dir,
+            &agent_dir.join("sessions"),
+            |_| {},
+        ));
+        Mutex::new(AgentRoster::new(Arc::new(
+            crate::usage_ledger::UsageLedger::new(&agent_dir, spawns),
+        )))
     }
 
     fn summary(agent: &str, active: Option<&str>, file: Option<&str>) -> Value {

@@ -341,7 +341,12 @@ fn walk_children(
     // recursion level its own.
     let sessions_dir = agent_dir.join("sessions");
     let ledger = crate::context_tree_children::ContextLedger::read(
-        &crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {}),
+        &Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+            agent_dir,
+            &sessions_dir,
+            |_| {},
+        )),
+        agent_dir,
     );
     let mut skip_ids: HashSet<String> = snapshots
         .iter()
@@ -606,23 +611,17 @@ mod tests {
         );
     }
 
-    /// The parent worker's snapshots of one child: its zero row at spawn,
-    /// then its current total.
-    fn bill_child(parent: &Path, child: &Path) {
-        let mut store = crate::session_store::SessionFile::open(parent).unwrap();
-        let snapshot = |total| pa_types::session::ChildSpendEntry {
-            child_session_id: crate::rlm_children::child_session_id(child).unwrap(),
-            child_session_file: child.to_string_lossy().into_owned(),
-            total,
-        };
-        store
-            .append_child_spend(&snapshot(pa_types::ai::Usage::default()))
-            .unwrap();
-        let total = crate::session_store::read_session_info(child)
-            .unwrap()
-            .totals
-            .total;
-        store.append_child_spend(&snapshot(total)).unwrap();
+    /// The supervisor's usage ledger records one session's transcript (the
+    /// `/context` walk only reads the ledger).
+    fn record_spend(agent_dir: &Path, session: &Path) -> crate::usage_ledger::UsageLedger {
+        let spawns = Arc::new(crate::rlm_ledger::RlmSpawnLedger::new(
+            agent_dir,
+            &agent_dir.join("sessions"),
+            |_| {},
+        ));
+        let usage = crate::usage_ledger::UsageLedger::new(agent_dir, spawns);
+        usage.reconcile(session).unwrap();
+        usage
     }
 
     /// One session transcript: a user row and an assistant row billing `cost`.
@@ -660,8 +659,8 @@ mod tests {
 
     /// A deleted factory child keeps billing: /context serves it as a
     /// `deleted` row tagged with its run (from the tombstoned ledger edge)
-    /// with the spend the parent's `child_spend` rows recorded, and the
-    /// /context grand total equals the root's whole-file total.
+    /// with the spend the usage ledger recorded, and the /context grand
+    /// total equals the root's ledger total.
     // Exact binary fractions: the two totals must be the same number.
     #[allow(clippy::float_cmp)]
     #[test]
@@ -710,8 +709,8 @@ mod tests {
                 factory: None,
             })
             .unwrap();
-        bill_child(&root_file, &live_file);
-        bill_child(&root_file, &gone_file);
+        record_spend(&agent_dir, &live_file);
+        record_spend(&agent_dir, &gone_file);
         ledger
             .append_delete(
                 "sub-gone",
@@ -752,10 +751,7 @@ mod tests {
         );
         let context_total =
             root_own["cost"]["total"].as_f64().unwrap() + persisted.iter().map(cost).sum::<f64>();
-        let root_total = crate::session_store::read_session_info(&root_file)
-            .unwrap()
-            .totals
-            .total;
+        let root_total = record_spend(&agent_dir, &root_file).spend(&root_file).total;
         assert_eq!(context_total, 0.875);
         assert_eq!(context_total, root_total.cost.total.as_f64());
         let _ = std::fs::remove_dir_all(&agent_dir);
@@ -783,7 +779,7 @@ mod tests {
                 factory: None,
             })
             .unwrap();
-        bill_child(&parent, &child);
+        record_spend(agent_dir, &child);
         ledger
             .append_delete(
                 "sub-old",
@@ -849,7 +845,7 @@ mod tests {
         for (id, cost) in [("first", 0.125), ("second", 0.25)] {
             let child = agent_dir.join(format!("session-artifacts/parent/{id}/{id}.jsonl"));
             write_session(&child, id, cost);
-            bill_child(&parent, &child);
+            record_spend(agent_dir, &child);
             ledger
                 .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                     child_id: "reused".into(),

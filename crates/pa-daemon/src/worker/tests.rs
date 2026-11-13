@@ -144,7 +144,7 @@ async fn the_worker_store_reports_each_billed_row_once() {
     assert!(created.success, "create failed: {created:?}");
     let store = CoreUsageStore {
         core: Arc::clone(&worker.core),
-        roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
+        usage_reports: crate::usage_report::UsageReports::disabled(),
     };
     let session_id = {
         let core = worker.core.lock().unwrap();
@@ -300,7 +300,7 @@ async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
     };
     let store = CoreUsageStore {
         core: Arc::clone(&worker.core),
-        roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
+        usage_reports: crate::usage_report::UsageReports::disabled(),
     };
     let original = session_at("original.jsonl");
     let original_id = original.session_id().to_string();

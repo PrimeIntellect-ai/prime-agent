@@ -164,15 +164,10 @@ pub(crate) fn ledger_rename_by_child_path(
 }
 
 /// The pre-delete capture (phase 1 — the reads need the file ALIVE):
-/// `TopLevel` never tombstones; a child carries its total spend, which its
-/// parent's last `child_spend` snapshot reads once the file is gone (absent
-/// when unreadable — the tombstone still lands bare).
+/// `TopLevel` never tombstones; a child keeps its canonical key.
 pub(crate) enum SavedDeleteCapture {
     TopLevel,
     Child {
-        total: Option<pa_types::ai::Usage>,
-        /// The parent transcript whose worker records the final snapshot.
-        parent_session_path: Option<String>,
         /// The canonical session key captured while the file still existed:
         /// a symlink delete unlinks the LINK, so the tombstone uses the pre-unlink key.
         canonical_path: String,
@@ -204,50 +199,25 @@ pub(crate) fn capture_saved_session_delete(
     if positively_top_level {
         return SavedDeleteCapture::TopLevel;
     }
-    SavedDeleteCapture::Child {
-        total: regular
-            .then(|| crate::session_usage::read_session_usage(Path::new(session_path)))
-            .flatten()
-            .map(|totals| totals.total),
-        parent_session_path: deleted_info.and_then(|info| info.parent_session_path),
-        canonical_path,
-    }
+    SavedDeleteCapture::Child { canonical_path }
 }
 
 /// The post-delete tombstone append (phase 2 — only a SUCCESSFUL removal
-/// tombstones, or a failed delete would bill a live transcript as deleted spend).
+/// tombstones, or a failed delete would hide a live transcript).
 pub(crate) fn tombstone_saved_session_delete_captured(
     agent_dir: &Path,
     sessions_dir: &Path,
     capture: &SavedDeleteCapture,
-) -> usize {
-    let SavedDeleteCapture::Child {
-        total,
-        canonical_path,
-        ..
-    } = capture
-    else {
-        return 0;
+) {
+    let SavedDeleteCapture::Child { canonical_path } = capture else {
+        return;
     };
     let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
-    match ledger.tombstone_child_path_with_total(
+    if let Err(error) = ledger.tombstone_child_path(
         canonical_path,
         crate::rlm_ledger::RlmLedgerDeleteReason::User,
-        total.as_ref(),
     ) {
-        // The returned edges are the pre-append replay state: every
-        // matching edge received the total when one was captured.
-        Ok(edges) => {
-            if total.is_some() {
-                edges.len()
-            } else {
-                0
-            }
-        }
-        Err(error) => {
-            eprintln!("failed to append RLM ledger delete tombstone: {error:#}");
-            0
-        }
+        eprintln!("failed to append RLM ledger delete tombstone: {error:#}");
     }
 }
 
@@ -648,46 +618,41 @@ impl Supervisor {
                 .and_then(|entry| entry.summary.get("runtimeKind"))
                 .and_then(Value::as_str),
         );
+        // The delete unlinks the transcript and its descendants' artifacts:
+        // their spend must be in the usage ledger first.
+        let moved = self.reconcile_usage(Path::new(session_path)).await;
         let result = delete_session_file(Path::new(session_path));
         let removed = result.get("ok").and_then(Value::as_bool) == Some(true);
         if removed {
             // A deleted session file can carry passive scheduled rows: the catalog must rescan.
             self.invalidate_passive_catalog();
-            let captured = tombstone_saved_session_delete_captured(
+            tombstone_saved_session_delete_captured(
                 &self.options.agent_dir,
                 sessions_dir.as_deref().unwrap_or(&self.options.agent_dir),
                 &capture,
             );
-            if captured > 0 {
-                self.note_deleted_child_usage_captured("saved_delete", captured);
-            }
             // The deleted file's binding dies with it: a stale id for the
             // session can never rebind again. `canonical` was resolved while
             // the file still existed - the same key the table stores.
             self.session_bindings.forget_file(&canonical);
-            // A resident parent records the deleted child's final snapshot
-            // now (from the tombstone's total); a passive one at its wake.
-            if let SavedDeleteCapture::Child {
-                parent_session_path: Some(parent),
-                canonical_path,
-                ..
-            } = &capture
-            {
-                self.notify_child_spend_changed(parent, canonical_path)
-                    .await;
-            }
-            let removed_ids = match roster_entry {
-                Some(entry) => {
-                    let agent_id = entry.agent_id;
-                    self.roster
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .delete(&agent_id);
-                    vec![agent_id]
-                }
-                None => Vec::new(),
+            // The rows whose totals the reconcile moved ride the same push.
+            let (changed, removed_ids) = {
+                let mut roster = self
+                    .roster
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let removed_ids = match roster_entry {
+                    Some(entry) => {
+                        roster.delete(&entry.agent_id);
+                        vec![entry.agent_id]
+                    }
+                    None => Vec::new(),
+                };
+                (roster.restamp_spend(&moved), removed_ids)
             };
-            self.push_roster_update(Vec::new(), removed_ids);
+            self.push_roster_update(changed, removed_ids);
+        } else {
+            self.push_spend(&moved);
         }
         (
             vec![response_line(&response_success(
@@ -940,7 +905,7 @@ impl Worker {
             self.cancel_deleted_session_jobs(deleted);
         });
         if result.get("ok").and_then(Value::as_bool) == Some(true) {
-            let _captured = tombstone_saved_session_delete_captured(
+            tombstone_saved_session_delete_captured(
                 &self.config.agent_dir,
                 &sessions_dir,
                 &capture,
@@ -963,9 +928,9 @@ mod tombstone_usage_tests {
         sessions_dir: &Path,
         session_path: &str,
         known_runtime_kind: Option<&str>,
-    ) -> usize {
+    ) {
         let capture = capture_saved_session_delete(session_path, known_runtime_kind);
-        tombstone_saved_session_delete_captured(agent_dir, sessions_dir, &capture)
+        tombstone_saved_session_delete_captured(agent_dir, sessions_dir, &capture);
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -1003,43 +968,6 @@ mod tombstone_usage_tests {
         path
     }
 
-    /// The tombstone carries the child's total, read while the transcript is
-    /// alive: the parent's final snapshot reads it once the file is gone.
-    #[test]
-    fn saved_session_delete_captures_the_total_before_the_unlink() {
-        let root = temp_dir("capture");
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let parent = sessions_dir.join("p.jsonl");
-        let child = write_child_with_usage(&sessions_dir);
-        std::fs::write(&parent, "{}").unwrap();
-        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        ledger
-            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
-                child_id: "sub-1".to_string(),
-                parent: parent.to_string_lossy().to_string(),
-                child: child.to_string_lossy().to_string(),
-                depth: 1,
-                name: "lane".to_string(),
-                factory: None,
-            })
-            .unwrap();
-        let captured = tombstone_saved_session_delete(
-            &agent_dir,
-            &sessions_dir,
-            &child.to_string_lossy(),
-            Some("subagent"),
-        );
-        assert_eq!(captured, 1, "the one edge received the total");
-        let edges = ledger.edges(true).unwrap();
-        assert_eq!(edges.len(), 1);
-        let total = edges[0]
-            .deleted_total
-            .expect("the total rides the tombstone");
-        assert!((total.cost.total.as_f64() - 0.4).abs() < 1e-9);
-    }
-
     #[test]
     fn top_level_deletes_never_capture() {
         let root = temp_dir("top-level");
@@ -1047,13 +975,12 @@ mod tombstone_usage_tests {
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let top = write_child_with_usage(&sessions_dir);
-        let captured = tombstone_saved_session_delete(
+        tombstone_saved_session_delete(
             &agent_dir,
             &sessions_dir,
             &top.to_string_lossy(),
             Some("top-level"),
         );
-        assert_eq!(captured, 0, "nothing tombstoned, nothing captured");
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         assert!(
             ledger.edges(true).unwrap().is_empty(),
@@ -1092,21 +1019,13 @@ mod tombstone_usage_tests {
         std::os::unix::fs::symlink(&child, &link).unwrap();
         let capture = capture_saved_session_delete(&link.to_string_lossy(), Some("subagent"));
         std::fs::remove_file(&link).unwrap();
-        let captured = tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
-        assert_eq!(
-            captured, 1,
-            "the pre-unlink key finds the edge the symlink pointed at"
-        );
+        tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
         let edges = ledger.edges(true).unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(
             edges[0].deleted,
             Some(crate::rlm_ledger::RlmLedgerDeleteReason::User),
-            "the edge is tombstoned, not left live"
-        );
-        assert!(
-            edges[0].deleted_total.is_some(),
-            "the captured total rode the tombstone"
+            "the pre-unlink key tombstones the edge the symlink pointed at"
         );
     }
 
@@ -1139,23 +1058,14 @@ mod tombstone_usage_tests {
             .unwrap();
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);
         match &capture {
-            SavedDeleteCapture::Child {
-                total,
-                canonical_path,
-                ..
-            } => {
-                assert!(
-                    total.is_none(),
-                    "a non-regular path captures no total (no blocking read)"
-                );
+            SavedDeleteCapture::Child { canonical_path } => {
                 assert_eq!(canonical_path, &fifo.to_string_lossy());
             }
             SavedDeleteCapture::TopLevel => {
                 panic!("an unreadable non-regular path is never positively top-level")
             }
         }
-        let captured = tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
-        assert_eq!(captured, 0, "no total to carry");
+        tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
         let edges = ledger.edges(true).unwrap();
         assert_eq!(
             edges[0].deleted,

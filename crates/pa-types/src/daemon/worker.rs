@@ -183,15 +183,6 @@ pub enum DaemonWorkerCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// A direct child's published spend changed: the parent's worker
-    /// records a fresh `child_spend` snapshot of that child.
-    ChildSpendChanged {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        child_session_file: String,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
     WorkerPrepareUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

@@ -291,22 +291,20 @@ impl Supervisor {
                 false
             }
         };
-        match deleted_child {
-            Some(_) => {
-                crate::saved_session_commands::remove_session_artifacts(Path::new(
-                    &root_session_file,
-                ));
-            }
-            None => {
-                // The adoption finalize (an interrupted stop re-runs here): a crash
-                // between the ledger tombstone and this sweep leaves the sweep undone;
-                // the durable tombstone reconstructs the delete and the sweep finishes.
-                if self.tombstoned_child_at(&root_session_file).await.is_some() {
-                    crate::saved_session_commands::remove_session_artifacts(Path::new(
-                        &root_session_file,
-                    ));
-                }
-            }
+        // A delete sweeps the child's artifacts. The adoption finalize (an
+        // interrupted stop re-runs here) finds the delete through the durable
+        // tombstone: a crash between the tombstone and the sweep leaves the
+        // sweep undone, and it finishes here.
+        let sweep = match deleted_child {
+            Some(_) => true,
+            None => self.tombstoned_child_at(&root_session_file).await.is_some(),
+        };
+        if sweep {
+            // The sweep unlinks the descendants' transcripts: their spend
+            // must be in the usage ledger first.
+            let moved = self.reconcile_usage(Path::new(&root_session_file)).await;
+            self.push_spend(&moved);
+            crate::saved_session_commands::remove_session_artifacts(Path::new(&root_session_file));
         }
         settled
     }

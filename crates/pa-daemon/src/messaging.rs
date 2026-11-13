@@ -671,7 +671,7 @@ mod tests {
             depth: 1,
             name: "kid".to_string(),
             deleted: None,
-            deleted_total: None,
+            deleted_usage: None,
             factory: None,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {

@@ -258,17 +258,6 @@ pub struct ChildUsageAttributionEntry {
     pub rest: JsonMap,
 }
 
-/// `type: "child_spend"`: one snapshot of a direct child session's total
-/// spend (its own spend plus its descendants'). Snapshots are cumulative:
-/// the parent bills each child's latest snapshot minus its first.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChildSpendEntry {
-    pub child_session_id: String,
-    pub child_session_file: String,
-    pub total: Usage,
-}
-
 /// `type: "label"`: a tree-node label set from the UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -427,12 +416,6 @@ pub enum FileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
-    ChildSpend {
-        #[serde(flatten)]
-        payload: ChildSpendEntry,
-        #[serde(flatten)]
-        base: EntryBase,
-    },
     Label {
         #[serde(flatten)]
         payload: LabelEntry,
@@ -544,12 +527,6 @@ enum KnownFileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
-    ChildSpend {
-        #[serde(flatten)]
-        payload: ChildSpendEntry,
-        #[serde(flatten)]
-        base: EntryBase,
-    },
     Label {
         #[serde(flatten)]
         payload: LabelEntry,
@@ -604,7 +581,6 @@ impl From<KnownFileEntry> for FileEntry {
             KnownFileEntry::ChildUsageAttributed { payload, base } => {
                 Self::ChildUsageAttributed { payload, base }
             }
-            KnownFileEntry::ChildSpend { payload, base } => Self::ChildSpend { payload, base },
             KnownFileEntry::Label { payload, base } => Self::Label { payload, base },
             KnownFileEntry::SessionInfo { payload, base } => Self::SessionInfo { payload, base },
             KnownFileEntry::SessionState { payload, base } => Self::SessionState { payload, base },
@@ -649,7 +625,6 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
-            | FileEntry::ChildSpend { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -677,7 +652,6 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
-            | FileEntry::ChildSpend { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -708,7 +682,6 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
-            | FileEntry::ChildSpend { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }

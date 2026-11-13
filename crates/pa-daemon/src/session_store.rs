@@ -27,7 +27,6 @@ mod stream_tests;
 #[path = "session_store_window_tests.rs"]
 mod window_tests;
 
-mod child_spend;
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
 mod index;
 
@@ -238,18 +237,31 @@ pub struct SessionFile {
     /// serve it through `get_state`
     /// (`SessionSummary::anthropic_warning_shown`).
     pub(crate) anthropic_warning_shown: bool,
-    /// Told about each appended row that bills a model call (the engine's
-    /// goal budget and telemetry accounting).
-    pub(crate) billed_row_sink: BilledRowSinkSlot,
+    /// Told about each appended row that carries usage: the engine's goal
+    /// budget and telemetry read its billed rows, and the worker reports
+    /// every one to the supervisor's usage ledger.
+    pub(crate) usage_row_sink: UsageRowSinkSlot,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct BilledRowSinkSlot(pub(crate) Option<pa_core::session::billed_row::BilledRowSink>);
+/// One appended row that carries usage.
+pub(crate) struct UsageRow<'a> {
+    /// The transcript the row landed in.
+    pub(crate) session_file: &'a Path,
+    pub(crate) id: &'a str,
+    pub(crate) usage: pa_types::ai::Usage,
+    /// The model call a non-message row bills; `None` for an assistant message.
+    pub(crate) billed: Option<pa_core::session::billed_row::BilledRow>,
+}
 
-impl std::fmt::Debug for BilledRowSinkSlot {
+pub(crate) type UsageRowSink = std::sync::Arc<dyn Fn(&UsageRow<'_>) + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub(crate) struct UsageRowSinkSlot(pub(crate) Option<UsageRowSink>);
+
+impl std::fmt::Debug for UsageRowSinkSlot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_tuple("BilledRowSinkSlot")
+            .debug_tuple("UsageRowSinkSlot")
             .field(&self.0.is_some())
             .finish()
     }

@@ -1147,6 +1147,11 @@ impl Supervisor {
             std::path::Path::new(&session_file),
             &live,
         );
+        // The sweep unlinks the descendants' transcripts: their spend must be
+        // in the usage ledger first.
+        let moved = self
+            .reconcile_usage(std::path::Path::new(&session_file))
+            .await;
         crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
             &session_file,
         ));
@@ -1155,7 +1160,8 @@ impl Supervisor {
         let canonical = crate::lease::canonical_session_path(std::path::Path::new(&session_file))
             .to_string_lossy()
             .to_string();
-        let removed: Vec<String> = {
+        // The rows whose totals the reconcile moved ride the same push.
+        let (changed, removed): (Vec<_>, Vec<String>) = {
             let mut roster = self.roster.lock().unwrap();
             let agent_id = roster
                 .by_session_file(&canonical)
@@ -1163,9 +1169,9 @@ impl Supervisor {
             if let Some(agent_id) = &agent_id {
                 roster.delete(agent_id);
             }
-            agent_id.into_iter().collect()
+            (roster.restamp_spend(&moved), agent_id.into_iter().collect())
         };
-        self.push_roster_update(Vec::new(), removed);
+        self.push_roster_update(changed, removed);
         Ok(())
     }
 }

@@ -1,61 +1,62 @@
 //! Session spend invariants: a session's total (own + every descendant's
-//! spend) never drops, whatever happens to its subagents. Every surface
-//! reads the root row's published `totalUsage`, the root transcript's fold.
+//! spend) never drops, whatever happens to its subagents. Every surface reads
+//! a row's `totalUsage`, which the supervisor stamps from its usage ledger.
 
 use super::*;
 use crate::supervisor_roster_seed::tests::register_root_worker;
 
-/// One transcript: the header plus one billed assistant turn.
-fn write_transcript(path: &std::path::Path, id: &str, cost: f64) {
+/// One billed assistant turn appended to a transcript (the header first).
+fn append_turn(path: &Path, row_id: &str, cost: f64) {
+    use std::io::Write;
     std::fs::create_dir_all(path.parent().expect("transcript dir")).unwrap();
-    let header = json!({"type": "session", "version": 3, "id": id, "timestamp": "t", "cwd": "/c"});
-    let turn = json!({
-        "type": "message", "id": format!("{id}-a1"), "parentId": null, "timestamp": "t",
-        "message": {"role": "assistant", "content": [], "stopReason": "stop", "timestamp": 1,
-            "usage": {"input": 10, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 11,
-                "cost": {"input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost}}}
-    });
-    std::fs::write(path, format!("{header}\n{turn}\n")).unwrap();
+    let mut lines = String::new();
+    if !path.exists() {
+        let id = path.file_stem().unwrap().to_string_lossy();
+        lines.push_str(
+            &json!({"type": "session", "version": 3, "id": id, "timestamp": "t", "cwd": "/c"})
+                .to_string(),
+        );
+        lines.push('\n');
+    }
+    lines.push_str(&turn(row_id, cost).to_string());
+    lines.push('\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .unwrap();
 }
 
-/// The parent worker's snapshots of one child: its zero row at spawn, then
-/// its current total.
-fn bill_child(parent: &std::path::Path, child: &std::path::Path) {
-    let mut store = crate::session_store::SessionFile::open(parent).unwrap();
-    let snapshot = |total| pa_types::session::ChildSpendEntry {
-        child_session_id: crate::rlm_children::child_session_id(child).unwrap(),
-        child_session_file: child.to_string_lossy().into_owned(),
-        total,
-    };
-    store
-        .append_child_spend(&snapshot(pa_types::ai::Usage::default()))
-        .unwrap();
-    let total = crate::session_store::read_session_info(child)
-        .unwrap()
-        .totals
-        .total;
-    store.append_child_spend(&snapshot(total)).unwrap();
+fn turn(row_id: &str, cost: f64) -> Value {
+    json!({
+        "type": "message", "id": row_id, "parentId": null, "timestamp": "t",
+        "message": {"role": "assistant", "content": [], "stopReason": "stop", "timestamp": 1,
+            "usage": usage(cost)}
+    })
+}
+
+fn usage(cost: f64) -> Value {
+    json!({"input": 10, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 11,
+        "cost": {"input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost}})
 }
 
 struct Family {
     dir: tempfile::TempDir,
     root: PathBuf,
+    child: PathBuf,
+    grandchild: PathBuf,
 }
 
-/// root ($1.00) -> child ($0.50) -> grandchild ($0.25), the real RLM
-/// layout (descendants persist under `session-artifacts/<parent id>/`),
-/// each parent's worker having snapshotted its child.
+/// root -> child -> grandchild in the real RLM layout (descendants persist
+/// under `session-artifacts/<parent id>/`), linked by spawn records.
 fn family() -> Family {
     let dir = tempfile::TempDir::new().unwrap();
     let agent = dir.path().join("agent");
     let root = agent.join("sessions").join("root.jsonl");
     let child = agent.join("session-artifacts/root/sub-c/child.jsonl");
     let grandchild = agent.join("session-artifacts/child/sub-g/grandchild.jsonl");
-    write_transcript(&root, "root", 1.0);
-    write_transcript(&child, "child", 0.5);
-    write_transcript(&grandchild, "grandchild", 0.25);
-    bill_child(&child, &grandchild);
-    bill_child(&root, &child);
     let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent, &agent.join("sessions"), |_| {});
     for (child_id, parent, file, depth) in [
         ("sub-c", &root, &child, 1),
@@ -72,7 +73,12 @@ fn family() -> Family {
             })
             .unwrap();
     }
-    Family { dir, root }
+    Family {
+        dir,
+        root,
+        child,
+        grandchild,
+    }
 }
 
 fn supervisor_over(family: &Family) -> Arc<Supervisor> {
@@ -85,37 +91,52 @@ fn supervisor_over(family: &Family) -> Arc<Supervisor> {
     )
 }
 
-/// The root's resident worker registers and publishes its summary (the
-/// worker's spend fields come from its transcript's fold).
-async fn register_root(supervisor: &Arc<Supervisor>, root: &std::path::Path) {
-    register_root_worker(supervisor, "w-root", root).await;
-    let info = crate::session_store::read_session_info(root).expect("root info");
-    let mut summary = json!({
-        "id": "root", "sessionId": "root", "activeSessionId": "w-root",
-        "runtimeKind": "top-level", "rlmDepth": 0,
-        "sessionFile": root.to_string_lossy(),
-    });
-    info.insert_spend(summary.as_object_mut().unwrap());
-    supervisor.write_roster_summary(&summary, Some("w-root"));
+/// The root's roster row; `worker` names its resident worker (`None`: a
+/// passive row, no worker).
+fn write_root_row(supervisor: &Supervisor, root: &Path, worker: Option<&str>) {
+    supervisor.write_roster_summary(
+        &json!({
+            "id": "root", "sessionId": "root", "activeSessionId": "root",
+            "runtimeKind": "top-level", "rlmDepth": 0,
+            "sessionFile": root.to_string_lossy(),
+        }),
+        worker,
+    );
 }
 
-/// The registration seed the supervisor runs for a newly resident root.
-async fn seed_family(supervisor: &Arc<Supervisor>, root: &std::path::Path) {
-    let seeded = supervisor.seed_roster_family_edges(root).await;
-    supervisor.spawn_seeded_hydration(seeded).await.unwrap();
+/// One persisted turn and its worker's report.
+async fn spend(supervisor: &Arc<Supervisor>, worker: &str, file: &Path, row_id: &str, cost: f64) {
+    append_turn(file, row_id, cost);
+    let session_id = file.file_stem().unwrap().to_string_lossy();
+    let response = supervisor
+        .handle_worker_usage(
+            "u",
+            "worker_usage",
+            &format!("{worker}-token"),
+            &session_id,
+            row_id,
+            serde_json::from_value(usage(cost)).unwrap(),
+        )
+        .await;
+    assert!(response.success, "{response:?}");
 }
 
-/// The root session's total as the title and the agents view bill it.
-fn root_total(supervisor: &Supervisor) -> f64 {
+/// The session's total as the title and the agents view bill it.
+fn total(supervisor: &Supervisor, session_id: &str) -> f64 {
     supervisor
         .roster
         .lock()
         .unwrap()
         .entries()
         .iter()
-        .find(|entry| entry.summary["sessionId"] == json!("root"))
+        .find(|entry| entry.summary["sessionId"] == json!(session_id))
         .and_then(|entry| entry.summary["totalUsage"]["cost"].as_f64())
         .unwrap_or(0.0)
+}
+
+fn assert_total(supervisor: &Supervisor, expected: f64, moment: &str) {
+    let total = total(supervisor, "root");
+    assert!((total - expected).abs() < 1e-9, "{moment}: {total}");
 }
 
 async fn route_rlm_delete(supervisor: &Arc<Supervisor>, selector: &str, child_id: &str) -> Value {
@@ -141,57 +162,117 @@ async fn route_rlm_delete(supervisor: &Arc<Supervisor>, selector: &str, child_id
     lines.into_iter().next().expect("one response line")
 }
 
-/// (a) An agent's `rlm.delete_subagent` of an idle child (the worker arm's
-/// kill marker, no child worker left) keeps the root's total, also across
-/// the next supervisor start.
+/// (a) The parent's agent deletes an idle child (`rlm.delete_subagent`'s
+/// kill marker): the root's total keeps every spend, the grandchild's turn
+/// after the child went idle included, also across the next supervisor start.
 #[tokio::test]
 async fn an_agent_delete_keeps_the_roots_total() {
     let family = family();
     let supervisor = supervisor_over(&family);
-    register_root(&supervisor, &family.root).await;
-    seed_family(&supervisor, &family.root).await;
-    assert!(
-        (root_total(&supervisor) - 1.75).abs() < 1e-9,
-        "before: {}",
-        root_total(&supervisor)
-    );
+    for (worker, file) in [
+        ("w-root", &family.root),
+        ("w-child", &family.child),
+        ("w-grand", &family.grandchild),
+    ] {
+        register_root_worker(&supervisor, worker, file).await;
+    }
+    write_root_row(&supervisor, &family.root, Some("w-root"));
+    spend(&supervisor, "w-root", &family.root, "r1", 1.0).await;
+    spend(&supervisor, "w-child", &family.child, "c1", 0.5).await;
+    // The grandchild's last turn lands after the child went idle.
+    supervisor.registry.remove("w-child").await;
+    spend(&supervisor, "w-grand", &family.grandchild, "g1", 0.25).await;
+    supervisor.registry.remove("w-grand").await;
+    assert_total(&supervisor, 1.75, "before the delete");
 
     let response = route_rlm_delete(&supervisor, "child", "sub-c").await;
     assert_eq!(response["success"], json!(true), "{response}");
-    assert!(
-        (root_total(&supervisor) - 1.75).abs() < 1e-9,
-        "after the delete: {}",
-        root_total(&supervisor)
-    );
+    assert_total(&supervisor, 1.75, "after the delete");
 
     let restarted = supervisor_over(&family);
-    register_root(&restarted, &family.root).await;
-    seed_family(&restarted, &family.root).await;
-    assert!(
-        (root_total(&restarted) - 1.75).abs() < 1e-9,
-        "after the next start: {}",
-        root_total(&restarted)
-    );
+    write_root_row(&restarted, &family.root, None);
+    assert_total(&restarted, 1.75, "after the next start");
 }
 
-/// (b) A supervisor restart keeps the root's total from the first frame:
-/// the re-registered root's family must not bill less while its rows hydrate.
+/// (b) A supervisor restart keeps the root's total from the first frame, and
+/// a report lost while the supervisor was down is reconciled exactly once by
+/// the registration's family reconcile.
 #[tokio::test]
-async fn a_supervisor_restart_keeps_the_roots_total() {
+async fn a_supervisor_restart_keeps_the_total_and_reconciles_a_lost_report() {
     let family = family();
     let supervisor = supervisor_over(&family);
-    register_root(&supervisor, &family.root).await;
-    seed_family(&supervisor, &family.root).await;
-    let before = root_total(&supervisor);
-    assert!((before - 1.75).abs() < 1e-9, "before: {before}");
+    for (worker, file) in [
+        ("w-root", &family.root),
+        ("w-child", &family.child),
+        ("w-grand", &family.grandchild),
+    ] {
+        register_root_worker(&supervisor, worker, file).await;
+    }
+    write_root_row(&supervisor, &family.root, Some("w-root"));
+    spend(&supervisor, "w-root", &family.root, "r1", 1.0).await;
+    spend(&supervisor, "w-child", &family.child, "c1", 0.5).await;
+    spend(&supervisor, "w-grand", &family.grandchild, "g1", 0.25).await;
+    assert_total(&supervisor, 1.75, "before the restart");
+    drop(supervisor);
 
+    // The child spends while no supervisor listens: its report is lost.
+    append_turn(&family.child, "c2", 0.125);
     let restarted = supervisor_over(&family);
-    register_root(&restarted, &family.root).await;
-    // The registration seed's tracked part: the rows the first frame renders.
-    let _seeded = restarted.seed_roster_family_edges(&family.root).await;
-    assert!(
-        (root_total(&restarted) - before).abs() < 1e-9,
-        "the first frame after the restart: {}",
-        root_total(&restarted)
-    );
+    register_root_worker(&restarted, "w-root", &family.root).await;
+    write_root_row(&restarted, &family.root, Some("w-root"));
+    assert_total(&restarted, 1.75, "the first frame after the restart");
+    // The root's registration reconciles its family (what
+    // `handle_worker_register` runs); the child's own registration repeats
+    // it and adds nothing.
+    let moved = restarted.reconcile_usage(&family.root).await;
+    restarted.push_spend(&moved);
+    assert_total(&restarted, 1.875, "after the registration reconcile");
+    assert!(restarted.reconcile_usage(&family.child).await.is_empty());
+    assert_total(&restarted, 1.875, "after a repeated reconcile");
+}
+
+/// (c) A grandchild's report raises the root's total while the child in
+/// between has no worker.
+#[tokio::test]
+async fn grandchild_spend_reaches_the_root() {
+    let family = family();
+    let supervisor = supervisor_over(&family);
+    for (worker, file) in [
+        ("w-root", &family.root),
+        ("w-child", &family.child),
+        ("w-grand", &family.grandchild),
+    ] {
+        register_root_worker(&supervisor, worker, file).await;
+    }
+    write_root_row(&supervisor, &family.root, Some("w-root"));
+    spend(&supervisor, "w-root", &family.root, "r1", 1.0).await;
+    spend(&supervisor, "w-child", &family.child, "c1", 0.5).await;
+    supervisor.registry.remove("w-child").await;
+    assert_total(&supervisor, 1.5, "before the grandchild spends");
+    spend(&supervisor, "w-grand", &family.grandchild, "g1", 0.25).await;
+    assert_total(&supervisor, 1.75, "after the grandchild's report");
+}
+
+/// (d) A passive parent's row (no worker runs for it) moves while its child
+/// spends.
+#[tokio::test]
+async fn a_passive_parents_total_moves_while_its_child_spends() {
+    let family = family();
+    let supervisor = supervisor_over(&family);
+    register_root_worker(&supervisor, "w-root", &family.root).await;
+    spend(&supervisor, "w-root", &family.root, "r1", 1.0).await;
+    // The root's worker stops: its row stays, passive.
+    supervisor.registry.remove("w-root").await;
+    write_root_row(&supervisor, &family.root, None);
+    assert_total(&supervisor, 1.0, "the passive root's own spend");
+    register_root_worker(&supervisor, "w-child", &family.child).await;
+    spend(&supervisor, "w-child", &family.child, "c1", 0.5).await;
+    assert_total(&supervisor, 1.5, "after the child's first turn");
+    spend(&supervisor, "w-child", &family.child, "c2", 0.25).await;
+    assert_total(&supervisor, 1.75, "after the child's second turn");
+    assert!(supervisor
+        .registry
+        .find_by_session_file(&family.root.to_string_lossy())
+        .await
+        .is_none());
 }
