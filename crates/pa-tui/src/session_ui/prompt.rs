@@ -855,6 +855,7 @@ impl SessionUi {
                         });
                     }
                 }
+                self.apply_run_event(RunEvent::Admitted, view);
                 // TS `onSubmit`'s finally: the current submit's admitted prompt
                 // restores the stash head it captured, if that is still the head.
                 if note.generation == self.input_submission_generation {
