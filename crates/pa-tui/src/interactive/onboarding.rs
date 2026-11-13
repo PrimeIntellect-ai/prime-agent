@@ -202,12 +202,9 @@ async fn drive_onboarding_pane(
                         screen = pane;
                         continue;
                     };
-                    // The onboarding exit keys include Ctrl+C: report the handled press so the
-                    // force-quit guard's handled counter stays in sync with the reader's
-                    // observations.
-                    if key_id == "ctrl+c" {
-                        drive.exit_guard.note_ctrl_c_handled();
-                    }
+                    // Every key that reaches the pane is handled (the force-quit guard counts
+                    // the Ctrl+C presses).
+                    drive.exit_guard.note_key_handled(&key_id);
                     if let Some(decision) = pane.handle_key(&key_id, &drive.keybindings, osc_sink) {
                         // A decision tears the pane down mid-drive: end a still-running login flow.
                         if let Some(task) = flow.take() {
@@ -463,8 +460,9 @@ async fn run_onboarding_flow(
     // daemon resolves the model against its own registry — read fresh at the switch, so the
     // just-stored credential is what makes the default available (the client's startup snapshot
     // predates the sign-in). A resolution failure surfaces as the switch's error row and the flow
-    // still completes.
-    if task.current_model.is_none() {
+    // still completes. The picker below words its prompt and continue row from the same fact.
+    let prime_default = task.current_model.is_none();
+    if prime_default {
         session
             .apply_model_selection(
                 crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
@@ -501,7 +499,7 @@ async fn run_onboarding_flow(
             break;
         }
         screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Providers(
-            crate::onboarding_flow::ProviderPicker::new(options),
+            crate::onboarding_flow::ProviderPicker::new(options, prime_default),
         ));
         let (picked_screen, outcome) =
             drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;

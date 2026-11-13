@@ -204,6 +204,9 @@ jobs:
       # BEFORE the pa-cli battery - the full pa-cli e2e set runs past
       # three hours on this runner (measured twice), so the install proof
       # must not sit behind it.
+      # The e2e assembles the real artifact, third-party notices included.
+      - name: Install cargo-about
+        uses: ./.github/actions/install-cargo-about
       - name: windows install e2e (ps1 + sh routes)
         id: install_e2e
         continue-on-error: true

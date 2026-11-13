@@ -335,6 +335,8 @@ struct AgentInner {
     follow_up_queue: Mutex<PendingMessageQueue>,
     /// Active-run bookkeeping. A plain mutex: never held across awaits.
     run: Mutex<Option<ActiveRun>>,
+    /// Serializes run admission with idle-only context commits.
+    admission: tokio::sync::Mutex<()>,
     convert_to_llm: ConvertToLlmFn,
     transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
@@ -591,6 +593,7 @@ impl AgentInner {
 
     /// Claims the run slot with the run's model snapshot, or fails when a run is active.
     async fn claim_run(&self) -> anyhow::Result<RunClaim> {
+        let _admission = self.admission.lock().await;
         // The run's model-override snapshot, read once: a concurrent
         // `set_model_override` cannot split the run's model from its request fields.
         // Read before the run lock: the shared lock awaits, a std guard must never ride it.
@@ -819,6 +822,7 @@ impl Agent {
                 options.follow_up_mode.unwrap_or(QueueMode::OneAtATime),
             )),
             run: Mutex::new(None),
+            admission: tokio::sync::Mutex::new(()),
             convert_to_llm: options
                 .convert_to_llm
                 .unwrap_or_else(AgentLoopConfig::default_convert_to_llm),
@@ -1137,6 +1141,27 @@ impl Agent {
     pub fn abort(&self) {
         if let Some(run) = self.inner.run.lock().unwrap().as_ref() {
             run.controller.abort();
+        }
+    }
+
+    /// Reserve an idle boundary until the returned guard is dropped.
+    ///
+    /// Existing runs finish normally, including tools and internal follow-ups.
+    /// New run admission waits for this reservation; steering and follow-up
+    /// enqueue remain independent. Callers must not await model planning or
+    /// contended storage locks while holding the guard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the active-run mutex is poisoned.
+    pub async fn reserve_idle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        loop {
+            let admission = self.inner.admission.lock().await;
+            if self.inner.run.lock().unwrap().is_none() {
+                return admission;
+            }
+            drop(admission);
+            self.wait_for_idle().await;
         }
     }
 

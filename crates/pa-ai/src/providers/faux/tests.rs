@@ -315,6 +315,27 @@ async fn parses_the_repeat_last_response_script_key_into_the_registration() {
 }
 
 #[tokio::test]
+async fn script_registrations_keep_separate_queues() {
+    let script = |reply: &str| {
+        script::parse_faux_script(&serde_json::json!({ "responses": [reply] }))
+            .expect("script parses")
+    };
+    let first = script::register_faux_provider_from_script(&script("first"));
+    let second = script::register_faux_provider_from_script(&script("second"));
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let reply = complete(&first.get_model(), &context, None).await.unwrap();
+    assert_eq!(reply.content, vec![faux_text("first")]);
+    assert_eq!(second.get_pending_response_count(), 1);
+    first.unregister();
+    second.unregister();
+}
+
+#[tokio::test]
 async fn repeat_last_response_switched_on_after_serving_replays_the_last_step() {
     let registration = register();
     registration.set_responses(vec![text_msg("first"), text_msg("last")]);

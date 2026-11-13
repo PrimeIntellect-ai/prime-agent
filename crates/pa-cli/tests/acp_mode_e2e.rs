@@ -94,6 +94,23 @@ impl AcpChild {
         Self::wrap(child, Some(home), socket)
     }
 
+    /// The daemon-attached lane whose worker's kernel runs the given
+    /// interpreter (the env flows ACP -> supervisor -> worker).
+    fn spawn_with_kernel(
+        args: &[&str],
+        script: &serde_json::Value,
+        kernel_python: &std::path::Path,
+    ) -> AcpChild {
+        let home = tempfile::TempDir::new().unwrap();
+        let socket = home.path().join("daemon.sock");
+        std::fs::write(home.path().join("worker-script.json"), script.to_string()).unwrap();
+        let child = daemon_attached_command(home.path(), &socket, args)
+            .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
+            .spawn()
+            .expect("binary present");
+        Self::wrap(child, Some(home), socket)
+    }
+
     /// The daemon-attached lane whose `rlm.spawn` children are scripted:
     /// `<home>/child-script.json` rides the `PRIME_AGENT_FAUX_CHILD_SCRIPT`
     /// create-config seam (the worker already consumes the key), and the
@@ -302,12 +319,15 @@ fn acp_initialize_matches_the_ts_golden() {
     let result = &response["result"];
     assert_eq!(result["protocolVersion"], 1);
     let capabilities = &result["agentCapabilities"];
-    assert_eq!(capabilities["loadSession"], false);
+    assert_eq!(capabilities["loadSession"], true);
     assert_eq!(
         capabilities["promptCapabilities"],
         json!({ "image": true, "embeddedContext": true })
     );
-    assert_eq!(capabilities["sessionCapabilities"], json!({ "close": {} }));
+    assert_eq!(
+        capabilities["sessionCapabilities"],
+        json!({ "close": {}, "list": {} })
+    );
     // ACP MCP server admission is served, so the http capability is advertised.
     assert_eq!(capabilities["mcpCapabilities"], json!({ "http": true }));
     let info = &result["agentInfo"];
@@ -1166,6 +1186,168 @@ fn acp_daemon_attached_default_session_persists_and_resumes() {
 }
 
 #[test]
+fn acp_session_load_refused_by_a_busy_worker_keeps_the_startup_binding() {
+    // Loading a session another client is mid-turn on, with an MCP server,
+    // fails at the worker's busy MCP replace; the connection keeps its own
+    // startup session instead of rebinding to the loaded one.
+    let home = tempfile::TempDir::new().unwrap();
+    let home_path = home.path().to_path_buf();
+    let socket = home_path.join("daemon.sock");
+    let answer = "a paced answer that keeps the worker busy while another client loads the session, streaming slowly enough to outlast the load";
+    std::fs::write(
+        home_path.join("worker-script.json"),
+        json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [{ "text": answer }] })
+            .to_string(),
+    )
+    .unwrap();
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut first = AcpChild::wrap(child, Some(home), socket.clone());
+    let session_id = initialize_and_new_session(&mut first);
+    let _ = first.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    first.wait_update("agent_message_chunk", TIMEOUT);
+
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut second = AcpChild::wrap(child, None, socket);
+    let init = second.request("initialize", &initialize_params());
+    let _ = second.wait_response(init, TIMEOUT);
+    let load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": home_path.display().to_string(), "mcpServers": [
+            { "type": "http", "name": "probe", "url": "https://mcp.invalid/probe", "headers": [] },
+        ] }),
+    );
+    let (load_response, _) = second.wait_response(load, TIMEOUT);
+    assert!(
+        load_response["error"]["data"]["details"]
+            .as_str()
+            .is_some_and(|details| details.contains("while the agent is running")),
+        "{load_response}"
+    );
+    let startup_session_id = new_session(&mut second);
+    assert_ne!(startup_session_id, session_id);
+}
+
+#[test]
+fn acp_session_list_and_load_restore_a_saved_session_in_a_new_process() {
+    // The first process's resident session is listed by its prime-agent
+    // session id and loads in a second process: the conversation replays
+    // before the load response, and the next prompt runs on the same live
+    // worker (the script's second answer).
+    let home = tempfile::TempDir::new().unwrap();
+    let home_path = home.path().to_path_buf();
+    let socket = home_path.join("daemon.sock");
+    std::fs::write(
+        home_path.join("worker-script.json"),
+        json!({ "engine": "faux", "responses": ["The Nile.", "Everest."] }).to_string(),
+    )
+    .unwrap();
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut first = AcpChild::wrap(child, Some(home), socket.clone());
+    let session_id = initialize_and_new_session(&mut first);
+    assert_prompt_ends_turn(&mut first, &session_id, "Name a river.");
+    first.close_stdin();
+    assert!(first.child.wait().expect("the ACP child exits").success());
+
+    let child = daemon_attached_command(&home_path, &socket, &["--mode", "acp"])
+        .spawn()
+        .expect("binary present");
+    let mut second = AcpChild::wrap(child, None, socket);
+    let init = second.request("initialize", &initialize_params());
+    let (init_response, _) = second.wait_response(init, TIMEOUT);
+    let capabilities = &init_response["result"]["agentCapabilities"];
+    assert_eq!(capabilities["loadSession"], true);
+    assert_eq!(capabilities["sessionCapabilities"]["list"], json!({}));
+
+    let list = second.request("session/list", &json!({}));
+    let (list_response, _) = second.wait_response(list, TIMEOUT);
+    let row = list_response["result"]["sessions"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["sessionId"] == session_id))
+        .unwrap_or_else(|| panic!("the saved session is listed: {list_response}"))
+        .clone();
+    let cwd = row["cwd"].as_str().expect("a listed cwd");
+    assert_eq!(
+        std::fs::canonicalize(cwd).unwrap(),
+        std::fs::canonicalize(&home_path).unwrap()
+    );
+    assert_eq!(row["title"], "Name a river.");
+
+    // A load that fails (an invalid MCP server) keeps the startup binding:
+    // the next session/new hosts the startup session, not the saved one.
+    let bad_load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [
+            { "name": "n", "type": "stdio", "command": "", "args": [], "env": [] },
+        ] }),
+    );
+    let (bad_response, _) = second.wait_response(bad_load, TIMEOUT);
+    assert_eq!(bad_response["error"]["code"], -32602, "{bad_response}");
+    let startup_session_id = new_session(&mut second);
+    assert_ne!(startup_session_id, session_id);
+    let close = second.request("session/close", &json!({ "sessionId": startup_session_id }));
+    let (close_response, _) = second.wait_response(close, TIMEOUT);
+    assert_eq!(close_response["result"], json!({}));
+
+    let load = second.request(
+        "session/load",
+        &json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
+    );
+    let (load_response, replay) = second.wait_response(load, TIMEOUT);
+    assert!(
+        load_response["result"]["configOptions"].is_array(),
+        "{load_response}"
+    );
+    let chunks: Vec<(String, String)> = replay
+        .iter()
+        .filter(|frame| frame["params"]["sessionId"] == session_id)
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| {
+            update["sessionUpdate"]
+                .as_str()
+                .is_some_and(|kind| kind.ends_with("_message_chunk"))
+        })
+        .map(|update| {
+            (
+                update["sessionUpdate"].as_str().unwrap().to_string(),
+                update["content"]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        chunks,
+        [
+            (
+                "user_message_chunk".to_string(),
+                "Name a river.".to_string()
+            ),
+            ("agent_message_chunk".to_string(), "The Nile.".to_string()),
+        ],
+        "{replay:?}"
+    );
+
+    let updates = assert_prompt_ends_turn(&mut second, &session_id, "Name a mountain.");
+    assert!(
+        updates.iter().any(|frame| {
+            frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                && frame["params"]["update"]["content"]["text"] == "Everest."
+        }),
+        "{updates:?}"
+    );
+}
+
+#[test]
 fn acp_daemon_attached_resident_eof_mid_turn_cancels_the_prompt() {
     let answer = "a paced answer that streams slowly enough to close mid-turn";
     let mut client = AcpChild::spawn(
@@ -1258,7 +1440,8 @@ fn acp_daemon_attached_close_keeps_the_worker_and_new_rebinds_it() {
     assert_eq!(sessions[0]["activeSessionId"], active_session_id);
 
     let second = new_session(&mut client);
-    assert_ne!(second, first);
+    // The ACP session id is the daemon session's prime-agent session id.
+    assert_eq!(second, first);
     let updates = assert_prompt_ends_turn(&mut client, &second, "Name a mountain.");
     let chunk = updates
         .iter()
@@ -2318,6 +2501,71 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     assert!(metas[0]["tokensBefore"].as_u64().unwrap() > 0);
 }
 
+/// The byte-size overflow class through the arm end to end: a 413 whose
+/// live body carries `error.type: "invalid_request_error"` (the gateway's
+/// shape for a request over the body-size cap) must run the same
+/// compact-and-retry as a token overflow — the unrecognized shape is the
+/// wedged image-heavy session: a permanent invalid request that replays the
+/// same oversized body forever.
+#[test]
+fn acp_overflow_recovery_recovers_from_the_live_413_body() {
+    let script = json!({
+        "engine": "faux",
+        "contextWindow": 128_000,
+        "responses": [
+            { "text": "seed reply" },
+            {
+                "text": "",
+                "stopReason": "error",
+                "errorMessage": "413 Hosted decision request exceeds the body size limit.",
+            },
+            { "text": "the summary" },
+            { "text": "recovered reply" },
+        ]
+    });
+    let mut client =
+        spawn_with_compaction_settings(&["--mode", "acp", "--no-session"], &script, 1, 10);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": format!("seed turn {}", "x".repeat(48_000)) }],
+        }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_end_turn(&prompt_response);
+
+    // The live 413 body settles as the overflow arm's input, not a
+    // permanent invalid request: one compaction, the retried turn recovers.
+    // (The seed turn carries mass so the compaction cut leaves history to
+    // summarize; the live body's wording is the only variable.)
+    let prompt = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
+        }),
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"],
+        json!({ "stopReason": "end_turn" }),
+        "the retry recovered the turn: {prompt_response}"
+    );
+    let metas = compaction_metas(&updates);
+    assert_eq!(metas.len(), 1, "one compaction meta: {metas:?}");
+    assert_eq!(metas[0]["summary"], "the summary");
+}
+
 /// The kernel Python with prime-agent-runtime installed; set
 /// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 /// Without one, the live RLM quiescence lanes below skip (with a note).
@@ -2452,6 +2700,114 @@ fn acp_prompt_settles_after_rlm_quiescence() {
     assert_eq!(
         prompt_response["result"],
         json!({ "stopReason": "end_turn" })
+    );
+}
+
+/// The bash quiescence observation (the eval harness's `terminalQuiescence`
+/// meta): a turn that launches a detached `bash()` job settles clean while
+/// the job still runs, and the completion and terminal quiescence frames
+/// report the outstanding background job — never the subagent count — so a
+/// host that closes on quiescence holds the episode. After the job's
+/// `[bash-done]` wake is consumed, a quiet turn reports zero.
+#[test]
+fn acp_prompt_reports_outstanding_background_bash_jobs() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let script = json!({
+        "engine": "faux",
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "python_repl", "arguments": { "code":
+                    "from rlm import bash\nhandle = bash('sleep 5; echo QUIESCENT_JOB_DONE')\nprint('job launched', handle.running)" } },
+            ] },
+            { "text": "bash lane turn done" },
+            { "text": "notice seen" },
+            { "text": "quiet turn" },
+        ],
+    });
+    let mut client = AcpChild::spawn_with_kernel(&["--mode", "acp"], &script, &kernel_python);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let session_id = new_session(&mut client);
+
+    // THE TURN: the tool call launches the detached job, the model ends the
+    // turn clean, and the ACP settle observes quiescence while the job runs.
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "run the detached job" }] }),
+    );
+    let completion = client.wait_frame(TIMEOUT, |frame| {
+        let meta = update_meta(frame);
+        meta["phase"] == "event" && !meta["quiescence"].is_null()
+    });
+    assert_eq!(
+        update_meta(&completion)["quiescence"]["outstandingBackgroundJobs"],
+        1,
+        "the completion never reported the live background job: {completion}"
+    );
+    let terminal = client.wait_frame(TIMEOUT, |frame| {
+        update_meta(frame)["phase"] == "terminalQuiescence"
+    });
+    assert_eq!(
+        update_meta(&terminal)["quiescence"]["outstandingSubagents"],
+        0,
+        "the background job must count as bash work, not a subagent: {terminal}"
+    );
+    assert_eq!(
+        update_meta(&terminal)["quiescence"]["outstandingBackgroundJobs"],
+        1,
+        "the terminal quiescence never reported the live background job: {terminal}"
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"],
+        json!({ "stopReason": "end_turn" })
+    );
+
+    // The job finishes and its `[bash-done]` wake is consumed by the session
+    // (the "notice seen" turn can only follow the notice).
+    client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("notice seen"))
+    });
+
+    // THE QUIET TURN: nothing will wake the session from the bash lane —
+    // both quiescence frames report zero.
+    let quiet = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "are we quiet now" }] }),
+    );
+    let quiet_completion = client.wait_frame(TIMEOUT, |frame| {
+        let meta = update_meta(frame);
+        meta["phase"] == "event" && !meta["quiescence"].is_null()
+    });
+    assert_eq!(
+        update_meta(&quiet_completion)["quiescence"]["outstandingBackgroundJobs"],
+        0,
+        "the quiet turn's completion still reported background work: {quiet_completion}"
+    );
+    let quiet_terminal = client.wait_frame(TIMEOUT, |frame| {
+        update_meta(frame)["phase"] == "terminalQuiescence"
+    });
+    assert_eq!(
+        update_meta(&quiet_terminal)["quiescence"]["outstandingBackgroundJobs"],
+        0,
+        "the quiet turn's terminal quiescence still reported background work: {quiet_terminal}"
+    );
+    let (quiet_response, updates) = client.wait_response(quiet, TIMEOUT);
+    assert_eq!(
+        quiet_response["result"],
+        json!({ "stopReason": "end_turn" })
+    );
+    assert!(
+        updates.iter().all(|frame| {
+            let meta = update_meta(frame);
+            meta["phase"] != "terminalQuiescence"
+                || meta["quiescence"]["outstandingBackgroundJobs"] == 0
+        }),
+        "every terminal frame must report a quiet bash lane: {updates:?}"
     );
 }
 

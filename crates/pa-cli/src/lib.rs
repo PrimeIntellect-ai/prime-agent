@@ -137,6 +137,10 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     let app_mode = mode::AppMode::resolve(&parsed, std::io::stdin().is_terminal());
+    // The TUI owns the terminal: structured logs go to stderr only outside it.
+    if app_mode != mode::AppMode::Interactive {
+        pa_ai::utils::log::install_stderr_log_sink();
+    }
 
     // Enable Windows VT processing before raw ANSI mode writes.
     pa_types::platform::console_init();

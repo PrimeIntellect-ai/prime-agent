@@ -22,8 +22,6 @@ impl AgentSessionEngine {
         struct FailoverPrimary {
             model: pa_types::ai::Model,
             thinking_level: pa_agent::types::ThinkingLevel,
-            api_key: Option<String>,
-            headers: Option<std::collections::BTreeMap<String, String>>,
             session_restored: bool,
         }
         let model = match self.resolve_model() {
@@ -44,11 +42,10 @@ impl AgentSessionEngine {
             .map_or_else(|| model.clone(), |route| route.target.model);
         if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
             let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-            let mut registry = pa_core::models::ModelRegistry::create(
+            let registry = pa_core::models::ModelRegistry::create(
                 auth,
                 self.config.agent_dir.join("models.json"),
             );
-            registry.load_private_authorization_from_cache();
             if !registry.has_configured_auth(&preflight_model) {
                 let uses_oauth = registry
                     .auth
@@ -155,6 +152,27 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        // The auth-retry seam: refresh the rejected credential before the retry.
+        let recovery_engine = engine_weak.clone();
+        let auth_recovery: Option<pa_core::session_engine::auto_retry::AuthRecoveryCallback> =
+            Some(&mut move |message| {
+                let engine = recovery_engine.as_ref().and_then(std::sync::Weak::upgrade);
+                let provider = message.provider.clone();
+                Box::pin(async move {
+                    use pa_core::session_engine::auto_retry::AuthRecovery;
+                    let Some(engine) = engine else {
+                        return AuthRecovery::Retry;
+                    };
+                    let refreshed = tokio::task::spawn_blocking(move || {
+                        engine.refresh_rejected_request_auth(&provider)
+                    })
+                    .await;
+                    match refreshed {
+                        Ok(Err(failure)) => AuthRecovery::EndTurn(failure.to_string()),
+                        Ok(Ok(())) | Err(_) => AuthRecovery::Retry,
+                    }
+                })
+            });
         let park: Option<pa_core::session_engine::provider_park::ParkDecisionCallback> =
             Some(&mut move |message, abort| {
                 let engine_weak = engine_weak.clone();
@@ -279,8 +297,6 @@ impl AgentSessionEngine {
                 let Some(FailoverPrimary {
                     model: primary_model,
                     thinking_level,
-                    api_key: primary_api_key,
-                    headers: primary_headers,
                     session_restored,
                 }) = primary
                 else {
@@ -289,18 +305,15 @@ impl AgentSessionEngine {
                 let agent_model = json_round_trip(&primary_model)
                     .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                 {
-                    // The restore serializes with `/reload`'s
-                    // live-input refresh: without this fence a
-                    // reload landing between the restore's
-                    // resolution and its slot write is clobbered
-                    // by the restore's older pair — the lock
-                    // makes whichever runs last leave the newest
-                    // store standing. The whole turn (this
+                    // The restore serializes with the other
+                    // slot writers (`set_model`, the failover
+                    // switch, the image-route apply/clear): the
+                    // lock makes the last writer leave the newest
+                    // target standing. The whole turn (this
                     // closure included) runs on the blocking
                     // pool — the worker parks the turn there
-                    // (`worker/turn.rs`) — so the synchronous
-                    // credential resolution below, OAuth refresh
-                    // and all, never touches an async executor
+                    // (`worker/turn.rs`) — so the slot write
+                    // below never touches an async executor
                     // worker; only a concurrently reloading
                     // session waits on this span.
                     let _reload_serialized = self
@@ -311,16 +324,11 @@ impl AgentSessionEngine {
                     // fenced helper (no provider-slot lock held
                     // across the route read).
                     if !self.install_armed_route_target() {
-                        // The primary's request auth re-resolves at
-                        // restore: a credential rotated (and
-                        // reloaded) during the failover serves from
-                        // the store, never the pre-failover
-                        // capture.
-                        let target = self.restored_primary_target(
-                            &primary_model,
-                            primary_api_key,
-                            primary_headers,
-                        );
+                        // The restored target carries the model and
+                        // the tier: the daemon's stream re-resolves
+                        // request auth per provider call, so the
+                        // slot's auth half is write-only here.
+                        let target = self.restored_primary_target(&primary_model);
                         *self.provider_target.write().expect("provider target lock") = Some(target);
                     }
                 }
@@ -522,12 +530,9 @@ impl AgentSessionEngine {
                         // Capture the primary state once (TS `_backupModel`), restored when the
                         // successful backup response arrives.
                         if primary.is_none() {
-                            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
                             *primary = Some(FailoverPrimary {
                                 model: model.clone(),
                                 thinking_level: map_thinking_level(self.effective_thinking()),
-                                api_key,
-                                headers,
                                 session_restored: false,
                             });
                         } else if let Some(primary) = primary.as_mut() {
@@ -546,15 +551,12 @@ impl AgentSessionEngine {
                         // The stream's provider target follows the switch (the same slot
                         // `set_model` swaps).
                         {
-                            // The switch's resolve-and-install serializes
-                            // with `/reload`'s live-input refresh — the
-                            // restore path in the sibling callback takes
-                            // the same lock: a reload landing between
-                            // this resolution and its slot write must not
-                            // be clobbered by the switch's older pair. The
-                            // turn runs on the blocking pool, so the
-                            // synchronous resolution never touches an
-                            // async executor worker.
+                            // The switch's install serializes with the
+                            // other slot writers (the restore path in
+                            // the sibling callback takes the same lock):
+                            // the turn runs on the blocking pool, so the
+                            // write never touches an async executor
+                            // worker.
                             let _reload_serialized = self
                                 .reload_lock
                                 .lock()
@@ -564,18 +566,19 @@ impl AgentSessionEngine {
                             // the fenced install (the route lock covers
                             // the clone and the slot write together).
                             if !self.install_armed_route_target() {
-                                let (api_key, headers) =
-                                    self.resolve_request_key_and_headers(&next);
                                 let mut target =
                                     self.provider_target.write().expect("provider target lock");
+                                // The daemon's stream re-resolves
+                                // request auth per provider call: the
+                                // slot's auth half is write-only here.
                                 *target = Some(ProviderTarget {
                                     service_tier: *self
                                         .service_tier
                                         .read()
                                         .expect("service tier lock"),
-                                    api_key,
+                                    api_key: None,
                                     model: next.clone(),
-                                    headers,
+                                    headers: None,
                                 });
                             }
                         }
@@ -601,6 +604,7 @@ impl AgentSessionEngine {
                 },
                 &restore_primary,
                 park,
+                auth_recovery,
             ),
         );
         self.runtime.block_on(restore_subscription.unsubscribe());

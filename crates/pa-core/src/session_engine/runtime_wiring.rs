@@ -18,7 +18,7 @@ use crate::session::manager::SessionManager;
 use crate::skills::{get_python_skill_runtime_info, Skill};
 use crate::tools::ipython::{
     IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
-    KernelExecError, KernelExecuteOptions, KernelExecutor,
+    KernelExecuteOptions, KernelExecutor,
 };
 
 use super::host_requests::SessionBinding;
@@ -155,14 +155,10 @@ pub fn wire_session_runtime(
     runtime.register_host_handlers(session.clone(), &mut handlers);
     let model_registry = rlm.model_registry.unwrap_or_else(|| {
         let auth = crate::auth::AuthStorage::create(agent_dir);
-        let mut registry =
-            crate::models::registry::ModelRegistry::create(auth, agent_dir.join("models.json"));
-        // Adopt the on-disk private authorization before freezing the Arc:
-        // `rlm.find_models` and child-spawn resolution search this registry, and a
-        // fresh registry otherwise gates every private `internal/*` model out (only
-        // the async refresh populates the authorized set).
-        registry.load_private_authorization_from_cache();
-        Arc::new(registry)
+        Arc::new(crate::models::registry::ModelRegistry::create(
+            auth,
+            agent_dir.join("models.json"),
+        ))
     });
     let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
         rlm.usage_store
@@ -389,12 +385,8 @@ impl KernelExecutor for KernelManagerExecutor {
         &self,
         code: &str,
         options: KernelExecuteOptions<'_>,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<crate::tools::ipython::ExecuteResult, KernelExecError>>
-                + Send,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::tools::ipython::ExecuteResult>> + Send>>
+    {
         let manager = self.manager.clone();
         let code = code.to_string();
         let signal = options.signal;
@@ -416,8 +408,7 @@ impl KernelExecutor for KernelManagerExecutor {
                         ..Default::default()
                     },
                 )
-                .await
-                .map_err(KernelExecError::Other)?;
+                .await?;
             Ok(convert_execute_result(result))
         })
     }
@@ -488,7 +479,6 @@ pub fn ipython_tool_options(
 ) -> IpythonToolOptions {
     IpythonToolOptions {
         provisioner,
-        ui: None,
         on_late_sent_agent_message,
     }
 }

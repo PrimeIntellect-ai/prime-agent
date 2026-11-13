@@ -1,0 +1,1 @@
+- Closing a menu with Ctrl+C (settings, tree, fork, confirm, share upload) no longer makes the next quick Ctrl+C at the editor force-quit Prime Agent about 1.5 seconds later.

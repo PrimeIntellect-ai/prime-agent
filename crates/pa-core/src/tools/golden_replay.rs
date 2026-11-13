@@ -11,8 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::tools::ipython::{
     self, ExecuteResult, ExecuteStatus, IpythonKernelProvisioner, IpythonToolOptions,
-    IpythonToolUi, KernelAttachment, KernelBusyAfterInterruptError, KernelErrorInfo,
-    KernelExecError, KernelExecuteOptions, KernelExecutor,
+    KernelAttachment, KernelErrorInfo, KernelExecuteOptions, KernelExecutor,
 };
 use crate::tools::tool_definition::ToolDefinition;
 
@@ -31,15 +30,9 @@ fn assert_json_eq(actual: &serde_json::Value, expected: &serde_json::Value, what
 }
 
 struct MockKernel {
-    executions: Mutex<Vec<MockOutcome>>,
+    executions: Mutex<Vec<ExecuteResult>>,
     exec_calls: AtomicUsize,
     next_index: AtomicUsize,
-}
-
-#[derive(Clone)]
-enum MockOutcome {
-    Ok(Box<ExecuteResult>),
-    Busy,
 }
 
 #[derive(Clone)]
@@ -50,9 +43,8 @@ impl KernelExecutor for ClonableKernel {
         &self,
         code: &str,
         options: KernelExecuteOptions<'_>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<ExecuteResult, KernelExecError>> + Send>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<ExecuteResult>> + Send>>
+    {
         self.0.execute(code, options)
     }
 }
@@ -68,27 +60,20 @@ impl KernelExecutor for MockKernel {
         &self,
         _code: &str,
         _options: KernelExecuteOptions<'_>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<ExecuteResult, KernelExecError>> + Send>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<ExecuteResult>> + Send>>
+    {
         self.exec_calls.fetch_add(1, Ordering::SeqCst);
         // TS harness: executions[min(i++, len-1)] — the last item repeats.
         let item = {
             let executions = self.executions.lock().unwrap();
             if executions.is_empty() {
-                MockOutcome::Ok(Box::default())
+                ExecuteResult::default()
             } else {
                 let last = executions.len() - 1;
                 executions[self.next_index.fetch_add(1, Ordering::SeqCst).min(last)].clone()
             }
         };
-        let item = match item {
-            MockOutcome::Ok(result) => Ok(*result),
-            MockOutcome::Busy => Err(KernelExecError::BusyAfterInterrupt(
-                KernelBusyAfterInterruptError::default(),
-            )),
-        };
-        Box::pin(std::future::ready(item))
+        Box::pin(std::future::ready(Ok(item)))
     }
 }
 
@@ -118,29 +103,7 @@ impl IpythonKernelProvisioner for MockProvisioner {
     }
 }
 
-struct KillChoiceUi;
-
-impl IpythonToolUi for KillChoiceUi {
-    fn select(
-        &self,
-        _prompt: &str,
-        choices: &[&str],
-        _signal: Option<&crate::tools::tool_definition::AbortSignal>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
-        let choice = choices
-            .iter()
-            .find(|c| **c == ipython::BUSY_KERNEL_KILL_CHOICE)
-            .map(std::string::ToString::to_string);
-        Box::pin(std::future::ready(choice))
-    }
-
-    fn set_working_message(&self, _message: Option<&str>) {}
-}
-
-fn mock_execution(entry: &serde_json::Value) -> MockOutcome {
-    if entry.get("thrown").is_some() {
-        return MockOutcome::Busy;
-    }
+fn mock_execution(entry: &serde_json::Value) -> ExecuteResult {
     let mut result = ExecuteResult {
         status: match entry["status"].as_str().unwrap_or("ok") {
             "ok" => ExecuteStatus::Ok,
@@ -185,7 +148,7 @@ fn mock_execution(entry: &serde_json::Value) -> MockOutcome {
                 .collect()
         })
         .unwrap_or_default();
-    MockOutcome::Ok(Box::new(result))
+    result
 }
 
 #[tokio::test]
@@ -194,7 +157,7 @@ async fn golden_ipython_group_matches_ts() {
     let mut checked = 0;
     for case in corpus["cases"].as_array().expect("cases array") {
         let name = case["name"].as_str().expect("name");
-        let executions: Vec<MockOutcome> = case["mockResults"]
+        let executions: Vec<ExecuteResult> = case["mockResults"]
             .as_array()
             .expect("mockResults")
             .iter()
@@ -212,11 +175,6 @@ async fn golden_ipython_group_matches_ts() {
         });
         let options = IpythonToolOptions {
             provisioner: provisioner.clone(),
-            ui: if case["ctxMode"].as_str() == Some("ui-kill") {
-                Some(Arc::new(KillChoiceUi))
-            } else {
-                None
-            },
             on_late_sent_agent_message: None,
         };
         let result = ipython::execute_ipython(
@@ -290,14 +248,13 @@ async fn ipython_details_carry_the_cell_edit_diffs() {
     let options = IpythonToolOptions {
         provisioner: Arc::new(MockProvisioner {
             kernel: Arc::new(MockKernel {
-                executions: Mutex::new(vec![MockOutcome::Ok(Box::new(result))]),
+                executions: Mutex::new(vec![result]),
                 exec_calls: AtomicUsize::new(0),
                 next_index: AtomicUsize::new(0),
             }),
             ensure_calls: AtomicUsize::new(0),
             kill_calls: AtomicUsize::new(0),
         }),
-        ui: None,
         on_late_sent_agent_message: None,
     };
     let result = ipython::execute_ipython(&options, "edit()", None, None, None, None)
@@ -332,7 +289,6 @@ fn golden_schema_group_matches_ts() {
                         ensure_calls: AtomicUsize::new(0),
                         kill_calls: AtomicUsize::new(0),
                     }),
-                    ui: None,
                 },
             ),
             other => panic!("unknown tool {other}"),

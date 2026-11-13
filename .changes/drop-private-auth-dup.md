@@ -1,0 +1,1 @@
+- Private Prime Inference models now come from the same account-scoped model catalog as the public ones. A newly granted private model appears after the next catalog refresh (startup, login, or the hourly refresh) instead of within 5 minutes, and a key without a team selection now sees the private models the server lists for it.

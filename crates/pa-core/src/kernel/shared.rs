@@ -252,12 +252,6 @@ pub struct ExecuteOptions {
     pub cell_timeout_ms: Option<u64>,
 }
 
-/// The error raised when a new cell cannot start because the previously
-/// interrupted cell is still running.
-#[derive(Debug, thiserror::Error)]
-#[error("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}")]
-pub struct KernelBusyAfterInterruptError;
-
 /// A typed request from Python code running in the kernel to the host.
 #[derive(Debug, Clone)]
 pub struct HostRequestPayload {

@@ -133,7 +133,7 @@ async fn a_delete_of_a_dead_workers_child_completes_without_a_handshake() {
     let (descriptor, descriptor_path) =
         child_descriptor(&supervisor, &child_file, pid, start_id.as_deref());
     let resident = ResidentWorker::new("w-child".to_string(), descriptor, descriptor_path.clone());
-    resident.note_session_ready();
+    resident.transition(crate::registry::WorkerTransition::SessionReady);
     supervisor.registry.insert(Arc::clone(&resident)).await;
 
     let response = route_delete(&supervisor).await;
@@ -170,7 +170,9 @@ async fn a_delete_of_a_live_workers_child_still_routes_the_kill() {
     );
     let resident = ResidentWorker::new("w-child".to_string(), descriptor, descriptor_path);
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(4);
-    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    resident
+        .install_command_channel(resident.begin_connection(), cmd_tx)
+        .await;
     let pump_resident = Arc::clone(&resident);
     let pump = tokio::spawn(async move {
         let mut seen = Vec::new();
@@ -194,8 +196,7 @@ async fn a_delete_of_a_live_workers_child_still_routes_the_kill() {
         }
         seen
     });
-    resident.note_connection_live();
-    resident.note_session_ready();
+    resident.transition(crate::registry::WorkerTransition::SessionReady);
     supervisor.registry.insert(Arc::clone(&resident)).await;
 
     let response = route_delete(&supervisor).await;

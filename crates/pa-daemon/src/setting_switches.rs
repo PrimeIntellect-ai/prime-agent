@@ -542,9 +542,10 @@ impl Worker {
         response_success(None, "set_auto_retry", None)
     }
 
-    /// `set_auto_compaction { enabled }`: the connection-state flag and the settings value
-    /// change together; a failed save fails the command without flipping the flag.
-    pub(crate) fn handle_set_auto_compaction(&self, payload: &Value) -> DaemonResponse {
+    /// `set_auto_compaction { enabled }`: the connection-state flag, the built session's
+    /// live toggle, and the settings value change together; a failed save fails the
+    /// command without flipping the flag.
+    pub(crate) async fn handle_set_auto_compaction(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_auto_compaction") {
             return response;
         }
@@ -552,14 +553,12 @@ impl Worker {
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let core = self.core.lock().unwrap();
-        let cwd = core.cwd.clone();
-        drop(core);
+        let cwd = self.core.lock().unwrap().cwd.clone();
         let mut settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
         if let Err(error) = settings.set_compaction_enabled(enabled) {
             return response_failure(None, "set_auto_compaction", &error.to_string(), None);
         }
-        self.compaction.set_auto_compaction(enabled);
+        self.compaction.set_auto_compaction(enabled).await;
         response_success(None, "set_auto_compaction", None)
     }
 
@@ -1174,6 +1173,83 @@ mod tests {
             state.data.expect("data")["autoCompactionEnabled"],
             json!(false)
         );
+    }
+
+    /// The threshold `compaction_start` events since the last drain.
+    fn threshold_compaction_starts(
+        subscription: &mut tokio::sync::broadcast::Receiver<Arc<crate::worker::OutboundFrame>>,
+    ) -> usize {
+        let mut count = 0;
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type != "session_event" {
+                continue;
+            }
+            let outbound: Value = serde_json::from_slice(&frame.payload).unwrap_or_default();
+            if outbound["event"]["type"] == "compaction_start"
+                && outbound["event"]["reason"] == "threshold"
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// The toggle reaches an already-built session: the threshold arm follows
+    /// it at the next turn boundary in both directions. The reserve leaves a
+    /// threshold of 1616 tokens on the faux model (128k window, 16k output
+    /// budget), below any real turn, so every turn is due while the toggle is on.
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    #[tokio::test]
+    async fn set_auto_compaction_reaches_the_built_session() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("agent")).unwrap();
+        std::fs::write(
+            dir.path().join("agent").join("settings.json"),
+            json!({ "compaction": { "enabled": false, "reserveTokens": 110_000, "keepRecentTokens": 10 } })
+                .to_string(),
+        )
+        .unwrap();
+        let mut config = worker_config(dir.path());
+        config.script = Some(json!({
+            "engine": "faux",
+            "responses": vec!["reply"; 8],
+        }));
+        let worker = Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": dir.path() }))
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        let mut subscription = worker.events.subscribe();
+        for (enabled, message, compacts) in [
+            (None, "first", false),
+            (Some(true), "second", true),
+            (Some(false), "third", false),
+        ] {
+            if let Some(enabled) = enabled {
+                let toggled = worker
+                    .dispatch(
+                        "set_auto_compaction",
+                        &json!({ "activeSessionId": "switch-session", "enabled": enabled }),
+                    )
+                    .await;
+                assert!(toggled.success, "toggle failed: {toggled:?}");
+            }
+            let turn = worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({ "activeSessionId": "switch-session", "message": message }),
+                )
+                .await;
+            assert!(turn.success, "the {message} turn failed: {turn:?}");
+            assert_eq!(
+                threshold_compaction_starts(&mut subscription) > 0,
+                compacts,
+                "the {message} turn's threshold compaction (toggle {enabled:?})"
+            );
+        }
     }
 
     #[tokio::test]

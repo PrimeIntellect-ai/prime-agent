@@ -667,14 +667,15 @@ fn packaging_dry_run_produces_artifact() {
     } else {
         (env!("CARGO_BIN_EXE_prime-agent").into(), None, None)
     };
-    // The platform tag the packer derives on this host: linux-x64 on the
-    // linux CI host, win32-x64 on the windows-latest battery (the channel
-    // alias, never a bare `windows-x64` — the naming the update reader's
-    // manifest contract requires).
-    let host_platform = if cfg!(windows) {
-        "win32-x64"
-    } else {
-        "linux-x64"
+    // The platform tag the packer derives on this host (`release_platform`):
+    // linux-x64 on the linux CI host, win32-x64 on the windows-latest battery
+    // (the channel alias, never a bare `windows-x64` — the naming the update
+    // reader's manifest contract requires), darwin-<arch> on a macOS dev host.
+    let host_platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => "win32-x64",
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", _) => "darwin-x64",
+        _ => "linux-x64",
     };
     let staged_binary_name = if cfg!(windows) {
         "prime-agent.exe"

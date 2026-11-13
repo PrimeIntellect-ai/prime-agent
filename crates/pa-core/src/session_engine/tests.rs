@@ -177,7 +177,7 @@ async fn digest_session_with_harness(
 
 /// A resumed session over the entries of a prior session (converted
 /// loop context, adopted manager).
-async fn resumed_digest_session(
+pub(super) async fn resumed_digest_session(
     entries: Vec<FileEntry>,
     harness: crate::session_engine::harness_digest::HarnessDigestContext,
 ) -> AgentSession {
@@ -232,9 +232,9 @@ async fn loop_digest_rows(session: &AgentSession) -> Vec<(String, Option<String>
 
 /// TS #2400 + #2394 at the resume boundary: unchanged state does not
 /// re-deliver a drifted-looking digest; a state change re-delivers
-/// exactly one, replacing the superseded copy.
+/// an appended update without rewriting the existing context prefix.
 #[tokio::test]
-async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
+async fn resume_dedupes_by_state_fingerprint_and_appends_stale_digest_update() {
     let tmp = tempfile::tempdir().unwrap();
     let harness_dir = tmp.path().join("harness");
     // Seeded global state: entries whose ranked order differs once the
@@ -334,8 +334,8 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     );
 
     // Changed disk state: the fingerprint moves, so the boundary
-    // re-delivers — and the fresh row replaces the superseded copy
-    // instead of stacking (TS #2394).
+    // appends an authoritative update while preserving the prior prefix.
+    let prior_messages = resumed.agent().state().await.messages;
     state
         .entries
         .get_mut(&crate::refinement::RefinementKind::Memory)
@@ -361,15 +361,21 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
     let refreshed = resumed_digest_session(entries.clone(), harness).await;
     let rows = loop_digest_rows(&refreshed).await;
-    assert_eq!(rows.len(), 1, "the fresh digest replaces the old copy");
+    let refreshed_messages = refreshed.agent().state().await.messages;
+    assert_eq!(
+        serde_json::to_value(&refreshed_messages[..prior_messages.len()]).unwrap(),
+        serde_json::to_value(&prior_messages).unwrap(),
+        "resume must preserve every existing provider-context row"
+    );
+    assert_eq!(rows.len(), 2, "the fresh digest appends to the old copy");
     assert!(
-        rows[0].1.is_some(),
+        rows[1].1.is_some(),
         "the delivered custom row carries its state fingerprint"
     );
-    assert!(rows[0].0.contains("Resume test memory"));
+    assert!(rows[1].0.contains("Resume test memory"));
     // The persisted transcript keeps every copy (TS #2394: the newest
     // digest remains authoritative), so the file holds both while the
-    // live context carries exactly one.
+    // live context retains both without rewriting the old prefix.
     let persisted: Vec<String> = refreshed
         .entries()
         .await
@@ -392,7 +398,7 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     assert_eq!(persisted.len(), 2);
     assert_eq!(persisted[0], first_fingerprint);
     assert_ne!(persisted[1], first_fingerprint);
-    assert_eq!(Some(persisted[1].as_str()), rows[0].1.as_deref());
+    assert_eq!(Some(persisted[1].as_str()), rows[1].1.as_deref());
 }
 
 /// The digest body of the newest digest custom entry (fixture lookup).
