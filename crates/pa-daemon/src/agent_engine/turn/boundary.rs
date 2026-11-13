@@ -215,7 +215,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn requested_refinement_emits_its_durable_outcome_before_completion() {
+    fn requested_refinement_commits_its_durable_outcome_row() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -267,32 +267,25 @@ mod tests {
                     global: false,
                 }));
         }
-        let mut events = Vec::new();
-        let boundary = engine.run_turn_boundary(&mut |event| {
-            events.push(event);
-            true
-        });
+        let (send, receive) = std::sync::mpsc::channel();
+        *engine.refinement_completion_sink.lock().unwrap() =
+            Some(std::sync::Arc::new(move |pending| {
+                send.send(pending).unwrap();
+            }));
+        let boundary = engine.run_turn_boundary(&mut |_| true);
         assert!(matches!(boundary, BoundaryRun::Proceed));
-        let outcomes: Vec<_> = events
+        let pending = receive
+            .try_recv()
+            .expect("completion handed to background sink");
+        let committed = engine.runtime.block_on(pending).unwrap().unwrap();
+        let outcomes = committed
+            .rows
             .iter()
-            .enumerate()
-            .filter(|(_, event)| {
-                matches!(event, EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome")
-            })
-            .map(|(index, _)| index)
-            .collect();
+            .filter(|row| row.custom_type == "refinement_outcome")
+            .count();
         assert_eq!(
-            outcomes.len(),
-            1,
+            outcomes, 1,
             "one durable outcome, including a no-op refinement"
-        );
-        let completed = events
-            .iter()
-            .position(|event| matches!(event, EngineEvent::RefineComplete { .. }))
-            .expect("refinement completed");
-        assert!(
-            outcomes[0] < completed,
-            "persist the outcome before announcing completion"
         );
     }
 }
