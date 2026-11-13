@@ -987,6 +987,151 @@ mod tests {
         }
     }
 
+    /// A queued row restored WITHOUT a timestamp (the crash-recovery
+    /// snapshot shape the restore fixtures carry) delivers as one
+    /// normalized row: the type default fills the clock at the
+    /// injected-row parse, so the frames clients get carry the same row
+    /// the model context holds.
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    #[tokio::test]
+    async fn a_restored_row_without_a_timestamp_delivers_one_normalized_row() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let config = crate::worker::WorkerConfig {
+            socket_path: dir_path.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "restored-row-session".to_string(),
+            agent_dir: dir_path.join("agent"),
+            recovery_journal_path: dir_path.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(
+                json!({ "engine": "faux", "responses": [{ "text": "notice acknowledged" }] }),
+            ),
+        };
+        let worker = Arc::new(crate::worker::Worker::new(config, None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        assert!(
+            worker.agent_engine.is_some(),
+            "the faux script must build a real agent engine"
+        );
+        let mut subscription = worker.events.subscribe();
+        let content = "[heartbeat: every 10m run#0]\n\nnudge the mission";
+        let response = worker
+            .dispatch(
+                "restore_actions",
+                &json!({
+                    "activeSessionId": "restored-row-session",
+                    "snapshot": {
+                        "formatVersion": 1,
+                        "actions": [
+                            {
+                                "id": "hb-restored",
+                                "source": "user",
+                                "delivery": "next_turn_boundary",
+                                "wake": "wake",
+                                "queueKey": "heartbeat:hb-restored",
+                                "payload": {
+                                    "kind": "turn",
+                                    "text": content,
+                                    "records": [],
+                                    // The snapshot row carries NO timestamp.
+                                    "customMessage": {
+                                        "role": "custom",
+                                        "customType": "heartbeat_prompt",
+                                        "content": content,
+                                        "display": true
+                                    },
+                                    "executionPolicy": { "preparation": {} },
+                                    "queueVisible": true,
+                                    "acceptedAgentMessage": false,
+                                    "acceptedBeforeCompletion": false,
+                                },
+                            },
+                        ],
+                    },
+                }),
+            )
+            .await;
+        assert!(response.success, "restore failed: {response:?}");
+        assert_eq!(response.data, Some(json!({ "restored": 1 })));
+        // The runner delivers the restored row; the idle wait holds while
+        // the lanes carry it and returns only after the turn settled.
+        let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+        assert!(idle.success, "the restored turn never settled: {idle:?}");
+        let mut events = Vec::new();
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type == "session_event" {
+                let outbound: Value = serde_json::from_slice(&frame.payload).unwrap();
+                events.push(outbound["event"].clone());
+            }
+        }
+        // The turn admitted: no parse-failure settle frame.
+        let parse_failed = events.iter().any(|event| {
+            event["type"] == "turn_end"
+                && event["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("parse failed"))
+        });
+        assert!(
+            !parse_failed,
+            "the missing clock killed the restored turn: {events:?}"
+        );
+        // The turn ran to its model response.
+        assert!(
+            events.iter().any(|event| {
+                event["type"] == "message_end" && event["message"]["role"] == "assistant"
+            }),
+            "the restored turn never reached its model response: {events:?}"
+        );
+        // The frames carry the row WITH the default-filled clock...
+        let frame_row = events
+            .iter()
+            .find_map(|event| {
+                (event["type"] == "message_start"
+                    && event["message"]["customType"] == "heartbeat_prompt")
+                    .then(|| event["message"].clone())
+            })
+            .expect("the restored row's message_start frame");
+        let frame_timestamp = frame_row["timestamp"]
+            .as_u64()
+            .expect("the frame row carries the filled clock");
+        assert!(frame_timestamp > 0);
+        // ...and the model context holds the SAME row (frame/context match).
+        let built = {
+            let engine = worker.agent_engine.as_ref().expect("the real agent engine");
+            let session = engine.session.lock().await;
+            Arc::clone(session.as_ref().expect("the built session"))
+        };
+        let state = built.session.agent().state().await;
+        let context_row = state
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                pa_agent::types::AgentMessage::Custom(custom)
+                    if custom.payload["customType"] == "heartbeat_prompt" =>
+                {
+                    Some(custom.payload.clone())
+                }
+                _ => None,
+            })
+            .expect("the model context admitted the restored row");
+        assert_eq!(
+            context_row["timestamp"],
+            json!(frame_timestamp),
+            "the frames and the model context hold one normalized row"
+        );
+        assert_eq!(frame_row["role"], "custom");
+        assert_eq!(frame_row["content"], json!(content));
+    }
+
     /// The scripted harness has no refiner: `refine` answers the failure the engine seam
     /// carries.
     #[tokio::test]

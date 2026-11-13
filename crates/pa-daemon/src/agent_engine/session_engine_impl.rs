@@ -1387,6 +1387,10 @@ impl SessionEngine for AgentSessionEngine {
         // unparseable row fails the turn, not double-represents it.
         let injected = match &request.custom_message {
             Some(custom) => {
+                // A missing `timestamp` fills from the type's own serde
+                // default at this parse, so the accepted row below can BE
+                // the parsed row: the frames and the model context carry
+                // one normalized representation.
                 match serde_json::from_value::<pa_types::session::AgentMessage>(custom.clone()) {
                     Ok(pa_types::session::AgentMessage::Custom(parsed)) => Some(parsed),
                     Ok(_) => {
@@ -1396,6 +1400,29 @@ impl SessionEngine for AgentSessionEngine {
                         return;
                     }
                     Err(error) => {
+                        // The row failed to parse: log the requesting turn's
+                        // identity (source, agent message id, session file)
+                        // plus a summary of the row — never the raw payload,
+                        // which can carry base64 image blocks and private
+                        // prompt text. The row never reached the transcript,
+                        // so this line is the only evidence the sender
+                        // leaves; the summary identifies it.
+                        let session_file = self
+                            .session_file
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_deref()
+                            .map_or_else(|| "unset".to_string(), |path| path.display().to_string());
+                        eprintln!(
+                            "{}",
+                            injected_custom_parse_failed_log_line(
+                                &request.source,
+                                request.agent_message_id.as_deref(),
+                                &session_file,
+                                custom,
+                                &error,
+                            )
+                        );
                         emit(EngineEvent::Done(Err(format!(
                             "injected custom message parse failed: {error}"
                         ))));
@@ -1407,8 +1434,11 @@ impl SessionEngine for AgentSessionEngine {
         };
         // The accepted turn row: an injected custom row replaces the user
         // message; the plain turn records the accepted row, images after.
-        let accepted = if let Some(custom) = &request.custom_message {
-            EngineEvent::CustomMessage(custom.clone())
+        // The injected row the client sees IS the parsed row (one
+        // normalized representation): the frames carry exactly what the
+        // model context holds, a default-filled clock included.
+        let accepted = if let Some(parsed) = &injected {
+            EngineEvent::CustomMessage(crate::session_commands::custom_message_value(parsed))
         } else {
             let mut content = vec![json!({ "type": "text", "text": request.message })];
             for image in &request.images {
@@ -1513,4 +1543,34 @@ impl SessionEngine for AgentSessionEngine {
             }
         }
     }
+}
+
+/// The daemon-log line for an injected custom row that failed to parse:
+/// the requesting turn's identity (source, agent message id, session file)
+/// plus a summary of the row — its `customType`, its top-level keys, and
+/// its byte length. Never the raw payload: it can carry base64 image
+/// blocks and private prompt text, and the summary is enough to identify
+/// the sender. Unit-tested in isolation; the parse site prints it with
+/// `eprintln!` (the daemon log captures stderr).
+pub(crate) fn injected_custom_parse_failed_log_line(
+    source: &str,
+    agent_message_id: Option<&str>,
+    session_file: &str,
+    raw_payload: &Value,
+    error: &serde_json::Error,
+) -> String {
+    let custom_type = raw_payload
+        .get("customType")
+        .and_then(Value::as_str)
+        .unwrap_or("<none>");
+    let mut keys: Vec<&str> = Vec::new();
+    if let Some(object) = raw_payload.as_object() {
+        keys.extend(object.keys().map(String::as_str));
+    }
+    let bytes = serde_json::to_vec(raw_payload).map_or(0, |payload| payload.len());
+    format!(
+        "pa-daemon: injected custom message parse failed: {error}; source={source:?} \
+         agent_message_id={agent_message_id:?} session_file={session_file:?} \
+         customType={custom_type:?} keys={keys:?} bytes={bytes}"
+    )
 }
