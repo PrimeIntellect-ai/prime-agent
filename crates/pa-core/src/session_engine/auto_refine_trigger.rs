@@ -85,8 +85,9 @@ impl AgentSession {
             == captured
     }
 
-    /// Drop the armed trigger and bump the branch version — an in-flight
-    /// review started on the abandoned branch never applies its edits.
+    /// Drop the armed trigger, bump the branch version, and cancel in-flight
+    /// refinement planning and commit waits — work started on the abandoned
+    /// branch never lands on the new one.
     ///
     /// # Panics
     ///

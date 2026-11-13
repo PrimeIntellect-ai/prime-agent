@@ -1,6 +1,7 @@
 //! A same-path reopen builds the replacement engine before the replaced kernel's
 //! dispose flushes its final snapshot into the shared artifact dir: the reopened
-//! session must still revive that final namespace.
+//! session must still revive that final namespace. An in-memory fork rebuilds in
+//! place: a refinement planned on the abandoned branch must not commit onto it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -221,4 +222,129 @@ async fn a_same_path_reopen_revives_the_replaced_kernels_final_namespace() {
         Some("2"),
         "the reopened session revived a namespace older than the replaced kernel's final flush"
     );
+}
+
+const HELD_PLANNER_API: &str = "test-held-rpc-fork-planner";
+
+/// A planning provider whose request parks until released.
+struct HeldPlanner {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl pa_ai::registry::Provider for HeldPlanner {
+    fn api(&self) -> &str {
+        HELD_PLANNER_API
+    }
+
+    fn stream(
+        &self,
+        _model: &pa_types::ai::Model,
+        _context: &pa_ai::types::Context,
+        _options: Option<&pa_ai::types::StreamOptions>,
+    ) -> pa_ai::AssistantMessageEventStream {
+        let (writer, stream) = pa_ai::AssistantMessageEventStream::new();
+        let (started, release) = (self.started.clone(), self.release.clone());
+        tokio::spawn(async move {
+            started.notify_one();
+            release.notified().await;
+            let message = pa_ai::faux::faux_assistant_text_message(
+                r#"{"summary":"planned on the abandoned branch","edits":[]}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            );
+            writer.push(pa_types::ai::AssistantMessageEvent::Done {
+                reason: pa_types::ai::DoneStopReason::Stop,
+                message: message.clone(),
+            });
+            writer.end(Some(message));
+        });
+        stream
+    }
+
+    fn stream_simple(
+        &self,
+        model: &pa_types::ai::Model,
+        context: &pa_ai::types::Context,
+        _options: Option<&pa_ai::types::SimpleStreamOptions>,
+    ) -> pa_ai::AssistantMessageEventStream {
+        self.stream(model, context, None)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_in_memory_fork_cancels_a_refinement_planned_on_the_abandoned_branch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    pa_ai::registry::register_api_provider(
+        Arc::new(HeldPlanner {
+            started: started.clone(),
+            release: release.clone(),
+        }),
+        Some(HELD_PLANNER_API),
+    );
+    let mut manager = SessionManager::in_memory(&cwd);
+    let forked_entry = manager
+        .append_message(pa_types::session::AgentMessage::User(
+            pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("the abandoned branch".to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            },
+        ))
+        .unwrap();
+    let mut handle = engine_handle(&cwd, &agent_dir, manager, None).await;
+    handle.model.api = HELD_PLANNER_API.to_string();
+    handle.model.context_window = 128_000;
+    let engine = Arc::clone(&handle.engine);
+    let writer = LineWriter::spawn();
+    let state = Arc::new(crate::rpc::commands::RpcState {
+        session: Arc::new(RpcSession::adopt(handle, None, writer.clone()).await),
+        writer,
+        cwd,
+        agent_dir,
+        compacting: Arc::default(),
+        autonomous: Arc::new(tokio::sync::Mutex::new(
+            pa_core::autonomous::create_autonomous_runtime_state(None, None),
+        )),
+        last_goal: Arc::new(tokio::sync::Mutex::new(engine.goal_state().await)),
+        queue_pump: Arc::default(),
+        pump_suspended: Arc::default(),
+        model_ops: Arc::default(),
+        session_ops: Arc::default(),
+    });
+    let command = |command: &str, payload: serde_json::Value| crate::rpc::protocol::RpcCommand {
+        id: None,
+        command: command.to_string(),
+        payload,
+    };
+    let mut refine = tokio::spawn({
+        let state = Arc::clone(&state);
+        let refine = command("refine", serde_json::json!({ "global": true }));
+        async move { crate::rpc::commands::handle_command(&state, refine).await }
+    });
+    tokio::select! {
+        () = started.notified() => {}
+        response = &mut refine => panic!("refine settled before planning: {response:?}"),
+    }
+    let fork = crate::rpc::commands::handle_command(
+        &state,
+        command("fork", serde_json::json!({ "entryId": forked_entry })),
+    )
+    .await;
+    assert_eq!(fork["success"], true, "{fork}");
+    release.notify_one();
+    let refined = refine.await.unwrap();
+    assert_eq!(refined["success"], false, "{refined}");
+    let persistence = engine.session.shared_persistence();
+    assert!(!persistence.lock().await.get_all_entries().iter().any(|entry| matches!(
+        entry,
+        pa_types::session::FileEntry::CustomMessage { payload, .. }
+            if payload.custom_type == pa_core::session_engine::refine::REFINEMENT_OUTCOME_CUSTOM_TYPE
+    )));
+    pa_ai::registry::unregister_api_providers(HELD_PLANNER_API);
 }
