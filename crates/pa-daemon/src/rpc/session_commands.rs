@@ -196,6 +196,7 @@ async fn fork_at(
         // Settle any streaming turn before the rebuild: a turn still
         // appending would land its later messages on the new branch.
         engine.session.agent().wait_for_idle().await;
+        engine.session.discard_compact_auto_refine();
         engine
             .session
             .rebuild_branch_context(branch_entries)
