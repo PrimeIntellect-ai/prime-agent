@@ -1173,6 +1173,77 @@ fn assert_turn_end_publishes_a_held_goal_change(message: &str, aborted: bool) {
 }
 
 #[test]
+fn active_goal_survives_an_abort_that_lands_before_the_provider_stream() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(
+            json!({
+                "engine": "faux",
+                "responses": [{ "text": "goal start reply" }, { "text": "never served" }],
+            })
+            .to_string(),
+        ),
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    let _goal_work = goal_admission_collector(&engine);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "/goal survive the early abort".to_string(),
+        &mut events,
+    );
+    assert_eq!(engine.goal_state_value()["status"], json!("active"));
+    // The Stop lands while the run persists its user row: after the run
+    // started, before the loop reaches the provider.
+    let agent = engine
+        .built_handles()
+        .map(|handles| handles.turn_agent.clone())
+        .expect("the goal start built the session");
+    let abort_target = std::sync::Arc::downgrade(&agent);
+    let _abort_at_user_row = engine
+        .runtime
+        .block_on(agent.subscribe(move |event, _signal| {
+            if let pa_agent::types::AgentEvent::MessageEnd {
+                message: pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(_)),
+            } = &event
+            {
+                if let Some(agent) = abort_target.upgrade() {
+                    agent.abort();
+                }
+            }
+            Box::pin(async { Ok(()) })
+        }));
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "aborted before the stream".to_string(),
+        &mut events,
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::DoneAborted)),
+        "the turn settles as aborted: {events:?}"
+    );
+    let after = engine.goal_state_value();
+    assert_eq!(after["status"], json!("active"), "state: {after:?}");
+}
+
+#[test]
 fn shared_window_goal_seed_matches_persisted_goal_state() {
     let header = || {
         json!({
