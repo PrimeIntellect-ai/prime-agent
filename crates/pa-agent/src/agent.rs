@@ -320,6 +320,12 @@ struct ActiveRun {
     model: Model,
 }
 
+/// An owned run slot: the claimed run's abort signal and model-override snapshot.
+struct RunClaim {
+    signal: AbortSignal,
+    model_override: Option<AgentModelOverride>,
+}
+
 struct AgentInner {
     /// Serializes state reduction and listener delivery without holding the
     /// state lock across callbacks that may read or restore that state.
@@ -585,14 +591,9 @@ impl AgentInner {
         config
     }
 
-    async fn run_with_lifecycle<F, Fut>(self: &Arc<Self>, executor: F) -> anyhow::Result<()>
-    where
-        F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
-        Fut: std::future::Future<Output = anyhow::Result<()>>,
-    {
-        let admission = self.admission.lock().await;
-        let controller = AbortController::new();
-        let (idle_tx, _idle_rx) = watch::channel(false);
+    /// Claims the run slot with the run's model snapshot, or fails when a run is active.
+    async fn claim_run(&self) -> anyhow::Result<RunClaim> {
+        let _admission = self.admission.lock().await;
         // The run's model-override snapshot, read once: a concurrent
         // `set_model_override` cannot split the run's model from its request fields.
         // Read before the run lock: the shared lock awaits, a std guard must never ride it.
@@ -603,20 +604,39 @@ impl AgentInner {
                 .as_ref()
                 .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
         };
-        {
-            let mut run = self.run.lock().unwrap();
-            if run.is_some() {
-                anyhow::bail!("Agent is already processing.");
-            }
-            *run = Some(ActiveRun {
-                controller: controller.clone(),
-                idle_tx,
-                model: run_model,
-            });
+        let mut run = self.run.lock().unwrap();
+        if run.is_some() {
+            anyhow::bail!("Agent is already processing.");
         }
-        drop(admission);
-        let run_signal = controller.signal();
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let (idle_tx, _idle_rx) = watch::channel(false);
+        *run = Some(ActiveRun {
+            controller,
+            idle_tx,
+            model: run_model,
+        });
+        Ok(RunClaim {
+            signal,
+            model_override: run_override,
+        })
+    }
 
+    fn release_run(&self) {
+        if let Some(active) = self.run.lock().unwrap().take() {
+            let _ = active.idle_tx.send(true);
+        }
+    }
+
+    async fn run_with_lifecycle<F, Fut>(
+        self: &Arc<Self>,
+        claim: RunClaim,
+        executor: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
         {
             let mut shared = self.shared.lock().await;
             shared.state.is_streaming = true;
@@ -624,7 +644,7 @@ impl AgentInner {
             shared.state.error_message = None;
         }
 
-        let result = executor(run_signal, run_override).await;
+        let result = executor(claim.signal, claim.model_override).await;
         if let Err(error) = &result {
             let aborted = self
                 .current_signal()
@@ -638,34 +658,36 @@ impl AgentInner {
             shared.state.streaming_message = None;
             shared.state.pending_tool_calls.clear();
         }
-        {
-            let mut run = self.run.lock().unwrap();
-            if let Some(active) = run.take() {
-                let _ = active.idle_tx.send(true);
-            }
-        }
+        self.release_run();
         result
     }
 
     async fn run_prompt_messages(
         self: &Arc<Self>,
+        claim: RunClaim,
         messages: Vec<AgentMessage>,
         skip_initial_steering_poll: bool,
     ) -> anyhow::Result<()> {
-        self.run_prompt_messages_with_start_signal(messages, skip_initial_steering_poll, None)
-            .await
+        self.run_prompt_messages_with_start_signal(
+            claim,
+            messages,
+            skip_initial_steering_poll,
+            None,
+        )
+        .await
     }
 
     /// The same run, firing `started` once the run registers; the caller
     /// returns while this run settles on its own.
     async fn run_prompt_messages_with_start_signal(
         self: &Arc<Self>,
+        claim: RunClaim,
         messages: Vec<AgentMessage>,
         skip_initial_steering_poll: bool,
         started: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
-        self.run_with_lifecycle(|signal, model_override| async move {
+        self.run_with_lifecycle(claim, |signal, model_override| async move {
             if let Some(started) = started {
                 let _ = started.send(());
             }
@@ -698,8 +720,9 @@ impl AgentInner {
     }
 
     async fn run_continuation(self: &Arc<Self>) -> anyhow::Result<()> {
+        let claim = self.claim_run().await?;
         let inner = Arc::clone(self);
-        self.run_with_lifecycle(|signal, model_override| async move {
+        self.run_with_lifecycle(claim, |signal, model_override| async move {
             let (context, config) = {
                 let shared = inner.shared.lock().await;
                 (
@@ -730,17 +753,22 @@ impl AgentInner {
     /// Drains queued steering/follow-up messages as a run. Returns whether
     /// a run was started.
     async fn run_queued_messages(self: &Arc<Self>) -> anyhow::Result<bool> {
+        // Claim before draining: a caller that loses the run slot to a
+        // concurrent run must leave the queues for that run to deliver.
+        let claim = self.claim_run().await?;
         let queued_steering = self.steering_queue.lock().unwrap().drain();
-        if !queued_steering.is_empty() {
-            self.run_prompt_messages(queued_steering, true).await?;
-            return Ok(true);
+        let (messages, skip_initial_steering_poll) = if queued_steering.is_empty() {
+            (self.follow_up_queue.lock().unwrap().drain(), false)
+        } else {
+            (queued_steering, true)
+        };
+        if messages.is_empty() {
+            self.release_run();
+            return Ok(false);
         }
-        let queued_follow_ups = self.follow_up_queue.lock().unwrap().drain();
-        if !queued_follow_ups.is_empty() {
-            self.run_prompt_messages(queued_follow_ups, false).await?;
-            return Ok(true);
-        }
-        Ok(false)
+        self.run_prompt_messages(claim, messages, skip_initial_steering_poll)
+            .await?;
+        Ok(true)
     }
 
     fn normalize_prompt_input(input: AgentPromptInput) -> Vec<AgentMessage> {
@@ -1191,7 +1219,8 @@ impl Agent {
             );
         }
         let messages = AgentInner::normalize_prompt_input(input.into());
-        self.inner.run_prompt_messages(messages, false).await
+        let claim = self.inner.claim_run().await?;
+        self.inner.run_prompt_messages(claim, messages, false).await
     }
 
     /// Admit the prompt, return once its run registers, and let the run
@@ -1218,9 +1247,13 @@ impl Agent {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (failed_tx, failed_rx) = tokio::sync::oneshot::channel::<anyhow::Error>();
         tokio::spawn(async move {
-            let result = inner
-                .run_prompt_messages_with_start_signal(messages, false, Some(started_tx))
-                .await;
+            let result = async {
+                let claim = inner.claim_run().await?;
+                inner
+                    .run_prompt_messages_with_start_signal(claim, messages, false, Some(started_tx))
+                    .await
+            }
+            .await;
             if let Err(error) = result {
                 let _ = failed_tx.send(error);
             }
@@ -1377,11 +1410,12 @@ mod tests {
             })
             .await;
         let inner = agent.inner.clone();
+        let claim = agent.inner.claim_run().await.unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             agent
                 .inner
-                .run_with_lifecycle(move |_signal, _override| async move {
+                .run_with_lifecycle(claim, move |_signal, _override| async move {
                     inner.process_events(AgentEvent::AgentStart).await
                 }),
         )
@@ -1621,6 +1655,44 @@ mod tests {
         assert_eq!(
             mixed, 0,
             "every snapshot carries a consistent (model, level) pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_claimed_while_continue_run_starts_leaves_the_queue_intact() {
+        fn poll_once<F: std::future::Future>(
+            future: std::pin::Pin<&mut F>,
+        ) -> std::task::Poll<F::Output> {
+            future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+        }
+
+        let agent = Agent::new(AgentOptions::default());
+        agent.steer(AgentMessage::user("queued steer"));
+
+        // The tokio mutex hands the lock to waiters in arrival order, so holding it
+        // fixes the interleaving: continue_run parks first, the racing claim parks
+        // behind it while holding run admission.
+        let shared = agent.inner.shared.lock().await;
+        let mut continuing = std::pin::pin!(agent.continue_run());
+        assert!(poll_once(continuing.as_mut()).is_pending());
+        let mut claiming = std::pin::pin!(agent.inner.claim_run());
+        assert!(poll_once(claiming.as_mut()).is_pending());
+        drop(shared);
+
+        // continue_run passes its entry check and parks on admission; the racing
+        // claim then takes the run slot.
+        assert!(poll_once(continuing.as_mut()).is_pending());
+        let std::task::Poll::Ready(Ok(_claim)) = poll_once(claiming.as_mut()) else {
+            panic!("the racing claim takes the free run slot");
+        };
+
+        assert!(
+            continuing.await.is_err(),
+            "the racing claim owns the run slot"
+        );
+        assert!(
+            agent.has_queued_messages(),
+            "a continue_run that loses the run slot must leave the queued steer queued"
         );
     }
 }
