@@ -419,14 +419,14 @@ impl AuthStorage {
         self.errors.push(error.to_string());
     }
 
-    /// Runtime API-key override (CLI `--api-key`); not persisted.
+    /// Runtime API-key override (CLI `--api-key`); not persisted. It clears no
+    /// stale mark: marks are value-matched, so a new value is never stale, and
+    /// the session re-sets the same override before every request.
     pub fn set_runtime_api_key(&mut self, provider: &str, api_key: String) {
         self.runtime_overrides.insert(provider.to_string(), api_key);
-        self.clear_stale_auth_source(provider, AuthSource::Runtime);
     }
 
     pub fn remove_runtime_api_key(&mut self, provider: &str) {
-        self.clear_stale_auth_source(provider, AuthSource::Runtime);
         self.runtime_overrides.remove(provider);
     }
 
@@ -823,8 +823,8 @@ impl AuthStorage {
         self.clear_current_stale_marks(provider, |_| true);
     }
 
-    /// Clear the mark of `source`'s current value (a write or override re-enables exactly the
-    /// value it set).
+    /// Clear the mark of `source`'s current value (a write re-enables exactly the value it
+    /// set).
     fn clear_stale_auth_source(&self, provider: &str, source: AuthSource) {
         self.clear_current_stale_marks(provider, |candidate| candidate == source);
     }

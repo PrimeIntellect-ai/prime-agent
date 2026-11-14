@@ -58,6 +58,23 @@ fn runtime_override_wins() {
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("stored-key"));
 }
 
+/// The session re-sets its runtime override before every request: re-setting a rejected runtime
+/// key keeps it stale, so the stored login keeps serving.
+#[test]
+fn re_setting_a_rejected_runtime_key_keeps_it_stale() {
+    // Keys no other test uses: stale marks are process-wide.
+    let mut auth = storage_with(&serde_json::json!({
+        "anthropic": { "type": "api_key", "key": "sk-stored-after-runtime-rejection" }
+    }));
+    auth.set_runtime_api_key("anthropic", "sk-runtime-rejected-resent".to_string());
+    assert!(auth.mark_auth_stale("anthropic"));
+    auth.set_runtime_api_key("anthropic", "sk-runtime-rejected-resent".to_string());
+    assert_eq!(
+        auth.get_api_key("anthropic").as_deref(),
+        Some("sk-stored-after-runtime-rejection")
+    );
+}
+
 #[test]
 fn stale_marking_skips_source_and_clears() {
     let mut auth = storage_with(&serde_json::json!({
