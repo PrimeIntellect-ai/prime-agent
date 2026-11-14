@@ -50,6 +50,11 @@ enum SearchToken {
 /// bounded to this many backtracking attempts.
 const REGEX_BACKTRACK_LIMIT: usize = 10_000;
 
+/// The `re:` compile budget in VM instructions: `fancy-regex` inlines subroutine calls (`\g<1>`)
+/// at compile time, so a recursive pattern grows exponentially before `build` returns, and the
+/// backtrack limit only bounds matching.
+const REGEX_MAX_PROG_SIZE: usize = 10_000;
+
 /// Parse a query; invalid `re:` patterns parse to no matches.
 #[must_use]
 pub fn parse_search_query(query: &str) -> ParsedSearchQuery {
@@ -65,6 +70,7 @@ pub fn parse_search_query(query: &str) -> ParsedSearchQuery {
         }
         let built = fancy_regex::RegexBuilder::new(&format!("(?i){pattern}"))
             .backtrack_limit(REGEX_BACKTRACK_LIMIT)
+            .max_prog_size(REGEX_MAX_PROG_SIZE)
             .build();
         let matches_never = match built {
             Ok(regex) => {
@@ -482,5 +488,16 @@ mod tests {
         // engine and match.
         let lookahead = parse_search_query("re:gateway(?=worker)");
         assert!(score_search(&targets(), &lookahead).is_some());
+    }
+
+    #[test]
+    fn recursive_re_subroutines_stop_at_the_compile_budget() {
+        // Each level of `\g<1>` inlines three copies of the group: without the compile budget
+        // `build` would never return on this keystroke.
+        let parsed = parse_search_query(r"re:(a|b\g<1>\g<1>\g<1>)");
+        assert!(score_search(&targets(), &parsed).is_none());
+        // Subroutines that fit the budget still compile and match.
+        let small = parse_search_query(r"re:(gate|way\g<1>)");
+        assert!(score_search(&targets(), &small).is_some());
     }
 }
