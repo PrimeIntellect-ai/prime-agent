@@ -45,13 +45,13 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-native-certs = "0.8"
 webpki-roots = "1"
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
 http = "1"
 
 [dev-dependencies]
 # Wire tests only: the WS handshake accept key (SHA-1 of key + GUID); the
 # same version the graph resolves for tokio-tungstenite's rustls chain.
-sha1 = "0.10"
+sha1 = "0.11"
 tempfile = "3"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
