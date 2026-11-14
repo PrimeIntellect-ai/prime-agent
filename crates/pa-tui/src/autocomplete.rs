@@ -997,7 +997,13 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                     .and_then(|command| self.arguments.get(command))
                     .is_some_and(|items| items.iter().any(|argument| argument.value == item.value))
             {
-                return apply_file_completion(lines, cursor_line, cursor_col, item, &context.prefix);
+                return apply_file_completion(
+                    lines,
+                    cursor_line,
+                    cursor_col,
+                    item,
+                    &context.prefix,
+                );
             }
         }
         let path_prefix = extract_path_prefix(before, true).unwrap_or_default();
