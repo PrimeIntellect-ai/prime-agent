@@ -544,8 +544,8 @@ mod tests {
                 color: ThemeColor::Success
             }]
         );
-        // An unterminated quote runs to the end of the line; a flag inside a quoted path is no
-        // flag; a delimiter (`=`, a quote) starts an `@` token too.
+        // An unterminated quote runs to the end of the line; a single-quoted path is one token
+        // too, a flag inside it no flag; `=` starts an `@` token too.
         assert_eq!(
             find_arg_tokens(r#"a @"open b"#, 0, false),
             vec![ArgTokenSpan {
@@ -555,7 +555,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            find_arg_tokens(r#"a @"my --file" b"#, 0, false),
+            find_arg_tokens("a @'my --file' b", 0, false),
             vec![ArgTokenSpan {
                 start: 2,
                 end: 14,
@@ -570,7 +570,8 @@ mod tests {
                 color: ThemeColor::Success
             }]
         );
-        // A backslash is a plain path char.
+        // A backslash escape can carry a non-space char; the token stops at the first whitespace
+        // either way.
         assert_eq!(
             find_arg_tokens(r"a @pa\th b", 0, false),
             vec![ArgTokenSpan {
