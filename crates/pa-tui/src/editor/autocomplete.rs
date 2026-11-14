@@ -130,7 +130,7 @@ impl Editor {
     fn cursor_ends_symbol_token(&self) -> bool {
         let before = char_prefix(&self.lines[self.cursor_line], self.cursor_col);
         ends_with_symbol_token(&before)
-            || crate::autocomplete::extract_at_prefix(&before.chars().collect::<Vec<_>>()).is_some()
+            || crate::path_token::at_token_before(&before.chars().collect::<Vec<_>>()).is_some()
             || self.emoji_query().is_some()
     }
 

@@ -690,7 +690,8 @@ mod query_tests {
         let base = Path::new("base");
         let cancel = AtomicBool::new(false);
         let mut answer = None;
-        resolve_search(base, "@", &cancel, |search, scope| {
+        let token = crate::path_token::at_token_before(&['@']).expect("token");
+        resolve_search(base, &token, &cancel, |search, scope| {
             answer = Some(index.query(base, scope, search));
             None
         });
