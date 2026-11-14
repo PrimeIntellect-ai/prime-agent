@@ -3,79 +3,61 @@ use std::sync::{Arc, LazyLock};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 
-// The OS trust store, loaded once per process: reqwest reloads it on every
-// `ClientBuilder::build`, which pays 75-85 ms per client on macOS. Keep only
-// the roots `RootCertStore::add` accepts (reqwest's skip-invalid rule), so
-// `add_root_certificate` below cannot fail the build on a real store's
-// ancient certificates.
-static NATIVE_CERTS: LazyLock<Vec<CertificateDer<'static>>> = LazyLock::new(|| {
+// The one TLS client configuration every HTTP and WebSocket client shares,
+// built once per process (loading the OS trust store costs 75-85 ms on
+// macOS). Trust set: the OS store (roots `RootCertStore` rejects are
+// skipped), NODE_EXTRA_CA_CERTS, and the webpki roots. The ring provider is
+// passed explicitly, so no process-default provider is ever installed.
+static CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     let mut roots = rustls::RootCertStore::empty();
-    let mut certs = Vec::new();
-    for cert in rustls_native_certs::load_native_certs().certs {
-        if roots.add(cert.clone()).is_ok() {
-            certs.push(cert);
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS") {
+        let mut loaded = 0;
+        let result = (|| -> anyhow::Result<()> {
+            for cert in CertificateDer::pem_file_iter(&path)? {
+                roots.add(cert?)?;
+                loaded += 1;
+            }
+            anyhow::ensure!(loaded > 0, "empty CA bundle");
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "NODE_EXTRA_CA_CERTS could not be fully loaded; keeping certificates loaded before the error"
+            );
         }
+        // Node keeps the valid prefix and stops at the first PEM or DER error.
     }
-    certs
-});
-
-static EXTRA_CERTS: LazyLock<Vec<CertificateDer<'static>>> = LazyLock::new(|| {
-    let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS") else {
-        return Vec::new();
-    };
-    let mut certs = Vec::new();
-    let loaded = (|| -> anyhow::Result<()> {
-        let mut roots = rustls::RootCertStore::empty();
-        for cert in CertificateDer::pem_file_iter(&path)? {
-            let cert = cert?;
-            roots.add(cert.clone())?;
-            certs.push(cert);
-        }
-        anyhow::ensure!(!certs.is_empty(), "empty CA bundle");
-        Ok(())
-    })();
-    if let Err(error) = loaded {
-        tracing::warn!(
-            path = %path.display(),
-            error = %error,
-            "NODE_EXTRA_CA_CERTS could not be fully loaded; keeping certificates loaded before the error"
-        );
-    }
-    // Node keeps the valid prefix and stops at the first PEM or DER error.
-    certs
-});
-
-/// # Panics
-///
-/// Never: every certificate below is a DER blob the root-store filter or
-/// the PEM parser already accepted.
-pub fn http_client_builder() -> reqwest::ClientBuilder {
-    let mut builder = reqwest::Client::builder().tls_built_in_native_certs(false);
-    for cert in &*NATIVE_CERTS {
-        builder = builder.add_root_certificate(
-            reqwest::Certificate::from_der(cert).expect("native CA certificate"),
-        );
-    }
-    for cert in &*EXTRA_CERTS {
-        builder = builder.add_root_certificate(
-            reqwest::Certificate::from_der(cert).expect("extra CA certificate"),
-        );
-    }
-    builder
-}
-
-static WS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add_parsable_certificates(NATIVE_CERTS.iter().cloned());
-    roots.add_parsable_certificates(EXTRA_CERTS.iter().cloned());
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
     )
 });
 
+/// A copy of the shared TLS configuration with `alpn` offered. reqwest uses a
+/// preconfigured configuration as-is, so the caller picks the protocols its
+/// client speaks.
+pub(crate) fn tls_config(alpn: &[&[u8]]) -> rustls::ClientConfig {
+    let mut config = rustls::ClientConfig::clone(&CLIENT_CONFIG);
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+    config
+}
+
+/// A reqwest builder on the shared TLS configuration, offering HTTP/2 and
+/// HTTP/1.1 over ALPN (reqwest's default for its own TLS).
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().tls_backend_preconfigured(tls_config(&[b"h2", b"http/1.1"]))
+}
+
+/// The Codex WebSocket connector: the shared configuration, no ALPN.
 pub(crate) fn websocket_connector() -> tokio_tungstenite::Connector {
-    tokio_tungstenite::Connector::Rustls(Arc::clone(&WS_CONFIG))
+    tokio_tungstenite::Connector::Rustls(Arc::clone(&CLIENT_CONFIG))
 }
