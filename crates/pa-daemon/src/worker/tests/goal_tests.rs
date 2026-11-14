@@ -327,10 +327,8 @@ async fn goal_pause_withdraws_the_queued_continuation() {
         telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
-            "responses": [
-                "start turn",
-                "one continuation turn at most",
-            ],
+            "responses": ["start turn", "continuation turn"],
+            "repeatLastResponse": true,
         })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
@@ -351,22 +349,78 @@ async fn goal_pause_withdraws_the_queued_continuation() {
         )
         .await;
     assert!(start.success, "the goal start failed: {start:?}");
+    // Holding queued input lets the running goal turn settle and mint its
+    // continuation, which then stays queued.
+    let input_pause = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({
+                "activeSessionId": "goal-pause-session",
+                "leaseKey": "goal-pause",
+                "clientId": "test",
+            }),
+        )
+        .await;
+    assert!(
+        input_pause.success,
+        "the input pause failed: {input_pause:?}"
+    );
+    let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+    assert!(idle.success, "the held loop never parked: {idle:?}");
+    let queued_continuations = worker
+        .core
+        .lock()
+        .unwrap()
+        .follow_up
+        .iter()
+        .filter(|item| crate::worker::is_goal_context_item(item))
+        .count();
+    assert_eq!(queued_continuations, 1, "one continuation is queued");
+    let assistant_rows = || async {
+        let messages = worker.dispatch("get_messages", &json!({})).await;
+        messages
+            .data
+            .as_ref()
+            .and_then(|data| data.get("messages"))
+            .and_then(Value::as_array)
+            .map_or(0, |messages| {
+                messages
+                    .iter()
+                    .filter(|message| crate::types::message_role(message) == Some("assistant"))
+                    .count()
+            })
+    };
+    let assistant_rows_before = assistant_rows().await;
+    // The pause takes the steering lane ahead of the queued continuation.
     let pause = worker
         .dispatch(
-            "prompt_and_wait",
+            "prompt",
             &json!({ "activeSessionId": "goal-pause-session", "message": "/goal pause" }),
         )
         .await;
-    assert!(pause.success, "the pause never ran: {pause:?}");
-    // The loop is quiet: the idle wait settles without consuming
-    // further turns (a live continuation would starve it).
+    assert!(pause.success, "the pause was not admitted: {pause:?}");
+    let released = worker
+        .dispatch(
+            "release_session_input_pause",
+            &json!({
+                "activeSessionId": "goal-pause-session",
+                "pauseId": input_pause.data.as_ref().unwrap()["pauseId"],
+                "clientId": "test",
+            }),
+        )
+        .await;
+    assert!(
+        released.success,
+        "the input pause release failed: {released:?}"
+    );
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "the loop never went quiet: {idle:?}");
     let goal = worker.engine.goal_state_value();
     assert_eq!(goal["status"], "paused", "goal state: {goal}");
-    assert!(
-        goal["continuationsUsed"].as_u64().unwrap_or(0) <= 2,
-        "the pause never withdrew the loop: {goal}"
+    assert_eq!(
+        assistant_rows().await,
+        assistant_rows_before,
+        "no continuation turn ran after the pause"
     );
 }
 
