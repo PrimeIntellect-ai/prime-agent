@@ -1670,20 +1670,26 @@ mod tests {
         agent.steer(AgentMessage::user("queued steer"));
 
         // The tokio mutex hands the lock to waiters in arrival order, so holding it
-        // fixes the interleaving: continue_run parks first, the prompt parks behind it.
+        // fixes the interleaving: continue_run parks first, the racing claim parks
+        // behind it while holding run admission.
         let shared = agent.inner.shared.lock().await;
         let mut continuing = std::pin::pin!(agent.continue_run());
         assert!(poll_once(continuing.as_mut()).is_pending());
-        let mut prompting = std::pin::pin!(agent.prompt(AgentPromptInput::text("racing prompt")));
-        assert!(poll_once(prompting.as_mut()).is_pending());
+        let mut claiming = std::pin::pin!(agent.inner.claim_run());
+        assert!(poll_once(claiming.as_mut()).is_pending());
         drop(shared);
 
-        // continue_run passes its entry check, then the prompt claims the run slot.
+        // continue_run passes its entry check and parks on admission; the racing
+        // claim then takes the run slot.
         assert!(poll_once(continuing.as_mut()).is_pending());
-        assert!(poll_once(prompting.as_mut()).is_pending());
-        assert!(agent.inner.run.lock().unwrap().is_some());
+        let std::task::Poll::Ready(Ok(_claim)) = poll_once(claiming.as_mut()) else {
+            panic!("the racing claim takes the free run slot");
+        };
 
-        assert!(continuing.await.is_err(), "the prompt owns the run slot");
+        assert!(
+            continuing.await.is_err(),
+            "the racing claim owns the run slot"
+        );
         assert!(
             agent.has_queued_messages(),
             "a continue_run that loses the run slot must leave the queued steer queued"
