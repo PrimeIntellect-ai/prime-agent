@@ -1,6 +1,7 @@
 //! RLM child admission vs worker replacement: concurrent spawns stay
-//! admitted, a child replaced between admission and its task prompt still
-//! receives the prompt exactly once, and no admitted child is torn down.
+//! admitted, a child whose worker is replaced after admission still
+//! receives its task prompt exactly once and keeps its answer, and no
+//! admitted child is torn down.
 // Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
 // Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
@@ -329,8 +330,10 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         );
     }
 
-    // The replacement: kill kid-a's worker between its admission and its
-    // task prompt (the detached prompt fires at the turn boundary, below).
+    // The replacement: kill kid-a's worker after its admission. No parent
+    // turn is running, so the detached task prompt fires at spawn and the
+    // kill can land before the prompt, during the turn, or after the answer;
+    // every order must keep the prompt and the answer.
     let kid_a_worker_id = {
         let row = wait_until(Duration::from_mins(1), "kid-a roster row", || {
             roster_summaries(&mut client, "l1")

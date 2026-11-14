@@ -386,6 +386,28 @@ impl SupervisorChildSessionsInner {
             .map(str::to_string))
     }
 
+    /// The child's last assistant text: the live worker's answer, else the
+    /// durable session file's last assistant row (the worker is gone).
+    async fn last_assistant_text(
+        &self,
+        active_session_id: &str,
+        session_file: Option<String>,
+    ) -> Option<String> {
+        let live = self
+            .child_answer_raw(active_session_id)
+            .await
+            .ok()
+            .flatten();
+        if live.is_some() {
+            return live;
+        }
+        let path = session_file.filter(|path| !path.is_empty())?;
+        tokio::task::spawn_blocking(move || last_assistant_text_from_file(&path))
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// Best-effort bounded wait for one child and its descendants to go
     /// idle. The wait is a
     /// snapshot helper, not a gate: its timeout is not an error, and the
@@ -419,19 +441,15 @@ impl SupervisorChildSessionsInner {
                 return false;
             }
         }
-        let (active_session_id, direct_observation, recheck_idle, unsettled_session_file) = {
+        let (active_session_id, direct_observation, recheck_idle, session_file, running) = {
             let record = record.lock().await;
             (
                 record.active_session_id.clone(),
                 Arc::clone(&record.direct_observation),
                 !record.run.funnel_fired()
                     || matches!(record.run.verdict(), Some(RunVerdict::Cancelled(_))),
-                record
-                    .run
-                    .is_running()
-                    .then(|| record.session_file.clone())
-                    .flatten()
-                    .filter(|path| !path.is_empty()),
+                record.session_file.clone().filter(|path| !path.is_empty()),
+                record.run.is_running(),
             )
         };
         let state = {
@@ -474,19 +492,19 @@ impl SupervisorChildSessionsInner {
         // Capture the answer before taking the record lock (the capture is
         // a link round trip): one fetch yields the raw text both lanes
         // derive from — the compact preview for the roster rows and the
-        // full text for the collect envelope's binding lane.
+        // full text for the collect envelope's binding lane. A worker that
+        // left after the idle read (a crash, a passivation) answers from
+        // its durable file.
         let raw_answer = self
-            .child_answer_raw(&active_session_id)
-            .await
-            .ok()
-            .flatten();
+            .last_assistant_text(&active_session_id, session_file.clone())
+            .await;
         // How the run's final turn ended (#3366): a run whose last model
         // call failed (a provider error, after its retries if it had any)
         // settles `error` with that text instead of a `done` with no
         // answer. The worker persists every row before it reads idle,
         // so its durable file holds the final turn; the read stays off
         // the async workers.
-        let final_turn_error = match unsettled_session_file {
+        let final_turn_error = match session_file.filter(|_| running) {
             Some(path) => tokio::task::spawn_blocking(move || final_turn_error_from_file(&path))
                 .await
                 .ok()
@@ -792,24 +810,8 @@ impl SupervisorChildSessionsInner {
         };
         let exit_text = match live_or_file {
             Some((active_session_id, session_file)) => {
-                let live = self
-                    .child_answer_raw(&active_session_id)
+                self.last_assistant_text(&active_session_id, session_file)
                     .await
-                    .ok()
-                    .flatten();
-                if live.is_some() {
-                    live
-                } else {
-                    match session_file.filter(|path| !path.is_empty()) {
-                        Some(path) => tokio::task::spawn_blocking(move || {
-                            last_assistant_text_from_file(&path)
-                        })
-                        .await
-                        .ok()
-                        .flatten(),
-                        None => None,
-                    }
-                }
             }
             None => None,
         };
@@ -914,31 +916,17 @@ pub(super) fn should_mark_error(state: &ChildRecord) -> bool {
 /// capture's fallback when the worker is already gone): the file is the
 /// record a worker replacement replays from, so its last assistant row is
 /// the child's final say even after a crash. The newest non-empty text row
-/// wins; a file with no assistant rows (the prompt arm's never-started
-/// turn) answers nothing.
+/// wins, read with the live worker's text rule; a file with no assistant
+/// rows (the prompt arm's never-started turn) answers nothing.
 pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String> {
     let content = std::fs::read_to_string(session_file).ok()?;
-    for line in content.lines().rev() {
-        let Ok(pa_types::session::FileEntry::Message {
-            message: pa_types::session::AgentMessage::Assistant(assistant),
-            ..
-        }) = serde_json::from_str::<pa_types::session::FileEntry>(line.trim())
-        else {
-            continue;
-        };
-        let text = assistant
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect::<String>();
-        if !text.is_empty() {
-            return Some(text);
-        }
-    }
-    None
+    content.lines().rev().find_map(|line| {
+        let row: Value = serde_json::from_str(line.trim()).ok()?;
+        let message = row.get("message").filter(|_| row["type"] == "message")?;
+        (crate::types::message_role(message) == Some("assistant"))
+            .then(|| crate::types::message_text(message))
+            .filter(|text| !text.is_empty())
+    })
 }
 
 /// The error a child's final turn ended in, read from its durable session
@@ -1090,12 +1078,14 @@ pub(super) mod exit_capture_tests {
             uuid::Uuid::new_v4().simple()
         ));
         let user_row = r#"{"type":"message","role":"user","content":"the task"}"#;
+        // String content (the scripted engine's row shape) reads like blocks.
+        let string_row =
+            r#"{"type":"message","message":{"role":"assistant","content":"the final say"}}"#;
         std::fs::write(
             &file,
             format!(
-                "{user_row}\n{}\n{}\n",
+                "{user_row}\n{}\n{string_row}\n",
                 assistant_row("an earlier turn's say"),
-                assistant_row("the final say")
             ),
         )
         .expect("write the session file");

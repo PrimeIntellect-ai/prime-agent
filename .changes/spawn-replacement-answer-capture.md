@@ -1,0 +1,1 @@
+- Fixed an RLM child losing its final answer when its worker crashed right after the answer: `rlm.list_subagents` and the parent's completion notice now show the answer.
