@@ -1,0 +1,1 @@
+- Accepting a slash-command argument suggestion (e.g. `/tier de ` → `default`) now replaces the typed argument instead of appending to it (`/tier de default`).
