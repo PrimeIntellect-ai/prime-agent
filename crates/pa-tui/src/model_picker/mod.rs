@@ -70,6 +70,9 @@ pub struct ModelPickerOptions {
     pub thinking_level: Option<ModelThinkingLevel>,
     /// The viewport height the list sizes itself against (already the `getRows` value).
     pub viewport_rows: usize,
+    /// The daemon's one-line credential notice (`credentialNotice`: a rejected key, its source
+    /// and the fix), shown above the search field.
+    pub credential_notice: Option<String>,
 }
 
 mod scope;
@@ -100,6 +103,7 @@ pub struct ModelPicker {
     all_models: Vec<Model>,
     current: Option<CurrentModel>,
     configured_providers: HashSet<String>,
+    credential_notice: Option<String>,
     recent_rank: HashMap<String, usize>,
     /// The effort a fresh selection starts from; `None` resolves to "off" per model.
     initial_thinking_level: Option<ModelThinkingLevel>,
@@ -137,6 +141,7 @@ impl ModelPicker {
             all_models: Vec::new(),
             current: options.current,
             configured_providers: options.configured_providers,
+            credential_notice: options.credential_notice,
             recent_rank: options
                 .recent_models
                 .iter()
@@ -177,6 +182,10 @@ impl ModelPicker {
         self.search.value()
     }
 
+    pub(crate) fn credential_notice(&self) -> Option<&str> {
+        self.credential_notice.as_deref()
+    }
+
     /// Replace the catalog snapshot (the daemon refresh landing): re-sort, re-filter with the live
     /// query, and keep the selection on the same model when it survived the refresh.
     pub fn update_state(
@@ -184,9 +193,11 @@ impl ModelPicker {
         current: Option<CurrentModel>,
         models: Vec<Model>,
         configured_providers: HashSet<String>,
+        credential_notice: Option<String>,
     ) {
         self.current = current;
         self.configured_providers = configured_providers;
+        self.credential_notice = credential_notice;
         let selected_key = self
             .selected_model()
             .map(|model| Self::model_key_provider(&model.provider, &model.id));

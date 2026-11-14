@@ -210,10 +210,55 @@ pub fn switchable_stream_fn_with_live_auth(
                     service_tier,
                     headers,
                 } = target_value;
-                stream_once(&model, api_key, service_tier, headers, context, options)
+                let stream = stream_once(&model, api_key, service_tier, headers, context, options)?;
+                Ok(match resolved.source_token {
+                    Some(token) if model.provider == pa_types::ai::PRIME_INFERENCE_PROVIDER_ID => {
+                        Box::new(PrimeInferenceCredentialStream {
+                            inner: stream,
+                            token,
+                        }) as Box<dyn ModelStream>
+                    }
+                    Some(_) | None => stream,
+                })
             })
         },
     )
+}
+
+/// A Prime Inference stream sent with one resolved credential: a 401/403 reply marks exactly that
+/// credential stale for this process and names it (the source and the fix) in the turn's error.
+struct PrimeInferenceCredentialStream {
+    inner: Box<dyn ModelStream>,
+    token: crate::auth::AuthSourceToken,
+}
+
+impl ModelStream for PrimeInferenceCredentialStream {
+    fn next_event(
+        &mut self,
+    ) -> pa_agent::BoxFut<'_, Option<pa_agent::stream::AssistantMessageEvent>> {
+        self.inner.next_event()
+    }
+
+    fn result(
+        &mut self,
+    ) -> pa_agent::BoxFut<'_, anyhow::Result<pa_agent::types::AssistantMessage>> {
+        Box::pin(async move {
+            let mut message = self.inner.result().await?;
+            if matches!(
+                super::provider_retry::provider_stream_failure_status(&message),
+                Some(401 | 403)
+            ) {
+                message.error_message =
+                    Some(crate::auth::prime_inference_rejection_message(&self.token));
+                crate::auth::mark_auth_source_stale(self.token.clone());
+            }
+            Ok(message)
+        })
+    }
+
+    fn close(&mut self) {
+        self.inner.close();
+    }
 }
 
 /// Stream one completion against `model` with `api_key` and the auth-resolved
@@ -533,6 +578,83 @@ mod tests {
         registration.unregister();
     }
 
+    /// A Prime Inference 401 marks exactly the credential the call sent stale (process-wide), and
+    /// the turn's error names that credential instead of the raw status line.
+    #[tokio::test]
+    async fn a_prime_inference_401_marks_the_sent_credential_and_names_it() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("pi-credential-rejection-test".to_owned()),
+                provider: Some(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID.to_owned()),
+                ..Default::default()
+            });
+        let mut rejected = pa_ai::faux::faux_assistant_text_message(
+            "",
+            pa_ai::faux::FauxAssistantMessageOptions {
+                stop_reason: Some(pa_types::ai::StopReason::Error),
+                error_message: Some("401 status code (no body)".to_string()),
+                ..Default::default()
+            },
+        );
+        pa_ai::utils::stream_failure::record_stream_failure(
+            (
+                pa_types::ai::PRIME_INFERENCE_PROVIDER_ID,
+                "faux",
+                "pi-credential-rejection-test",
+            ),
+            &mut rejected,
+            &pa_ai::ProviderError::from_http_status_body(401, "", std::collections::HashMap::new()),
+        );
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(rejected)]);
+        // A key no other test uses: stale marks are process-wide.
+        let data = crate::auth::AuthStorageData(
+            serde_json::json!({
+                "prime-inference": { "type": "api_key", "key": "sk-adapter-rejected-login" }
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
+        let stored = || {
+            crate::auth::AuthStorage::in_memory_without_env(&data, Arc::new(crate::auth::NoOAuth))
+        };
+        let token = stored()
+            .get_api_key_with_source_token(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID, false)
+            .source_token
+            .expect("the stored login's source token");
+        let served = token.clone();
+        let live_auth: LiveAuthResolver = Arc::new(move |_: &Model| ResolvedRequestAuth {
+            ok: true,
+            api_key: Some("sk-adapter-rejected-login".to_string()),
+            source_token: Some(served.clone()),
+            ..Default::default()
+        });
+        let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+            api_key: None,
+            model: registration.get_model(),
+            service_tier: None,
+            headers: None,
+        })));
+        let stream_fn = switchable_stream_fn_with_live_auth(target, live_auth);
+        let mut stream = stream_fn(
+            AgentModel::unknown(),
+            LlmContext::default(),
+            StreamRequestOptions::default(),
+        )
+        .await
+        .expect("the call streams");
+        let message = stream.result().await.expect("the failed reply");
+        assert_eq!(
+            message.error_message,
+            Some(crate::auth::prime_inference_rejection_message(&token))
+        );
+        assert_eq!(
+            stored().rejected_credential(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID),
+            Some(token)
+        );
+        registration.unregister();
+    }
+
     #[tokio::test]
     async fn a_panicking_live_auth_resolution_fails_only_its_call() {
         let registration =
@@ -645,6 +767,7 @@ mod tests {
                         headers: None,
                         error: None,
                         request_model: None,
+                        source_token: None,
                     },
                     ResolvedRequestAuth {
                         ok: true,
@@ -655,6 +778,7 @@ mod tests {
                         )])),
                         error: None,
                         request_model: None,
+                        source_token: None,
                     },
                     ResolvedRequestAuth {
                         ok: true,
@@ -662,6 +786,7 @@ mod tests {
                         headers: None,
                         error: None,
                         request_model: None,
+                        source_token: None,
                     },
                     ResolvedRequestAuth {
                         ok: true,
@@ -669,6 +794,7 @@ mod tests {
                         headers: None,
                         error: None,
                         request_model: None,
+                        source_token: None,
                     },
                 ],
             )));
@@ -731,6 +857,7 @@ mod tests {
             headers: None,
             error: Some("No API key found for \"battery\"".to_string()),
             request_model: None,
+            source_token: None,
         });
         let Err(error) = stream_fn(
             AgentModel::unknown(),
@@ -827,6 +954,7 @@ mod tests {
                         headers: None,
                         error: None,
                         request_model: Some(adapted_model.clone()),
+                        source_token: None,
                     },
                     ResolvedRequestAuth {
                         ok: true,
@@ -834,6 +962,7 @@ mod tests {
                         headers: None,
                         error: None,
                         request_model: None,
+                        source_token: None,
                     },
                     // A logged-out xAI store resolves no live credential
                     // WITH an API-key-shaped request model (the registry
@@ -847,6 +976,7 @@ mod tests {
                         headers: None,
                         error: None,
                         request_model: Some(adapted_model.clone()),
+                        source_token: None,
                     },
                 ],
             )));
@@ -1113,6 +1243,7 @@ mod tests {
                     headers: None,
                     error: None,
                     request_model: None,
+                    source_token: None,
                 }
             });
             let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {

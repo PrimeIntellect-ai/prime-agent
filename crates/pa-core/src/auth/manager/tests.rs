@@ -74,6 +74,33 @@ fn stale_marking_skips_source_and_clears() {
     );
 }
 
+/// A stale mark is process-wide: a later `AuthStorage` (production builds one per lookup) skips
+/// the rejected env key and serves the valid stored login without any user action.
+#[test]
+fn a_rejected_env_key_stays_skipped_and_the_stored_login_serves() {
+    let data = serde_json::json!({
+        "prime-inference": { "type": "api_key", "key": "sk-stored-serves-after-env-rejection" }
+    });
+    let env = || {
+        ScriptedEnv(HashMap::from([(
+            "PRIME_API_KEY".to_string(),
+            "sk-env-rejected-across-instances".to_string(),
+        )]))
+    };
+    let mut rejected = storage_with_env(&data, env());
+    let served = rejected.get_api_key_with_source_token(PRIME_INFERENCE_PROVIDER_ID, false);
+    assert_eq!(
+        served.api_key.as_deref(),
+        Some("sk-env-rejected-across-instances")
+    );
+    mark_auth_source_stale(served.source_token.expect("the env key's source token"));
+    let mut fresh = storage_with_env(&data, env());
+    assert_eq!(
+        fresh.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+        Some("sk-stored-serves-after-env-rejection")
+    );
+}
+
 #[test]
 fn candidate_memos_supersede_exactly_when_material_changes() {
     // The memo is keyed by the hashed material: a changed env value re-resolves to
@@ -180,20 +207,28 @@ fn a_command_keys_status_probe_never_runs_the_command() {
     ));
     let _ = std::fs::remove_file(&counter);
     let key = format!("!echo run >> {} ; echo cmd-key", counter.display());
+    // A provider no test marks stale: any mark on the stored source makes a
+    // command key resolve uncached, and stale marks are process-wide.
     let mut auth = storage_with(&serde_json::json!({
-        "anthropic": { "type": "api_key", "key": key }
+        "command-probe": { "type": "api_key", "key": key }
     }));
     let runs = || std::fs::read_to_string(&counter).map_or(0, |text| text.lines().count());
-    let status = auth.get_auth_status("anthropic");
+    let status = auth.get_auth_status("command-probe");
     assert_eq!(status.source, Some(AuthSource::Stored));
     assert_eq!(
         runs(),
         0,
         "building the candidates for a status probe never runs the command"
     );
-    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(
+        auth.get_api_key("command-probe").as_deref(),
+        Some("cmd-key")
+    );
     assert_eq!(runs(), 1, "the serving lookup resolves the command once");
-    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(
+        auth.get_api_key("command-probe").as_deref(),
+        Some("cmd-key")
+    );
     assert_eq!(
         runs(),
         1,

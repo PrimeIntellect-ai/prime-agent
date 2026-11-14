@@ -357,6 +357,14 @@ pub fn format_rlm_model_unavailable_error(
     format!("{base}; {hint}; close matches: {}", quoted.join(", "))
 }
 
+/// Rejection message for a model whose provider credential the server
+/// rejected: the credential sentence (source and fix) replaces the generic
+/// unavailability.
+#[must_use]
+pub fn format_rlm_model_rejected_error(reference: &str, target: &str, rejection: &str) -> String {
+    format!("Requested {target} model \"{reference}\" is unavailable: {rejection}")
+}
+
 /// Parse the `kwargs` object of a kernel host request. Missing -> empty.
 pub fn kwargs_from_payload(payload: &Value) -> serde_json::Map<String, Value> {
     payload

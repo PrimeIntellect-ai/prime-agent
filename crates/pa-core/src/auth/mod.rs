@@ -9,13 +9,16 @@ pub(crate) mod resolve_config_value;
 pub(crate) mod storage;
 pub(crate) mod types;
 
-pub use manager::{AuthApiKeyResult, AuthStorage, NoOAuth, OAuthIntegration, OAuthRefreshFailure};
+pub use manager::{
+    mark_auth_source_stale, AuthApiKeyResult, AuthStorage, NoOAuth, OAuthIntegration,
+    OAuthRefreshFailure,
+};
 pub use prime_inference::{
     check_prime_inference_access, default_prime_cli_config_path, fetch_prime_teams,
-    read_prime_cli_config, resolve_prime_inference_auth_config, PrimeAccessError,
-    PrimeAccessFailure, PrimeCliConfig, PrimeHttp, PrimeHttpResponse, PrimeInferenceAuthConfig,
-    ReqwestPrimeHttp, DEFAULT_PRIME_API_BASE_URL, DEFAULT_PRIME_FRONTEND_URL,
-    DEFAULT_REQUEST_TIMEOUT_MS,
+    prime_inference_rejection_message, read_prime_cli_config, resolve_prime_inference_auth_config,
+    PrimeAccessError, PrimeAccessFailure, PrimeCliConfig, PrimeHttp, PrimeHttpResponse,
+    PrimeInferenceAuthConfig, ReqwestPrimeHttp, DEFAULT_PRIME_API_BASE_URL,
+    DEFAULT_PRIME_FRONTEND_URL, DEFAULT_REQUEST_TIMEOUT_MS,
 };
 pub use prime_inference_login::{
     login_prime_inference, PrimeInferenceLoginCallbacks, PrimeInferenceLoginOptions,

@@ -41,6 +41,28 @@ fn now_epoch_ms() -> i64 {
         .map_or(i64::MAX, |d| d.as_millis() as i64)
 }
 
+/// The process-wide stale marks, keyed by provider. Production builds a short-lived
+/// `AuthStorage` per lookup, so a mark must outlive the instance that recorded it; it lasts for
+/// the process (no cross-process sync).
+fn stale_auth_sources() -> std::sync::MutexGuard<'static, HashMap<String, Vec<AuthSourceToken>>> {
+    static MARKS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<AuthSourceToken>>>> =
+        std::sync::OnceLock::new();
+    MARKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Mark one credential value stale for this process (the server rejected it). A token is
+/// value-fingerprinted: a changed key is a different credential and is never stale.
+pub fn mark_auth_source_stale(token: AuthSourceToken) {
+    let mut marks = stale_auth_sources();
+    let stale = marks.entry(token.provider.clone()).or_default();
+    if !stale.contains(&token) {
+        stale.push(token);
+    }
+}
+
 /// Provider gate for the whole refresh, including credential commit and reload.
 fn refresh_flight_lock(provider: &str) -> &'static std::sync::Mutex<()> {
     static FLIGHTS: std::sync::OnceLock<
@@ -256,7 +278,6 @@ pub struct AuthStorage {
     env_credentials: Arc<dyn EnvCredentialSource>,
     data: AuthStorageData,
     runtime_overrides: HashMap<String, String>,
-    stale_auth_sources: HashMap<String, Vec<AuthSourceToken>>,
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
     /// The retained load/parse/persist diagnostics, bounded to the most
@@ -286,7 +307,6 @@ impl AuthStorage {
             env_credentials: Arc::new(ProcessEnvCredentials),
             data: AuthStorageData::default(),
             runtime_overrides: HashMap::new(),
-            stale_auth_sources: HashMap::new(),
             fallback_resolver: None,
             load_error: None,
             errors: Vec::new(),
@@ -358,7 +378,6 @@ impl AuthStorage {
             env_credentials,
             data: AuthStorageData::default(),
             runtime_overrides: HashMap::new(),
-            stale_auth_sources: HashMap::new(),
             fallback_resolver: None,
             load_error: None,
             errors: Vec::new(),
@@ -402,8 +421,8 @@ impl AuthStorage {
 
     /// Runtime API-key override (CLI `--api-key`); not persisted.
     pub fn set_runtime_api_key(&mut self, provider: &str, api_key: String) {
-        self.clear_stale_auth_source(provider, AuthSource::Runtime);
         self.runtime_overrides.insert(provider.to_string(), api_key);
+        self.clear_stale_auth_source(provider, AuthSource::Runtime);
     }
 
     pub fn remove_runtime_api_key(&mut self, provider: &str) {
@@ -653,12 +672,8 @@ impl AuthStorage {
         .collect()
     }
 
-    fn matching_stale(
-        &self,
-        provider: &str,
-        candidate: &AuthSourceCandidate,
-    ) -> Vec<&AuthSourceToken> {
-        self.stale_auth_sources
+    fn matching_stale(provider: &str, candidate: &AuthSourceCandidate) -> Vec<AuthSourceToken> {
+        stale_auth_sources()
             .get(provider)
             .map(|stale| {
                 stale
@@ -667,13 +682,14 @@ impl AuthStorage {
                         token.source == candidate.source
                             && token.identity_fingerprint == candidate.identity_fingerprint
                     })
+                    .cloned()
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    fn is_stale(&self, provider: &str, candidate: &AuthSourceCandidate) -> bool {
-        let matching = self.matching_stale(provider, candidate);
+    fn is_stale(provider: &str, candidate: &AuthSourceCandidate) -> bool {
+        let matching = Self::matching_stale(provider, candidate);
         if matching.is_empty() {
             return false;
         }
@@ -691,13 +707,14 @@ impl AuthStorage {
     ) -> Option<AuthSourceCandidate> {
         self.auth_source_candidates(provider, include_fallback)
             .into_iter()
-            .find(|candidate| !self.is_stale(provider, candidate))
+            .find(|candidate| !Self::is_stale(provider, candidate))
     }
 
     fn token_for(provider: &str, candidate: &AuthSourceCandidate) -> Option<AuthSourceToken> {
         Some(AuthSourceToken {
             provider: provider.to_string(),
             source: candidate.source,
+            label: candidate.label.clone(),
             identity_fingerprint: candidate.identity_fingerprint.clone(),
             value_fingerprint: candidate.resolved_value_fingerprint()?,
         })
@@ -721,7 +738,7 @@ impl AuthStorage {
         let candidates = self.auth_source_candidates(provider, true);
         let mut has_stale = false;
         for candidate in &candidates {
-            if self.is_stale(provider, candidate) {
+            if Self::is_stale(provider, candidate) {
                 has_stale = true;
                 continue;
             }
@@ -747,39 +764,78 @@ impl AuthStorage {
     }
 
     /// Mark the current credential stale (e.g. the server rejected it).
-    pub fn mark_auth_stale(&mut self, provider: &str) -> bool {
+    pub fn mark_auth_stale(&self, provider: &str) -> bool {
         let Some(candidate) = self.available_candidate(provider, true) else {
             return false;
         };
         let Some(token) = Self::token_for(provider, &candidate) else {
             return false;
         };
-        self.mark_auth_source_stale(token)
-    }
-
-    pub fn mark_auth_source_stale(&mut self, token: AuthSourceToken) -> bool {
-        if token.provider.is_empty() {
-            return false;
-        }
-        let stale = self
-            .stale_auth_sources
-            .entry(token.provider.clone())
-            .or_default();
-        if !stale.contains(&token) {
-            stale.push(token);
-        }
+        mark_auth_source_stale(token);
         true
     }
 
-    pub fn clear_auth_stale(&mut self, provider: &str) {
-        self.stale_auth_sources.remove(provider);
+    /// The credential the server rejected while no other credential serves: the first source in
+    /// resolution order (all of them are stale then). `None` while any credential serves.
+    pub fn rejected_credential(&self, provider: &str) -> Option<AuthSourceToken> {
+        if self.available_candidate(provider, true).is_some() {
+            return None;
+        }
+        let candidate = self
+            .auth_source_candidates(provider, true)
+            .into_iter()
+            .next()?;
+        Self::token_for(provider, &candidate)
     }
 
-    fn clear_stale_auth_source(&mut self, provider: &str, source: AuthSource) {
-        if let Some(stale) = self.stale_auth_sources.get_mut(provider) {
-            stale.retain(|token| token.source != source);
+    /// The key value [`Self::rejected_credential`] carried: the catalog renders the rejected
+    /// account's rows with it; it is never sent again.
+    pub fn rejected_api_key(&self, provider: &str) -> Option<String> {
+        match self.rejected_credential(provider)?.source {
+            AuthSource::Runtime => self.runtime_overrides.get(provider).cloned(),
+            AuthSource::Environment => self.env_credentials.api_key(provider),
+            AuthSource::Stored => match self.data.credential(provider)? {
+                AuthCredential::ApiKey { key, .. } => resolve_config_value(&key),
+                credential @ AuthCredential::Oauth { .. } => {
+                    self.oauth.api_key_for(provider, &credential)
+                }
+                AuthCredential::McpStaticToken { bearer, .. } => Some(bearer),
+            },
+            AuthSource::Fallback => self
+                .fallback_resolver
+                .as_ref()
+                .and_then(|resolver| resolver(provider)),
+            AuthSource::PrimeCli
+            | AuthSource::ModelsJsonKey
+            | AuthSource::ModelsJsonCommand
+            | AuthSource::Stale => None,
+        }
+    }
+
+    /// Clear the marks of the credentials this store holds now; other values' marks belong to
+    /// other credentials and stay (the marks are process-wide).
+    pub fn clear_auth_stale(&mut self, provider: &str) {
+        self.clear_current_stale_marks(provider, |_| true);
+    }
+
+    /// Clear the mark of `source`'s current value (a write or override re-enables exactly the
+    /// value it set).
+    fn clear_stale_auth_source(&self, provider: &str, source: AuthSource) {
+        self.clear_current_stale_marks(provider, |candidate| candidate == source);
+    }
+
+    fn clear_current_stale_marks(&self, provider: &str, sources: impl Fn(AuthSource) -> bool) {
+        let current: Vec<AuthSourceToken> = self
+            .auth_source_candidates(provider, true)
+            .iter()
+            .filter(|candidate| sources(candidate.source))
+            .filter_map(|candidate| Self::token_for(provider, candidate))
+            .collect();
+        let mut marks = stale_auth_sources();
+        if let Some(stale) = marks.get_mut(provider) {
+            stale.retain(|token| !current.contains(token));
             if stale.is_empty() {
-                self.stale_auth_sources.remove(provider);
+                marks.remove(provider);
             }
         }
     }
@@ -834,9 +890,16 @@ impl AuthStorage {
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .or_else(|| {
-                // The stored primeTeam rides only with the stored key: a
-                // runtime or environment key never borrows the login's team.
-                if self.get_auth_status(provider_id).source != Some(AuthSource::Stored) {
+                // The stored primeTeam rides only with the stored key (the
+                // serving one, or the rejected one the catalog still renders):
+                // a runtime or environment key never borrows the login's team.
+                let stored_key = match self.available_candidate(provider_id, true) {
+                    Some(candidate) => candidate.source == AuthSource::Stored,
+                    None => self
+                        .rejected_credential(provider_id)
+                        .is_some_and(|token| token.source == AuthSource::Stored),
+                };
+                if !stored_key {
                     return None;
                 }
                 match self.data.credential(provider_id) {

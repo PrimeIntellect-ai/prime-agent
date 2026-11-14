@@ -263,6 +263,13 @@ impl ModelCatalog {
             .await
     }
 
+    /// Whether the latest credentialed Prime Inference fetch with `credentials` was refused (HTTP
+    /// 401/403). The caller that resolved the credential decides what the rejection means.
+    #[must_use]
+    pub fn prime_inference_rejected(&self, credentials: &PrimeCredentials) -> bool {
+        self.prime_inference.rejected(&credentials.as_inference())
+    }
+
     /// Awaited refresh of both catalog layers — the public provider catalog and, when `credentials`
     /// are given, the credentialed Prime Inference snapshot. Unlike
     /// [`ModelCatalog::trigger_refresh_with_credentials`] (fire-and-forget), `resolve` reflects the

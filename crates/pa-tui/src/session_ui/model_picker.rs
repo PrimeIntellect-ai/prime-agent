@@ -17,6 +17,8 @@ const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from
 pub(crate) struct ModelCatalogUpdate {
     pub models: Vec<pa_types::ai::Model>,
     pub configured_providers: std::collections::HashSet<String>,
+    /// The daemon's `credentialNotice` (a rejected key, its source and the fix).
+    pub credential_notice: Option<String>,
 }
 
 impl SessionUi {
@@ -70,6 +72,7 @@ impl SessionUi {
             thinking_level,
             scoped_models,
             viewport_rows: picker_viewport_rows(view.terminal_rows()),
+            credential_notice: self.model_credential_notice.clone(),
         };
         // Always open the menu (an empty catalog renders the empty panel).
         let crate::model_picker::ModelCommandOutcome::Open(picker) =
@@ -206,9 +209,14 @@ impl SessionUi {
                         .collect()
                 })
                 .unwrap_or_default();
+            let credential_notice = value
+                .get("credentialNotice")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let _ = updates.send(ModelCatalogUpdate {
                 models,
                 configured_providers,
+                credential_notice,
             });
         });
     }
@@ -227,6 +235,7 @@ impl SessionUi {
     pub(crate) fn apply_model_catalog(&mut self, update: ModelCatalogUpdate, view: &mut AgentView) {
         self.model_catalog = update.models;
         self.model_configured_providers = update.configured_providers;
+        self.model_credential_notice = update.credential_notice;
         self.models_fetched_at = Some(std::time::Instant::now());
         let current = self.current_model(view);
         if let Some(picker) = view.model_picker.as_mut() {
@@ -234,6 +243,7 @@ impl SessionUi {
                 current,
                 self.model_catalog.clone(),
                 self.model_configured_providers.clone(),
+                self.model_credential_notice.clone(),
             );
         }
         self.update_model_eligibility_filters(view);

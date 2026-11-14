@@ -175,6 +175,8 @@ pub(crate) struct SessionUi {
     /// fallback), replaced by the daemon's `get_model_catalog` response.
     model_catalog: Vec<pa_types::ai::Model>,
     model_configured_providers: std::collections::HashSet<String>,
+    /// The latest catalog's `credentialNotice`, shown in the picker.
+    model_credential_notice: Option<String>,
     /// The settings recent-model list (`provider/id` keys, newest first).
     model_recent_models: Vec<String>,
     default_thinking_level: Option<String>,

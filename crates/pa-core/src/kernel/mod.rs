@@ -25,9 +25,10 @@ pub use manager::ReplKernelManager;
 pub use provisioner::IpythonKernelProvisioner;
 pub use rlm_runtime::{
     create_default_rlm_subagent_session_name, find_rlm_model_matches,
-    find_unique_rlm_short_form_model_match, format_rlm_model_unavailable_error,
-    normalize_requested_rlm_subagent_model, normalize_requested_rlm_subagent_session_name,
-    normalize_requested_rlm_subagent_thinking_level, RlmModelInfo, RlmModelMatch, THINKING_LEVELS,
+    find_unique_rlm_short_form_model_match, format_rlm_model_rejected_error,
+    format_rlm_model_unavailable_error, normalize_requested_rlm_subagent_model,
+    normalize_requested_rlm_subagent_session_name, normalize_requested_rlm_subagent_thinking_level,
+    RlmModelInfo, RlmModelMatch, THINKING_LEVELS,
 };
 pub use shared::{
     HostRequestHandler, HostRequestHandlers, HostRequestPayload, KernelDiffDisplay,

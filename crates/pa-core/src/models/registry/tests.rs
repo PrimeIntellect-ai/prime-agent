@@ -72,8 +72,9 @@ fn rlm_searchable_models_gate_one_stale_provider_across_its_models() {
     // The per-provider status memo must answer every model of a provider
     // with the same probe result: a stale provider's whole model list stays
     // gated while a second authed provider keeps its models searchable.
-    let mut auth = auth_without_env(&serde_json::json!({
-        "anthropic": { "type": "api_key", "key": "sk-ant" },
+    // A key no other test uses: stale marks are process-wide.
+    let auth = auth_without_env(&serde_json::json!({
+        "anthropic": { "type": "api_key", "key": "sk-ant-stale-gate" },
         "openai": { "type": "api_key", "key": "sk-oai" }
     }));
     assert!(auth.mark_auth_stale("anthropic"));
