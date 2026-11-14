@@ -184,12 +184,13 @@ fn scan(line: &[char], start: usize) -> PathToken {
         while let Some(&c) = line.get(index).filter(|c| !is_delimiter(**c, at)) {
             index += 1;
             if at && ESCAPES && c == '\\' {
+                quoting = Quoting::Escaped;
+                // A trailing backslash escapes the char typed next; it is no path char yet.
                 if let Some(&escaped) = line.get(index).filter(|next| **next != '\n') {
                     index += 1;
                     path.push(escaped);
-                    quoting = Quoting::Escaped;
-                    continue;
                 }
+                continue;
             }
             path.push(c);
         }
@@ -271,6 +272,12 @@ mod tests {
         );
         assert_eq!(at_token_before(&chars("@'a b'")), None);
         assert_eq!(at_token_before(&chars("@a ")), None);
+        if ESCAPES {
+            assert_eq!(
+                at_token_before(&chars(r"@my\")).map(|t| t.path),
+                Some("my".to_string())
+            );
+        }
     }
 
     #[test]
