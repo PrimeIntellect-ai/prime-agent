@@ -192,11 +192,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The panel consumes Ctrl+C (cancel the mounted input, not the app);
-        // report it so the force-quit guard stays in sync.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let kb = view.editor.keybindings();
         if let Some(Overlay::AuthPanel(panel)) = view.overlay.as_mut() {
             panel.handle_key(&id, kb, &mut self.osc_sink);
@@ -417,11 +412,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The view consumes Ctrl+C (close, not exit); report it so the force-quit
-        // guard can disarm.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let action = match view.overlay.as_mut() {
             Some(Overlay::Mcp(mcp_view)) => {
                 Some(mcp_view.handle_key(&id, view.editor.keybindings()))

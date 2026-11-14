@@ -1,0 +1,43 @@
+name: Install cargo-about
+description: Put the pinned cargo-about release on PATH (assemble_artifacts.py renders the third-party notices with it).
+runs:
+  using: composite
+  steps:
+    - name: Download and verify cargo-about
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=0.9.3
+        install_dir="${RUNNER_TEMP}/cargo-about-${version}"
+        path_entry="${install_dir}"
+        hash_check="sha256sum --check --strict"
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64)
+            asset=x86_64-unknown-linux-musl
+            sha256=3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4 ;;
+          Linux-aarch64)
+            asset=aarch64-unknown-linux-musl
+            sha256=eb4d9ff6ebd2518152a8308729431a04b3836e71d2bd5ead7aea69f91a71162e ;;
+          Darwin-arm64)
+            asset=aarch64-apple-darwin
+            sha256=45520df8680978a6e7c4023ace0e3f311c73efc208cd68e5a7f4ed4822fa0349
+            hash_check="shasum -a 256 --check --strict" ;;
+          MINGW*-x86_64)
+            asset=x86_64-pc-windows-msvc
+            sha256=9e2942533ef1c592c4a70bdb384cae1550a3f5fc9ae40379b6662e3d2f16fe02
+            # Git Bash's tar reads a drive-letter path as a remote host.
+            install_dir="$(cygpath -u "${install_dir}")"
+            path_entry="$(cygpath -w "${install_dir}")" ;;
+          *)
+            echo "::error::no pinned cargo-about build for $(uname -s)-$(uname -m)"
+            exit 1 ;;
+        esac
+        mkdir -p "${install_dir}"
+        archive="${install_dir}/cargo-about.tar.gz"
+        curl --fail --show-error --silent --location --retry 3 \
+          "https://github.com/EmbarkStudios/cargo-about/releases/download/${version}/cargo-about-${version}-${asset}.tar.gz" \
+          --output "${archive}"
+        echo "${sha256}  ${archive}" | ${hash_check}
+        tar -xzf "${archive}" --directory "${install_dir}" --strip-components=1
+        "${install_dir}/cargo-about" --version
+        echo "${path_entry}" >> "${GITHUB_PATH}"

@@ -1,1 +1,0 @@
-- `prime-agent send` now accepts `--steer` and `--follow-up`, as its help already listed: `--follow-up` queues the message until the agent's current turn ends, and `--steer` (still the default) delivers it as steering while the agent is busy.

@@ -1,15 +1,17 @@
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod support;
+
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{serve_connection, session_stats_response, write_json, Request};
 
 const HISTORY_MESSAGES: usize = 4;
 const HISTORY_LEAF_ID: &str = "attached-branch-leaf";
@@ -46,44 +48,18 @@ impl MockSupervisor {
 
     fn serve(mut self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
         let mut held_backfill: Option<String> = None;
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            match command_type {
+        serve_connection(stream, &[], |writer, Request { id, kind, command }| {
+            match kind {
                 "attach" => {
-                    write_json(&mut writer, &attach_response(id, self.windowed));
+                    write_json(writer, &attach_response(id, self.windowed));
                 }
                 "get_messages" => {
                     self.requests.lock().unwrap().push(command.clone());
                     if self.failures > 0 {
                         self.failures -= 1;
-                        write_json(&mut writer, &history_failure(id));
-                        continue;
+                        write_json(writer, &history_failure(id));
+                        return true;
                     }
                     if command["page"].get("before").is_some() {
                         if self.hold_backfill {
@@ -91,7 +67,7 @@ impl MockSupervisor {
                             // The frame is proof the server received this request;
                             // the headless plan cannot leave or reload before it.
                             write_json(
-                                &mut writer,
+                                writer,
                                 &json!({
                                     "type": "session_event", "activeSessionId": "s1",
                                     "event": {"type": "message_end", "message": {
@@ -99,41 +75,30 @@ impl MockSupervisor {
                                     }},
                                 }),
                             );
-                            continue;
+                            return true;
                         }
-                        write_json(&mut writer, &get_messages_response(id, &self));
-                        continue;
+                        write_json(writer, &get_messages_response(id, &self));
+                        return true;
                     }
                     if matches!(self.rebuild_response, RebuildResponse::Reject) {
-                        write_json(&mut writer, &history_failure(id));
-                        continue;
+                        write_json(writer, &history_failure(id));
+                        return true;
                     }
                     // A cursor-less page is a transcript rebuild. Release the
                     // obsolete response before it; the separate unit regression
                     // injects an already-queued note to verify the epoch fence.
                     if let Some(held) = held_backfill.take() {
-                        write_json(&mut writer, &get_messages_response(&held, &self));
+                        write_json(writer, &get_messages_response(&held, &self));
                     }
-                    write_json(&mut writer, &whole_head_response(id));
+                    write_json(writer, &whole_head_response(id));
                 }
                 "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &success_response(
-                            id,
-                            "get_session_stats",
-                            &json!({
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            }),
-                        ),
-                    );
+                    write_json(writer, &session_stats_response(id));
                 }
-                _ => {
-                    write_json(&mut writer, &success_response(id, command_type, &json!({})));
-                }
+                _ => return false,
             }
-        }
+            true
+        });
     }
 }
 
@@ -142,20 +107,6 @@ fn history_failure(id: &str) -> Value {
         "type": "response", "id": id, "command": "get_messages",
         "success": false, "error": "temporary history rejection",
     })
-}
-
-fn success_response(id: &str, command: &str, data: &Value) -> Value {
-    json!({
-        "type": "response", "id": id, "command": command,
-        "success": true, "data": data,
-    })
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 fn message(index: usize) -> Value {
@@ -271,39 +222,8 @@ fn entry_id(index: usize) -> String {
 
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
         session: SessionSelection::Attach("s1".to_string()),
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
+        ..support::options(socket)
     }
 }
 

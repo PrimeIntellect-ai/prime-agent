@@ -515,10 +515,8 @@ impl SessionUi {
             // update replaces only the on-disk binary, so the new build
             // takes effect on restart and nothing here blocks or tears
             // down; there is no busy guard to keep). The confirm carries
-            // the preserve invariant: the update uninstalls the
-            // TypeScript version and installs the latest Rust build;
-            // sessions and configuration (~/.prime/agent) are never
-            // touched.
+            // the preserve invariant: sessions and configuration
+            // (~/.prime/agent) are never touched.
             "update" => {
                 if !resolved.args.trim().is_empty() {
                     view.editor.set_text(text);
@@ -539,7 +537,7 @@ impl SessionUi {
                 view.overlay = Some(Overlay::Confirm {
                     panel: crate::confirm::ConfirmPanel::yes_no(
                         "Update Prime Agent",
-                        "Update uninstalls the TypeScript version and installs the latest Rust build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
+                        "Update installs the latest Prime Agent build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
                     ),
                     pending: PendingConfirm::Update,
                 });

@@ -127,8 +127,10 @@ mod tests {
     #[test]
     fn a_launcher_symlink_resolves_to_the_real_payload_dir() {
         let root = tempfile::tempdir().unwrap();
-        let libexec = root.path().join("libexec");
-        let bin = root.path().join("bin");
+        // exe_dir_of returns a canonical path; macOS temp dirs sit behind the /var symlink.
+        let root_path = root.path().canonicalize().unwrap();
+        let libexec = root_path.join("libexec");
+        let bin = root_path.join("bin");
         std::fs::create_dir_all(&libexec).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(libexec.join("prime-agent"), b"binary").unwrap();

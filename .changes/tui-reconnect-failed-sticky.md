@@ -1,0 +1,1 @@
+- Fixed submits staying blocked with "Daemon reconnection failed" after the TUI reconnected to the daemon.

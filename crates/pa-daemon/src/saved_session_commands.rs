@@ -1126,7 +1126,12 @@ mod tombstone_usage_tests {
     #[cfg(unix)]
     #[test]
     fn a_non_regular_session_path_captures_nothing() {
-        let root = temp_dir("fifo-del");
+        // A short canonical root: the socket path must fit SUN_LEN, and the
+        // capture reports the canonical path.
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("pa-fifo-del-{}", uuid::Uuid::new_v4()));
         let agent_dir = root.join("agent");
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();

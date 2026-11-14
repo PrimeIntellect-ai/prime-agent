@@ -129,11 +129,10 @@ impl RotatingLog {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        else {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        pa_core::platform::perms::set_private_mode(&mut options);
+        let Ok(mut file) = options.open(&self.path) else {
             return;
         };
         let payload = format!("{line}\n");
@@ -142,11 +141,7 @@ impl RotatingLog {
                 drop(file);
                 let rotated = self.path.with_extension("log.1");
                 let _ = std::fs::rename(&self.path, &rotated);
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)
-                {
+                match options.open(&self.path) {
                     Ok(reopened) => file = reopened,
                     Err(_) => return,
                 }

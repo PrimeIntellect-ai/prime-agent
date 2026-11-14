@@ -16,7 +16,9 @@
 //! the provisioner usable, so a settled child's kernel releases without ending the session. The
 //! kernel Python is ambient product state; skipped when absent.
 
-use std::os::unix::fs::PermissionsExt;
+mod script;
+
+use script::write_executable;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -395,16 +397,14 @@ fn counting_kernel(
     count: &std::path::Path,
 ) -> PathBuf {
     let wrapper = dir.join("counting-python");
-    std::fs::write(
+    write_executable(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf x >> '{}'\nexec '{}' \"$@\"\n",
             count.display(),
             python.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     wrapper
 }
 

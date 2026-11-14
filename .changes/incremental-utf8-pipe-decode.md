@@ -1,1 +1,0 @@
-- `!` command output and autonomous gate output no longer turn a multi-byte character split across two pipe reads into replacement characters, and gate output past the 1 MiB cap no longer panics when the cap lands inside a character.

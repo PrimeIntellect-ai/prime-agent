@@ -476,11 +476,17 @@ pub struct McpConnectionView {
 
 /// The `/mcp` view's api-key credential catalog: the non-provider keys the
 /// product stores in the shared auth store and offers alongside the MCP
-/// connections (the web-search key the websearch skill's runtime reads).
-pub const API_KEY_CREDENTIALS: &[(&str, &str)] = &[(
-    crate::auth::SERPER_CREDENTIAL_ID,
-    crate::auth::SERPER_CREDENTIAL_NAME,
-)];
+/// connections (the web-search keys the websearch skill's runtime reads).
+pub const API_KEY_CREDENTIALS: &[(&str, &str)] = &[
+    (
+        crate::auth::SERPER_CREDENTIAL_ID,
+        crate::auth::SERPER_CREDENTIAL_NAME,
+    ),
+    (
+        crate::auth::ECO_CREDENTIAL_ID,
+        crate::auth::ECO_CREDENTIAL_NAME,
+    ),
+];
 
 /// One row of the `/mcp` view's api-key credential section (the daemon's
 /// `get_mcp_connections` response): a stored key the surface manages. Enter

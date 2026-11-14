@@ -444,10 +444,10 @@ pub fn append_global_refinement(
     let history_path = get_refinement_history_path(harness_state_dir);
     let mut line = serde_json::to_string(result)?;
     line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&history_path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    crate::platform::perms::set_private_mode(&mut options);
+    let mut file = options.open(&history_path)?;
     file.write_all(line.as_bytes())?;
     Ok(history_path)
 }

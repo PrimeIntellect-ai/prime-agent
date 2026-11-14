@@ -1,0 +1,1 @@
+- Fixed an injected custom message without a timestamp failing the turn with "parse failed: missing field timestamp": a missing clock now fills from the serde default on the message type at parse, and a row that still fails to parse logs a redacted summary (its customType, top-level keys, and byte length) plus the requesting session's identity to the daemon log.

@@ -360,9 +360,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let action = match view.overlay.as_mut() {
             Some(Overlay::Bash(bash_view)) => {
                 Some(bash_view.handle_key(&id, view.editor.keybindings()))

@@ -449,6 +449,7 @@ pub fn load_custom_models(
                 // default is not, so a defaulted model stays capped.
                 max_tokens_explicit: model_def.max_tokens.is_some(),
                 featured: None,
+                serving: None,
                 headers: None,
                 compat,
             });

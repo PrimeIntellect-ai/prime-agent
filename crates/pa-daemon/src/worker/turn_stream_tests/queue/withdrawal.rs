@@ -114,3 +114,89 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
         }
     }
 }
+
+/// The quiescence observation's bash lane: no background work counts zero,
+/// an admitted `[bash-done]` notice counts as the pending wake until it is
+/// withdrawn, a plain queued prompt never counts, and the
+/// `wait_for_headless_completion` answer carries the count as an additive
+/// key next to the TS status.
+#[tokio::test]
+async fn headless_completion_counts_the_bash_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Arc::new(NoteWitnessEngine::default());
+    let mut worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.path().join("worker.sock"),
+            supervisor_socket_path: dir.path().join("supervisor.sock"),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "bash-quiescence".to_string(),
+            agent_dir: dir.path().join("agent"),
+            recovery_journal_path: dir.path().join("recovery.jsonl"),
+            telemetry_disabled: Some(true),
+            script: Some(json!({ "responses": ["unused"] })),
+        },
+        None,
+    );
+    worker.engine = engine.clone();
+    let (roster_pushes, _pending) = crate::roster_activity::RosterPushQueue::observed_for_test();
+    worker.roster_pushes = roster_pushes;
+    worker.core.lock().unwrap().created = true;
+
+    // No background work: the bash lane counts zero, and the answer still
+    // carries the TS autonomous status.
+    let quiet = worker
+        .dispatch("wait_for_headless_completion", &json!({}))
+        .await;
+    assert!(
+        quiet.success,
+        "wait_for_headless_completion failed: {quiet:?}"
+    );
+    assert_eq!(
+        quiet.data.as_ref().unwrap()["outstandingBackgroundJobs"],
+        0,
+        "no background work must count zero: {quiet:?}"
+    );
+    assert_eq!(
+        quiet.data.as_ref().unwrap()["enabled"],
+        false,
+        "the TS status must ride alongside the count: {quiet:?}"
+    );
+
+    // An admitted `[bash-done]` notice is completed work whose wake is
+    // still pending delivery; a plain queued prompt never counts.
+    admit_kernel_notice(
+        &worker.recovery,
+        &worker.core,
+        &Arc::new(Notify::new()),
+        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
+        || false,
+    );
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .steering
+        .push_back(queued_prompt("ordinary", TurnPolicy::Queued));
+    assert_eq!(
+        worker.outstanding_background_jobs(),
+        1,
+        "the pending [bash-done] wake must count as background work"
+    );
+
+    // The consumed notice withdraws; the bash lane quiets again.
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "fixture command".to_string(),
+        },
+        Some(engine.as_ref()),
+    );
+    assert_eq!(
+        worker.outstanding_background_jobs(),
+        0,
+        "the withdrawn notice must not count as background work"
+    );
+}

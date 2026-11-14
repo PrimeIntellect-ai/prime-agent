@@ -48,6 +48,69 @@ fn markdown_link_targets_use_the_owning_view_cwd() {
     assert!(targets(&mut first).iter().all(|link| link.url != first_url));
 }
 
+/// A raw OSC 8 sequence in model, tool, or file text renders as plain text: only the links the
+/// renderer adds (here the markdown link) are clickable.
+#[test]
+fn injected_terminal_links_are_not_clickable() {
+    let injected = "\x1b]8;;https://evil.example/\x1b\\safe\x1b]8;;\x1b\\";
+    // Removing the inner opener must not join the outer prefix into a new one.
+    let nested = "\x1b]8;;\x1b]8;;x\x1b\\file:///evil\x1b\\safe";
+    // Markdown decodes `\;` after the source is stripped.
+    let escaped = "\x1b]8\\;;file:///evil\x1b\\safe";
+    let entries = vec![
+        ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Text(format!(
+                "{injected} {nested} {escaped} and [docs](https://docs.example/)"
+            ))],
+            has_tool_calls: true,
+            streaming: false,
+            error: None,
+            aborted: false,
+        })),
+        ChatEntry::Tool(Box::new(ToolCallCard {
+            id: "t1".to_string(),
+            name: "python".to_string(),
+            args: serde_json::json!({ "code": format!("x = 1  # {injected}") }),
+            started: true,
+            ..Default::default()
+        })),
+        ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
+            direction: crate::custom_message::AgentMessageDirection::Received,
+            counterpart: "lane".to_string(),
+            message: format!("{injected}\n{nested}"),
+        })),
+        ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
+            pid: Some(1),
+            exit_code: Some(0),
+            content: format!("[bash-done] {injected}"),
+        })),
+        ChatEntry::CompactionSummary {
+            summary: injected.to_string(),
+            tokens_before: 1,
+            custom_instructions: None,
+        },
+    ];
+    for detail in [Detail::Overview, Detail::All] {
+        let mut v = view_with(entries.clone());
+        v.detail = detail;
+        let links = crate::hyperlinks::frame_link_ranges(&v.render_transcript(80));
+        assert!(!links.is_empty(), "the markdown link stays clickable");
+        assert!(
+            links.iter().all(|link| link.url == "https://docs.example/"),
+            "{detail:?}: {links:?}"
+        );
+    }
+    let streaming = crate::compaction_row::CompactionState {
+        reason: crate::compaction_row::CompactionReason::Manual,
+        custom_instructions: None,
+        summary: injected.to_string(),
+    };
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let rows = crate::compaction_row::render_compaction_stream(&streaming, true, &theme, 80);
+    let links = crate::hyperlinks::frame_link_ranges(&rows);
+    assert!(!rows.is_empty() && links.is_empty(), "{links:?}");
+}
+
 /// The hardware caret never sits over the factory page: the page is an
 /// input-less replacement view, so `frame_cursor` suppresses the stale
 /// editor dock position while it is open (the settings menu's guard
