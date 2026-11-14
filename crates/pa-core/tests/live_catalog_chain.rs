@@ -158,6 +158,61 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
     json!({ "data": data }).to_string()
 }
 
+/// A 401 from the credentialed fetch marks the credential that made it stale, for every later
+/// registry in the process: the rejected login serves no request (the refusal names it), and the
+/// account's private rows stay listed but unavailable.
+#[tokio::test]
+async fn a_rejected_catalog_fetch_marks_the_credential_that_made_it() {
+    let agent_dir = tempfile::tempdir().unwrap();
+    let bundled_dir = tempfile::tempdir().unwrap();
+    let layer_a = json!({ "schemaVersion": 1, "models": [layer_a_entry(LAYER_A_PROBE_ID, 1.25)] })
+        .to_string();
+    let server = common::MockServer::start(vec![
+        common::ok_json(&layer_a, None),
+        common::ok_json(&pi_payload("z-ai/glm-5.3", 7.0), None),
+        common::ok_json(&layer_a, None),
+        common::status(401, "Unauthorized"),
+    ])
+    .await;
+    install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
+    // A key no other test uses: stale marks are process-wide.
+    let registry_for = || {
+        ModelRegistry::create(
+            prime_auth("sk-catalog-rejected-login", "team-r"),
+            agent_dir.path().join("models.json"),
+        )
+    };
+    let mut registry = registry_for();
+    registry.refresh_available_models().await;
+    registry
+        .refresh_available_models_with_trigger(pa_models::RefreshTrigger::AuthChange)
+        .await;
+
+    let mut fresh = registry_for();
+    let rejected = fresh
+        .auth
+        .rejected_credential("prime-inference")
+        .expect("the stored login is marked stale");
+    let private = fresh
+        .get_all()
+        .iter()
+        .find(|model| model.id == "internal/glm-5.3-fast")
+        .cloned()
+        .expect("the rejected account's private row stays listed");
+    assert!(!fresh
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "prime-inference"));
+    assert_eq!(
+        fresh.get_api_key_and_headers(&private, None),
+        pa_core::models::ResolvedRequestAuth {
+            ok: false,
+            error: Some(pa_core::auth::prime_inference_rejection_message(&rejected)),
+            ..Default::default()
+        }
+    );
+}
+
 /// The credentialed fetches carry the Bearer + team headers (the
 /// $0-pricing bug: production fetched without them).
 #[tokio::test]

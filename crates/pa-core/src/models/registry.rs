@@ -9,7 +9,7 @@ use pa_types::ai::{
 };
 
 use crate::auth::manager::AuthStorage;
-use crate::auth::types::{AuthCredential, PRIME_INFERENCE_PROVIDER_ID};
+use crate::auth::types::{AuthCredential, AuthSourceToken, PRIME_INFERENCE_PROVIDER_ID};
 
 use super::catalog_chain;
 use super::custom::{apply_model_override, load_custom_models, merge_compat, CustomModelsResult};
@@ -37,6 +37,9 @@ pub struct ResolvedRequestAuth {
     /// subscription's openai-responses shape or the configured API-key
     /// shape. `None` keeps the caller's model.
     pub request_model: Option<Model>,
+    /// The credential the lookup served (`None` for the `models.json`
+    /// fallback key): a request it fails with 401/403 marks exactly it stale.
+    pub source_token: Option<AuthSourceToken>,
 }
 
 /// Why a `set_model` selection failed to resolve: the provider is not
@@ -44,8 +47,8 @@ pub struct ResolvedRequestAuth {
 /// is not in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetModelSelectionError {
-    /// The model exists, but its provider has no credential and none is
-    /// stale: sign in, then retry the switch.
+    /// The model exists, but its provider has no usable credential (none,
+    /// or only rejected ones): sign in, then retry the switch.
     ProviderUnauthenticated { provider: String },
     /// No such model in the catalog.
     NotFound { provider: String, model_id: String },
@@ -185,14 +188,42 @@ impl ModelRegistry {
     }
 
     /// The Prime Inference credentials for the credentialed catalog layer
-    /// (Bearer + team headers, as the TS refresh sends).
-    fn prime_credentials(&mut self) -> Option<pa_models::PrimeCredentials> {
-        let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID)?;
-        let team_id = self
+    /// (Bearer + team headers, as the TS refresh sends), with the source
+    /// token of the credential that served them.
+    fn prime_credentials(
+        &mut self,
+    ) -> Option<(pa_models::PrimeCredentials, Option<AuthSourceToken>)> {
+        let served = self
             .auth
+            .get_api_key_with_source_token(PRIME_INFERENCE_PROVIDER_ID, true);
+        let api_key = served.api_key?;
+        Some((
+            pa_models::PrimeCredentials {
+                api_key,
+                team_id: self.prime_team_id(),
+            },
+            served.source_token,
+        ))
+    }
+
+    fn prime_team_id(&self) -> Option<String> {
+        self.auth
             .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
-            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
-        Some(pa_models::PrimeCredentials { api_key, team_id })
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
+    }
+
+    /// The credentials the catalog renders: the serving ones, else the
+    /// rejected ones — the rejected account's rows stay listed (never
+    /// available: the provider has no usable credential), and a new key is
+    /// its own scope.
+    fn rendered_prime_credentials(&mut self) -> Option<pa_models::PrimeCredentials> {
+        if let Some((credentials, _)) = self.prime_credentials() {
+            return Some(credentials);
+        }
+        Some(pa_models::PrimeCredentials {
+            api_key: self.auth.rejected_api_key(PRIME_INFERENCE_PROVIDER_ID)?,
+            team_id: self.prime_team_id(),
+        })
     }
 
     pub fn get_error(&self) -> Option<&str> {
@@ -273,20 +304,16 @@ impl ModelRegistry {
             return Ok(model);
         }
         // A model can exist while its provider is not signed in — the
-        // picker's discovery path. No credential at all is the sign-in refusal;
-        // the unauthorized private Prime Inference model keeps the not-found
-        // refusal — never a switch to an unentitled model.
+        // picker's discovery path. No usable credential (none, or only
+        // rejected ones) is the sign-in refusal; the unauthorized private
+        // Prime Inference model keeps the not-found refusal — never a switch
+        // to an unentitled model.
         let Some(model) = self.get_all().iter().find(|model| matches(model)) else {
             return Err(SetModelSelectionError::NotFound {
                 provider: provider.to_string(),
                 model_id: model_id.to_string(),
             });
         };
-        if self.get_provider_auth_status(provider).source
-            == Some(crate::auth::types::AuthSource::Stale)
-        {
-            return Ok(model);
-        }
         if !self.has_configured_auth(model) {
             return Err(SetModelSelectionError::ProviderUnauthenticated {
                 provider: provider.to_string(),
@@ -327,7 +354,7 @@ impl ModelRegistry {
         if let Some(error) = &result.error {
             self.load_error = Some(error.clone());
         }
-        let credentials = self.prime_credentials();
+        let credentials = self.rendered_prime_credentials();
         let built_in = self.load_built_in_models(&result, credentials.as_ref());
         self.models = Self::merge_custom_models(built_in, result.models);
         self.apply_subscription_model_adaptations();
@@ -545,13 +572,20 @@ impl ModelRegistry {
     }
 
     /// The awaited refresh body: reload, the gated-or-forced chain fetch,
-    /// then the auth-filtered catalog.
+    /// then the auth-filtered catalog. A credentialed fetch the server
+    /// refused marks the credential that made it stale.
     async fn refresh_available_models_forced(&mut self, force: bool) -> Vec<Model> {
         self.refresh();
-        let credentials = self.prime_credentials();
+        let served = self.prime_credentials();
+        let credentials = served.as_ref().map(|(credentials, _)| credentials);
         self.catalog
-            .refresh_with_credentials(force, credentials.as_ref())
+            .refresh_with_credentials(force, credentials)
             .await;
+        if let Some((credentials, Some(token))) = served {
+            if self.catalog.prime_inference_rejected(&credentials) {
+                crate::auth::mark_auth_source_stale(token);
+            }
+        }
         self.load_models();
         self.get_available().into_iter().cloned().collect()
     }
@@ -566,6 +600,7 @@ impl ModelRegistry {
             .auth
             .get_api_key_with_source_token(&model.provider, false);
         let mut api_key = stored.api_key;
+        let source_token = stored.source_token.clone().filter(|_| api_key.is_some());
         let provider_config = self.provider_request_configs.get(&model.provider).cloned();
         if api_key.is_none() {
             if let Some(config) = &provider_config {
@@ -576,6 +611,17 @@ impl ModelRegistry {
                         api_key = Some(resolved);
                     }
                 }
+            }
+        }
+        // A rejected Prime Inference credential with nothing else to serve: fail with the sentence
+        // naming it — never a keyless request (pa-ai would resend the rejected env key).
+        if api_key.is_none() && model.provider == PRIME_INFERENCE_PROVIDER_ID {
+            if let Some(rejected) = self.auth.rejected_credential(&model.provider) {
+                return ResolvedRequestAuth {
+                    ok: false,
+                    error: Some(crate::auth::prime_inference_rejection_message(&rejected)),
+                    ..Default::default()
+                };
             }
         }
         // A failed OAuth refresh with nothing else to serve: fail with the re-login sentence.
@@ -685,6 +731,7 @@ impl ModelRegistry {
             headers: (!headers.is_empty()).then_some(headers),
             error: None,
             request_model,
+            source_token,
         }
     }
 }

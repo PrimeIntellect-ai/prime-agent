@@ -97,7 +97,10 @@ impl Worker {
 }
 
 /// The wire payload of one catalog snapshot: the full catalog minus
-/// unauthorized private Prime Inference models, plus sorted providers.
+/// unauthorized private Prime Inference models, plus sorted providers. While
+/// the Prime Inference credential is rejected, its account's private rows stay
+/// listed (unconfigured, so the picker marks them for sign-in) and
+/// `credentialNotice` names the rejected source and the fix.
 fn catalog_payload(
     registry: &pa_core::models::ModelRegistry,
     available: &[pa_types::ai::Model],
@@ -112,6 +115,9 @@ fn catalog_payload(
         .iter()
         .map(|model| format!("{}/{}", model.provider, model.id))
         .collect();
+    let rejected = registry
+        .auth
+        .rejected_credential(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID);
     // Canonical (provider, id) order: the served and refreshed snapshots
     // compare verbatim.
     let mut entries: Vec<&pa_types::ai::Model> = registry
@@ -119,6 +125,7 @@ fn catalog_payload(
         .iter()
         .filter(|model| {
             !pa_core::models::is_private_prime_inference_model(model)
+                || rejected.is_some()
                 || available_keys.contains(&format!("{}/{}", model.provider, model.id))
         })
         .collect();
@@ -130,6 +137,8 @@ fn catalog_payload(
     json!({
         "models": models,
         "configuredProviders": providers,
+        "credentialNotice": rejected
+            .map(|token| pa_core::auth::prime_inference_rejection_message(&token)),
     })
 }
 
@@ -568,6 +577,57 @@ mod tests {
                 Err(error) => panic!("model_catalog_changed never landed: {error}"),
             }
         }
+    }
+
+    /// While the Prime Inference credential is rejected, the payload keeps the account's private
+    /// rows listed (the provider stays unconfigured, so the picker marks them for sign-in) and
+    /// names the rejected credential.
+    #[test]
+    fn a_rejected_prime_inference_credential_keeps_its_private_rows_and_names_itself() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path();
+        std::fs::write(
+            agent_dir.join("models.json"),
+            json!({
+                "providers": {
+                    "prime-inference": {
+                        "api": "openai-completions",
+                        "baseUrl": "http://127.0.0.1:9/v1",
+                        "models": [
+                            {"id": "internal/rejected-account-route", "name": "Route",
+                             "contextWindow": 128_000, "maxTokens": 4096}
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write models.json");
+        // A key no other test uses: stale marks are process-wide.
+        write_auth_json(agent_dir, "sk-catalog-payload-rejected", "team-r");
+        let auth = pa_core::auth::AuthStorage::create(agent_dir);
+        // Mark until nothing serves: an ambient PRIME_API_KEY outranks the
+        // stored login (marks are value-matched, so only these values gate).
+        while auth.mark_auth_stale(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID) {}
+        let rejected = auth
+            .rejected_credential(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID)
+            .expect("no Prime Inference credential serves");
+        let registry = pa_core::models::ModelRegistry::create(
+            pa_core::auth::AuthStorage::create(agent_dir),
+            agent_dir.join("models.json"),
+        );
+        let available: Vec<pa_types::ai::Model> =
+            registry.get_available().into_iter().cloned().collect();
+        let payload = catalog_payload(&registry, &available);
+        assert!(has_model(&payload, "internal/rejected-account-route"));
+        assert!(!payload["configuredProviders"]
+            .as_array()
+            .expect("providers")
+            .contains(&json!("prime-inference")));
+        assert_eq!(
+            payload["credentialNotice"],
+            json!(pa_core::auth::prime_inference_rejection_message(&rejected))
+        );
     }
 
     #[tokio::test]

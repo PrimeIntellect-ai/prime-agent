@@ -667,13 +667,14 @@ impl PrimeInferenceCatalog {
         self.cache.get(&self.scope_for(credentials))
     }
 
-    /// Clear one scope's cache (revocation, logout).
-    pub fn clear(&self, credentials: &PrimeInferenceCredentials) {
-        self.cache.clear(&self.scope_for(credentials));
+    /// Whether the latest fetch with `credentials` was refused (HTTP 401/403).
+    pub fn rejected(&self, credentials: &PrimeInferenceCredentials) -> bool {
+        self.cache.rejected(&self.scope_for(credentials))
     }
 
     /// Live credentialed refresh: coalesced, hourly gated, scope-isolated;
-    /// 401/403 clears only this scope. Never blocks on errors.
+    /// a 401/403 keeps this scope's snapshot and records the rejection
+    /// ([`Self::rejected`]). Never blocks on errors.
     pub async fn refresh(
         &self,
         credentials: &PrimeInferenceCredentials,

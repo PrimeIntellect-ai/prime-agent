@@ -58,6 +58,23 @@ fn runtime_override_wins() {
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("stored-key"));
 }
 
+/// The session re-sets its runtime override before every request: re-setting a rejected runtime
+/// key keeps it stale, so the stored login keeps serving.
+#[test]
+fn re_setting_a_rejected_runtime_key_keeps_it_stale() {
+    // Keys no other test uses: stale marks are process-wide.
+    let mut auth = storage_with(&serde_json::json!({
+        "anthropic": { "type": "api_key", "key": "sk-stored-after-runtime-rejection" }
+    }));
+    auth.set_runtime_api_key("anthropic", "sk-runtime-rejected-resent".to_string());
+    assert!(auth.mark_auth_stale("anthropic"));
+    auth.set_runtime_api_key("anthropic", "sk-runtime-rejected-resent".to_string());
+    assert_eq!(
+        auth.get_api_key("anthropic").as_deref(),
+        Some("sk-stored-after-runtime-rejection")
+    );
+}
+
 #[test]
 fn stale_marking_skips_source_and_clears() {
     let mut auth = storage_with(&serde_json::json!({
@@ -71,6 +88,33 @@ fn stale_marking_skips_source_and_clears() {
     assert_eq!(
         auth.get_api_key("prime-inference").as_deref(),
         Some("sk-stale")
+    );
+}
+
+/// A stale mark is process-wide: a later `AuthStorage` (production builds one per lookup) skips
+/// the rejected env key and serves the valid stored login without any user action.
+#[test]
+fn a_rejected_env_key_stays_skipped_and_the_stored_login_serves() {
+    let data = serde_json::json!({
+        "prime-inference": { "type": "api_key", "key": "sk-stored-serves-after-env-rejection" }
+    });
+    let env = || {
+        ScriptedEnv(HashMap::from([(
+            "PRIME_API_KEY".to_string(),
+            "sk-env-rejected-across-instances".to_string(),
+        )]))
+    };
+    let mut rejected = storage_with_env(&data, env());
+    let served = rejected.get_api_key_with_source_token(PRIME_INFERENCE_PROVIDER_ID, false);
+    assert_eq!(
+        served.api_key.as_deref(),
+        Some("sk-env-rejected-across-instances")
+    );
+    mark_auth_source_stale(served.source_token.expect("the env key's source token"));
+    let mut fresh = storage_with_env(&data, env());
+    assert_eq!(
+        fresh.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+        Some("sk-stored-serves-after-env-rejection")
     );
 }
 
@@ -180,20 +224,28 @@ fn a_command_keys_status_probe_never_runs_the_command() {
     ));
     let _ = std::fs::remove_file(&counter);
     let key = format!("!echo run >> {} ; echo cmd-key", counter.display());
+    // A provider no test marks stale: any mark on the stored source makes a
+    // command key resolve uncached, and stale marks are process-wide.
     let mut auth = storage_with(&serde_json::json!({
-        "anthropic": { "type": "api_key", "key": key }
+        "command-probe": { "type": "api_key", "key": key }
     }));
     let runs = || std::fs::read_to_string(&counter).map_or(0, |text| text.lines().count());
-    let status = auth.get_auth_status("anthropic");
+    let status = auth.get_auth_status("command-probe");
     assert_eq!(status.source, Some(AuthSource::Stored));
     assert_eq!(
         runs(),
         0,
         "building the candidates for a status probe never runs the command"
     );
-    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(
+        auth.get_api_key("command-probe").as_deref(),
+        Some("cmd-key")
+    );
     assert_eq!(runs(), 1, "the serving lookup resolves the command once");
-    assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
+    assert_eq!(
+        auth.get_api_key("command-probe").as_deref(),
+        Some("cmd-key")
+    );
     assert_eq!(
         runs(),
         1,
@@ -226,6 +278,37 @@ fn fallback_resolver_last_resort() {
         (provider == "custom").then(|| "fb-key".to_string())
     }));
     assert_eq!(auth.get_api_key("custom").as_deref(), Some("fb-key"));
+}
+
+/// A rejected env key takes its `PRIME_TEAM_ID` with it: the stored login that serves in its place
+/// carries its own team, never the rejected pair's.
+#[test]
+fn a_rejected_env_key_pair_leaves_the_stored_login_its_own_team() {
+    // Keys no other test uses: stale marks are process-wide.
+    let auth = storage_with_env(
+        &serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "sk-stored-keeps-own-team",
+                "primeTeam": { "teamId": "stored-team", "name": "Stored Team" }
+            }
+        }),
+        ScriptedEnv(HashMap::from([
+            (
+                "PRIME_API_KEY".to_string(),
+                "sk-env-pair-rejected".to_string(),
+            ),
+            ("PRIME_TEAM_ID".to_string(), "env-team".to_string()),
+        ])),
+    );
+    assert!(auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID));
+    assert_eq!(
+        auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID),
+        Some(HashMap::from([(
+            "X-Prime-Team-ID".to_string(),
+            "stored-team".to_string()
+        )]))
+    );
 }
 
 #[test]

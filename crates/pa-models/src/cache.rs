@@ -58,6 +58,9 @@ impl<T> InFlight<T> {
 struct CacheState<T> {
     scope: Option<String>,
     snapshot: Option<Snapshot<T>>,
+    /// The source refused this scope's credentials (HTTP 401/403) on the
+    /// latest fetch; the snapshot stays for display.
+    rejected: bool,
     pending: Option<Arc<InFlight<T>>>,
     last_attempt: Option<u64>,
     generation: u64,
@@ -108,6 +111,7 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             state: Mutex::new(CacheState {
                 scope: None,
                 snapshot: None,
+                rejected: false,
                 pending: None,
                 last_attempt: None,
                 generation: 0,
@@ -142,6 +146,7 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         state.generation += 1;
         state.pending = None;
         state.snapshot = None;
+        state.rejected = false;
         state.last_attempt = None;
         let path = self.cache_path.clone()?;
         match self.read_snapshot(&path, scope) {
@@ -166,24 +171,15 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         (stored.url == self.url.as_ref()).then_some(stored.scope)
     }
 
-    /// Drop the snapshot for `scope` (401/403 revocation); other scopes keep
-    /// their own snapshots.
+    /// Whether the latest fetch for `scope` was refused (HTTP 401/403): the
+    /// caller owns what a rejected credential means; the snapshot stays.
     ///
     /// # Panics
     ///
     /// Panics if the cache mutex is poisoned (a panicking thread held it).
-    pub fn clear(&self, scope: &str) {
-        let mut state = self.state.lock().unwrap();
-        if state.scope.as_deref() != Some(scope) {
-            return;
-        }
-        state.snapshot = None;
-        if let Some(path) = &self.cache_path {
-            if let Err(error) = std::fs::remove_file(path) {
-                // Read-only cache directories do not prevent model discovery.
-                tracing::debug!(path = %path.display(), %error, "catalog cache clear failed");
-            }
-        }
+    pub fn rejected(&self, scope: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.scope.as_deref() == Some(scope) && state.rejected
     }
 
     /// Refresh the snapshot for `scope`: coalesces with an in-flight refresh,
@@ -267,7 +263,15 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     }
 
     fn is_current(&self, scope: &str, generation: u64, opts: &RefreshOptions) -> bool {
-        let state = self.state.lock().unwrap();
+        Self::is_current_state(&self.state.lock().unwrap(), scope, generation, opts)
+    }
+
+    fn is_current_state(
+        state: &CacheState<T>,
+        scope: &str,
+        generation: u64,
+        opts: &RefreshOptions,
+    ) -> bool {
         state.scope.as_deref() == Some(scope)
             && state.generation == generation
             && opts.is_current.as_ref().is_none_or(|check| check())
@@ -318,12 +322,13 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
                 Some(served)
             }
             Err(error) => {
-                if self.is_current(scope, generation, opts)
-                    && scope != PUBLIC_SCOPE
-                    && matches!(error.status(), Some(401 | 403))
-                {
-                    self.clear(scope);
-                    return None;
+                if scope != PUBLIC_SCOPE && matches!(error.status(), Some(401 | 403)) {
+                    // Check and flag under one lock: a scope switch in between
+                    // must not flag the new scope.
+                    let mut state = self.state.lock().unwrap();
+                    if Self::is_current_state(&state, scope, generation, opts) {
+                        state.rejected = true;
+                    }
                 }
                 self.keep_last_good(scope, generation, opts)
             }
@@ -347,6 +352,7 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             if state.scope.as_deref() != Some(scope) {
                 return;
             }
+            state.rejected = false;
             state.snapshot = Some(Snapshot {
                 scope: snapshot.scope.clone(),
                 fetched_at: snapshot.fetched_at,

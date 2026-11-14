@@ -479,10 +479,10 @@ mod tests {
         );
     }
 
-    /// A stale-auth provider keeps the switch (the TS daemon's
-    /// full-catalog fallback; the lookup never mutates stale state).
+    /// A provider whose only credential was rejected (stale) routes the
+    /// switch to sign-in, like a provider with no credential.
     #[test]
-    fn stale_auth_keeps_the_set_model_switch() {
+    fn stale_auth_routes_the_set_model_switch_to_sign_in() {
         let dir = tempfile::tempdir().expect("tempdir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -490,7 +490,8 @@ mod tests {
         auth.set(
             "anthropic",
             pa_core::auth::AuthCredential::ApiKey {
-                key: "sk-stale".to_string(),
+                // A key no other test uses: stale marks are process-wide.
+                key: "sk-set-model-stale".to_string(),
                 prime_team: None,
             },
         );
@@ -500,10 +501,10 @@ mod tests {
         );
         let registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
         let (provider, model_id) = first_built_in_anthropic_model();
-        let model = registry
-            .resolve_set_model_selection(&provider, &model_id)
-            .expect("a stale-auth provider keeps the switch");
-        assert_eq!(model.id, model_id);
+        assert_eq!(
+            registry.resolve_set_model_selection(&provider, &model_id),
+            Err(pa_core::models::SetModelSelectionError::ProviderUnauthenticated { provider })
+        );
     }
 
     /// The first built-in Anthropic catalog model (a fixture-free

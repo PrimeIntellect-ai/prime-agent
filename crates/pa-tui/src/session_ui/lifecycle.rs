@@ -69,6 +69,7 @@ impl SessionUi {
             models: options.models.clone(),
             model_catalog: options.model_catalog.clone(),
             model_configured_providers: options.model_configured_providers.clone(),
+            model_credential_notice: None,
             model_recent_models: options.model_recent_models.clone(),
             default_thinking_level: options.default_thinking_level.clone(),
             models_fetched_at: None,

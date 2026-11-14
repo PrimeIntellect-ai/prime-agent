@@ -59,12 +59,26 @@ pub(crate) struct SpawnedWorker {
 /// never survives: a client may itself run inside an agent (its env
 /// carries the recursion marker), and a worker that inherited it would
 /// stamp every root session it creates with a stale depth (audit #9).
+///
+/// A forwarded launch env is the only source of the Prime Inference env
+/// credential (its key vars and `PRIME_TEAM_ID`): Prime Inference is the
+/// one provider whose env key outranks the stored login, so a daemon-boot
+/// key the session's client never had must not shadow that login. Without
+/// a launch env (relaunch, ACP, RPC) the daemon env stays the base.
 fn apply_worker_env(
     command: &mut Command,
     client_launch_env: Option<&std::collections::BTreeMap<String, String>>,
     internal_launch_env: std::collections::BTreeMap<String, String>,
 ) {
     if let Some(env) = client_launch_env {
+        let prime_inference_vars =
+            pa_ai::env_api_keys::get_api_key_env_vars(pa_types::ai::PRIME_INFERENCE_PROVIDER_ID)
+                .unwrap_or_default();
+        for key in prime_inference_vars.into_iter().chain(["PRIME_TEAM_ID"]) {
+            if !env.contains_key(key) {
+                command.env_remove(key);
+            }
+        }
         command.envs(env);
     }
     command.envs(internal_launch_env);
@@ -1087,13 +1101,68 @@ mod tests {
         );
         let removals: Vec<&std::ffi::OsStr> = envs
             .iter()
-            .filter(|(_, value)| value.is_none())
+            .filter(|(key, value)| {
+                value.is_none() && !matches!(key.to_str(), Some("PRIME_API_KEY" | "PRIME_TEAM_ID"))
+            })
             .map(|(key, _)| *key)
             .collect();
         assert_eq!(
             removals,
             vec![std::ffi::OsStr::new("RLM_DEPTH")],
-            "RLM_DEPTH is the only removal: the daemon's own env stays             inherited (the e2e's base-sentinel check proves the layer)"
+            "beside the Prime Inference credential vars, RLM_DEPTH is the only removal: the daemon's own env stays             inherited (the e2e's base-sentinel check proves the layer)"
+        );
+    }
+
+    /// The Prime Inference env credential comes only from a forwarded launch
+    /// env: a daemon-boot key the client lacks is dropped, the client's own
+    /// key wins, and a spawn without a launch env keeps the daemon's key.
+    #[test]
+    fn a_forwarded_launch_env_is_the_only_prime_inference_env_credential() {
+        let worker_env = |client: Option<&std::collections::BTreeMap<String, String>>| {
+            let mut command = Command::new("x");
+            // Stands in for the daemon's inherited boot env.
+            command.env("PRIME_API_KEY", "daemon-key");
+            command.env("PRIME_TEAM_ID", "daemon-team");
+            apply_worker_env(&mut command, client, std::collections::BTreeMap::new());
+            let envs: std::collections::BTreeMap<String, Option<String>> = command
+                .as_std()
+                .get_envs()
+                .filter(|(key, _)| matches!(key.to_str(), Some("PRIME_API_KEY" | "PRIME_TEAM_ID")))
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.map(|value| value.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            envs
+        };
+        let without_key =
+            std::collections::BTreeMap::from([("PATH".to_string(), "/bin".to_string())]);
+        assert_eq!(
+            worker_env(Some(&without_key)),
+            std::collections::BTreeMap::from([
+                ("PRIME_API_KEY".to_string(), None),
+                ("PRIME_TEAM_ID".to_string(), None),
+            ])
+        );
+        let with_key = std::collections::BTreeMap::from([
+            ("PRIME_API_KEY".to_string(), "client-key".to_string()),
+            ("PRIME_TEAM_ID".to_string(), "client-team".to_string()),
+        ]);
+        assert_eq!(
+            worker_env(Some(&with_key)),
+            std::collections::BTreeMap::from([
+                ("PRIME_API_KEY".to_string(), Some("client-key".to_string())),
+                ("PRIME_TEAM_ID".to_string(), Some("client-team".to_string())),
+            ])
+        );
+        assert_eq!(
+            worker_env(None),
+            std::collections::BTreeMap::from([
+                ("PRIME_API_KEY".to_string(), Some("daemon-key".to_string())),
+                ("PRIME_TEAM_ID".to_string(), Some("daemon-team".to_string())),
+            ])
         );
     }
 

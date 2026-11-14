@@ -121,6 +121,7 @@ fn picker_options(catalog: Vec<Model>) -> ModelPickerOptions {
         scoped_models: Vec::new(),
         thinking_level: Some(ModelThinkingLevel::Medium),
         viewport_rows: 19,
+        credential_notice: None,
     }
 }
 
@@ -231,7 +232,12 @@ fn a_scope_the_catalog_cannot_resolve_still_scopes() {
     );
     let mut refreshed = battery_catalog();
     refreshed.push(model("prime-inference", "mock-9", "Mock 9", false, None));
-    picker.update_state(None, refreshed, configured());
+    picker.update_state(
+        None,
+        refreshed,
+        configured(),
+        /*credential_notice*/ None,
+    );
     assert_eq!(
         picker.filtered_len(),
         1,
@@ -500,6 +506,39 @@ fn unconfigured_providers_mark_require_sign_in_and_sort_last() {
     assert!(rows.iter().any(|row| row.contains("Mock 1")));
 }
 
+/// A landed refresh carrying the daemon's credential notice shows it as one line above the
+/// search field; the next refresh without it clears it.
+#[test]
+fn a_landed_credential_notice_renders_above_the_search_field() {
+    let catalog = vec![model("prime-inference", "mock-1", "Mock 1", false, None)];
+    let mut picker = ModelPicker::new(picker_options(catalog.clone()));
+    let notice = "Prime Inference rejected your stored login. Run /login.";
+    picker.update_state(
+        None,
+        catalog.clone(),
+        HashSet::new(),
+        Some(notice.to_string()),
+    );
+    let rows = frame_text(&mut picker);
+    let search_row = rows
+        .iter()
+        .position(|row| row.contains("Search models"))
+        .expect("the search field");
+    assert!(
+        rows[..search_row].iter().any(|row| row.trim() == notice),
+        "{rows:#?}"
+    );
+    picker.update_state(
+        None,
+        catalog,
+        HashSet::new(),
+        /*credential_notice*/ None,
+    );
+    assert!(!frame_text(&mut picker)
+        .iter()
+        .any(|row| row.contains(notice)));
+}
+
 #[test]
 fn update_state_keeps_the_selection_on_the_surviving_model() {
     let mut picker = ModelPicker::new(picker_options(battery_catalog()));
@@ -514,7 +553,12 @@ fn update_state_keeps_the_selection_on_the_surviving_model() {
         false,
         None,
     ));
-    picker.update_state(Some(current()), catalog, configured());
+    picker.update_state(
+        Some(current()),
+        catalog,
+        configured(),
+        /*credential_notice*/ None,
+    );
     let selected = picker.selected_model().expect("selection").clone();
     assert_eq!(selected.id, "anthropic/claude-fable-5");
 }

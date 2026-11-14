@@ -32,7 +32,7 @@ impl AuthStorage {
     ) -> AuthApiKeyResult {
         // 1. Runtime override.
         if let Some(candidate) = self.runtime_candidate(provider_id) {
-            if !self.is_stale(provider_id, &candidate) {
+            if !Self::is_stale(provider_id, &candidate) {
                 if let Some(api_key) = self.runtime_overrides.get(provider_id).cloned() {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
@@ -50,7 +50,7 @@ impl AuthStorage {
         // 2. Prime-inference: environment before stored.
         if provider_id == PRIME_INFERENCE_PROVIDER_ID {
             if let (Some(api_key), Some(candidate)) = (env_key.clone(), env_candidate.clone()) {
-                if !self.is_stale(provider_id, &candidate) {
+                if !Self::is_stale(provider_id, &candidate) {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
                         source_token: Self::token_for(provider_id, &candidate),
@@ -66,11 +66,11 @@ impl AuthStorage {
             if let Some(candidate) =
                 self.stored_candidate(provider_id, /*resolved_command_value*/ None)
             {
-                if !self.is_stale(provider_id, &candidate) {
+                if !Self::is_stale(provider_id, &candidate) {
                     match &credential {
                         AuthCredential::ApiKey { key, .. } => {
                             let has_stale_record =
-                                !self.matching_stale(provider_id, &candidate).is_empty();
+                                !Self::matching_stale(provider_id, &candidate).is_empty();
                             let api_key = if key.starts_with('!') && has_stale_record {
                                 resolve_config_value_uncached(key)
                             } else {
@@ -163,7 +163,7 @@ impl AuthStorage {
         // 4. Environment for non-prime-inference providers.
         if provider_id != PRIME_INFERENCE_PROVIDER_ID {
             if let (Some(api_key), Some(candidate)) = (env_key, env_candidate) {
-                if !self.is_stale(provider_id, &candidate) {
+                if !Self::is_stale(provider_id, &candidate) {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
                         source_token: Self::token_for(provider_id, &candidate),
@@ -177,7 +177,7 @@ impl AuthStorage {
         // 5. Fallback resolver.
         if include_fallback {
             if let Some(candidate) = self.fallback_candidate(provider_id) {
-                if !self.is_stale(provider_id, &candidate) {
+                if !Self::is_stale(provider_id, &candidate) {
                     let api_key = self
                         .fallback_resolver
                         .as_ref()

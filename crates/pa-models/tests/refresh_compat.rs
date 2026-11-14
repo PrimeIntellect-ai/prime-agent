@@ -489,7 +489,7 @@ async fn private_routes_revoke_through_normal_responses_but_public_routes_surviv
 }
 
 #[tokio::test]
-async fn unauthorized_prime_inference_clears_only_that_scope() {
+async fn unauthorized_prime_inference_keeps_the_snapshot_and_reports_the_rejection() {
     let dir = tempfile::tempdir().unwrap();
     let compiled = pa_models::transports::prime_inference_offline_entries();
     let ids: Vec<String> = compiled.iter().map(|m| m.id.clone()).take(60).collect();
@@ -528,18 +528,20 @@ async fn unauthorized_prime_inference_clears_only_that_scope() {
         api_key: "key-z".into(),
         team_id: Some("team-z".into()),
     };
-    assert!(catalog.refresh(&creds, true).await.is_some(), "good fetch");
-    assert!(catalog.get(&creds).is_some());
+    let fetched = catalog.refresh(&creds, true).await.expect("good fetch");
+    assert!(!catalog.rejected(&creds));
 
-    assert!(catalog.refresh(&creds, true).await.is_none(), "401");
-    assert!(catalog.get(&creds).is_none(), "scope cleared");
-    assert!(
-        !dir.path()
-            .join("prime-inference-models-cache.json")
-            .exists(),
-        "cache file removed"
+    assert_eq!(
+        catalog.refresh(&creds, true).await,
+        Some(fetched.clone()),
+        "a 401 keeps the scope's snapshot"
     );
-    assert!(catalog.get(&other).is_none());
+    assert!(catalog.rejected(&creds), "the 401 is reported");
+    assert!(!catalog.rejected(&other), "another scope is not rejected");
+    assert!(
+        catalog.get(&other).is_none(),
+        "nothing leaks into another scope"
+    );
 }
 
 #[test]

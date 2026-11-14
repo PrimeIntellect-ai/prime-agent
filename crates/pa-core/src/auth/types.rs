@@ -194,6 +194,8 @@ pub struct AuthStatus {
 pub struct AuthSourceToken {
     pub provider: String,
     pub source: AuthSource,
+    /// The source's display label (the env var name for an environment key).
+    pub label: Option<String>,
     pub identity_fingerprint: String,
     pub value_fingerprint: String,
 }

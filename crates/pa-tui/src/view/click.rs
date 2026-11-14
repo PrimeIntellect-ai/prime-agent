@@ -87,10 +87,6 @@ pub(crate) enum PickerKind {
     Choice,
 }
 
-/// The `/model` picker's chrome rows: the bordered search field
-/// renders exactly three rows.
-pub(crate) const MODEL_PICKER_CHROME_ROWS: usize = 3;
-
 /// The `/effort` picker's chrome rows: the config
 /// selector's header block plus the bordered search field.
 pub(crate) const CHOICE_PICKER_CHROME_ROWS: usize = 6;
@@ -779,5 +775,53 @@ mod tests {
         );
         assert_eq!(view.click_target_at(12 + 2 + 6, 1), None);
         assert_eq!(view.click_target_at(12 + 2, 1), None);
+    }
+
+    /// With the credential notice shown above the search field, a click on a model row still
+    /// selects that row's model (the notice counts as picker chrome).
+    #[test]
+    fn a_credential_notice_keeps_model_rows_clicking_their_own_model() {
+        let model = |id: &str| -> pa_types::ai::Model {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": format!("Row {id}"), "api": "openai-completions",
+                "provider": "prime-inference", "baseUrl": "https://example.invalid/v1",
+                "reasoning": false, "input": ["text"],
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                "contextWindow": 128_000, "maxTokens": 4096,
+            }))
+            .expect("model fixture")
+        };
+        let mut view = view();
+        view.model_picker = Some(crate::model_picker::ModelPicker::new(
+            crate::model_picker::ModelPickerOptions {
+                models: vec![model("alpha"), model("beta"), model("gamma")],
+                viewport_rows: 19,
+                credential_notice: Some(
+                    "Prime Inference rejected your stored login. Run /login.".to_string(),
+                ),
+                ..Default::default()
+            },
+        ));
+        let frame = view.render_frame(80, 24);
+        let text = |row: usize| -> String {
+            frame[row]
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect()
+        };
+        for id in ["alpha", "beta", "gamma"] {
+            let row = (0..frame.len())
+                .find(|row| text(*row).contains(&format!("Row {id}")))
+                .expect("the model's row");
+            let Some(ClickAction::SelectModelRow(position)) = view.click_target_at(row, 4) else {
+                panic!("the {id} row is clickable");
+            };
+            let picker = view.model_picker.as_ref().expect("picker");
+            let clicked = picker
+                .filtered_index(position)
+                .and_then(|index| picker.model_at(index))
+                .map(|model| model.id.clone());
+            assert_eq!(clicked.as_deref(), Some(id));
+        }
     }
 }

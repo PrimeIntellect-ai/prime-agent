@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use super::types::PrimeTeamCredential;
+use super::types::{AuthSource, AuthSourceToken, PrimeTeamCredential};
 
 pub const DEFAULT_PRIME_API_BASE_URL: &str = "https://api.primeintellect.ai";
 /// The browser challenge's URL host; the flow itself never opens a
@@ -17,6 +17,34 @@ pub const DEFAULT_PRIME_FRONTEND_URL: &str = "https://app.primeintellect.ai";
 /// as production.
 const DEFAULT_PRIME_INFERENCE_URL: &str = "https://api.pinference.ai/api/v1";
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
+/// The one user-facing sentence for a Prime Inference credential the server rejected (HTTP
+/// 401/403): the rejected source and its fix. The model picker, a failed turn, and `rlm.spawn`
+/// all show it.
+#[must_use]
+pub fn prime_inference_rejection_message(token: &AuthSourceToken) -> String {
+    match token.source {
+        AuthSource::Environment => {
+            let variable = token.label.as_deref().unwrap_or("the environment");
+            format!(
+                "Prime Inference rejected the API key from {variable}. Run /login, or set a valid {variable} and restart the daemon."
+            )
+        }
+        AuthSource::Stored => "Prime Inference rejected your stored login. Run /login.".to_string(),
+        AuthSource::Runtime => {
+            "Prime Inference rejected the API key passed with --api-key. Pass a valid key, or run /login."
+                .to_string()
+        }
+        AuthSource::Fallback
+        | AuthSource::ModelsJsonKey
+        | AuthSource::ModelsJsonCommand
+        | AuthSource::PrimeCli
+        | AuthSource::Stale => {
+            "Prime Inference rejected the API key from models.json. Fix the key there, or run /login."
+                .to_string()
+        }
+    }
+}
 
 /// The API the access check and team list run against, and the frontend
 /// URL the production guard compares.

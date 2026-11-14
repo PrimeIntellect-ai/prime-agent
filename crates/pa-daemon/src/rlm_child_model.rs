@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 use pa_ai::models::{get_supported_thinking_levels, thinking_level_from_str};
-use pa_core::kernel::rlm_runtime::{find_rlm_model_matches, RlmModelInfo};
-
-/// Close matches listed in model-resolution errors.
-const MODEL_ERROR_SUGGESTION_LIMIT: usize = 3;
+use pa_core::kernel::rlm_runtime::{
+    format_rlm_model_rejected_error, format_rlm_model_unavailable_error, RlmModelInfo,
+};
+use pa_types::ai::PRIME_INFERENCE_PROVIDER_ID;
 /// Cap on the answer preview handed to the parent model.
 pub const ANSWER_PREVIEW_MAX_CHARS: usize = 160;
 /// Cap on the one-line task label shown in kernel rosters.
@@ -27,7 +27,10 @@ const ELLIPSIS: &str = "...";
 /// credential-backed list `rlm.find_models` searches (entitled `internal/*` models resolve).
 #[must_use]
 pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
-    let registry = crate::state_getters::worker_model_registry(agent_dir);
+    searchable_models(&crate::state_getters::worker_model_registry(agent_dir))
+}
+
+fn searchable_models(registry: &pa_core::models::ModelRegistry) -> Vec<RlmModelInfo> {
     registry
         .get_rlm_searchable_models()
         .into_iter()
@@ -62,14 +65,61 @@ pub fn resolve_child_model(
 }
 
 /// The resolution before the allowlist gate: `None` inherits the parent model; a reference resolves
-/// parent equality first, then an exact catalog selector, then a unique short-form match.
+/// parent equality first, then an exact catalog selector, then a unique short-form match. While the
+/// Prime Inference credential is rejected, its models refuse with the sentence naming it.
 /// Public for the daemonless print host: print sessions do not enforce
 /// `allowedModels`, so its children do not either.
 ///
 /// # Errors
-/// Returns an error when the reference cannot be resolved against the catalog.
+/// Returns an error when the reference cannot be resolved against the catalog, or names a model
+/// whose Prime Inference credential was rejected.
 pub fn resolve_child_model_unchecked(
     agent_dir: &Path,
+    reference: Option<&str>,
+    parent_model: Option<&str>,
+    target: &str,
+) -> Result<String> {
+    let registry = crate::state_getters::worker_model_registry(agent_dir);
+    let resolved = resolve_reference(&registry, reference, parent_model, target);
+    let Some(rejected) = registry
+        .auth
+        .rejected_credential(PRIME_INFERENCE_PROVIDER_ID)
+    else {
+        return resolved;
+    };
+    let names_prime_inference = match &resolved {
+        Ok(selector) => selector.starts_with(&format!("{PRIME_INFERENCE_PROVIDER_ID}/")),
+        Err(_) => {
+            reference.is_some_and(|reference| names_prime_inference_model(&registry, reference))
+        }
+    };
+    if !names_prime_inference {
+        return resolved;
+    }
+    let requested = reference.or(parent_model).unwrap_or_default().trim();
+    bail!(format_rlm_model_rejected_error(
+        requested,
+        target,
+        &pa_core::auth::prime_inference_rejection_message(&rejected)
+    ))
+}
+
+/// Whether `reference` names a Prime Inference model of the full catalog (exact
+/// selector or short form): the rejected account's models stay listed there.
+fn names_prime_inference_model(registry: &pa_core::models::ModelRegistry, reference: &str) -> bool {
+    let normalized = reference.trim().to_lowercase();
+    registry
+        .get_all()
+        .iter()
+        .filter(|model| model.provider == PRIME_INFERENCE_PROVIDER_ID)
+        .any(|model| {
+            let selector = format!("{}/{}", model.provider, model.id).to_lowercase();
+            selector == normalized || selector.ends_with(&format!("/{normalized}"))
+        })
+}
+
+fn resolve_reference(
+    registry: &pa_core::models::ModelRegistry,
     reference: Option<&str>,
     parent_model: Option<&str>,
     target: &str,
@@ -86,7 +136,7 @@ pub fn resolve_child_model_unchecked(
             return Ok(parent.to_string());
         }
     }
-    let candidates = catalog_models(agent_dir);
+    let candidates = searchable_models(registry);
     let selector_of = |model: &RlmModelInfo| format!("{}/{}", model.provider, model.id);
     if let Some(exact) = candidates
         .iter()
@@ -114,7 +164,11 @@ pub fn resolve_child_model_unchecked(
         }
         _ => {}
     }
-    Err(model_unavailable_error(reference, target, &candidates))
+    Err(anyhow!(format_rlm_model_unavailable_error(
+        reference,
+        target,
+        &candidates
+    )))
 }
 
 /// A requested thinking level must be supported by the resolved model;
@@ -177,31 +231,6 @@ pub fn resolve_child_cwd(
     match joined.canonicalize() {
         Ok(cwd) if cwd.is_dir() => Ok(cwd),
         _ => bail!("{operation} cwd {} is not a directory", joined.display()),
-    }
-}
-
-/// Rejection message for an unresolved model reference: the
-/// unavailability, the selector form, and close matches for retry.
-fn model_unavailable_error(
-    reference: &str,
-    target: &str,
-    candidates: &[RlmModelInfo],
-) -> anyhow::Error {
-    let base = format!(
-        "Requested {target} model \"{reference}\" is unavailable, unauthenticated, or expired"
-    );
-    let hint =
-        "selectors use the form \"provider/model-id\" (e.g. \"prime-inference/z-ai/glm-5.3\")";
-    let close_matches = find_rlm_model_matches(reference, candidates, MODEL_ERROR_SUGGESTION_LIMIT);
-    if close_matches.is_empty() {
-        anyhow!("{base}; {hint}")
-    } else {
-        let selectors = close_matches
-            .iter()
-            .map(|match_| format!("\"{}\"", match_.selector))
-            .collect::<Vec<_>>()
-            .join(", ");
-        anyhow!("{base}; {hint}; close matches: {selectors}")
     }
 }
 
@@ -377,6 +406,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3");
+    }
+
+    /// While the Prime Inference credential is rejected, a spawn of its model names the rejected
+    /// source and the fix instead of the generic unavailability.
+    #[test]
+    fn a_rejected_prime_inference_credential_names_itself_on_spawn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_catalog(dir.path());
+        // A key no other test uses: stale marks are process-wide.
+        std::fs::write(
+            dir.path().join("auth.json"),
+            json!({ "prime-inference": { "type": "api_key", "key": "sk-spawn-rejected-login" } })
+                .to_string(),
+        )
+        .unwrap();
+        let auth = pa_core::auth::AuthStorage::create(dir.path());
+        // Mark until nothing serves: an ambient PRIME_API_KEY outranks the
+        // stored login (marks are value-matched, so only these values gate).
+        while auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID) {}
+        let rejected = auth
+            .rejected_credential(PRIME_INFERENCE_PROVIDER_ID)
+            .expect("no Prime Inference credential serves");
+        let model = crate::state_getters::worker_model_registry(dir.path())
+            .get_all()
+            .iter()
+            .find(|model| model.provider == PRIME_INFERENCE_PROVIDER_ID)
+            .map(|model| format!("{}/{}", model.provider, model.id))
+            .expect("a Prime Inference catalog model");
+        let error = resolve_child_model(
+            dir.path(),
+            Some(&model),
+            None,
+            "spawn",
+            &DaemonAllowlist::Unrestricted,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format_rlm_model_rejected_error(
+                &model,
+                "spawn",
+                &pa_core::auth::prime_inference_rejection_message(&rejected)
+            )
+        );
     }
 
     #[test]

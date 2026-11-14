@@ -57,6 +57,10 @@ pub(super) fn render(
         }
         lines.push(crate::width::truncate_line(&line, width, "..."));
     }
+    if let Some(notice) = picker.credential_notice() {
+        let line = vec![theme.fg_span(ThemeColor::Warning, format!(" {notice}"))];
+        lines.push(crate::width::truncate_line(&line, width, "..."));
+    }
     lines.extend(search_field_lines(
         theme,
         width,
