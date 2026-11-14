@@ -330,11 +330,17 @@ impl ModelPicker {
             Some(self.viewport_rows),
             8,
             self.filtered.len(),
-            // The frame's fixed rows plus the scope row when the session has
-            // scoped models.
-            4 + usize::from(self.has_scoped_models()) + detail_rows,
+            // The chrome above the list plus the scroll row.
+            self.chrome_rows() + 1 + detail_rows,
             1,
         )
+    }
+
+    /// The rows above the item rows: the scope row (when the session has scoped models), the
+    /// credential notice, and the bordered search field. The list budget and click hit-testing
+    /// both read it.
+    pub(crate) fn chrome_rows(&self) -> usize {
+        usize::from(self.has_scoped_models()) + usize::from(self.credential_notice.is_some()) + 3
     }
 
     pub(crate) fn detail_rows(&self) -> usize {

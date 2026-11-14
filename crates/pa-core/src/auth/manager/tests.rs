@@ -263,6 +263,37 @@ fn fallback_resolver_last_resort() {
     assert_eq!(auth.get_api_key("custom").as_deref(), Some("fb-key"));
 }
 
+/// A rejected env key takes its `PRIME_TEAM_ID` with it: the stored login that serves in its place
+/// carries its own team, never the rejected pair's.
+#[test]
+fn a_rejected_env_key_pair_leaves_the_stored_login_its_own_team() {
+    // Keys no other test uses: stale marks are process-wide.
+    let auth = storage_with_env(
+        &serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "sk-stored-keeps-own-team",
+                "primeTeam": { "teamId": "stored-team", "name": "Stored Team" }
+            }
+        }),
+        ScriptedEnv(HashMap::from([
+            (
+                "PRIME_API_KEY".to_string(),
+                "sk-env-pair-rejected".to_string(),
+            ),
+            ("PRIME_TEAM_ID".to_string(), "env-team".to_string()),
+        ])),
+    );
+    assert!(auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID));
+    assert_eq!(
+        auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID),
+        Some(HashMap::from([(
+            "X-Prime-Team-ID".to_string(),
+            "stored-team".to_string()
+        )]))
+    );
+}
+
 #[test]
 fn provider_headers_team_selection() {
     let auth = storage_with(&serde_json::json!({

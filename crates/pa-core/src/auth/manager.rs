@@ -795,6 +795,11 @@ impl AuthStorage {
             AuthSource::Runtime => self.runtime_overrides.get(provider).cloned(),
             AuthSource::Environment => self.env_credentials.api_key(provider),
             AuthSource::Stored => match self.data.credential(provider)? {
+                // A rejected key always has a stale record: a `!command` key
+                // resolves uncached, as in the lookup.
+                AuthCredential::ApiKey { key, .. } if key.starts_with('!') => {
+                    resolve_config_value_uncached(&key)
+                }
                 AuthCredential::ApiKey { key, .. } => resolve_config_value(&key),
                 credential @ AuthCredential::Oauth { .. } => {
                     self.oauth.api_key_for(provider, &credential)
@@ -882,24 +887,33 @@ impl AuthStorage {
         if provider_id != PRIME_INFERENCE_PROVIDER_ID {
             return None;
         }
+        // The credential in play: the serving one, or the rejected one the
+        // catalog still renders.
+        let in_play = match self.available_candidate(provider_id, true) {
+            Some(candidate) => Some(candidate.source),
+            None => self
+                .rejected_credential(provider_id)
+                .map(|token| token.source),
+        };
+        let stored_in_play = in_play == Some(AuthSource::Stored);
+        // PRIME_TEAM_ID was rejected together with the env key it came with:
+        // it never rides with the stored login that serves in that key's place.
+        let env_pair_rejected = stored_in_play
+            && self
+                .environment_candidate(provider_id)
+                .is_some_and(|candidate| Self::is_stale(provider_id, &candidate));
         let team_id = self
             .env_credentials
             .prime_team_id()
+            .filter(|_| !env_pair_rejected)
             .and_then(|value| {
                 let trimmed = value.trim().to_string();
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .or_else(|| {
-                // The stored primeTeam rides only with the stored key (the
-                // serving one, or the rejected one the catalog still renders):
-                // a runtime or environment key never borrows the login's team.
-                let stored_key = match self.available_candidate(provider_id, true) {
-                    Some(candidate) => candidate.source == AuthSource::Stored,
-                    None => self
-                        .rejected_credential(provider_id)
-                        .is_some_and(|token| token.source == AuthSource::Stored),
-                };
-                if !stored_key {
+                // The stored primeTeam rides only with the stored key: a
+                // runtime or environment key never borrows the login's team.
+                if !stored_in_play {
                     return None;
                 }
                 match self.data.credential(provider_id) {

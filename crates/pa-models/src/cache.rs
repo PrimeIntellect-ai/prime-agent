@@ -263,7 +263,15 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     }
 
     fn is_current(&self, scope: &str, generation: u64, opts: &RefreshOptions) -> bool {
-        let state = self.state.lock().unwrap();
+        Self::is_current_state(&self.state.lock().unwrap(), scope, generation, opts)
+    }
+
+    fn is_current_state(
+        state: &CacheState<T>,
+        scope: &str,
+        generation: u64,
+        opts: &RefreshOptions,
+    ) -> bool {
         state.scope.as_deref() == Some(scope)
             && state.generation == generation
             && opts.is_current.as_ref().is_none_or(|check| check())
@@ -314,11 +322,13 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
                 Some(served)
             }
             Err(error) => {
-                if self.is_current(scope, generation, opts)
-                    && scope != PUBLIC_SCOPE
-                    && matches!(error.status(), Some(401 | 403))
-                {
-                    self.state.lock().unwrap().rejected = true;
+                if scope != PUBLIC_SCOPE && matches!(error.status(), Some(401 | 403)) {
+                    // Check and flag under one lock: a scope switch in between
+                    // must not flag the new scope.
+                    let mut state = self.state.lock().unwrap();
+                    if Self::is_current_state(&state, scope, generation, opts) {
+                        state.rejected = true;
+                    }
                 }
                 self.keep_last_good(scope, generation, opts)
             }
