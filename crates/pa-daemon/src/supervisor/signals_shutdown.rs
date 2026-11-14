@@ -1,6 +1,8 @@
 //! Shutdown and signal handling: the drain arms, the shutdown entry, and the
 //! daemon-closing shutdown event.
-use super::{json, Arc, Ordering, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS};
+use super::{
+    json, Arc, Ordering, RouteAdmission, Supervisor, Value, WorkerTransition, ROUTE_TIMEOUT_MS,
+};
 // The only use is the broadcast inside the unix begin_signal_drain arm.
 #[cfg(unix)]
 use super::ClientRouting;
@@ -28,8 +30,7 @@ impl Supervisor {
     pub(super) async fn begin_shutdown(self: &Arc<Self>) {
         self.shutting_down.store(true, Ordering::SeqCst);
         for resident in self.registry.list().await {
-            resident.intentional_stop.store(true, Ordering::SeqCst);
-            resident.note_retired();
+            resident.transition(WorkerTransition::RetireStopped);
             // The stop tombstone persists before the worker is even told (TS
             // `stopWorkerUntracked`): a supervisor that dies between here and the worker's
             // exit leaves durable stop intent, and the next boot finishes the stop. The

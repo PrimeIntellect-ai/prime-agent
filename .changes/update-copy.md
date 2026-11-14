@@ -1,0 +1,1 @@
+- `/update` and `prime-agent update` now describe the update as installing the latest version, without mentioning the TypeScript version or the Rust build.

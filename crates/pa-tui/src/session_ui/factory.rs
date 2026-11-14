@@ -100,9 +100,6 @@ impl super::SessionUi {
         let Some(id) = super::key_event_to_id(&key) else {
             return Ok(());
         };
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let action = view
             .factory_view
             .as_mut()

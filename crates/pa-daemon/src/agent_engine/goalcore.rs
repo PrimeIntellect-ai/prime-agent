@@ -1,18 +1,17 @@
 //! The goal/max-depth runtime core: the durable `rlm_max_depth_state`
-//! writes, the goal-runtime mirror adopted onto each built session, and
-//! the `goal_update` emission family.
-use super::{json, AgentSessionEngine, CoreSessionEngine, EngineEvent, GoalRuntimeHandles, Value};
+//! writes, the pending-continuation guard, and the `goal_update` emission
+//! family.
+use super::{json, AgentSessionEngine, EngineEvent, Value};
 
 impl AgentSessionEngine {
     /// Write the durable `rlm_max_depth_state` entry: straight into the
     /// built session's persistence handle, or parked for the build.
     pub(super) fn persist_max_depth_state(&self, max_depth: u64) {
-        let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
-        match handles {
+        match self.live_handles() {
             Some(handles) => {
                 let mut manager = self
                     .runtime
-                    .block_on(async { handles.session.lock().await });
+                    .block_on(async { handles.goal.session.lock().await });
                 if let Err(error) = manager.append_custom_entry(
                     "rlm_max_depth_state",
                     Some(json!({ "maxDepth": max_depth })),
@@ -143,32 +142,13 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Mirror the built session's goal handles: the core session's mutex
-    /// stays held across a turn's admission, so goal checks in emit callbacks
-    /// read the mirror.
-    pub(super) async fn mirror_goal_runtime(&self, core: &CoreSessionEngine) {
-        let pending = core.goal_driver.lock().await.pending_continuation_handle();
-        *self
-            .pending_goal_continuation
-            .lock()
-            .expect("pending goal continuation lock") = Some(pending);
-        *self.goal_runtime.lock().expect("goal runtime lock") = Some(GoalRuntimeHandles {
-            driver: core.goal_driver.clone(),
-            session: core.session.shared_persistence(),
-        });
-    }
-
     /// The current goal state for a wire emission, when the driver is free
     /// to read (the next emitted event re-checks). The served state reads the
     /// creation-based age fresh from `created_at` (no anchor, no
     /// compounding).
     pub(super) fn current_goal_state(&self) -> Option<pa_core::goals::GoalState> {
-        let handles = self
-            .goal_runtime
-            .lock()
-            .expect("goal runtime lock")
-            .clone()?;
-        let driver = handles.driver.try_lock().ok()?;
+        let handles = self.live_handles()?;
+        let driver = handles.goal.driver.try_lock().ok()?;
         Some(driver.state_with_creation_elapsed())
     }
 
@@ -176,18 +156,11 @@ impl AgentSessionEngine {
     /// admitted (or withdrew) the minted goal continuation, so the next
     /// boundary may mint again (the pending-never-re-arms contract).
     /// Lock-free: the callers cannot take the async driver lock.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the pending-handle mirror's mutex is poisoned.
     pub(crate) fn clear_pending_goal_continuation(&self) {
-        let handle = self
-            .pending_goal_continuation
-            .lock()
-            .expect("pending goal continuation lock")
-            .clone();
-        if let Some(pending) = handle {
-            pending.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handles) = self.built_handles() {
+            handles
+                .pending_goal_continuation
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -224,22 +197,25 @@ impl AgentSessionEngine {
     pub(crate) fn goal_pending_handle(
         &self,
     ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
-        self.pending_goal_continuation
-            .lock()
-            .expect("pending goal continuation lock")
-            .clone()
+        self.built_handles()
+            .map(|handles| std::sync::Arc::clone(&handles.pending_goal_continuation))
     }
 
     /// Emit the `goal_update` event when the session's goal state changed
     /// since the last emission (per-session dedupe). A session without a
     /// goal seeds the baseline silently.
     pub(crate) fn goal_update_if_changed(&self, emit: &mut dyn FnMut(EngineEvent) -> bool) -> bool {
-        let Some(goal) = self.current_goal_state() else {
-            // No session yet, or the driver is mid-mutation: a later event re-checks.
+        // No session yet, or the driver is mid-mutation: a later event re-checks.
+        let Some(handles) = self.live_handles() else {
             return true;
         };
+        let Ok(driver) = handles.goal.driver.try_lock() else {
+            return true;
+        };
+        let goal = driver.state_with_creation_elapsed();
+        drop(driver);
         {
-            let mut published = self.published_goal.lock().expect("published goal lock");
+            let mut published = handles.published_goal.lock().expect("published goal lock");
             // The dedupe is age-invariant (the age ticks with the wall clock).
             if published.as_ref().is_some_and(|last| {
                 pa_core::goals::goal_update_dedupe_projection(last)

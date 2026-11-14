@@ -18,6 +18,19 @@ pub trait ClientSettings: Send + Sync {
         anyhow::bail!("Harness refinement settings are unavailable")
     }
 
+    /// `webSearchProvider` (`serper`/`eco`; default `serper`): the service the
+    /// websearch skill queries in new sessions.
+    fn web_search_provider(&self) -> String {
+        "serper".to_string()
+    }
+    /// Persist the web search provider globally.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown provider or a failed or unavailable store.
+    fn set_web_search_provider(&self, _provider: &str) -> Result<()> {
+        anyhow::bail!("Web search settings are unavailable")
+    }
+
     /// Automatic compaction percentage ceiling; output headroom may trigger earlier.
     fn compaction_threshold_percent(&self) -> f64;
     /// Persist the percentage globally.
@@ -100,6 +113,18 @@ pub trait ClientSettings: Send + Sync {
     ///
     /// Returns `Err` when the settings store fails.
     fn set_show_hardware_cursor(&self, enabled: bool) -> Result<()>;
+    /// `emojiShortcodes` (default true).
+    fn emoji_shortcodes(&self) -> bool {
+        true
+    }
+    /// Persists `emojiShortcodes` to the global scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the settings store fails or is unavailable.
+    fn set_emoji_shortcodes(&self, _enabled: bool) -> Result<()> {
+        anyhow::bail!("Emoji shortcode settings are unavailable")
+    }
     /// `editorPaddingX` (TS default 0).
     fn editor_padding_x(&self) -> u64;
     /// Persists `editorPaddingX` to the global scope.

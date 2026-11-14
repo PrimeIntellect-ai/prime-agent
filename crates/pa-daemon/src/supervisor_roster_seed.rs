@@ -604,7 +604,10 @@ pub(crate) mod tests {
     /// A temp supervisor home: agent dir, sessions dir, a root
     /// transcript, and a child transcript carrying the durable display rows.
     pub(crate) async fn roster_fixture() -> (PathBuf, Arc<Supervisor>, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("pa-roster-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("pa-roster-{}", uuid::Uuid::new_v4()));
         let agent_dir = dir.join("agent");
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();

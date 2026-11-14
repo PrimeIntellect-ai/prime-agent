@@ -1,0 +1,1 @@
+- Files that can hold private data are now created readable only by you (mode 0600 on Linux and macOS): large bash output spill files in the temp directory, rewritten session transcripts, window-cache sidecars, refinement history, diagnostic logs, and persistent-shell output and records. Existing files keep their current permissions.

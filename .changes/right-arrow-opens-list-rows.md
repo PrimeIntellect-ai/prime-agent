@@ -1,1 +1,0 @@
-- → now opens the selected shell in the bash panel, like Enter (← already closes it), and the footer says so.

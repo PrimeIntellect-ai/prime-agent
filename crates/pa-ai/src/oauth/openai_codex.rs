@@ -321,15 +321,17 @@ async fn token_post_bounded(
             response.status
         ));
     }
-    let json: serde_json::Value =
-        serde_json::from_str(&response.body).map_err(|_| response.body.clone())?;
+    let json: serde_json::Value = serde_json::from_str(&response.body)
+        .map_err(|_| format!("OpenAI Codex token {label} response is not valid JSON"))?;
+    // A malformed SUCCESS body can echo credentials back: the errors name
+    // the missing field, never the response body.
     let Some(access) = json
         .get("access_token")
         .and_then(serde_json::Value::as_str)
         .filter(|token| !token.is_empty())
     else {
         return Err(format!(
-            "OpenAI Codex token {label} response missing fields: {json}"
+            "OpenAI Codex token {label} response missing field: access_token"
         ));
     };
     let Some(refresh) = json
@@ -338,19 +340,19 @@ async fn token_post_bounded(
         .filter(|token| !token.is_empty())
     else {
         return Err(format!(
-            "OpenAI Codex token {label} response missing fields: {json}"
+            "OpenAI Codex token {label} response missing field: refresh_token"
         ));
     };
     let Some(expires_in) = json.get("expires_in").and_then(serde_json::Value::as_f64) else {
         return Err(format!(
-            "OpenAI Codex token {label} response missing fields: {json}"
+            "OpenAI Codex token {label} response missing field: expires_in"
         ));
     };
     if !expires_in.is_finite() {
         // A NaN/`inf` lifetime is not a lifetime (TS's arithmetic yields
         // a never-expiring credential; the port refuses it).
         return Err(format!(
-            "OpenAI Codex token {label} response missing fields: {json}"
+            "OpenAI Codex token {label} response missing field: expires_in"
         ));
     }
     // Epoch millis fit i64 for ~292 million years.
@@ -684,7 +686,27 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error,
-            r#"OpenAI Codex token exchange response missing fields: {"access_token":"a"}"#
+            "OpenAI Codex token exchange response missing field: refresh_token"
+        );
+    }
+
+    /// A malformed SUCCESS body can echo a live credential back: the
+    /// refresh error never carries the response body.
+    #[tokio::test]
+    async fn a_malformed_success_response_never_leaks_the_token_into_the_error() {
+        let live_token = "sk-live-echoed-credential";
+        let body = format!("{{\"access_token\":\"{live_token}\"}}");
+        let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, &body)]);
+        let error = refresh_openai_codex_token(&http, "r-old")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "OpenAI Codex token refresh response missing field: refresh_token"
+        );
+        assert!(
+            !error.contains(live_token),
+            "the live access token must not reach the error: {error}"
         );
     }
 

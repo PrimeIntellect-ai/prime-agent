@@ -128,6 +128,10 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
             .iter()
             .any(|a| a == DAEMON_UPDATE_RESTART_COORDINATOR_FLAG)
     {
+        if let Err(error) = crate::config::require_agent_dir() {
+            eprintln!("Error: {error}");
+            return handled_failed();
+        }
         let result = handle_package_command(&args);
         return handled_with_exit(result.exit_code.unwrap_or(0));
     }
@@ -140,6 +144,11 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
     });
     if let Some(help_index) = help_index {
         return print_requested_help(&get_command_path(&args[..help_index]));
+    }
+
+    if let Err(error) = crate::config::require_agent_dir() {
+        eprintln!("Error: {error}");
+        return handled_failed();
     }
 
     let rest: Vec<String> = args[1..].to_vec();
