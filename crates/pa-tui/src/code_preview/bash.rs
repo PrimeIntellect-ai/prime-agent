@@ -26,7 +26,7 @@ pub(crate) enum Rx {
 /// preview code reads.
 pub(crate) struct Cap<'t> {
     fast: Option<regex::Captures<'t>>,
-    fancy: Option<fancy_regex::Captures<'t>>,
+    fancy: Option<fancy_regex::Captures<'t, str>>,
 }
 
 /// One captured group: the matched text plus its span, from either engine.
