@@ -1091,7 +1091,7 @@ mod tests {
             panel: std::boxed::Box::new(panel),
             heading: None,
         });
-        v.onboarding = Some(screen);
+        v.overlay = Some(crate::view::Overlay::Onboarding(screen));
         let frame = v.render_frame(80, 24);
         crate::hyperlinks::set_hyperlinks_override(None);
         let url = "https://fixture.example/auth";

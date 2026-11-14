@@ -50,6 +50,41 @@ impl Default for ShareLoader {
     }
 }
 
+/// A panel that owns the frame (in place of the editor dock) while it is open.
+pub(crate) enum Overlay {
+    /// The onboarding splash: covers the whole pane while its own input loop drives it.
+    Onboarding(crate::onboarding::OnboardingScreen),
+    /// The `/model` picker.
+    ModelPicker(crate::model_picker::ModelPicker),
+    /// The `/effort` inline picker (TS `ThinkingSelectorComponent` seam).
+    ChoicePicker(crate::choice_picker::ChoicePicker),
+    /// The `/mcp` connections view.
+    Mcp(crate::mcp_view::McpView),
+    /// The factory page: the activity dock's factory group's destination.
+    Factory(crate::factory_view::FactoryView),
+    /// The `/heartbeats` inline management view (TS `HeartbeatManagerComponent`).
+    Heartbeats(crate::heartbeats_picker::HeartbeatsPicker),
+    Goal(crate::goal_surface::GoalPanel),
+    Bash(crate::bash_view::BashView),
+    /// The read-only info panel (operator directive 2026-09-26: the `/context`-family displays
+    /// dock instead of flooding the transcript).
+    Info(crate::info_panel::InfoPanel),
+    Tree(crate::tree_selector::TreeSelector),
+    Fork(crate::user_message_selector::UserMessageSelector),
+    /// A `/share` upload in flight.
+    ShareLoader(ShareLoader),
+    /// A yes/no question and the action its `Yes` runs.
+    Confirm {
+        panel: crate::confirm::ConfirmPanel,
+        pending: crate::session_ui::PendingConfirm,
+    },
+    ProviderAuth(crate::provider_auth::ProviderAuthSelector),
+    AuthPanel(crate::auth_panel::AuthPanel),
+    /// The `/reload` progress box.
+    Reload(String),
+    Settings(crate::settings_menu::SettingsMenu),
+}
+
 pub struct AgentView {
     pub theme: Theme,
     /// The chat markdown fenced-code indent (`markdown.codeBlockIndent`;
@@ -78,35 +113,11 @@ pub struct AgentView {
     /// When the current working loader started (elapsed label).
     pub working_since: Option<std::time::Instant>,
     pub retry: Option<crate::chat::RetryState>,
-    pub onboarding: Option<crate::onboarding::OnboardingScreen>,
-    pub model_picker: Option<crate::model_picker::ModelPicker>,
-    pub tree_selector: Option<crate::tree_selector::TreeSelector>,
-    pub confirm: Option<crate::confirm::ConfirmPanel>,
-    pub provider_auth: Option<crate::provider_auth::ProviderAuthSelector>,
-    pub auth_panel: Option<crate::auth_panel::AuthPanel>,
-    pub fork_selector: Option<crate::user_message_selector::UserMessageSelector>,
-    /// The `/effort` inline picker (TS
-    /// `ThinkingSelectorComponent` seam): while set, it owns the whole frame
-    /// like the model picker.
-    pub(crate) choice_picker: Option<crate::choice_picker::ChoicePicker>,
-    pub mcp_view: Option<crate::mcp_view::McpView>,
-    /// The factory page: while set, it owns the editor dock like the
-    /// inline pickers (one panel per live factory run) — the activity
-    /// dock's factory group's destination.
-    pub factory_view: Option<crate::factory_view::FactoryView>,
-    /// The `/heartbeats` inline management view (TS
-    /// `HeartbeatManagerComponent`, inline-picker style): while set, it
-    /// owns the editor dock like the `/model` and `/effort` pickers.
-    pub heartbeats_picker: Option<crate::heartbeats_picker::HeartbeatsPicker>,
-    pub goal_panel: Option<crate::goal_surface::GoalPanel>,
-    pub bash_view: Option<crate::bash_view::BashView>,
-    pub share_loader: Option<ShareLoader>,
-    pub reload_box: Option<String>,
+    /// The one panel that owns the frame while open; `None` is the bare editor dock. One field holds
+    /// it, so two panels can never be open at once, and keys, render, paste, mouse and cursor all
+    /// dispatch on the same value.
+    pub(crate) overlay: Option<Overlay>,
     pub side_pane: Option<crate::side_question::SideQuestionPane>,
-    pub settings_menu: Option<crate::settings_menu::SettingsMenu>,
-    /// The read-only info panel (operator directive 2026-09-26: the
-    /// `/context`-family displays dock instead of flooding the transcript).
-    pub info_panel: Option<crate::info_panel::InfoPanel>,
     /// The `terminal.showImages` setting (default true): image blocks
     /// render metadata rows when set, `[Image: ...]` placeholders otherwise.
     pub show_images: bool,
@@ -226,55 +237,64 @@ impl AgentView {
         )
     }
 
-    /// One paste routed by the open overlay, the key dispatch's order:
-    /// the overlay's own input takes it, the input-less overlays consume
-    /// it, and the bare dock's editor takes it when nothing is open.
+    /// One paste routed by the open overlay: the overlay's own input takes it, the input-less
+    /// overlays consume it, and the bare dock's editor takes it when nothing is open.
     /// Returns whether an overlay took or consumed the paste.
     pub fn route_paste(&mut self, text: &str) -> bool {
-        if let Some(picker) = self.model_picker.as_mut() {
-            picker.paste(text);
-            return true;
+        match self.overlay.as_mut() {
+            None => false,
+            Some(Overlay::ModelPicker(picker)) => {
+                picker.paste(text);
+                true
+            }
+            Some(Overlay::ChoicePicker(picker)) => {
+                picker.paste(text);
+                true
+            }
+            Some(Overlay::Mcp(mcp)) => {
+                mcp.paste(text);
+                true
+            }
+            Some(Overlay::Tree(selector)) => {
+                selector.paste(text);
+                true
+            }
+            Some(Overlay::ProviderAuth(auth)) => {
+                auth.paste(text);
+                true
+            }
+            Some(Overlay::Settings(menu)) => {
+                menu.paste(text);
+                true
+            }
+            // The auth panel's mounted input takes it: never the hidden editor, where a later
+            // Enter could submit the secret as a prompt.
+            Some(Overlay::AuthPanel(panel)) => {
+                panel.handle_paste(text);
+                true
+            }
+            // The input-less frame owners never leave a paste to the editor behind.
+            Some(
+                Overlay::Onboarding(_)
+                | Overlay::Factory(_)
+                | Overlay::Heartbeats(_)
+                | Overlay::Bash(_)
+                | Overlay::Goal(_)
+                | Overlay::Info(_)
+                | Overlay::Fork(_)
+                | Overlay::Confirm { .. }
+                | Overlay::ShareLoader(_)
+                | Overlay::Reload(_),
+            ) => true,
         }
-        if let Some(picker) = self.choice_picker.as_mut() {
-            picker.paste(text);
-            return true;
+    }
+
+    /// Close the open overlay when `is_kind` names it: an async settle (an upload, a reload, a
+    /// login flow, a rebind) closes only its own panel, never one the user opened since.
+    pub(crate) fn close_overlay_if(&mut self, is_kind: impl FnOnce(&Overlay) -> bool) {
+        if self.overlay.as_ref().is_some_and(is_kind) {
+            self.overlay = None;
         }
-        if let Some(mcp) = self.mcp_view.as_mut() {
-            mcp.paste(text);
-            return true;
-        }
-        if let Some(selector) = self.tree_selector.as_mut() {
-            selector.paste(text);
-            return true;
-        }
-        if let Some(auth) = self.provider_auth.as_mut() {
-            auth.paste(text);
-            return true;
-        }
-        if let Some(menu) = self.settings_menu.as_mut() {
-            menu.paste(text);
-            return true;
-        }
-        // The input-less frame owners (the key dispatch's same set): the
-        // factory page, the heartbeats picker, the bash view, the
-        // read-only goal and info panels, the fork selector, the pending
-        // confirm, the share loader, the reload box, and the auth panel
-        // (its own channel drives it). None of them leaves a paste to the
-        // editor behind.
-        if self.factory_view.is_some()
-            || self.heartbeats_picker.is_some()
-            || self.bash_view.is_some()
-            || self.goal_panel.is_some()
-            || self.info_panel.is_some()
-            || self.fork_selector.is_some()
-            || self.confirm.is_some()
-            || self.share_loader.is_some()
-            || self.reload_box.is_some()
-            || self.auth_panel.is_some()
-        {
-            return true;
-        }
-        false
     }
 
     #[must_use]
@@ -297,24 +317,8 @@ impl AgentView {
             pulse_frame: 0,
             working_since: None,
             retry: None,
-            onboarding: None,
-            model_picker: None,
-            tree_selector: None,
-            confirm: None,
-            provider_auth: None,
-            auth_panel: None,
-            fork_selector: None,
-            choice_picker: None,
-            mcp_view: None,
-            factory_view: None,
-            heartbeats_picker: None,
-            goal_panel: None,
-            bash_view: None,
-            share_loader: None,
-            reload_box: None,
+            overlay: None,
             side_pane: None,
-            settings_menu: None,
-            info_panel: None,
             show_images: true,
             show_hardware_cursor: false,
             splash_suppressed: false,

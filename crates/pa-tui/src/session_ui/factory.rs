@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use pa_types::daemon::DaemonCommand;
 
-use super::AgentView;
+use super::{AgentView, Overlay};
 
 use crate::factory_view::{
     factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryView, FactoryViewAction,
@@ -79,10 +79,10 @@ impl super::SessionUi {
         // The mount holds the fold's malformed-reply contract: a cached
         // malformed lane mounts with its error line, never as a silent
         // fake empty state waiting for the first fold.
-        view.factory_view = Some(FactoryView::from_reply(
+        view.overlay = Some(Overlay::Factory(FactoryView::from_reply(
             &self.factory_graph,
             picker_viewport_rows(view.terminal_rows()),
-        ));
+        )));
         self.sync_factory_selection(view);
         self.dirty = true;
         self.spawn_factory_refresh();
@@ -100,17 +100,19 @@ impl super::SessionUi {
         let Some(id) = super::key_event_to_id(&key) else {
             return Ok(());
         };
-        let action = view
-            .factory_view
-            .as_mut()
-            .map(|factory_view| factory_view.handle_key(&id, view.editor.keybindings()));
+        let action = match view.overlay.as_mut() {
+            Some(Overlay::Factory(factory_view)) => {
+                Some(factory_view.handle_key(&id, view.editor.keybindings()))
+            }
+            _ => None,
+        };
         self.sync_factory_selection(view);
         match action {
             Some(FactoryViewAction::None) | None => {}
             Some(FactoryViewAction::Close) => {
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
-                view.factory_view = None;
+                view.overlay = None;
                 self.close_panel_to_agents_view();
                 self.dirty = true;
             }
@@ -141,16 +143,17 @@ impl super::SessionUi {
             self.pending_selection_rlm_depth = rlm_depth;
             self.pending_selection_origin = Some(SelectionOrigin {
                 panel: SessionPanel::FactoryRuns {
-                    row: view
-                        .factory_view
-                        .as_ref()
-                        .and_then(FactoryView::selected_row)
-                        .cloned(),
+                    row: match &view.overlay {
+                        Some(Overlay::Factory(factory_view)) => {
+                            factory_view.selected_row().cloned()
+                        }
+                        _ => None,
+                    },
                 },
                 closes_to_agents_view: self.panel_returns_to_agents_view,
             });
             self.exit_requested = true;
-        } else if let Some(factory_view) = view.factory_view.as_mut() {
+        } else if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
             factory_view.set_error(Some(format!(
                 "cannot open {child_id}: no live runtime or saved session yet"
             )));
@@ -229,7 +232,7 @@ impl super::SessionUi {
                 self.toast(&format!("Factory run {run_id} is now {state}"), view);
             }
             Err(error) => {
-                if let Some(factory_view) = view.factory_view.as_mut() {
+                if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
                     factory_view.set_error(Some(format!("{error:#}")));
                 } else {
                     self.error_row(&format!("{error:#}"), view);
@@ -431,7 +434,7 @@ impl super::SessionUi {
                         crate::agents_view::StatusTone::Muted => self.toast(&message, view),
                         crate::agents_view::StatusTone::Warning
                         | crate::agents_view::StatusTone::Error => {
-                            if let Some(factory_view) = view.factory_view.as_mut() {
+                            if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
                                 factory_view.set_error(Some(message));
                             } else {
                                 self.toast(&message, view);
@@ -457,13 +460,13 @@ impl super::SessionUi {
         match payload {
             Ok(data) => match Self::fold_factory_reply(&mut self.factory_graph, data) {
                 Some(runs) => {
-                    if let Some(factory_view) = view.factory_view.as_mut() {
+                    if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
                         factory_view.set_error(None);
                         factory_view.apply_runs(runs);
                     }
                 }
                 None => {
-                    if let Some(factory_view) = view.factory_view.as_mut() {
+                    if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
                         factory_view.set_error(Some(
                             crate::factory_view::MALFORMED_REPLY_ERROR.to_string(),
                         ));
@@ -471,7 +474,7 @@ impl super::SessionUi {
                 }
             },
             Err(message) => {
-                if let Some(factory_view) = view.factory_view.as_mut() {
+                if let Some(Overlay::Factory(factory_view)) = view.overlay.as_mut() {
                     factory_view.set_error(Some(message));
                 }
             }
@@ -488,12 +491,13 @@ impl super::SessionUi {
     /// refresh tick): the view owns the selection, the session UI owns
     /// the spawned refresh.
     pub(crate) fn sync_factory_selection(&mut self, view: &AgentView) {
-        self.factory_selected_run = view
-            .factory_view
-            .as_ref()
-            .and_then(|factory_view| factory_view.selected_run())
-            .map(|run| run.run_id.clone())
-            .filter(|run_id| !run_id.is_empty());
+        self.factory_selected_run = match &view.overlay {
+            Some(Overlay::Factory(factory_view)) => factory_view
+                .selected_run()
+                .map(|run| run.run_id.clone())
+                .filter(|run_id| !run_id.is_empty()),
+            _ => None,
+        };
     }
 }
 

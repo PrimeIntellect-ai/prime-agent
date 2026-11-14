@@ -5,7 +5,7 @@ use super::{
     attach_capabilities, attach_data_from_response, create_session, last_assistant_text_of, mpsc,
     reconstruct, resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry,
     CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
-    HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
+    HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, Overlay, PromptOrder,
     PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
     SessionSelection, SessionUi, ShareNote, TranscriptPageNote, UpdateNote, Value,
     EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
@@ -121,7 +121,6 @@ impl SessionUi {
             aborted_tools: HashSet::default(),
             last_assistant_text: None,
             osc_sink: crate::clipboard::OscSink::Stdout,
-            pending_confirm: None,
             traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
             pending_model_sign_in: None,
@@ -569,7 +568,7 @@ impl SessionUi {
         // A rebind replaces the whole view: the previous session's open bash view
         // dies with its transcript, and the tok/sec stats restart per session.
         if matches!(kind, RebuildKind::Rebind) {
-            view.bash_view = None;
+            view.close_overlay_if(|overlay| matches!(overlay, Overlay::Bash(_)));
             // The factory view dies the same death — it snapshots the
             // previous session's kernel runs, and its refresh lane must
             // not keep polling the new session's kernel for a view
@@ -592,20 +591,19 @@ impl SessionUi {
                 .as_deref()
                 .is_some_and(|session| session != self.session_id)
             {
-                view.factory_view = None;
+                view.close_overlay_if(|overlay| matches!(overlay, Overlay::Factory(_)));
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 self.factory_graph = serde_json::json!({"runs": []});
             }
             // An agents-view panel the rebind tore down takes its return-to-agents-view flag
             // with it; a kept factory page keeps it.
-            self.panel_returns_to_agents_view &= view.factory_view.is_some();
+            self.panel_returns_to_agents_view &= matches!(view.overlay, Some(Overlay::Factory(_)));
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
             // owning the frame over the rebind with stale content.
-            view.goal_panel = None;
-            view.info_panel = None;
+            view.close_overlay_if(|overlay| matches!(overlay, Overlay::Goal(_) | Overlay::Info(_)));
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -702,7 +700,7 @@ impl SessionUi {
         view.follow();
         // An open `/heartbeats` picker follows the rebuilt session's catalog — otherwise a rebind
         // leaves it showing the previous session's rows.
-        if let Some(picker) = view.heartbeats_picker.as_mut() {
+        if let Some(Overlay::Heartbeats(picker)) = view.overlay.as_mut() {
             picker.apply_catalog(self.heartbeat_catalog.clone(), None);
         }
         // The brand splash is the EMPTY chat's header: a rebuild that folds a non-empty transcript
@@ -876,14 +874,20 @@ mod backfill_tests {
                 &mut view,
             );
             session.rebuild_view(&mut view, &RebuildKind::Rebind);
-            assert!(view.bash_view.is_none(), "the rebind tore the panel down");
+            assert!(
+                !matches!(view.overlay, Some(Overlay::Bash(_))),
+                "the rebind tore the panel down"
+            );
             session.open_bash_view(&mut view);
             let esc = crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Esc,
                 crossterm::event::KeyModifiers::NONE,
             );
             session.handle_bash_view_key(esc, &mut view).unwrap();
-            assert!(view.bash_view.is_none(), "Esc closed the dock's panel");
+            assert!(
+                !matches!(view.overlay, Some(Overlay::Bash(_))),
+                "Esc closed the dock's panel"
+            );
             assert!(
                 !session.open_agents_view && !session.exit_requested,
                 "the dock's panel closes to the dock"
@@ -933,11 +937,10 @@ mod backfill_tests {
                         &mut view,
                     );
                 }
-                let lines = view.bash_view.as_ref().expect("the Bash panel").render(
-                    &theme(),
-                    80,
-                    view.editor.keybindings(),
-                );
+                let Some(Overlay::Bash(bash_view)) = &view.overlay else {
+                    panic!("the Bash panel is open");
+                };
+                let lines = bash_view.render(&theme(), 80, view.editor.keybindings());
                 let selected = lines
                     .iter()
                     .map(|line| {
@@ -957,6 +960,30 @@ mod backfill_tests {
         })
         .await
         .expect("mock session open and both panel opens complete within ten seconds");
+    }
+
+    /// A reload outcome closes only the reload box: the settings menu that started the reload stays
+    /// open.
+    #[tokio::test]
+    async fn a_reload_outcome_leaves_the_settings_menu_open() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("reload.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_settings_menu(&mut view).await;
+            session
+                .apply_reload_outcome(Err("reload failed".to_string()), &mut view)
+                .await;
+            assert!(matches!(view.overlay, Some(Overlay::Settings(_))));
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and reload outcome complete within ten seconds");
     }
 
     /// Every successful attach clears an expired re-attach window's failure: the flag is

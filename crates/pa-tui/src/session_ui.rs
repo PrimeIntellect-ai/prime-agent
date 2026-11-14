@@ -43,7 +43,7 @@ use prompt::PromptOrder;
 pub(crate) use prompt::PromptSubmitNote;
 pub(crate) use prompt::SubmitBehavior;
 use sessions_fork::{create_session, terminal_columns};
-use settings::PendingConfirm;
+pub(crate) use settings::PendingConfirm;
 pub(crate) use settings::ReloadNote;
 pub(crate) use share::{ShareNote, TracesUploadNote, UpdateNote};
 use share::{ShareRun, TraceUploadAllRun, TracesLoginIntent};
@@ -96,7 +96,7 @@ use crate::snapshot::{
 };
 use crate::tree_selector::{TreeSelector, TreeSelectorAction};
 use crate::user_message_selector::{UserMessageSelector, UserMessageSelectorAction};
-use crate::view::{AgentView, ShareLoader};
+use crate::view::{AgentView, Overlay, ShareLoader};
 
 use crossterm::event::KeyEvent;
 use std::time::{Duration, Instant};
@@ -263,7 +263,6 @@ pub(crate) struct SessionUi {
     aborted_tools: std::collections::HashSet<String>,
     pub(crate) last_assistant_text: Option<String>,
     pub(crate) osc_sink: crate::clipboard::OscSink,
-    pending_confirm: Option<PendingConfirm>,
     traces: Option<crate::traces::TracesCommandsHandle>,
     provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
     /// A model selection parked on the provider's sign-in: the picker applied a model whose
