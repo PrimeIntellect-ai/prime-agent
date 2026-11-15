@@ -54,6 +54,7 @@ __all__ = [
     "call_tool",
     "clear_notifications",
     "close",
+    "list_subscriptions",
     "describe_tool",
     "get_prompt",
     "list_connections",
@@ -68,6 +69,8 @@ __all__ = [
     "reload",
     "search_plugins",
     "search_tools",
+    "subscribe_resource",
+    "unsubscribe_resource",
 ]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
@@ -100,6 +103,8 @@ _MAX_LISTING_PAGES = 25
 _MAX_RESOURCE_BYTES = 256 * 1024
 _MAX_URI_LENGTH = 4096
 _MAX_RESOURCE_ITEMS = 512
+# Subscription bookkeeping: one URI list per server, capped like the rest.
+_MAX_SUBSCRIPTIONS = 32
 # Defensive only: the host must already whitelist safe metadata in inventory
 # entries. Never applied to live tool schemas or results — argument names there
 # are server-defined and legitimately credential-like.
@@ -640,6 +645,25 @@ class _Generation:
         ]
         return {"description": _field(result, "description"), "messages": messages}
 
+    # -- resource subscriptions --------------------------------------------
+
+    def _require_subscribe(self) -> None:
+        capabilities = getattr(self.session, "server_capabilities", None)
+        resources = getattr(capabilities, "resources", None)
+        if resources is None or not bool(getattr(resources, "subscribe", False)):
+            raise McpRequestError(
+                f"MCP server '{self.server}' does not advertise resource subscriptions"
+            )
+
+    async def subscribe(self, uri: str) -> None:
+        self._require_subscribe()
+        async with asyncio.timeout(self.call_timeout):
+            await self.session.subscribe_resource(uri)
+
+    async def unsubscribe(self, uri: str) -> None:
+        async with asyncio.timeout(self.call_timeout):
+            await self.session.unsubscribe_resource(uri)
+
     # -- server notifications ----------------------------------------------
 
     def _on_message(self, message: Any) -> None:
@@ -766,6 +790,10 @@ class _Registry:
         # Notification buffers outlive a generation: a reload must not drop a
         # notification the model has not pulled yet.
         self._buses: dict[str, mcp_notify.NotificationBus] = {}
+        # Subscribed URIs per server, owned by the registry (not the
+        # generation): a reload or reconnect must re-subscribe, since the
+        # server forgets subscriptions with the old session.
+        self._subscriptions: dict[str, set[str]] = {}
         self._operations: set[asyncio.Task[Any]] = set()
         self._state = "open"
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -825,11 +853,29 @@ class _Registry:
         self._generations[server] = generation
         try:
             await generation.open()
+            await self._resubscribe(generation)
         except BaseException:
             if self._generations.get(server) is generation:
                 self._generations.pop(server, None)
             raise
         return generation
+
+    async def _resubscribe(self, generation: _Generation) -> None:
+        """Re-establish this server's tracked subscriptions on a fresh session.
+
+        A failed re-subscribe is a lost subscription, not a failed open: it is
+        recorded on the notification bus so the model learns the URI is stale.
+        """
+        for uri in sorted(self._subscriptions.get(generation.server, set())):
+            try:
+                await generation.subscribe(uri)
+            except Exception:  # noqa: BLE001 - one stale URI must not fail the open
+                generation.notifications.submit(
+                    generation.server,
+                    mcp_notify.SUBSCRIPTION_LOST,
+                    uri,
+                    uri=uri,
+                )
 
     async def tools(self, server: str) -> list[dict[str, Any]]:
         async def operation() -> list[dict[str, Any]]:
@@ -905,6 +951,37 @@ class _Registry:
             return copy.deepcopy(await generation.get_prompt(name, arguments))
 
         return await self._tracked(operation)
+
+    async def subscribe(self, server: str, uri: str) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            generation = await self._get(server)
+            tracked = self._subscriptions.setdefault(server, set())
+            if uri not in tracked and len(tracked) >= _MAX_SUBSCRIPTIONS:
+                raise McpRequestError(
+                    f"MCP server '{server}' already has {_MAX_SUBSCRIPTIONS} resource subscriptions"
+                )
+            await generation.subscribe(uri)
+            tracked.add(uri)
+            return {"uri": uri, "subscribed": True}
+
+        return await self._tracked(operation)
+
+    async def unsubscribe(self, server: str, uri: str) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            generation = await self._get(server)
+            await generation.unsubscribe(uri)
+            self._subscriptions.get(server, set()).discard(uri)
+            return {"uri": uri, "subscribed": False}
+
+        return await self._tracked(operation)
+
+    async def subscriptions(self, server: str | None) -> dict[str, Any]:
+        servers = {
+            name: sorted(uris)
+            for name, uris in sorted(self._subscriptions.items())
+            if server is None or name == server
+        }
+        return {"servers": servers}
 
     async def notifications_snapshot(
         self,
@@ -1091,6 +1168,28 @@ async def get_prompt(
         if any(not isinstance(value, str) for value in arguments.values()):
             raise TypeError("prompt arguments must be str values")
     return await _dispatch(lambda: _registry.prompt(server, name, arguments))
+
+
+async def subscribe_resource(server: str, uri: str) -> dict[str, Any]:
+    """Subscribe to a resource's updates (`resources/subscribe`).
+
+    The subscription is re-established after a reload; a URI the server no
+    longer accepts shows up as a `subscription_lost` notification."""
+    _validate_uri(uri)
+    return await _dispatch(lambda: _registry.subscribe(server, uri))
+
+
+async def unsubscribe_resource(server: str, uri: str) -> dict[str, Any]:
+    """Drop one resource subscription (`resources/unsubscribe`)."""
+    _validate_uri(uri)
+    return await _dispatch(lambda: _registry.unsubscribe(server, uri))
+
+
+async def list_subscriptions(server: str | None = None) -> dict[str, Any]:
+    """The tracked subscriptions, by server."""
+    if server is not None:
+        _validate_name(server, "server")
+    return await _dispatch(lambda: _registry.subscriptions(server))
 
 
 async def notifications(

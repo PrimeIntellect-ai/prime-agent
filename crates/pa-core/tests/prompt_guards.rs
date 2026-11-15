@@ -194,6 +194,9 @@ const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.notifications",
     "mcp.notification_status",
     "mcp.clear_notifications",
+    "mcp.subscribe_resource",
+    "mcp.unsubscribe_resource",
+    "mcp.list_subscriptions",
 ];
 
 /// The vendored runtime's harness-state API (`rlm.harness` CRUD and

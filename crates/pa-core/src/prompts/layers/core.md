@@ -193,6 +193,11 @@ Server notifications (tool/prompt/resource inventory changes, subscribed resourc
 
 When a `tools_changed` or `resources_updated` row arrives, re-list the tools or re-read the resource before acting on it.
 
+Subscriptions (when the server advertises them) make `resources/updated` arrive for a URI:
+- `mcp.subscribe_resource(server: str, uri: str) -> dict`
+- `mcp.unsubscribe_resource(server: str, uri: str) -> dict`
+- `mcp.list_subscriptions(server: str | None = None) -> dict`: `{servers: {name: [uri]}}`; a subscription survives a reload (it re-subscribes), and one the server refuses shows up as a `subscription_lost` notification
+
 ## Skills
 
 prime-agent provides multiple executable skills, described by their SKILL.md and executable code. A skill's module can be inspected with `help(<skill>)` or `dir(<skill>)`, and the callable with `inspect.signature(<skill>.<function>)`, if information is missing. The executable code is always pre-imported in the REPL as a programmatic tool, and a callable skill module can be called directly (`await <skill>(...)`).

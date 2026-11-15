@@ -1618,5 +1618,118 @@ class McpNotificationHandlerTest(unittest.TestCase):
         self.assertEqual(entries[0]["summary"], "half way")
 
 
+class McpSubscriptionTest(unittest.TestCase):
+    """`resources/subscribe` bookkeeping and re-subscription across reloads."""
+
+    def setUp(self):
+        mcp._registry = mcp._Registry()
+
+    def session(self, subscribe_ok=True, subscribe_capability=True):
+        session = SimpleNamespace(
+            server_capabilities=SimpleNamespace(
+                resources=SimpleNamespace(subscribe=subscribe_capability)
+            ),
+            subscribed=[],
+            unsubscribed=[],
+            subscribe_ok=subscribe_ok,
+        )
+
+        async def subscribe_resource(uri):
+            session.subscribed.append(uri)
+            if not session.subscribe_ok:
+                raise RuntimeError("subscription refused")
+
+        async def unsubscribe_resource(uri):
+            session.unsubscribed.append(uri)
+
+        session.subscribe_resource = subscribe_resource
+        session.unsubscribe_resource = unsubscribe_resource
+        return session
+
+    def generation(self, session):
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = session
+        return generation
+
+    def test_subscribe_tracks_and_unsubscribe_drops(self):
+        session = self.session()
+
+        async def open_generation(generation):
+            generation.session = session
+
+        async def config(_server):
+            return {"type": "http", "url": "https://example.test/mcp"}
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                await mcp.subscribe_resource("svc", "file:///a")
+                listed = await mcp.list_subscriptions("svc")
+                await mcp.unsubscribe_resource("svc", "file:///a")
+                after = await mcp.list_subscriptions("svc")
+            return listed, after
+
+        listed, after = run(scenario())
+        self.assertEqual(listed, {"servers": {"svc": ["file:///a"]}})
+        self.assertEqual(after, {"servers": {"svc": []}})
+        self.assertEqual(session.subscribed, ["file:///a"])
+        self.assertEqual(session.unsubscribed, ["file:///a"])
+
+    def test_a_reloaded_generation_resubscribes(self):
+        first = self.session()
+        second = self.session()
+        mcp._registry._subscriptions["svc"] = {"file:///a"}
+
+        async def scenario():
+            generation = self.generation(first)
+            await mcp._registry._resubscribe(generation)
+            replacement = self.generation(second)
+            await mcp._registry._resubscribe(replacement)
+            return generation, replacement
+
+        run(scenario())
+        self.assertEqual(first.subscribed, ["file:///a"])
+        self.assertEqual(second.subscribed, ["file:///a"], "a reload re-subscribes")
+
+    def test_a_refused_resubscribe_is_recorded_as_lost(self):
+        session = self.session(subscribe_ok=False)
+        mcp._registry._subscriptions["svc"] = {"file:///gone"}
+        generation = self.generation(session)
+        run(mcp._registry._resubscribe(generation))
+        notices = generation.notifications.snapshot()["notifications"]
+        self.assertEqual(
+            [(entry["kind"], entry["summary"]) for entry in notices],
+            [(mcp_notify.SUBSCRIPTION_LOST, "file:///gone")],
+        )
+
+    def test_subscribe_requires_the_capability(self):
+        generation = self.generation(self.session(subscribe_capability=False))
+        with self.assertRaises(mcp.McpRequestError) as raised:
+            run(generation.subscribe("file:///a"))
+        self.assertIn("does not advertise resource subscriptions", str(raised.exception))
+
+    def test_the_subscription_list_is_capped(self):
+        session = self.session()
+
+        async def open_generation(generation):
+            generation.session = session
+
+        async def config(_server):
+            return {"type": "http", "url": "https://example.test/mcp"}
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                for index in range(mcp._MAX_SUBSCRIPTIONS):
+                    await mcp.subscribe_resource("svc", f"file:///{index}")
+                with self.assertRaises(mcp.McpRequestError):
+                    await mcp.subscribe_resource("svc", "file:///over")
+
+        run(scenario())
+
+
 if __name__ == "__main__":
     unittest.main()

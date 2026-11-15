@@ -109,6 +109,18 @@ await mcp.clear_notifications("notion")
 - A non-zero `dropped` means the bounded buffer evicted entries: you missed
   some, so re-list the inventory rather than trusting the pull.
 
+### Subscriptions
+
+```python
+await mcp.subscribe_resource("notion", "notion://page/123")   # then resources/updated arrives for it
+await mcp.list_subscriptions("notion")                        # {servers: {"notion": ["notion://page/123"]}}
+await mcp.unsubscribe_resource("notion", "notion://page/123")
+```
+
+Subscriptions survive a reload (the kernel re-subscribes on the new session);
+one the server refuses shows up as a `subscription_lost` notification, so a
+stale URI is never silently assumed live.
+
 ## Large or integrity-critical payloads
 
 `mcp.call_tool` runs the MCP client session inside this kernel. Arguments go

@@ -1,0 +1,1 @@
+- MCP resource subscriptions are supported: `mcp.subscribe_resource` / `mcp.unsubscribe_resource` / `mcp.list_subscriptions`, with the subscription re-established after a reload and a refused one reported as a `subscription_lost` notification instead of going stale silently.
