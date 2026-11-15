@@ -3290,6 +3290,9 @@ class OwnerExitWaitTest(unittest.TestCase):
         self.assertFalse(waiter.is_alive(), "the owner's exit must wake the watchdog")
         sleep.assert_not_called()
 
+    # Known Windows hang: the owner-exit registration path is POSIX-only, so this test
+    # waits forever there (it never fails, which is worse). See
+    # docs/testing-known-failures.md before treating a Windows hang as a regression.
     def test_owner_wait_polls_when_exit_registration_fails(self):
         with (
             mock.patch.object(self.repl_module.select, "kqueue", create=True, side_effect=OSError("unavailable")),
