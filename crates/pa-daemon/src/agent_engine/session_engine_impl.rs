@@ -1432,6 +1432,20 @@ impl SessionEngine for AgentSessionEngine {
             }
             None => None,
         };
+        // `settings.images.blockImages` is a privacy promise ("no image reaches any
+        // provider", the routing decision's own words): the routing arm only skips the
+        // turn, and nothing downstream strips the blocks — a vision model keeps them and
+        // every other model replaces them with a placeholder at the provider transform.
+        // Drop them here, before the accepted row and the turn ever see them.
+        if (!request.images.is_empty() || request.batch.iter().any(|row| !row.images.is_empty()))
+            && pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir)
+                .get_block_images()
+        {
+            request.images.clear();
+            for row in &mut request.batch {
+                row.images.clear();
+            }
+        }
         // The accepted turn row: an injected custom row replaces the user
         // message; the plain turn records the accepted row, images after.
         // The injected row the client sees IS the parsed row (one
