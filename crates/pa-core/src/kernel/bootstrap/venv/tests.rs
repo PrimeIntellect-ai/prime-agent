@@ -199,6 +199,20 @@ fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
 
 /// The out-of-band-detection trio: the memo must hit on an unchanged venv, miss when the installed
 /// `rlm` tree or the interpreter changes, and miss after invalidation.
+/// Coverage of the `import mcp` probe clause:
+///
+/// - **Automated:** this test, on Linux CI. `#[cfg(unix)]` because every readiness-probe
+///   test in this file fakes its interpreter with a shell script; the probe tests do not
+///   compile under `cfg(windows)`.
+/// - **Windows: no automated coverage.** The evidence there is a manual end-to-end run —
+///   `prime-agent --prime-agent-bootstrap` on a venv held open by live kernel processes
+///   went from `Error: … removing … kernel-venv: 拒绝访问。 (os error 5)` + `import mcp` →
+///   ModuleNotFoundError, to an in-place repair (`Resolved 51 packages`, no removal),
+///   a written `.bootstrap-version`, and a successful `import mcp` (2026-11-16 00:57).
+///
+/// Red without the fix: the fake interpreter answers success to every probe, so the old
+/// check reports "ready" for a venv that cannot run a single MCP call.
+///
 /// The readiness probe must see the MCP SDK. `rlm.mcp` imports it lazily, so the runtime
 /// surface alone answered "ready" for a venv that cannot run a single MCP call, and the
 /// bootstrap then never repaired it (the owner hit exactly that state: `import rlm` worked,
