@@ -231,13 +231,10 @@ fn a_venv_that_cannot_import_the_mcp_sdk_is_not_ready() {
     let venv = dir.path().join("venv");
     let rlm = venv.join("lib/python3.11/site-packages/rlm");
     std::fs::create_dir_all(&rlm).unwrap();
-    std::fs::write(rlm.join("__init__.py"), "x = 1
-").unwrap();
+    std::fs::write(rlm.join("__init__.py"), "x = 1\n").unwrap();
     let python = dir.path().join("python");
     let write_interpreter = |body: &str| {
-        std::fs::write(&python, format!("#!/bin/sh
-{body}
-")).unwrap();
+        std::fs::write(&python, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
     };
     // Every probe passes except the one whose script imports the MCP SDK.
