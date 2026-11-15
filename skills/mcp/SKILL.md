@@ -66,6 +66,30 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
 - Results are already-parsed Python (a `dict` for structured output, otherwise
   a string). No `json.loads` needed.
 
+## Resources and prompts
+
+A server may also expose resources and prompt templates; both ride the same
+connection as its tools.
+
+```python
+for resource in await mcp.list_resources("notion"):        # {uri, name, description, mimeType}
+    ...
+for template in await mcp.list_resource_templates("notion"):  # {uriTemplate, ...}
+    ...
+contents = await mcp.read_resource("notion", "notion://page/123")
+# [{uri, mimeType, text}] or [{uri, mimeType, blobBase64}]
+
+for prompt in await mcp.list_prompts("notion"):            # {name, description, arguments}
+    ...
+rendered = await mcp.get_prompt("notion", "summarize", {"text": "..."})
+# {description, messages: [{role, content}]}
+```
+
+- A resource read over the size cap raises instead of loading the payload;
+  pass the URI to code that streams it if you need the whole thing.
+- A server that does not advertise resources or prompts raises a named error;
+  check `list_resources` / `list_prompts` before assuming support.
+
 ## Large or integrity-critical payloads
 
 `mcp.call_tool` runs the MCP client session inside this kernel. Arguments go

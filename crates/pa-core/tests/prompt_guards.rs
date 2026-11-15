@@ -183,6 +183,11 @@ const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.call_tool",
     "mcp.search_tools",
     "mcp.describe_tool",
+    "mcp.list_resources",
+    "mcp.list_resource_templates",
+    "mcp.read_resource",
+    "mcp.list_prompts",
+    "mcp.get_prompt",
 ];
 
 /// The vendored runtime's harness-state API (`rlm.harness` CRUD and

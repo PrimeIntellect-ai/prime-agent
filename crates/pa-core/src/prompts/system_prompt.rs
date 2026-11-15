@@ -395,7 +395,7 @@ fn format_generic_mcp_guidance(servers: &[String]) -> String {
     ];
     for server in &enabled {
         lines.push(format!(
-            "For `{server}`, first discover its tools with `await mcp.list_tools(\"{server}\")`, then call one with `await mcp.call_tool(\"{server}\", \"<tool>\", arguments)`."
+            "For `{server}`, first discover its tools with `await mcp.list_tools(\"{server}\")`, then call one with `await mcp.call_tool(\"{server}\", \"<tool>\", arguments)`. The same server may also expose resources (`await mcp.list_resources(\"{server}\")`, then `await mcp.read_resource(\"{server}\", uri)`) and prompt templates (`await mcp.list_prompts(\"{server}\")`, then `await mcp.get_prompt(\"{server}\", name, arguments)`)."
         ));
     }
     lines.join("\n")

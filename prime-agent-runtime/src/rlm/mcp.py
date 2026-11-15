@@ -13,6 +13,11 @@ Two surfaces, one module:
 - Host view: ``status(servers, timeout_ms)`` feeds the daemon's MCP
   connections view (one bounded per-server listing, errors reported per
   server).
+- Resources and prompts: ``list_resources`` / ``list_resource_templates`` /
+  ``read_resource`` / ``list_prompts`` / ``get_prompt`` over the same
+  per-server session, with bounded pagination and a byte cap on resource
+  payloads. A server that does not advertise the capability gets a named
+  error instead of an SDK-level failure.
 """
 
 from __future__ import annotations
@@ -47,9 +52,14 @@ __all__ = [
     "call_tool",
     "close",
     "describe_tool",
+    "get_prompt",
     "list_connections",
     "list_plugins",
+    "list_prompts",
+    "list_resource_templates",
+    "list_resources",
     "list_tools",
+    "read_resource",
     "reload",
     "search_plugins",
     "search_tools",
@@ -78,6 +88,13 @@ _MAX_TOOL_PAGES = 25
 _DEFAULT_TOOL_SEARCH_LIMIT = 20
 _MAX_TOOL_SEARCH_LIMIT = 50
 _MAX_TOOL_SEARCH_SERVERS = 8
+# resources/* and prompts/* pagination: the same honesty rule as tools/list.
+_MAX_LISTING_PAGES = 25
+# One resource read's payload cap (text bytes or base64 characters): a server
+# must not be able to exhaust the kernel with a single read.
+_MAX_RESOURCE_BYTES = 256 * 1024
+_MAX_URI_LENGTH = 4096
+_MAX_RESOURCE_ITEMS = 512
 # Defensive only: the host must already whitelist safe metadata in inventory
 # entries. Never applied to live tool schemas or results — argument names there
 # are server-defined and legitimately credential-like.
@@ -102,6 +119,14 @@ class McpCredentialsUnavailable(RuntimeError):
 
     The user must connect the service first (`/plugins` or
     `/mcp login <service>`)."""
+
+
+class McpRequestError(RuntimeError):
+    """Raised when a resources/* or prompts/* request cannot be served.
+
+    Covers a server that does not advertise the capability, a payload over the
+    size cap, and a malformed SDK result. The message names the server and the
+    operation; it never carries the payload itself."""
 
 
 class _StderrTail(io.TextIOBase):
@@ -162,6 +187,67 @@ class _StderrTail(io.TextIOBase):
         os.close(self._write_fd)
         self._reader.join(timeout=1)
         super().close()
+
+
+def _field(value: Any, *names: str, default: Any = None) -> Any:
+    """The first present field among the SDK's alias shapes (`mime_type`/`mimeType`)."""
+    for name in names:
+        found = getattr(value, name, None)
+        if found is not None:
+            return found
+    return default
+
+
+def _paginated_request(cursor: str) -> Any:
+    from mcp.types import PaginatedRequestParams
+
+    return PaginatedRequestParams(cursor=cursor)
+
+
+def _plain(value: Any) -> Any:
+    """An SDK model as plain JSON-able data (pydantic models dump by alias)."""
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(by_alias=True, exclude_none=True)
+        except TypeError:  # pragma: no cover - older pydantic shapes
+            return dump()
+    return value
+
+
+def _resource_entry(resource: Any) -> dict[str, Any]:
+    return {
+        "uri": _field(resource, "uri", default="") or "",
+        "name": _field(resource, "name", "title", default="") or "",
+        "description": _field(resource, "description", default="") or "",
+        "mimeType": _field(resource, "mime_type", "mimeType", default="") or "",
+    }
+
+
+def _resource_template_entry(template: Any) -> dict[str, Any]:
+    return {
+        "uriTemplate": _field(template, "uri_template", "uriTemplate", default="") or "",
+        "name": _field(template, "name", "title", default="") or "",
+        "description": _field(template, "description", default="") or "",
+        "mimeType": _field(template, "mime_type", "mimeType", default="") or "",
+    }
+
+
+def _prompt_argument_entry(argument: Any) -> dict[str, Any]:
+    return {
+        "name": _field(argument, "name", default="") or "",
+        "description": _field(argument, "description", default="") or "",
+        "required": bool(_field(argument, "required", default=False)),
+    }
+
+
+def _prompt_entry(prompt: Any) -> dict[str, Any]:
+    arguments = _field(prompt, "arguments", default=None) or []
+    return {
+        "name": _field(prompt, "name", default="") or "",
+        "description": _field(prompt, "description", default="") or "",
+        "arguments": [_prompt_argument_entry(argument) for argument in arguments],
+    }
 
 
 class _Generation:
@@ -398,6 +484,127 @@ class _Generation:
                 result = await self.session.call_tool(tool, arguments)
         return _parse_result(result)
 
+    # -- resources and prompts ------------------------------------------------
+
+    def _require_capability(self, capability: str, subject: str) -> None:
+        capabilities = getattr(self.session, "server_capabilities", None)
+        if capabilities is None or getattr(capabilities, capability, None) is None:
+            raise McpRequestError(
+                f"MCP server '{self.server}' does not advertise {subject} support"
+            )
+
+    async def _paginate(
+        self, method: Callable[..., Awaitable[Any]], items_attr: str, verb: str
+    ) -> list[Any]:
+        """Walk one list method's cursors, refusing a partial listing.
+
+        The same honesty rule as `tools/list`: a repeated or malformed cursor,
+        more pages than allowed, or more items than the item cap raises instead
+        of publishing one page as the whole inventory.
+        """
+        items: list[Any] = []
+        cursors: set[str] = set()
+        cursor: str | None = None
+        pages = 0
+        while True:
+            response = (
+                await method()
+                if cursor is None
+                else await method(params=_paginated_request(cursor))
+            )
+            pages += 1
+            items.extend(getattr(response, items_attr, None) or [])
+            if len(items) > _MAX_RESOURCE_ITEMS:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' returned more than {_MAX_RESOURCE_ITEMS} "
+                    f"items from {verb}; refusing to publish a partial listing"
+                )
+            raw_cursor = _field(response, "next_cursor", "nextCursor")
+            if raw_cursor is None:
+                return items
+            if not isinstance(raw_cursor, str) or not raw_cursor:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' returned a malformed {verb} pagination cursor"
+                )
+            if raw_cursor in cursors:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' repeated a {verb} pagination cursor; "
+                    "its listing cannot be completed"
+                )
+            if pages >= _MAX_LISTING_PAGES:
+                raise McpDiscoveryError(
+                    f"MCP server '{self.server}' paginated {verb} beyond "
+                    f"{_MAX_LISTING_PAGES} pages; refusing to publish a partial listing"
+                )
+            cursors.add(raw_cursor)
+            cursor = raw_cursor
+
+    async def list_resources(self) -> list[dict[str, Any]]:
+        self._require_capability("resources", "resources")
+        items = await self._paginate(
+            self.session.list_resources, "resources", "resources/list"
+        )
+        return [_resource_entry(item) for item in items]
+
+    async def list_resource_templates(self) -> list[dict[str, Any]]:
+        self._require_capability("resources", "resources")
+        items = await self._paginate(
+            self.session.list_resource_templates, "resource_templates", "resources/templates/list"
+        )
+        return [_resource_template_entry(item) for item in items]
+
+    async def list_prompts(self) -> list[dict[str, Any]]:
+        self._require_capability("prompts", "prompts")
+        items = await self._paginate(self.session.list_prompts, "prompts", "prompts/list")
+        return [_prompt_entry(item) for item in items]
+
+    async def read_resource(self, uri: str) -> list[dict[str, Any]]:
+        """Read one resource; the payload is capped before it is returned."""
+        self._require_capability("resources", "resources")
+        async with asyncio.timeout(self.call_timeout):
+            result = await self.session.read_resource(uri)
+        entries: list[dict[str, Any]] = []
+        total = 0
+        for content in getattr(result, "contents", None) or []:
+            entry: dict[str, Any] = {
+                "uri": _field(content, "uri", default=uri) or uri,
+                "mimeType": _field(content, "mime_type", "mimeType", default="") or "",
+            }
+            text = _field(content, "text")
+            blob = _field(content, "blob")
+            if isinstance(text, str):
+                total += len(text.encode("utf-8"))
+                entry["text"] = text
+            elif isinstance(blob, str):
+                total += len(blob)
+                entry["blobBase64"] = blob
+            else:
+                raise McpRequestError(
+                    f"MCP server '{self.server}' returned a resource content without text or blob"
+                )
+            if total > _MAX_RESOURCE_BYTES:
+                raise McpRequestError(
+                    f"MCP server '{self.server}' returned a resource over "
+                    f"{_MAX_RESOURCE_BYTES} bytes; refusing to load it"
+                )
+            entries.append(entry)
+        return entries
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, str] | None
+    ) -> dict[str, Any]:
+        self._require_capability("prompts", "prompts")
+        async with asyncio.timeout(self.call_timeout):
+            result = await self.session.get_prompt(name, arguments or None)
+        messages = [
+            {
+                "role": _field(message, "role", default="user") or "user",
+                "content": _plain(_field(message, "content")),
+            }
+            for message in getattr(result, "messages", None) or []
+        ]
+        return {"description": _field(result, "description"), "messages": messages}
+
     async def close(self) -> None:
         lifecycle = self._lifecycle
         if lifecycle is None:
@@ -520,6 +727,43 @@ class _Registry:
 
         return await self._tracked(operation)
 
+    async def resources(self, server: str) -> list[dict[str, Any]]:
+        async def operation() -> list[dict[str, Any]]:
+            generation = await self._get(server)
+            return copy.deepcopy(await generation.list_resources())
+
+        return await self._tracked(operation)
+
+    async def resource_templates(self, server: str) -> list[dict[str, Any]]:
+        async def operation() -> list[dict[str, Any]]:
+            generation = await self._get(server)
+            return copy.deepcopy(await generation.list_resource_templates())
+
+        return await self._tracked(operation)
+
+    async def read_resource(self, server: str, uri: str) -> list[dict[str, Any]]:
+        async def operation() -> list[dict[str, Any]]:
+            generation = await self._get(server)
+            return copy.deepcopy(await generation.read_resource(uri))
+
+        return await self._tracked(operation)
+
+    async def prompts(self, server: str) -> list[dict[str, Any]]:
+        async def operation() -> list[dict[str, Any]]:
+            generation = await self._get(server)
+            return copy.deepcopy(await generation.list_prompts())
+
+        return await self._tracked(operation)
+
+    async def prompt(
+        self, server: str, name: str, arguments: dict[str, str] | None
+    ) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            generation = await self._get(server)
+            return copy.deepcopy(await generation.get_prompt(name, arguments))
+
+        return await self._tracked(operation)
+
     async def reload(self, server: str | None = None) -> None:
         async def operation() -> None:
             names = [server] if server is not None else list(set(self._locks) | set(self._generations))
@@ -632,6 +876,43 @@ async def call_tool(server: str, tool: str, arguments: dict[str, Any] | None = N
     if arguments is not None and not isinstance(arguments, dict):
         raise TypeError("arguments must be a dict or None")
     return await _dispatch(lambda: _registry.call(server, tool, arguments or {}))
+
+
+async def list_resources(server: str) -> list[dict[str, Any]]:
+    """One server's static resources (`resources/list`), fully paginated."""
+    return await _dispatch(lambda: _registry.resources(server))
+
+
+async def list_resource_templates(server: str) -> list[dict[str, Any]]:
+    """One server's resource templates (`resources/templates/list`)."""
+    return await _dispatch(lambda: _registry.resource_templates(server))
+
+
+async def read_resource(server: str, uri: str) -> list[dict[str, Any]]:
+    """Read one resource (`resources/read`) as plain content entries.
+
+    Each entry carries `uri`, `mimeType`, and either `text` or `blobBase64`;
+    a payload over the byte cap raises instead of loading."""
+    _validate_uri(uri)
+    return await _dispatch(lambda: _registry.read_resource(server, uri))
+
+
+async def list_prompts(server: str) -> list[dict[str, Any]]:
+    """One server's prompt templates (`prompts/list`), fully paginated."""
+    return await _dispatch(lambda: _registry.prompts(server))
+
+
+async def get_prompt(
+    server: str, name: str, arguments: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Render one prompt (`prompts/get`): `{description, messages}`."""
+    _validate_name(name, "prompt")
+    if arguments is not None:
+        if not isinstance(arguments, dict):
+            raise TypeError("arguments must be a dict or None")
+        if any(not isinstance(value, str) for value in arguments.values()):
+            raise TypeError("prompt arguments must be str values")
+    return await _dispatch(lambda: _registry.prompt(server, name, arguments))
 
 
 async def reload(server: str | None = None) -> None:
@@ -876,6 +1157,13 @@ def _validate_cursor(value: Any) -> None:
 def _validate_name(value: str, label: str) -> None:
     if not isinstance(value, str) or not value:
         raise TypeError(f"{label} must be a non-empty string")
+
+
+def _validate_uri(value: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise TypeError("uri must be a non-empty string")
+    if len(value) > _MAX_URI_LENGTH:
+        raise ValueError(f"uri must be at most {_MAX_URI_LENGTH} characters")
 
 
 async def _config(server: str) -> dict[str, Any]:

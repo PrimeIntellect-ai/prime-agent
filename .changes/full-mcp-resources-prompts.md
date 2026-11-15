@@ -1,0 +1,1 @@
+- MCP servers' resources and prompts are now usable from the Python REPL (`mcp.list_resources`, `mcp.read_resource`, `mcp.list_resource_templates`, `mcp.list_prompts`, `mcp.get_prompt`), with fully paginated listings, a size cap on resource payloads, and a named error when a server does not advertise the capability.

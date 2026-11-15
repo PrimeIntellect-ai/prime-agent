@@ -1249,5 +1249,256 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertEqual(streams, ("read", "write"))
 
 
+class Dumped:
+    """A pydantic-shaped SDK value: `model_dump` is the only surface relied on."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def model_dump(self, **_kwargs):
+        return dict(self._data)
+
+
+def _resources_session(
+    resources_pages=None,
+    template_pages=None,
+    prompt_pages=None,
+    contents=None,
+    prompt_result=None,
+    capabilities=True,
+):
+    session = SimpleNamespace(
+        server_capabilities=SimpleNamespace(
+            resources=SimpleNamespace() if capabilities else None,
+            prompts=SimpleNamespace() if capabilities else None,
+        ),
+        contents=contents or [],
+        prompt_result=prompt_result,
+        read_uris=[],
+        prompt_calls=[],
+    )
+
+    def listing(pages, items_attr):
+        state = {"index": 0}
+
+        async def method(params=None):
+            items, next_cursor = pages[state["index"]]
+            state["index"] += 1
+            return SimpleNamespace(**{items_attr: items, "next_cursor": next_cursor})
+
+        return method
+
+    async def read_resource(uri):
+        session.read_uris.append(uri)
+        return SimpleNamespace(contents=session.contents)
+
+    async def get_prompt(name, arguments=None):
+        session.prompt_calls.append((name, arguments))
+        return session.prompt_result
+
+    if resources_pages is not None:
+        session.list_resources = listing(resources_pages, "resources")
+    if template_pages is not None:
+        session.list_resource_templates = listing(template_pages, "resource_templates")
+    if prompt_pages is not None:
+        session.list_prompts = listing(prompt_pages, "prompts")
+    session.read_resource = read_resource
+    session.get_prompt = get_prompt
+    return session
+
+
+class McpResourcesAndPromptsTest(unittest.TestCase):
+    """`resources/*` and `prompts/*` over the long-lived per-server session."""
+
+    def setUp(self):
+        mcp._registry = mcp._Registry()
+
+    def generation(self, session):
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = session
+        return generation
+
+    def test_list_resources_walks_every_page(self):
+        session = _resources_session(
+            resources_pages=[
+                (
+                    [
+                        SimpleNamespace(
+                            uri="file:///a.txt",
+                            name="a",
+                            description="first",
+                            mime_type="text/plain",
+                        )
+                    ],
+                    "page-2",
+                ),
+                ([SimpleNamespace(uri="file:///b.json", name="b", description="", mime_type="")], None),
+            ]
+        )
+        discovered = run(self.generation(session).list_resources())
+        self.assertEqual(
+            discovered,
+            [
+                {"uri": "file:///a.txt", "name": "a", "description": "first", "mimeType": "text/plain"},
+                {"uri": "file:///b.json", "name": "b", "description": "", "mimeType": ""},
+            ],
+        )
+
+    def test_list_resources_refuses_a_repeated_cursor(self):
+        session = _resources_session(
+            resources_pages=[
+                ([SimpleNamespace(uri="file:///a", name="a", description="", mime_type="")], "again"),
+                ([], "again"),
+            ]
+        )
+        with self.assertRaises(mcp.McpDiscoveryError) as raised:
+            run(self.generation(session).list_resources())
+        self.assertIn("repeated a resources/list pagination cursor", str(raised.exception))
+
+    def test_resource_templates_and_prompts_normalize(self):
+        session = _resources_session(
+            template_pages=[
+                (
+                    [
+                        SimpleNamespace(
+                            uri_template="file:///{path}",
+                            name="files",
+                            description="templated",
+                            mime_type="text/plain",
+                        )
+                    ],
+                    None,
+                )
+            ],
+            prompt_pages=[
+                (
+                    [
+                        SimpleNamespace(
+                            name="summarize",
+                            description="Summarize",
+                            arguments=[
+                                SimpleNamespace(name="text", description="Input", required=True)
+                            ],
+                        )
+                    ],
+                    None,
+                )
+            ],
+        )
+        generation = self.generation(session)
+        self.assertEqual(
+            run(generation.list_resource_templates()),
+            [
+                {
+                    "uriTemplate": "file:///{path}",
+                    "name": "files",
+                    "description": "templated",
+                    "mimeType": "text/plain",
+                }
+            ],
+        )
+        self.assertEqual(
+            run(generation.list_prompts()),
+            [
+                {
+                    "name": "summarize",
+                    "description": "Summarize",
+                    "arguments": [{"name": "text", "description": "Input", "required": True}],
+                }
+            ],
+        )
+
+    def test_read_resource_returns_text_and_blob_contents(self):
+        session = _resources_session(
+            contents=[
+                SimpleNamespace(uri="file:///a.txt", mime_type="text/plain", text="hello"),
+                SimpleNamespace(uri="file:///b.png", mime_type="image/png", blob="aGk="),
+            ]
+        )
+        generation = self.generation(session)
+        self.assertEqual(
+            run(generation.read_resource("file:///a.txt")),
+            [
+                {"uri": "file:///a.txt", "mimeType": "text/plain", "text": "hello"},
+                {"uri": "file:///b.png", "mimeType": "image/png", "blobBase64": "aGk="},
+            ],
+        )
+        self.assertEqual(session.read_uris, ["file:///a.txt"])
+
+    def test_read_resource_refuses_a_payload_over_the_cap(self):
+        # One byte over the cap: the read must raise rather than hand back a
+        # payload the kernel would then carry around (tooth: without the cap
+        # this returns the oversized text).
+        oversized = "x" * (mcp._MAX_RESOURCE_BYTES + 1)
+        session = _resources_session(
+            contents=[SimpleNamespace(uri="file:///big.txt", mime_type="text/plain", text=oversized)]
+        )
+        with self.assertRaises(mcp.McpRequestError) as raised:
+            run(self.generation(session).read_resource("file:///big.txt"))
+        self.assertIn("over", str(raised.exception))
+        self.assertIn(str(mcp._MAX_RESOURCE_BYTES), str(raised.exception))
+
+    def test_get_prompt_returns_plain_messages(self):
+        session = _resources_session(
+            prompt_result=SimpleNamespace(
+                description="Summarize",
+                messages=[
+                    SimpleNamespace(
+                        role="user",
+                        content=Dumped({"type": "text", "text": "Summarize this"}),
+                    )
+                ],
+            )
+        )
+        generation = self.generation(session)
+        self.assertEqual(
+            run(generation.get_prompt("summarize", {"text": "x"})),
+            {
+                "description": "Summarize",
+                "messages": [
+                    {"role": "user", "content": {"type": "text", "text": "Summarize this"}}
+                ],
+            },
+        )
+        self.assertEqual(session.prompt_calls, [("summarize", {"text": "x"})])
+
+    def test_a_server_without_the_capability_says_so(self):
+        session = _resources_session(
+            resources_pages=[([], None)], prompt_pages=[([], None)], capabilities=False
+        )
+        generation = self.generation(session)
+        with self.assertRaises(mcp.McpRequestError) as raised:
+            run(generation.list_resources())
+        self.assertIn("does not advertise resources support", str(raised.exception))
+        with self.assertRaises(mcp.McpRequestError) as raised:
+            run(generation.list_prompts())
+        self.assertIn("does not advertise prompts support", str(raised.exception))
+
+    def test_module_list_resources_dispatches_to_the_generation(self):
+        session = _resources_session(
+            resources_pages=[
+                ([SimpleNamespace(uri="file:///a", name="a", description="", mime_type="")], None)
+            ]
+        )
+
+        async def open_generation(generation):
+            generation.session = session
+
+        async def config(_server):
+            return {"type": "http", "url": "https://example.test/mcp"}
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                return await mcp.list_resources("svc")
+
+        self.assertEqual(
+            run(scenario()),
+            [{"uri": "file:///a", "name": "a", "description": "", "mimeType": ""}],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

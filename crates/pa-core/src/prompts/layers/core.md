@@ -178,6 +178,13 @@ prime-agent has support for programmatic tools that are defined in the MCP forma
 - `mcp.list_connections() -> list[dict]`: the user's current connections (the dispatch ids)
 - `mcp.search_tools(query: str, connection_id: str | None = None, limit: int = 20) -> dict`: search live tool names/descriptions and report the search scope
 - `mcp.describe_tool(connection_id: str, tool: str) -> dict`: one live tool's name, description, and inputSchema
+- `mcp.list_resources(server: str) -> list[dict]`: the server's static resources (`uri`, `name`, `description`, `mimeType`)
+- `mcp.list_resource_templates(server: str) -> list[dict]`: templated resource URIs (`uriTemplate`, `name`, `description`, `mimeType`)
+- `mcp.read_resource(server: str, uri: str) -> list[dict]`: one resource's contents (`uri`, `mimeType`, and `text` or `blobBase64`); a payload over the size cap raises
+- `mcp.list_prompts(server: str) -> list[dict]`: the server's prompt templates (`name`, `description`, `arguments`)
+- `mcp.get_prompt(server: str, name: str, arguments: dict[str, str] | None = None) -> dict`: renders one prompt as `{description, messages}`
+
+A server that does not advertise resources or prompts raises a named error for the call; do not probe it by other means.
 
 ## Skills
 
