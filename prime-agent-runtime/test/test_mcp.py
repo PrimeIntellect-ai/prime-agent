@@ -19,6 +19,7 @@ from unittest import mock
 
 from mcp.types import CallToolResult, TextContent
 from rlm import McpToolError, mcp
+from rlm import mcp_notify
 from rlm.mcp_base import _parse_result
 
 
@@ -90,7 +91,7 @@ class FakeSession:
     async def list_tools(self):
         return SimpleNamespace(tools=self.tools)
 
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, progress_callback=None):
         self.calls.append((name, arguments))
         return self.result
 
@@ -256,7 +257,7 @@ class McpRegistryTest(unittest.TestCase):
         cancelled = False
 
         class Slow(FakeSession):
-            async def call_tool(self, name, arguments):
+            async def call_tool(self, name, arguments, progress_callback=None):
                 nonlocal cancelled
                 try:
                     await asyncio.sleep(10)
@@ -1498,6 +1499,123 @@ class McpResourcesAndPromptsTest(unittest.TestCase):
             run(scenario()),
             [{"uri": "file:///a", "name": "a", "description": "", "mimeType": ""}],
         )
+
+
+class McpNotificationBusTest(unittest.TestCase):
+    """The bounded notification bus and its forwarding policy."""
+
+    def test_significant_kinds_forward_immediately(self):
+        bus = mcp_notify.NotificationBus()
+        bus.submit("svc", mcp_notify.TOOLS_CHANGED, "tool list changed")
+        batch = bus.take_forwardable(now=0.0)
+        self.assertEqual([entry["kind"] for entry in batch], [mcp_notify.TOOLS_CHANGED])
+        self.assertFalse(bus.pending)
+
+    def test_noisy_kinds_coalesce_within_the_window(self):
+        bus = mcp_notify.NotificationBus()
+        bus.submit("svc", mcp_notify.LOGGING, "first")
+        self.assertEqual(len(bus.take_forwardable(now=0.0)), 1)
+        bus.submit("svc", mcp_notify.LOGGING, "second")
+        bus.submit("svc", mcp_notify.LOGGING, "third")
+        # Inside the coalescing window: nothing is forwarded, the entries stay
+        # pending merged into one.
+        self.assertEqual(bus.take_forwardable(now=1.0), [])
+        self.assertTrue(bus.pending)
+        batch = bus.take_forwardable(now=2.5)
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0]["count"], 2)
+        self.assertEqual(batch[0]["summary"], "third")
+
+    def test_the_buffer_is_bounded_and_counts_drops(self):
+        bus = mcp_notify.NotificationBus()
+        for index in range(mcp_notify.MAX_BUFFERED + 3):
+            bus.submit("svc", mcp_notify.LOGGING, f"line {index}")
+        self.assertEqual(bus.status()["buffered"], mcp_notify.MAX_BUFFERED)
+        self.assertEqual(bus.status()["dropped"], 3)
+
+    def test_the_pull_cursor_and_clear(self):
+        bus = mcp_notify.NotificationBus()
+        first = bus.submit("svc", mcp_notify.RESOURCE_UPDATED, "file:///a", uri="file:///a")
+        second = bus.submit("svc", mcp_notify.RESOURCES_CHANGED, "list changed")
+        snapshot = bus.snapshot()
+        self.assertEqual([entry["seq"] for entry in snapshot["notifications"]], [1, 2])
+        self.assertEqual(snapshot["nextSince"], 2)
+        after_first = bus.snapshot(since=first["seq"])
+        self.assertEqual([entry["seq"] for entry in after_first["notifications"]], [second["seq"]])
+        self.assertEqual(bus.clear(), 2)
+        self.assertEqual(bus.snapshot()["notifications"], [])
+
+
+class McpNotificationHandlerTest(unittest.TestCase):
+    """The SDK callbacks: kinds, no awaiting, tool refresh, progress."""
+
+    def generation(self, session):
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = session
+        return generation
+
+    def test_message_handler_maps_the_kinds(self):
+        session = _resources_session(capabilities=True)
+        generation = self.generation(session)
+        # No running loop here: the handler must still record and never raise.
+        generation._on_message(
+            SimpleNamespace(method="notifications/resources/updated", params=SimpleNamespace(uri="file:///a"))
+        )
+        generation._on_message(
+            SimpleNamespace(method="notifications/resources/list_changed", params=None)
+        )
+        generation._on_message(SimpleNamespace(method="notifications/roots/list_changed", params=None))
+        notices = generation.notifications.snapshot()["notifications"]
+        self.assertEqual(
+            [(entry["kind"], entry["summary"]) for entry in notices],
+            [
+                (mcp_notify.RESOURCE_UPDATED, "file:///a"),
+                (mcp_notify.RESOURCES_CHANGED, "resource list changed"),
+            ],
+        )
+
+    def test_logging_callback_buffers_a_coalesced_entry(self):
+        session = _resources_session(capabilities=True)
+        generation = self.generation(session)
+        generation._on_logging(
+            SimpleNamespace(level="warning", logger="svc", data={"detail": "slow"})
+        )
+        entries = generation.notifications.snapshot()["notifications"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], mcp_notify.LOGGING)
+        self.assertEqual(entries[0]["level"], "warning")
+        self.assertIn("slow", entries[0]["summary"])
+
+    def test_tools_list_changed_refreshes_the_inventory(self):
+        session = FakeSession(
+            tools=[SimpleNamespace(name="old", description="", input_schema={})]
+        )
+        generation = self.generation(session)
+        run(generation.discover())
+        self.assertEqual(list(generation.tools), ["old"])
+        session.tools = [SimpleNamespace(name="new", description="", input_schema={})]
+        generation._on_message(
+            SimpleNamespace(method="notifications/tools/list_changed", params=None)
+        )
+        run(generation._refresh_tools())
+        self.assertEqual(list(generation.tools), ["new"])
+
+    def test_progress_is_buffered_through_the_call_callback(self):
+        class Progressing(FakeSession):
+            async def call_tool(self, name, arguments, progress_callback=None):
+                assert progress_callback is not None
+                progress_callback(1.0, 2.0, "half way")
+                return SimpleNamespace(content=[], is_error=False)
+
+        session = Progressing()
+        generation = self.generation(session)
+        generation.tools = {"slow": {"name": "slow", "description": "", "inputSchema": {}}}
+        run(generation.call("slow", {}))
+        entries = generation.notifications.snapshot()["notifications"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], mcp_notify.PROGRESS)
+        self.assertEqual(entries[0]["summary"], "half way")
 
 
 if __name__ == "__main__":

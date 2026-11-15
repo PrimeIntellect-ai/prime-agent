@@ -1,0 +1,1 @@
+- MCP server notifications now reach the conversation: tool/prompt/resource inventory changes and subscribed-resource updates land as `[mcp_notification]` rows and wake the model, while log lines and progress are buffered (coalesced and rate-limited) and pullable with `mcp.notifications(...)`; the drop counters make a gap visible instead of silent.

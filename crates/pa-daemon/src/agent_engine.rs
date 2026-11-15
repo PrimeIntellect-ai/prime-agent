@@ -151,6 +151,11 @@ pub struct AgentSessionEngine {
     /// row. `None` outside a daemon worker.
     pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
+    /// The MCP notification row seam: informational server notifications
+    /// (`logging`, `progress`) land as durable rows without waking a turn;
+    /// significant kinds go through `kernel_notice_sink` instead.
+    pub(crate) mcp_notification_row_sink:
+        std::sync::Mutex<Option<pa_core::session_engine::mcp_notices::McpNotificationRowSink>>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
     /// Whether the settled turn parked: the park's pause, not the goal's death.
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,

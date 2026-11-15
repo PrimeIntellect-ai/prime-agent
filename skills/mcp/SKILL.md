@@ -90,6 +90,25 @@ rendered = await mcp.get_prompt("notion", "summarize", {"text": "..."})
 - A server that does not advertise resources or prompts raises a named error;
   check `list_resources` / `list_prompts` before assuming support.
 
+## Server notifications
+
+A connected server can push notifications on the same session. Significant
+ones land in the conversation as `[mcp_notification]` rows and wake you;
+informational ones are buffered for you to pull.
+
+```python
+page = await mcp.notifications(server="notion", since=last_seq)   # {notifications, nextSince, dropped}
+await mcp.notification_status()                                   # per-server counters
+await mcp.clear_notifications("notion")
+```
+
+- `tools_changed` / `prompts_changed` / `resources_changed`: re-list before acting.
+- `resource_updated`: re-read the subscribed URI.
+- `logging` / `progress`: bounded, coalesced; never a wake. Pull them if you
+  need the detail.
+- A non-zero `dropped` means the bounded buffer evicted entries: you missed
+  some, so re-list the inventory rather than trusting the pull.
+
 ## Large or integrity-critical payloads
 
 `mcp.call_tool` runs the MCP client session inside this kernel. Arguments go

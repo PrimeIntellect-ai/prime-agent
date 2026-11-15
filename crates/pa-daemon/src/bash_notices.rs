@@ -30,6 +30,22 @@ impl AgentSessionEngine {
             .expect("bash consumed sink lock") = Some(consumed);
     }
 
+    /// Wire the MCP notification row seam (informational server notifications
+    /// land as durable rows; significant kinds wake through the notice sink).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink mutex is poisoned.
+    pub fn set_mcp_notification_row_sink(
+        &self,
+        row: pa_core::session_engine::mcp_notices::McpNotificationRowSink,
+    ) {
+        *self
+            .mcp_notification_row_sink
+            .lock()
+            .expect("mcp notification row sink lock") = Some(row);
+    }
+
     /// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
     /// handlers. Registered only when both seams are wired — no worker queue
     /// leaves the requests honestly unavailable.
@@ -50,8 +66,20 @@ impl AgentSessionEngine {
         else {
             return;
         };
+        let mcp_notice = notice.clone();
         pa_core::session_engine::bash_notices::register_kernel_notice_host_handlers(
             notice, consumed, handlers,
+        );
+        let Some(row) = self
+            .mcp_notification_row_sink
+            .lock()
+            .expect("mcp notification row sink lock")
+            .clone()
+        else {
+            return;
+        };
+        pa_core::session_engine::mcp_notices::register_mcp_notification_host_handler(
+            mcp_notice, row, handlers,
         );
     }
 }

@@ -30,11 +30,13 @@ import os
 import re
 import threading
 import time
+import uuid
 from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from . import host_request
+from . import mcp_notify
 from .mcp_base import (
     _EXPIRY_SKEW_SECONDS,
     McpToolError,
@@ -50,6 +52,7 @@ __all__ = [
     "McpStartupError",
     "McpToolError",
     "call_tool",
+    "clear_notifications",
     "close",
     "describe_tool",
     "get_prompt",
@@ -59,6 +62,8 @@ __all__ = [
     "list_resource_templates",
     "list_resources",
     "list_tools",
+    "notification_status",
+    "notifications",
     "read_resource",
     "reload",
     "search_plugins",
@@ -251,13 +256,23 @@ def _prompt_entry(prompt: Any) -> dict[str, Any]:
 
 
 class _Generation:
-    def __init__(self, server: str, config: dict[str, Any]):
+    def __init__(
+        self,
+        server: str,
+        config: dict[str, Any],
+        notifications: mcp_notify.NotificationBus | None = None,
+    ):
         self.server = server
         self.config = config
+        # The bus outlives one generation (the registry owns it), so a reload
+        # keeps the notifications the model has not pulled yet.
+        self.notifications = notifications or mcp_notify.NotificationBus()
         self.stack = AsyncExitStack()
         self.session: Any = None
         self.tools: dict[str, dict[str, Any]] = {}
         self.closed = False
+        self._forward_task: asyncio.Task[None] | None = None
+        self._tools_refresh: asyncio.Task[None] | None = None
         self._call_lock = asyncio.Lock()
         self._stderr: _StderrTail | None = None
         self._stderr_secrets: tuple[str, ...] = ()
@@ -301,7 +316,13 @@ class _Generation:
                     from mcp import ClientSession
 
                     self.session = await self.stack.enter_async_context(
-                        ClientSession(read, write, read_timeout_seconds=self.call_timeout)
+                        ClientSession(
+                            read,
+                            write,
+                            read_timeout_seconds=self.call_timeout,
+                            message_handler=self._on_message,
+                            logging_callback=self._on_logging,
+                        )
                     )
                     try:
                         await self.session.initialize()
@@ -479,9 +500,23 @@ class _Generation:
             raise PermissionError(f"MCP tool '{tool}' is disabled for server '{self.server}'")
         if tool not in self.tools:
             raise KeyError(f"MCP server '{self.server}' has no tool '{tool}'")
+        def progress(value: float, total: float | None, message: str | None) -> None:
+            # Per-request progress: buffered and coalesced like a log line, so a
+            # server cannot wake the model once per percent.
+            self.notifications.submit(
+                self.server,
+                mcp_notify.PROGRESS,
+                message or "",
+                progress=value,
+                total=total,
+            )
+            self._schedule_forward()
+
         async with self._call_lock:
             async with asyncio.timeout(self.call_timeout):
-                result = await self.session.call_tool(tool, arguments)
+                result = await self.session.call_tool(
+                    tool, arguments, progress_callback=progress
+                )
         return _parse_result(result)
 
     # -- resources and prompts ------------------------------------------------
@@ -605,6 +640,106 @@ class _Generation:
         ]
         return {"description": _field(result, "description"), "messages": messages}
 
+    # -- server notifications ----------------------------------------------
+
+    def _on_message(self, message: Any) -> None:
+        """SDK message handler: record a server notification, never await.
+
+        Runs on the session's receive loop, so anything slow here would stall
+        every response on this connection. The forwarder is a separate task.
+        """
+        method = getattr(message, "method", None)
+        params = getattr(message, "params", None)
+        if method == "notifications/tools/list_changed":
+            self.notifications.submit(self.server, mcp_notify.TOOLS_CHANGED, "tool list changed")
+            self._refresh_tools_soon()
+        elif method == "notifications/prompts/list_changed":
+            self.notifications.submit(self.server, mcp_notify.PROMPTS_CHANGED, "prompt list changed")
+        elif method == "notifications/resources/list_changed":
+            self.notifications.submit(
+                self.server, mcp_notify.RESOURCES_CHANGED, "resource list changed"
+            )
+        elif method == "notifications/resources/updated":
+            uri = str(_field(params, "uri", default="") or "")
+            self.notifications.submit(self.server, mcp_notify.RESOURCE_UPDATED, uri, uri=uri)
+        else:
+            # `logging/message` arrives through `logging_callback`, progress
+            # through the per-call callback; roots-listing changes are not ours.
+            return
+        self._schedule_forward()
+
+    def _on_logging(self, params: Any) -> None:
+        level = str(_field(params, "level", default="info") or "info")
+        logger = str(_field(params, "logger", default="") or "")
+        data = _field(params, "data", default=None)
+        self.notifications.submit(
+            self.server,
+            mcp_notify.LOGGING,
+            f"{level}{' ' + logger if logger else ''}: {data}",
+            level=level,
+            logger=logger,
+        )
+        self._schedule_forward()
+
+    def _refresh_tools_soon(self) -> None:
+        """Refresh the tool map after `tools/list_changed`, off the receive loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = self._tools_refresh
+        if task is not None and not task.done():
+            return
+        self._tools_refresh = loop.create_task(self._refresh_tools())
+
+    async def _refresh_tools(self) -> None:
+        try:
+            await self.discover()
+        except Exception:  # noqa: BLE001 - the stale map stays usable; the next list retries
+            return
+
+    def _schedule_forward(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = self._forward_task
+        if task is not None and not task.done():
+            return
+        self._forward_task = loop.create_task(self._forward_notifications())
+
+    async def _forward_notifications(self) -> None:
+        """Ship forwardable notifications to the host, fire-and-forget.
+
+        No reply is awaited (matching `bash.consumed`): the host turns each
+        frame into a durable row and wakes the model for significant kinds.
+        A failed write is counted, never raised into the SDK callback.
+        """
+        from . import repl
+
+        while self.notifications.pending:
+            batch = self.notifications.take_forwardable()
+            if batch:
+                if repl.is_active():
+                    try:
+                        repl._send(
+                            {
+                                "event": "host_request",
+                                "id": uuid.uuid4().hex,
+                                "data": {"type": "mcp.notification", "entries": batch},
+                            }
+                        )
+                        self.notifications.mark_forwarded(len(batch))
+                    except Exception:  # noqa: BLE001 - a broken pipe must not reach the SDK
+                        self.notifications.mark_forward_failed(len(batch))
+                else:
+                    # No host (a standalone runtime): the pull buffer is all
+                    # there is, and the count says so.
+                    self.notifications.mark_forward_failed(len(batch))
+                continue
+            wait = self.notifications.seconds_until_forwardable()
+            await asyncio.sleep(max(0.05, min(wait, mcp_notify.COALESCE_WINDOW_SECONDS)))
+
     async def close(self) -> None:
         lifecycle = self._lifecycle
         if lifecycle is None:
@@ -616,6 +751,9 @@ class _Generation:
             return
         if self.closed:
             return
+        for task in (self._forward_task, self._tools_refresh):
+            if task is not None and not task.done():
+                task.cancel()
         self._close_requested.set()
         await asyncio.shield(lifecycle)
 
@@ -625,6 +763,9 @@ class _Registry:
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._generations: dict[str, _Generation] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Notification buffers outlive a generation: a reload must not drop a
+        # notification the model has not pulled yet.
+        self._buses: dict[str, mcp_notify.NotificationBus] = {}
         self._operations: set[asyncio.Task[Any]] = set()
         self._state = "open"
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -679,7 +820,8 @@ class _Registry:
             if self._generations.get(server) is current:
                 self._generations.pop(server, None)
         self._accepting_work()
-        generation = _Generation(server, config)
+        bus = self._buses.setdefault(server, mcp_notify.NotificationBus())
+        generation = _Generation(server, config, bus)
         self._generations[server] = generation
         try:
             await generation.open()
@@ -763,6 +905,42 @@ class _Registry:
             return copy.deepcopy(await generation.get_prompt(name, arguments))
 
         return await self._tracked(operation)
+
+    async def notifications_snapshot(
+        self,
+        server: str | None,
+        kind: str | None,
+        since: int | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "notifications": [],
+            "dropped": 0,
+        }
+        for name, bus in sorted(self._buses.items()):
+            if server is not None and name != server:
+                continue
+            snapshot = bus.snapshot(server=server, kind=kind, since=since, limit=limit)
+            merged["notifications"].extend(snapshot["notifications"])
+            merged["dropped"] += snapshot["dropped"]
+        merged["notifications"] = merged["notifications"][-max(1, limit) :]
+        merged["nextSince"] = (
+            merged["notifications"][-1]["seq"] if merged["notifications"] else (since or 0)
+        )
+        return merged
+
+    async def notification_status(self) -> dict[str, Any]:
+        return {
+            "servers": {name: bus.status() for name, bus in sorted(self._buses.items())},
+        }
+
+    async def notifications_clear(self, server: str | None) -> int:
+        cleared = 0
+        for name, bus in self._buses.items():
+            if server is not None and name != server:
+                continue
+            cleared += bus.clear(server)
+        return cleared
 
     async def reload(self, server: str | None = None) -> None:
         async def operation() -> None:
@@ -913,6 +1091,37 @@ async def get_prompt(
         if any(not isinstance(value, str) for value in arguments.values()):
             raise TypeError("prompt arguments must be str values")
     return await _dispatch(lambda: _registry.prompt(server, name, arguments))
+
+
+async def notifications(
+    server: str | None = None,
+    kind: str | None = None,
+    since: int | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """The server notifications this kernel buffered, newest last.
+
+    `since` continues from a previous call's `nextSince`; `dropped` counts
+    entries evicted from the bounded buffer, so a gap is always visible."""
+    if kind is not None and kind not in (mcp_notify.SIGNIFICANT | mcp_notify.NOISY):
+        raise ValueError(f"unknown notification kind: {kind}")
+    if server is not None:
+        _validate_name(server, "server")
+    return await _dispatch(
+        lambda: _registry.notifications_snapshot(server, kind, since, limit)
+    )
+
+
+async def notification_status() -> dict[str, Any]:
+    """Per-server buffer and forward counters (buffered, dropped, failed)."""
+    return await _dispatch(_registry.notification_status)
+
+
+async def clear_notifications(server: str | None = None) -> dict[str, Any]:
+    """Drop buffered notifications (all servers, or one) and report how many."""
+    if server is not None:
+        _validate_name(server, "server")
+    return {"cleared": await _dispatch(lambda: _registry.notifications_clear(server))}
 
 
 async def reload(server: str | None = None) -> None:

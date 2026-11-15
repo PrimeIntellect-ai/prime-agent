@@ -660,6 +660,19 @@ impl Worker {
                     );
                 });
                 concrete.set_kernel_notice_sinks(notice_sink, consumed);
+                // The MCP notification row seam: informational server pushes
+                // land as durable rows (persist + broadcast) without waking a
+                // turn; significant kinds arrive through the notice sink above.
+                let row_core = Arc::clone(&core);
+                let row_events = events.clone();
+                let mcp_row_sink: pa_core::session_engine::mcp_notices::McpNotificationRowSink =
+                    Arc::new(move |message| {
+                        let value = crate::session_commands::custom_message_value(&message);
+                        let mut core = row_core.lock().unwrap();
+                        summary::persist_custom_row(&mut core, &value);
+                        summary::broadcast_custom_row_locked(&mut core, &row_events, &value);
+                    });
+                concrete.set_mcp_notification_row_sink(mcp_row_sink);
                 // The accepted note frames as a session event on the pump.
                 let note_core = Arc::clone(&core);
                 let note_events = events.clone();

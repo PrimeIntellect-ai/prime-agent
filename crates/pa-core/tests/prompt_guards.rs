@@ -154,6 +154,9 @@ const INTERNAL_HOST_REQUESTS: &[&str] = &[
     "bash.consumed",
     // The factory module reports run milestones; the model never calls it.
     "factory.progress",
+    // The kernel forwards buffered MCP server notifications; the model pulls
+    // them with `mcp.notifications`, never by issuing this host request.
+    "mcp.notification",
 ];
 
 /// Map one registered host-request type to the prompt token that documents
@@ -188,6 +191,9 @@ const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.read_resource",
     "mcp.list_prompts",
     "mcp.get_prompt",
+    "mcp.notifications",
+    "mcp.notification_status",
+    "mcp.clear_notifications",
 ];
 
 /// The vendored runtime's harness-state API (`rlm.harness` CRUD and
