@@ -1445,6 +1445,25 @@ impl SessionEngine for AgentSessionEngine {
             for row in &mut request.batch {
                 row.images.clear();
             }
+            // Nothing else tells the user: the routing arm skips the turn and the
+            // provider never sees the images, so this row is the only signal that the
+            // attachment was dropped (a strip is not a refusal — the turn still runs).
+            let notice = pa_types::session::CustomMessage {
+                custom_type: "image_blocked".to_string(),
+                content: pa_types::ai::UserContent::Text(
+                    "Images were not sent: settings.images.blockImages is on. Turn it off (or set imageModel) to attach images."
+                        .to_string(),
+                ),
+                display: true,
+                details: None,
+                timestamp: now_millis(),
+                rest: pa_types::JsonMap::default(),
+            };
+            if !emit(EngineEvent::CustomMessage(
+                crate::session_commands::custom_message_value(&notice),
+            )) {
+                return;
+            }
         }
         // The accepted turn row: an injected custom row replaces the user
         // message; the plain turn records the accepted row, images after.

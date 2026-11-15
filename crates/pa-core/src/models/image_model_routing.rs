@@ -24,6 +24,52 @@ fn takes_image_input(model: &Model) -> bool {
     model.input.contains(&ModelInput::Image)
 }
 
+/// Whether the session model can carry image input, and — when it cannot — whether the
+/// catalog actually declares it (a text-only entry) or knows nothing about it. The
+/// difference is user-facing: an id absent from every catalog must be named as such
+/// instead of being blamed on the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionImageSupport {
+    /// The model, or its catalog entry, declares image input.
+    Native,
+    /// The catalog lists the model and declares no image input.
+    DeclaredTextOnly,
+    /// No catalog entry exists for the id: nothing declares it either way.
+    NotInCatalog,
+}
+
+/// Classify the session model's image support against the catalog. A matching catalog
+/// entry (same provider and id) decides — the entry is the truth about the model, and a
+/// locally synthesized session model need not carry the same `input` list. Without one,
+/// the session model's own declaration is all there is.
+#[must_use]
+pub fn session_image_support(session_model: &Model, available: &[Model]) -> SessionImageSupport {
+    match available
+        .iter()
+        .find(|model| model.provider == session_model.provider && model.id == session_model.id)
+    {
+        Some(catalog) if takes_image_input(catalog) => SessionImageSupport::Native,
+        Some(_) => SessionImageSupport::DeclaredTextOnly,
+        None if takes_image_input(session_model) => SessionImageSupport::Native,
+        None => SessionImageSupport::NotInCatalog,
+    }
+}
+
+/// The session model id is absent from every catalog, so nothing declares that it can
+/// see images: say "unknown" out loud instead of blaming the model for a capability the
+/// catalog never recorded.
+fn format_image_model_unknown_message(session_model_id: &str) -> String {
+    format!(
+        "This turn attaches images, but the selected model ({session_model_id}) is not in the model catalog, so it is treated as text-only.
+
+Pick one:
+- Switch to a model the catalog lists with image input (/model), or
+- Set imageModel in settings.json to an image-capable model (\"provider/model-id\" or a bare id), e.g. \"anthropic/claude-sonnet-4-5\"
+
+Then resend the message. Without it the request would silently drop the images."
+    )
+}
+
 /// TS `formatImageModelRequiredMessage`: the session model cannot serve the
 /// attached images and no image model is configured.
 fn format_image_model_required_message(session_model_id: &str) -> String {
@@ -75,10 +121,17 @@ pub fn resolve_image_model_override(
         return Ok(None);
     }
     let Some(reference) = inputs.image_model_reference else {
-        return Err(format_image_model_required_message(&format!(
-            "{}/{}",
-            session_model.provider, session_model.id
-        )));
+        let selector = format!("{}/{}", session_model.provider, session_model.id);
+        return Err(
+            match session_image_support(session_model, inputs.available_models) {
+                SessionImageSupport::NotInCatalog => format_image_model_unknown_message(&selector),
+                // `Native` cannot reach here (the early return above); it shares the
+                // text-only copy rather than inventing a third message.
+                SessionImageSupport::Native | SessionImageSupport::DeclaredTextOnly => {
+                    format_image_model_required_message(&selector)
+                }
+            },
+        );
     };
     let image_model = find_exact_model_reference_match(reference, inputs.available_models)
         .ok_or_else(|| format_image_model_unusable_message(reference))?;
@@ -189,6 +242,60 @@ mod tests {
         let error = resolve_image_model_override(&inputs).unwrap_err();
         assert!(error.contains("does not accept image input"), "{error}");
         assert!(error.contains("Set imageModel in settings.json"), "{error}");
+    }
+
+    /// The classifier is what lets the refusal distinguish "the catalog says this model
+    /// is text-only" from "no catalog knows this id": the second one must be said out
+    /// loud instead of blaming the model.
+    #[test]
+    fn session_image_support_reads_the_catalog_entry() {
+        let vision = model("claude-opus-4-7", true);
+        let text_only = model("claude-opus-4-7-text-only", false);
+        let available = vec![vision.clone(), text_only.clone()];
+        assert_eq!(
+            session_image_support(&vision, &available),
+            SessionImageSupport::Native
+        );
+        assert_eq!(
+            session_image_support(&text_only, &available),
+            SessionImageSupport::DeclaredTextOnly
+        );
+        // An id no catalog lists ("deepseek-flash" was the real one) is unknown, not
+        // text-only-by-declaration.
+        let mut uncatalogued = model("deepseek-flash", false);
+        uncatalogued.provider = "deepseek".to_string();
+        assert_eq!(
+            session_image_support(&uncatalogued, &available),
+            SessionImageSupport::NotInCatalog
+        );
+        // A locally configured model that declares image input outside the catalog still
+        // counts as native: its own declaration is the only truth available.
+        let mut local_vision = model("local-vision", true);
+        local_vision.provider = "local".to_string();
+        assert_eq!(
+            session_image_support(&local_vision, &available),
+            SessionImageSupport::Native
+        );
+    }
+
+    #[test]
+    fn an_uncatalogued_session_model_gets_the_unknown_refusal() {
+        let catalogued = model("claude-opus-4-7-text-only", false);
+        let available = vec![catalogued.clone()];
+        let mut uncatalogued = model("deepseek-flash", false);
+        uncatalogued.provider = "deepseek".to_string();
+        let routing = inputs(&uncatalogued, None, &available, false);
+        let error = resolve_image_model_override(&routing).unwrap_err();
+        assert!(error.contains("not in the model catalog"), "{error}");
+        assert!(error.contains("deepseek/deepseek-flash"), "{error}");
+        assert!(
+            !error.contains("does not accept image input"),
+            "an uncatalogued model is not blamed for a capability the catalog never              recorded: {error}"
+        );
+        // The catalogued text-only model keeps the original copy.
+        let routing = inputs(&catalogued, None, &available, false);
+        let error = resolve_image_model_override(&routing).unwrap_err();
+        assert!(error.contains("does not accept image input"), "{error}");
     }
 
     #[test]

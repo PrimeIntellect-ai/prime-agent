@@ -683,11 +683,36 @@ mod tests {
                 .any(|event| matches!(event, EngineEvent::TurnEnd { .. })),
             "a strip is not a refusal: the turn still runs"
         );
+        // The strip is silent otherwise (no routing, no provider error): the notice row
+        // is the only signal the user gets that the attachment was dropped.
+        let notices = |events: &[EngineEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    EngineEvent::CustomMessage(row) => Some(row.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            notices(&blocked)
+                .iter()
+                .any(|row| row.contains("image_blocked")),
+            "blockImages says so in the transcript: {:?}",
+            notices(&blocked)
+        );
         let allowed = run(serde_json::json!({}));
         assert!(
             carried_images(&allowed),
             "control arm: without blockImages the image reaches the context: {:?}",
             user_rows(&allowed)
+        );
+        assert!(
+            !notices(&allowed)
+                .iter()
+                .any(|row| row.contains("image_blocked")),
+            "the notice belongs to the strip, not every image turn: {:?}",
+            notices(&allowed)
         );
         registration.unregister();
     }
