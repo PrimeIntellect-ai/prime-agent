@@ -134,17 +134,7 @@ pub(crate) async fn bootstrap_venv(
 
     let venv_str = venv.to_string_lossy().to_string();
     let python_str = python.to_string_lossy().to_string();
-    let mut install_args = vec![
-        "pip".to_string(),
-        "install".to_string(),
-        "--python".to_string(),
-        python_str,
-        source_dir.to_string_lossy().to_string(),
-    ];
-    install_args.push(STATE_SNAPSHOT_REQUIREMENT.to_string());
-    for uv_arg in default_rlm_extra_uv_args() {
-        install_args.push(uv_arg.to_string());
-    }
+    let install_args = runtime_install_args(&python_str, source_dir);
 
     run_async(
         uv_command.executable,
@@ -172,6 +162,61 @@ pub(crate) async fn bootstrap_venv(
     )
     .await?;
     run_async(uv_command.executable, &install_args, uv_command.project).await?;
+    sync_python_skills(
+        &uv_command,
+        venv,
+        &python,
+        source_dir,
+        runtime_identity,
+        python_skills,
+        options,
+    )
+    .await
+}
+
+/// The one `uv pip install` argument list the bootstrap and the in-place repair share:
+/// the runtime source, the state-snapshot requirement, and the default extra packages.
+fn runtime_install_args(python: &str, source_dir: &Path) -> Vec<String> {
+    let mut args = vec![
+        "pip".to_string(),
+        "install".to_string(),
+        "--python".to_string(),
+        python.to_string(),
+        source_dir.to_string_lossy().to_string(),
+    ];
+    args.push(STATE_SNAPSHOT_REQUIREMENT.to_string());
+    for uv_arg in default_rlm_extra_uv_args() {
+        args.push(uv_arg.to_string());
+    }
+    args
+}
+
+/// Heal an existing venv in place: re-run the declared install (runtime + extras) without
+/// creating or deleting anything. A venv whose interpreter still runs but whose readiness
+/// probe fails — a package deleted by an interrupted upgrade, a half-finished install — is
+/// repaired here; the destructive rebuild stays the fallback, because a live kernel holds
+/// the interpreter files Windows refuses to delete.
+pub(crate) async fn repair_venv(
+    venv: &Path,
+    source_dir: &Path,
+    runtime_identity: &str,
+    python_skills: &[BootstrapPythonSkill],
+    options: &EnsureKernelPythonOptions,
+    project: Option<&Path>,
+) -> anyhow::Result<()> {
+    let uv = ensure_uv(project)?;
+    let uv_command = UvCommand {
+        executable: &uv,
+        project,
+    };
+    let python = kernel_venv_python(venv);
+    let python_str = python.to_string_lossy().to_string();
+    run_async(
+        uv_command.executable,
+        &runtime_install_args(&python_str, source_dir),
+        uv_command.project,
+    )
+    .await?;
     sync_python_skills(
         &uv_command,
         venv,

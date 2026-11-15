@@ -1,0 +1,1 @@
+- The Python kernel now repairs itself instead of failing: a venv left without the MCP SDK (or any other declared package) is reinstalled in place, so `python_repl` and MCP tools keep working after an interrupted upgrade — previously such a venv was deleted, which a running session's kernel blocked ("access denied"), and the bootstrap reported "ready" before the error.

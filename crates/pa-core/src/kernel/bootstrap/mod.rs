@@ -22,7 +22,8 @@ pub use runtime_code::{
 use venv::{
     bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
-    resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill, UvCommand,
+    repair_venv, resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill,
+    UvCommand,
 };
 pub use venv::{invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python};
 use venv::{kernel_base_ready, kernel_ready};
@@ -38,7 +39,7 @@ pub struct KernelPythonSkill {
 
 /// The default extra packages pre-installed in the kernel venv and promised to
 /// the model in the system prompt.
-pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 12] = [
+pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 13] = [
     // (uvArg, importName, promptLabel)
     ("requests", "requests", "requests"),
     ("httpx", "httpx", "httpx"),
@@ -51,6 +52,10 @@ pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 12] = [
     ("beautifulsoup4", "bs4", "bs4 (Beautiful Soup)"),
     ("lxml", "lxml", "lxml"),
     ("pydantic", "pydantic", "pydantic"),
+    // The MCP SDK is also a dependency of prime-agent-runtime; listing it here keeps the
+    // override diagnostics and the prompt's package inventory honest, and the extras
+    // install then re-adds it after an interrupted upgrade.
+    ("mcp", "mcp", "mcp (MCP SDK)"),
     ("tyro", "tyro", "tyro"),
 ];
 
@@ -264,6 +269,26 @@ async fn ensure_kernel_venv(
         if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
             return Ok(python);
         }
+        // Heal in place before any destructive step. A venv whose interpreter still runs
+        // but whose readiness probe fails (a package an interrupted upgrade removed, a
+        // half-finished install) needs an install, not a new directory — and the rebuild
+        // below cannot delete a venv a live kernel holds open on Windows (access denied).
+        // The rebuild stays the fallback for a venv this cannot fix.
+        if kernel_venv_python(&venv).exists()
+            && repair_venv(
+                &venv,
+                &source_dir,
+                &runtime_identity,
+                python_skills,
+                options,
+                project,
+            )
+            .await
+            .is_ok()
+            && kernel_ready(&python_str, &venv, &runtime_identity, python_skills)
+        {
+            return Ok(python);
+        }
         if kernel_base_ready(&python_str, &venv, &runtime_identity) {
             let uv = ensure_uv(project)?;
             let uv_command = UvCommand {
@@ -286,8 +311,12 @@ async fn ensure_kernel_venv(
         options.report("› setting up python kernel (one-time, ~30s)…");
         if had_venv {
             options.report("rebuilding kernel venv");
-            std::fs::remove_dir_all(&venv)
-                .with_context(|| format!("removing {}", venv.display()))?;
+            std::fs::remove_dir_all(&venv).with_context(|| {
+                format!(
+                    "removing {} (a running session's kernel can still hold its interpreter;                      stop that session, or point PRIME_AGENT_KERNEL_VENV at a separate directory)",
+                    venv.display()
+                )
+            })?;
         }
         bootstrap_venv(
             &venv,
@@ -302,8 +331,11 @@ async fn ensure_kernel_venv(
     }
     .await;
     drop(release_lock);
+    // Report readiness only after the install actually succeeded: a failure used to print
+    // "✓ ready" first and the error after it, which reads as a working kernel.
+    let python = result.map_err(|error| format_bootstrap_failure(&error))?;
     options.report("✓ ready");
-    result.map_err(|error| format_bootstrap_failure(&error))
+    Ok(python)
 }
 
 /// The venv's directory denies writes to this user, so the bootstrap lock cannot be

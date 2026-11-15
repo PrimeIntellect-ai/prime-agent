@@ -199,6 +199,51 @@ fn probe_memo_key_distinguishes_every_input_and_drops_on_invalidate() {
 
 /// The out-of-band-detection trio: the memo must hit on an unchanged venv, miss when the installed
 /// `rlm` tree or the interpreter changes, and miss after invalidation.
+/// The readiness probe must see the MCP SDK. `rlm.mcp` imports it lazily, so the runtime
+/// surface alone answered "ready" for a venv that cannot run a single MCP call, and the
+/// bootstrap then never repaired it (the owner hit exactly that state: `import rlm` worked,
+/// `import mcp` raised, and every MCP tool failed at use time).
+///
+/// Tooth: this test is red without the `import mcp` clause in `RUNTIME_READY_CHECK` — the
+/// old probe answered ready for the same interpreter.
+#[cfg(unix)]
+#[test]
+fn a_venv_that_cannot_import_the_mcp_sdk_is_not_ready() {
+    let _memo_state = MEMO_STATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let venv = dir.path().join("venv");
+    let rlm = venv.join("lib/python3.11/site-packages/rlm");
+    std::fs::create_dir_all(&rlm).unwrap();
+    std::fs::write(rlm.join("__init__.py"), "x = 1
+").unwrap();
+    let python = dir.path().join("python");
+    let write_interpreter = |body: &str| {
+        std::fs::write(&python, format!("#!/bin/sh
+{body}
+")).unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // Every probe passes except the one whose script imports the MCP SDK.
+    write_interpreter("case \"$*\" in *'import mcp'*) exit 1 ;; *) exit 0 ;; esac");
+    write_bootstrap_version(&venv, "sha256:runtime", &[]).unwrap();
+    let python_str = python.to_string_lossy().to_string();
+    invalidate_runtime_probe_cache();
+    assert!(
+        !kernel_ready(&python_str, &venv, "sha256:runtime", &[]),
+        "an interpreter that cannot import the MCP SDK is not a ready kernel"
+    );
+    // Control: the same venv with an interpreter that can run every probe is ready.
+    write_interpreter("exit 0");
+    invalidate_runtime_probe_cache();
+    assert!(
+        kernel_ready(&python_str, &venv, "sha256:runtime", &[]),
+        "the probe still accepts a complete interpreter"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn probe_memo_misses_on_out_of_band_venv_mutation() {
