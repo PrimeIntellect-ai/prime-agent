@@ -579,4 +579,116 @@ mod tests {
         );
         registration.unregister();
     }
+
+    /// `settings.images.blockImages` promises "no image reaches any provider". The routing
+    /// decision only skips the turn, so the admission-time strip is what keeps that promise:
+    /// the emitted user row — and therefore the model context — carries no image block. The
+    /// control arm with the setting absent carries one, which is what gives this teeth:
+    /// removing the strip turns the blocked arm red.
+    #[test]
+    fn blocked_images_never_leave_the_daemon() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                provider: Some("battery".to_string()),
+                models: Some(vec![
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "mock-1".to_string(),
+                        name: Some("Mock 1".to_string()),
+                        reasoning: Some(false),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(4096),
+                    },
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "mock-vision".to_string(),
+                        name: Some("Mock Vision".to_string()),
+                        reasoning: Some(false),
+                        input: Some(vec![
+                            pa_types::ai::ModelInput::Text,
+                            pa_types::ai::ModelInput::Image,
+                        ]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(4096),
+                    },
+                ]),
+                ..Default::default()
+            });
+        let run = |settings: serde_json::Value| -> Vec<EngineEvent> {
+            registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+                pa_ai::faux::faux_assistant_text_message(
+                    "image reply",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ),
+            )]);
+            let dir = tempfile::TempDir::new().unwrap();
+            let engine = image_route_engine(dir.path(), &settings, &registration.api);
+            // The dangerous case: a session model that CAN see images, so nothing else in
+            // the pipeline would have dropped them.
+            engine.configure_model(EngineModelSelection {
+                provider: Some("battery".to_string()),
+                model: Some("mock-vision".to_string()),
+                api_key: None,
+                thinking: None,
+            });
+            let mut events = Vec::new();
+            engine.run_prompt(
+                0,
+                PromptRequest {
+                    batch: Vec::new(),
+                    images: one_image(),
+                    message: "describe this".to_string(),
+                    source: "user".to_string(),
+                    agent_message_id: None,
+                    custom_message: None,
+                },
+                &|| false,
+                &mut |event| {
+                    events.push(event);
+                    true
+                },
+            );
+            events
+        };
+        // Only the user rows are worth printing on failure; the event stream carries the
+        // whole harness digest, which drowns the assertion.
+        let user_rows = |events: &[EngineEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    EngineEvent::UserMessage(row) => Some(row.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let carried_images = |events: &[EngineEvent]| {
+            user_rows(events)
+                .iter()
+                .any(|row| row.contains("\"image\""))
+        };
+        let blocked = run(serde_json::json!({ "images": { "blockImages": true } }));
+        assert!(
+            !user_rows(&blocked).is_empty(),
+            "the accepted row is still recorded"
+        );
+        assert!(
+            !carried_images(&blocked),
+            "blockImages keeps every image inside the daemon: {:?}",
+            user_rows(&blocked)
+        );
+        assert!(
+            blocked
+                .iter()
+                .any(|event| matches!(event, EngineEvent::TurnEnd { .. })),
+            "a strip is not a refusal: the turn still runs"
+        );
+        let allowed = run(serde_json::json!({}));
+        assert!(
+            carried_images(&allowed),
+            "control arm: without blockImages the image reaches the context: {:?}",
+            user_rows(&allowed)
+        );
+        registration.unregister();
+    }
 }
