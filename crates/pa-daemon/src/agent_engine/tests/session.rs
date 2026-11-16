@@ -708,6 +708,7 @@ fn an_injected_custom_row_without_a_timestamp_admits_the_turn() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: Some(notice),
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
