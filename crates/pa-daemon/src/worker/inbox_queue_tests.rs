@@ -840,13 +840,14 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
     // tests run as root (chmod alone does not).
     std::fs::remove_file(&journal).unwrap();
     std::fs::create_dir(&journal).unwrap();
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -885,13 +886,14 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
     // the next notices must not silence the degradation their unread
     // rows were queued under.
     std::fs::remove_dir(&journal).unwrap();
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         &arrivals,
         bash_done_notice(4322, "sleep 2"),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -942,18 +944,19 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
     // tests run as root (chmod alone does not).
     std::fs::remove_file(&journal).unwrap();
     std::fs::create_dir(&journal).unwrap();
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
     );
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -963,6 +966,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -1006,7 +1010,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
     assert!(
         rows[1]
             .0
-            .starts_with("[inbox reminder] 1 messages still waiting"),
+            .starts_with("[inbox reminder] 1 message still waiting"),
         "the reminder re-rendered with the live count: {rows:?}"
     );
     for (message, _, _) in &rows {
