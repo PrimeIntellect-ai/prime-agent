@@ -1559,14 +1559,19 @@ class McpNotificationHandlerTest(unittest.TestCase):
     def test_message_handler_maps_the_kinds(self):
         session = _resources_session(capabilities=True)
         generation = self.generation(session)
-        # No running loop here: the handler must still record and never raise.
-        generation._on_message(
-            SimpleNamespace(method="notifications/resources/updated", params=SimpleNamespace(uri="file:///a"))
-        )
-        generation._on_message(
-            SimpleNamespace(method="notifications/resources/list_changed", params=None)
-        )
-        generation._on_message(SimpleNamespace(method="notifications/roots/list_changed", params=None))
+
+        async def scenario():
+            # The SDK awaits the handler on its receive loop.
+            await generation._on_message(
+                SimpleNamespace(method="notifications/resources/updated", params=SimpleNamespace(uri="file:///a"))
+            )
+            await generation._on_message(
+                SimpleNamespace(method="notifications/resources/list_changed", params=None)
+            )
+            await generation._on_message(SimpleNamespace(method="notifications/roots/list_changed", params=None))
+
+        generation._schedule_forward = lambda: None
+        run(scenario())
         notices = generation.notifications.snapshot()["notifications"]
         self.assertEqual(
             [(entry["kind"], entry["summary"]) for entry in notices],
@@ -1579,8 +1584,11 @@ class McpNotificationHandlerTest(unittest.TestCase):
     def test_logging_callback_buffers_a_coalesced_entry(self):
         session = _resources_session(capabilities=True)
         generation = self.generation(session)
-        generation._on_logging(
-            SimpleNamespace(level="warning", logger="svc", data={"detail": "slow"})
+        generation._schedule_forward = lambda: None
+        run(
+            generation._on_logging(
+                SimpleNamespace(level="warning", logger="svc", data={"detail": "slow"})
+            )
         )
         entries = generation.notifications.snapshot()["notifications"]
         self.assertEqual(len(entries), 1)
@@ -1596,10 +1604,16 @@ class McpNotificationHandlerTest(unittest.TestCase):
         run(generation.discover())
         self.assertEqual(list(generation.tools), ["old"])
         session.tools = [SimpleNamespace(name="new", description="", input_schema={})]
-        generation._on_message(
-            SimpleNamespace(method="notifications/tools/list_changed", params=None)
-        )
-        run(generation._refresh_tools())
+
+        async def announce():
+            # The handler awaits; the refresh it schedules runs off the receive loop.
+            await generation._on_message(
+                SimpleNamespace(method="notifications/tools/list_changed", params=None)
+            )
+            await generation._tools_refresh
+
+        generation._schedule_forward = lambda: None
+        run(announce())
         self.assertEqual(list(generation.tools), ["new"])
 
     def test_progress_is_buffered_through_the_call_callback(self):
@@ -1900,6 +1914,42 @@ class McpUsageReportingTest(unittest.TestCase):
         )
         contents = self.read(generation, [], active=False)
         self.assertEqual(contents[0]["text"], "hi")
+
+
+class McpNotificationCallbackContractTest(unittest.TestCase):
+    """The SDK awaits both notification callbacks.
+
+    A synchronous handler returns None, and `await None` raises TypeError for
+    every notification (the SDK logs it and carries on, so the only trace is
+    the kernel's stderr — the everything-server smoke test found four of them).
+    """
+
+    def generation(self):
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = SimpleNamespace(
+            server_capabilities=SimpleNamespace(resources=None, prompts=None)
+        )
+        generation._schedule_forward = lambda: None
+        return generation
+
+    def test_the_callbacks_are_coroutines(self):
+        generation = self.generation()
+        self.assertTrue(asyncio.iscoroutinefunction(generation._on_message))
+        self.assertTrue(asyncio.iscoroutinefunction(generation._on_logging))
+
+    def test_awaiting_the_handlers_records_the_notifications(self):
+        generation = self.generation()
+        run(
+            generation._on_message(
+                SimpleNamespace(method="notifications/prompts/list_changed", params=None)
+            )
+        )
+        run(generation._on_logging(SimpleNamespace(level="info", logger="test", data="hello")))
+        self.assertEqual(
+            generation.notifications.status()["bufferedByKind"],
+            {mcp_notify.PROMPTS_CHANGED: 1, mcp_notify.LOGGING: 1},
+        )
 
 
 if __name__ == "__main__":

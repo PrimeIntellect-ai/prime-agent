@@ -748,11 +748,12 @@ class _Generation:
 
     # -- server notifications ----------------------------------------------
 
-    def _on_message(self, message: Any) -> None:
-        """SDK message handler: record a server notification, never await.
+    async def _on_message(self, message: Any) -> None:
+        """SDK message handler: record a server notification, never block.
 
-        Runs on the session's receive loop, so anything slow here would stall
-        every response on this connection. The forwarder is a separate task.
+        The SDK awaits this handler on the session's receive loop, so anything
+        slow here would stall every response on this connection: the work is an
+        in-memory submit plus a scheduled forwarder task.
         """
         method = getattr(message, "method", None)
         params = getattr(message, "params", None)
@@ -774,7 +775,8 @@ class _Generation:
             return
         self._schedule_forward()
 
-    def _on_logging(self, params: Any) -> None:
+    async def _on_logging(self, params: Any) -> None:
+        """SDK logging callback: record one log line (the SDK awaits it)."""
         level = str(_field(params, "level", default="info") or "info")
         logger = str(_field(params, "logger", default="") or "")
         data = _field(params, "data", default=None)
