@@ -382,10 +382,9 @@ async fn refine_test_session_with(
     (session, tmp)
 }
 
-/// P0-1: a daemon-shaped local refinement writes the session's own
-/// artifact harness store — the one the kernel and the digest read — and
-/// nothing appears under the shared `<sessions>/harness` file the deleted
-/// session-dir derivation wrote (#3853's local half).
+/// A daemon-shaped local refinement writes the session's own artifact
+/// harness store, the one the kernel and the digest read, and nothing
+/// lands in `<sessions>/harness`.
 #[tokio::test]
 async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -477,8 +476,6 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
         state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
         "the local edit lands in the session's own harness store"
     );
-    // Nothing appears under the shared `<sessions>/harness` path the
-    // deleted session-dir derivation wrote.
     assert!(
         !sessions_root
             .join("harness")
@@ -487,8 +484,7 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
         "no write to the shared sessions-root harness file"
     );
     // A global refinement on the same session writes the agent dir's
-    // harness path — never a store file dropped directly in the agent dir
-    // (the drifted shape `~/.prime/agent/harness_state.json`).
+    // harness store.
     let global_plan = r#"{"summary":"bench","edits":[{"action":"create","kind":"memory","id":"g1","title":"Global tactic","content":"Prefer the shared seam"}]}"#;
     session
         .refine_with_refiner(

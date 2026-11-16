@@ -219,13 +219,10 @@ pub fn load_refinement_history(
     crate::refinement::merge_refinement_history(&global, &session_entries)
 }
 
-/// The refinement stores: the same directory pair the kernel reads and the
-/// harness digest renders — the global under the agent dir's harness path,
+/// The refinement stores, the same directory pair the kernel reads and the
+/// harness digest renders: the global under the agent dir's harness path,
 /// the local in the session's own artifact state. Refinement paths derive
-/// their stores from the session's harness digest context; no host passes
-/// its own (the deleted per-host parameter is how the daemon's writes
-/// drifted to `~/.prime/agent/harness_state.json` and one shared
-/// `<sessions>/harness` file).
+/// their stores from the session's harness digest context.
 #[derive(Debug, Clone)]
 pub struct RefinementStores {
     /// Global harness state directory (`<agent dir>/harness`).
@@ -875,9 +872,8 @@ pub(crate) fn refinement_stores_missing_error() -> anyhow::Error {
 
 impl AgentSession {
     /// The refinement stores: the session's harness digest context's store
-    /// pair — the same directories the kernel reads and the digest renders.
-    /// Every refinement entry point on the session derives its stores here;
-    /// no host passes its own directory.
+    /// pair, the same directories the kernel reads and the digest renders.
+    /// Every refinement entry point on the session derives its stores here.
     ///
     /// # Errors
     ///

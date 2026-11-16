@@ -298,10 +298,8 @@ mod tests {
             outcomes, 1,
             "one durable outcome, including a no-op refinement"
         );
-        // P0-2: a daemon global refinement writes the agent dir's harness
-        // path — the store the session's digest context carries — never a
-        // store file dropped directly in the agent dir (the drifted
-        // `~/.prime/agent/harness_state.json` shape).
+        // A daemon global refinement writes the agent dir's harness store,
+        // the one the session's digest context carries.
         {
             let guard = engine.session.blocking_lock();
             let session = guard.as_ref().expect("built session");
