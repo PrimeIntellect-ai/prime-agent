@@ -61,3 +61,30 @@ Numbers below are what the commands printed on the branch head; see
   Windows-green as green.
 - Branch split/rename and PR timing are the Owner's call; the branch also carries
   the blockImages fix.
+
+## Manual verification, 2026-11-17 (Windows, real ConPTY)
+
+The three behaviors this card exists for were verified by hand once, without a
+committed test: the TUI ran under a real Windows ConPTY (pywinpty) with a pyte
+screen model, bound to its own daemon socket (`--daemon-socket`) so it never
+touched the installed sessions, against a minimal stdlib MCP server (one tool
+that sends a single-field `elicitation/create`; one resource whose subscribe
+pushes `resources/updated` two seconds later).
+
+Results (raw screen snapshots kept beside the harness):
+
+1. `[mcp_elicitation]` and `[mcp_notification]` rows render in the screen buffer,
+   content untruncated (`[verify] asks: … Answer with /elicit accept <name> …`).
+2. Idle + a server push ⇒ the row appears and a model turn starts and answers
+   with no user input (`resource_updated`).
+3. Injected keys `/elicit accept Jev` complete the prompt mid-turn; the waiting
+   tool call returns `answer=accept:Jev` (584 ms) and the row
+   `[verify] elicitation request 1 accept` lands.
+
+This run found a real defect the unit tests could not see: `/elicit` used to
+enter the steering lane, and the steer interrupted the very tool call waiting
+for the answer (60 s, `KeyboardInterrupt`). It is now applied in
+`Worker::handle_prompt` ahead of admission.
+
+Still not covered by an automated test: everything in "Scope" above. The card
+stays registered.

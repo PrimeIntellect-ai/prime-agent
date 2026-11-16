@@ -12,13 +12,21 @@
 //! number). A schema it cannot represent is declined up front with the reason in
 //! the row — never approximated, never accepted with made-up input.
 //!
+//! The answer never enters a queue lane: the worker applies `/elicit` in
+//! `handle_prompt` ahead of admission (`worker/input.rs`), because a steering
+//! delivery would interrupt the very tool call that is waiting for the answer
+//! (the ConPTY run of 2026-11-17 showed the kernel cell dying with a
+//! KeyboardInterrupt when the answer rode the steering lane). `run_prompt` keeps
+//! a fallback interception for prompts that arrive by another path.
+//!
 //! Rollback: nothing here changes the wire (no new command, no session event, no
 //! schema bump) — the request and answer are an ordinary custom row plus a
-//! `/elicit` prompt routed before admission. Removing the `/elicit` intercept in
-//! `run_prompt` and the handler registration in `extra_host_handlers` restores the
-//! previous behavior exactly; the kernel then gets "unknown host request" and
-//! returns a JSON-RPC error to the server, which is a decline with a reason, and
-//! its own 300 s ceiling means no caller ever hangs.
+//! `/elicit` prompt routed before admission. Removing the two `/elicit`
+//! intercepts (the worker's `handle_prompt` and `run_prompt`) and the handler
+//! registration in `extra_host_handlers` restores the previous behavior exactly;
+//! the kernel then gets "unknown host request" and returns a JSON-RPC error to
+//! the server, which is a decline with a reason, and its own 300 s ceiling means
+//! no caller ever hangs.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -88,7 +96,7 @@ struct PendingInner {
 
 impl PendingElicitations {
     /// Open one request; the caller waits on the receiver.
-    fn open(
+    pub(crate) fn open(
         &self,
         field: AnswerField,
     ) -> Result<(u64, oneshot::Receiver<ElicitationDecision>), String> {

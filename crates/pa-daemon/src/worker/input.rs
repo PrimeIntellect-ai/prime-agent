@@ -42,6 +42,24 @@ impl Worker {
                 );
             }
         }
+        // `/elicit` answers a pending MCP elicitation. It never enters a lane:
+        // a steer delivery would interrupt the very tool call that is waiting
+        // for this answer, so the answer is applied in place, ahead of admission.
+        if custom_message.is_none() {
+            if let Some(command) =
+                crate::agent_engine::mcp_elicitation::parse_elicit_command(message)
+            {
+                if let Some(engine) = self.agent_engine.as_ref() {
+                    if engine.answer_elicitation(command) {
+                        return response_success(
+                            None,
+                            if wait { "prompt_and_wait" } else { "prompt" },
+                            None,
+                        );
+                    }
+                }
+            }
+        }
         // TS daemon prompts map `resumeIfIdle` to
         // `command.streamingBehavior !== undefined`: while the queued-input
         // suspension is set (post `abort`/manual `compact`), a plain prompt

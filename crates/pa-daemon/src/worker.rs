@@ -1225,6 +1225,8 @@ mod worker_resume_settings_tests;
 mod agent_message_tests;
 
 #[cfg(test)]
+mod elicit_prompt_tests;
+#[cfg(test)]
 mod prompt_image_tests;
 
 #[cfg(test)]
