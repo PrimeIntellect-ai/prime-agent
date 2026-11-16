@@ -236,6 +236,20 @@ impl AgentSession {
         // double-persist.
 
         if busy {
+            // The queued batch still gets its dispatch-time routing
+            // decision when no stream is live — the active-run slot's
+            // window (`is_streaming` false, the slot still held): the
+            // rows run when the slot releases (the daemon's
+            // `continue_run` drain never revisits session routing), so a
+            // text-only session model would silently downgrade the
+            // attachments to placeholders. Arming the route now points
+            // the queued rows' run at the configured image model, exactly
+            // like the idle branch below; a streaming run keeps its own
+            // target (the steered rows join a live episode).
+            if !state.is_streaming {
+                self.apply_image_model_routing(&images, &options.batch)
+                    .await?;
+            }
             // The busy branch queues the WHOLE delivery: the primary row
             // plus every batched co-delivered row, in delivery order, as
             // one batch — the same rows the idle branch admits — so the

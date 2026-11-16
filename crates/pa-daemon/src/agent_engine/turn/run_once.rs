@@ -443,8 +443,14 @@ impl AgentSessionEngine {
                             aborted() || emit_cancelled.load(std::sync::atomic::Ordering::SeqCst)
                         }
                     };
-                    match drain_queued_delivery(agent, &drain_aborted, &parked, &self.turn_seats)
-                        .await?
+                    match drain_queued_delivery(
+                        agent,
+                        &drain_aborted,
+                        &parked,
+                        &self.turn_seats,
+                        &self.parked_drains,
+                    )
+                    .await?
                     {
                         QueuedDrain::Drained => {}
                         QueuedDrain::Consumed => {
@@ -553,9 +559,9 @@ impl AgentSessionEngine {
 
 /// One live delivery seat's scope: `run_turn_once` holds it from entry
 /// through the final harvest, so a queued drain (see
-/// [`drain_queued_delivery`]) can wait until it is the only live seat —
-/// an earlier seat's still-active subscription forwards and accounts
-/// events, and its harvest could take the next run's assistant.
+/// [`drain_queued_delivery`]) can wait until no earlier seat is still
+/// active — an earlier seat's still-active subscription forwards and
+/// accounts events, and its harvest could take the next run's assistant.
 struct TurnSeatGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl Drop for TurnSeatGuard {
@@ -597,18 +603,39 @@ async fn drain_queued_delivery(
     aborted: &dyn Fn() -> bool,
     parked: &std::sync::atomic::AtomicBool,
     seats: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    parked_drains: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> anyhow::Result<QueuedDrain> {
     // The delivery is parked: the running turn's events belong to its own
-    // seat (the gate suppresses this seat's forwarding and accounting).
-    parked.store(true, std::sync::atomic::Ordering::SeqCst);
+    // seat (the gate suppresses this seat's forwarding and accounting). A
+    // parked seat is not an active stream owner, so it also leaves the
+    // drain's seat wait (counted in `parked_drains`): two deliveries
+    // queued behind one busy turn would otherwise each hold a seat and
+    // each wait for the other's seat to drop — neither drain would ever
+    // start. Concurrent drainers self-elect instead: the seat wait ends
+    // for all of them at once, `continue_run`'s slot refusal (`Busy`)
+    // re-parks the losers behind the winner's run, and a drained lane
+    // answers the rest `NothingToContinue` (Consumed).
+    let park = |parked: &std::sync::atomic::AtomicBool,
+                parked_drains: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+        parked.store(true, std::sync::atomic::Ordering::SeqCst);
+        parked_drains.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    let unpark = |parked: &std::sync::atomic::AtomicBool,
+                  parked_drains: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+        parked_drains.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        parked.store(false, std::sync::atomic::Ordering::SeqCst);
+    };
+    park(parked, parked_drains);
     loop {
         if aborted() {
+            unpark(parked, parked_drains);
             return Ok(QueuedDrain::Aborted);
         }
         if !agent.state().await.is_streaming {
             break;
         }
         if wait_for_run_slot(agent, aborted).await {
+            unpark(parked, parked_drains);
             return Ok(QueuedDrain::Aborted);
         }
     }
@@ -617,25 +644,33 @@ async fn drain_queued_delivery(
         // gate's own `agent.abort()` included) must not be answered by
         // starting a fresh run.
         if aborted() {
+            unpark(parked, parked_drains);
             return Ok(QueuedDrain::Aborted);
         }
         if !agent.has_queued_messages() {
+            unpark(parked, parked_drains);
             return Ok(QueuedDrain::Consumed);
         }
-        // Every earlier delivery seat must finish before a new run starts:
-        // its still-active subscription would forward and account this
-        // run's events, and its harvest could take this run's assistant as
-        // its own reply. This seat itself is counted (the wait ends at 1);
-        // the wait is cancel-aware.
-        while seats.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+        // Every earlier ACTIVE delivery seat must finish before a new run
+        // starts: its still-active subscription would forward and account
+        // this run's events, and its harvest could take this run's
+        // assistant as its own reply. Parked drainers do not count (this
+        // seat's own parked count cancels its seat); the wait is
+        // cancel-aware.
+        while seats
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_sub(parked_drains.load(std::sync::atomic::Ordering::SeqCst))
+            != 0
+        {
             if aborted() {
+                unpark(parked, parked_drains);
                 return Ok(QueuedDrain::Aborted);
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         // This seat starts the parked rows: the drained run's events are
-        // ours to forward and account again.
-        parked.store(false, std::sync::atomic::Ordering::SeqCst);
+        // ours to forward and account again (the seat is active again).
+        unpark(parked, parked_drains);
         match agent.continue_run().await {
             Ok(()) => return Ok(QueuedDrain::Drained),
             Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {
@@ -644,8 +679,9 @@ async fn drain_queued_delivery(
                 // it: wait for the slot, re-park (the winner's stream is
                 // its own seat's), and retry the drain.
                 Some(error) if error.code == pa_agent::agent::AgentContinueErrorCode::Busy => {
-                    parked.store(true, std::sync::atomic::Ordering::SeqCst);
+                    park(parked, parked_drains);
                     if wait_for_run_slot(agent, aborted).await {
+                        unpark(parked, parked_drains);
                         return Ok(QueuedDrain::Aborted);
                     }
                 }

@@ -496,3 +496,448 @@ fn a_busy_delivery_waits_for_the_run_and_drains_the_parked_row() {
     );
     let _ = runner.join();
 }
+
+/// Two deliveries that queue behind one streaming run must not deadlock
+/// on the seat count: a parked drainer leaves the drain's seat wait (a
+/// parked seat forwards and accounts nothing, so it is not an active
+/// stream owner), the drainers self-elect through `continue_run`'s slot
+/// refusal, and ONE drained run serves both parked rows. Mutation:
+/// counting parked seats as active (the plain `seats != 1` wait)
+/// deadlocks the pair — neither drain ever starts, and the join
+/// deadline below fails with this test's name.
+#[test]
+fn two_parked_deliveries_elect_one_drainer_and_both_settle() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let words = (0..120).fold(String::new(), |mut words, i| {
+        use std::fmt::Write;
+        write!(words, "w{i} ").expect("write to String");
+        words
+    });
+    let script = serde_json::json!({
+        "engine": "faux",
+        "tokensPerSecond": 30.0,
+        "responses": [
+            {"content": [{"type": "text", "text": words}]},
+            {"content": [{"type": "text", "text": "drained reply one"}]},
+            {"content": [{"type": "text", "text": "drained reply two"}]}
+        ],
+    });
+    // The run-stop lever (the worker's `_steeringStopPending` probe):
+    // armed after BOTH deliveries park, it makes the streaming run exit
+    // at its next boundary without consuming either parked row.
+    let stop_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = {
+        let stop_pending = std::sync::Arc::clone(&stop_pending);
+        std::sync::Arc::new(move || stop_pending.load(std::sync::atomic::Ordering::SeqCst))
+            as std::sync::Arc<dyn Fn() -> bool + Send + Sync>
+    };
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(script.to_string()),
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: Some(probe),
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    // Run #1 streams a paced turn on its own thread.
+    let runner = {
+        let engine = std::sync::Arc::clone(&engine);
+        std::thread::spawn(move || {
+            engine.run_prompt(
+                0,
+                PromptRequest {
+                    batch: Vec::new(),
+                    images: Vec::new(),
+                    message: "hold".to_string(),
+                    source: "user".to_string(),
+                    agent_message_id: None,
+                    custom_message: None,
+                    streaming_behavior: None,
+                },
+                &|| false,
+                &mut |_event: EngineEvent| true,
+            );
+        })
+    };
+    // Wait until the run streams: the admission's busy window.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let streaming = {
+            let guard = engine.session.blocking_lock();
+            match guard.as_deref() {
+                Some(core) => engine
+                    .runtime
+                    .block_on(async { core.session.agent().state().await.is_streaming }),
+                None => false,
+            }
+        };
+        if streaming {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first run never registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // TWO deliveries admit while run #1 streams: each parks on the
+    // steering lane and holds a seat in the drain wait.
+    let delivery = |message: &'static str| {
+        let engine = std::sync::Arc::clone(&engine);
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<EngineEvent>>();
+        let handle = std::thread::spawn(move || {
+            let mut events: Vec<EngineEvent> = Vec::new();
+            engine.run_prompt(
+                0,
+                PromptRequest {
+                    batch: Vec::new(),
+                    images: Vec::new(),
+                    message: message.to_string(),
+                    source: "user".to_string(),
+                    agent_message_id: None,
+                    custom_message: None,
+                    streaming_behavior: None,
+                },
+                &|| false,
+                &mut |event: EngineEvent| {
+                    events.push(event);
+                    true
+                },
+            );
+            let _ = tx.send(events);
+        });
+        (handle, rx)
+    };
+    let (_handle_a, rx_a) = delivery("continue-a");
+    let (_handle_b, rx_b) = delivery("continue-b");
+    // Wait until BOTH rows park on the steering lane.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let parked = {
+            let guard = engine.session.blocking_lock();
+            match guard.as_deref() {
+                Some(core) => core.session.agent().steering_previews().len(),
+                None => 0,
+            }
+        };
+        if parked >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the two deliveries never parked their rows (parked so far: {parked})"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Arm the stop lever: run #1 exits at its next boundary with BOTH
+    // rows still parked — the parked-drainer election this test pins.
+    stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Join both deliveries under a deadline: the pair must elect one
+    // drainer (one drained run serves both rows), never wait on each
+    // other's seats.
+    let events_a = rx_a
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("delivery A settled: two parked drainers must not deadlock on the seat count");
+    let events_b = rx_b
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("delivery B settled: two parked drainers must not deadlock on the seat count");
+    let dump_a = format!("{events_a:?}");
+    let dump_b = format!("{events_b:?}");
+    for (name, dump) in [("A", &dump_a), ("B", &dump_b)] {
+        assert!(
+            dump.contains("Done(Ok"),
+            "delivery {name} settles its own seat: {dump}"
+        );
+    }
+    // Each seat drains its own parked row on its own run: the two
+    // replies are distinct, one per seat (never both on one seat, never
+    // an error from a run that found no response).
+    let paired = (dump_a.contains("drained reply one") && dump_b.contains("drained reply two"))
+        || (dump_a.contains("drained reply two") && dump_b.contains("drained reply one"));
+    assert!(
+        paired,
+        "each seat drains its own row's run: {dump_a} {dump_b}"
+    );
+    let (steering, follow_up) = {
+        let guard = engine.session.blocking_lock();
+        let core = guard.as_deref().expect("session built");
+        let agent = core.session.agent();
+        (agent.steering_previews(), agent.follow_up_previews())
+    };
+    assert!(
+        steering.is_empty() && follow_up.is_empty(),
+        "both parked rows left the lanes: {steering:?} {follow_up:?}"
+    );
+    let _ = runner.join();
+}
+
+/// Two deliveries that queue behind one busy turn must not deadlock the
+/// drain: a parked seat is not an active stream owner, so the seat wait
+/// counts `turn_seats` minus the parked drainers and two concurrent
+/// drainers self-elect — the slot winner runs the first parked row, the
+/// `Busy` loser re-parks behind the winner's run and drains the row that
+/// remains. Mutation: reverting the wait to `turn_seats == 1` (counting
+/// parked drainers as active owners) leaves each drainer waiting for the
+/// other's seat to drop — neither settles, the deadline below fails
+/// naming the deadlock.
+#[test]
+fn two_parked_drainers_self_elect_instead_of_deadlocking_the_seat_wait() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let words = (0..120).fold(String::new(), |mut words, i| {
+        use std::fmt::Write;
+        write!(words, "w{i} ").expect("write to String");
+        words
+    });
+    let script = serde_json::json!({
+        "engine": "faux",
+        "tokensPerSecond": 30.0,
+        "responses": [
+            {"content": [{"type": "text", "text": words}]},
+            {"content": [{"type": "text", "text": "drained reply a"}]},
+            {"content": [{"type": "text", "text": "drained reply b"}]}
+        ],
+    });
+    // The run-stop lever (the worker's `_steeringStopPending` probe):
+    // armed while run #1 streams, it makes the streaming run exit at its
+    // next boundary WITHOUT consuming the parked rows — the final-poll
+    // window `drain_queued_delivery` covers, reached here by TWO parked
+    // seats at once.
+    let stop_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = {
+        let stop_pending = std::sync::Arc::clone(&stop_pending);
+        std::sync::Arc::new(move || stop_pending.load(std::sync::atomic::Ordering::SeqCst))
+            as std::sync::Arc<dyn Fn() -> bool + Send + Sync>
+    };
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(script.to_string()),
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: Some(probe),
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    // Run #1 streams a paced turn on its own thread.
+    let first_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runner = {
+        let engine = std::sync::Arc::clone(&engine);
+        let first_events = std::sync::Arc::clone(&first_events);
+        std::thread::spawn(move || {
+            engine.run_prompt(
+                0,
+                PromptRequest {
+                    batch: Vec::new(),
+                    images: Vec::new(),
+                    message: "hold".to_string(),
+                    source: "user".to_string(),
+                    agent_message_id: None,
+                    custom_message: None,
+                    streaming_behavior: None,
+                },
+                &|| false,
+                &mut move |event: EngineEvent| {
+                    first_events.lock().unwrap().push(event);
+                    true
+                },
+            );
+        })
+    };
+    // Wait until the run streams: the admissions' busy window.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let streaming = {
+            let guard = engine.session.blocking_lock();
+            match guard.as_deref() {
+                Some(core) => engine
+                    .runtime
+                    .block_on(async { core.session.agent().state().await.is_streaming }),
+                None => false,
+            }
+        };
+        if streaming {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first run never registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Arm the stop lever: run #1 exits at its next boundary with both
+    // deliveries' rows still parked on the steering lane.
+    stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+    // TWO deliveries admit while run #1 streams: both park, and when the
+    // run exits both drainers contend for the drain at once.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<EngineEvent>>();
+    let seats: Vec<_> = ["queued-a", "queued-b"]
+        .iter()
+        .map(|message| {
+            let engine = std::sync::Arc::clone(&engine);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut events: Vec<EngineEvent> = Vec::new();
+                engine.run_prompt(
+                    0,
+                    PromptRequest {
+                        batch: Vec::new(),
+                        images: Vec::new(),
+                        message: message.to_string(),
+                        source: "user".to_string(),
+                        agent_message_id: None,
+                        custom_message: None,
+                        streaming_behavior: None,
+                    },
+                    &|| false,
+                    &mut |event| {
+                        events.push(event);
+                        true
+                    },
+                );
+                tx.send(events).expect("the collecting test stays alive");
+            })
+        })
+        .collect();
+    drop(tx);
+    // Both rows are parked before the run can exit: the steering lane
+    // holds exactly the two queued rows.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let previews = {
+            let guard = engine.session.blocking_lock();
+            match guard.as_deref() {
+                Some(core) => core.session.agent().steering_previews(),
+                None => Vec::new(),
+            }
+        };
+        if previews.len() == 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both deliveries never parked: {previews:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // THE deadlock pin: both parked drainers settle. Two queued deliveries
+    // each hold a seat; a seat wait that counts parked drainers as active
+    // stream owners waits forever here (each drainer waits for the other's
+    // seat to drop).
+    let mut seat_events: Vec<Vec<EngineEvent>> = Vec::new();
+    for seat in ["first", "second"] {
+        let events = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or_else(|_| {
+                panic!("the {seat} parked drainer never settled: the parked-drainer deadlock (each queued delivery waits for the other's seat)")
+            });
+        seat_events.push(events);
+    }
+    for (index, events) in seat_events.iter().enumerate() {
+        let dump = format!("{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::Done(result) if result.is_ok())),
+            "the parked delivery {index} settles its own run: {dump}"
+        );
+        assert!(
+            !dump.contains("w119"),
+            "the streaming run's frames never ride a parked seat: {dump}"
+        );
+    }
+    // The two drained runs belong one-to-one to the two seats: each reply
+    // reaches exactly one seat (the winner's drain and the loser's retry),
+    // never both and never neither.
+    let dumps: Vec<String> = seat_events
+        .iter()
+        .map(|events| format!("{events:?}"))
+        .collect();
+    for reply in ["drained reply a", "drained reply b"] {
+        let seats_with_reply = dumps.iter().filter(|dump| dump.contains(reply)).count();
+        assert_eq!(
+            seats_with_reply, 1,
+            "{reply} must reach exactly one seat: {dumps:?}"
+        );
+    }
+    assert!(
+        dumps.iter().all(|dump| dump.contains("drained reply")),
+        "both seats carry their drained run's reply: {dumps:?}"
+    );
+    // The lanes drained: no row outlives the seats.
+    let (steering, follow_up) = {
+        let guard = engine.session.blocking_lock();
+        let core = guard.as_deref().expect("session built");
+        let agent = core.session.agent();
+        (agent.steering_previews(), agent.follow_up_previews())
+    };
+    assert!(
+        steering.is_empty() && follow_up.is_empty(),
+        "the parked rows left the lanes: {steering:?} {follow_up:?}"
+    );
+    // Both rows ran exactly once (the history holds run #1's user row plus
+    // each queued row, and three assistant replies — the held turn plus
+    // one drained run per row).
+    let (user_rows, assistant_rows) = {
+        let guard = engine.session.blocking_lock();
+        let core = guard.as_deref().expect("session built");
+        engine.runtime.block_on(async {
+            let state = core.session.agent().state().await;
+            let user_rows = state
+                .messages
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(_))
+                    )
+                })
+                .count();
+            let assistant_rows = state
+                .messages
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        pa_agent::types::AgentMessage::Standard(
+                            pa_agent::types::Message::Assistant(_)
+                        )
+                    )
+                })
+                .count();
+            (user_rows, assistant_rows)
+        })
+    };
+    assert_eq!(user_rows, 3, "run #1's row plus both queued rows ran once");
+    assert_eq!(
+        assistant_rows, 3,
+        "the held turn plus one drained run per parked row"
+    );
+    let _ = runner.join();
+    for seat in seats {
+        seat.join().expect("delivery thread");
+    }
+}

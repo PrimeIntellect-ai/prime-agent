@@ -164,11 +164,18 @@ pub struct AgentSessionEngine {
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The live delivery seats (`run_turn_once` calls, counted from seat
     /// entry through the final harvest): a queued delivery's drain waits
-    /// until it is the ONLY live seat before it starts a run — an earlier
-    /// seat's still-active subscription would forward and account the new
-    /// run's events, and its harvest could take the new run's assistant
-    /// as its own reply.
+    /// until no earlier seat is still ACTIVE before it starts a run — an
+    /// earlier seat's still-active subscription would forward and account
+    /// the new run's events, and its harvest could take the new run's
+    /// assistant as its own reply.
     pub(crate) turn_seats: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The seats currently parked in a queued delivery's drain wait: a
+    /// parked seat forwards and accounts nothing, so it is not an active
+    /// stream owner — the drain's wait counts `turn_seats` minus this.
+    /// Without it, two deliveries that queue behind one busy turn each
+    /// hold a seat and each wait for the other's seat to drop: neither
+    /// drain ever starts (the parked-drainer deadlock).
+    pub(crate) parked_drains: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The queue delivery modes: seeded from the start config, switched live;
     /// `None` keeps the default ("one-at-a-time").
     queue_modes: std::sync::Mutex<(Option<String>, Option<String>)>,
