@@ -911,6 +911,21 @@ pub(crate) fn withdraw_bash_completion_notice(
     // taking the batch before the core would deadlock the worker against
     // an admission holding both.
     let mut core_guard = core.lock().unwrap();
+    // The captured store is re-checked under the slot's own mutex, inside
+    // this critical section like the reminder's check: a replacement that
+    // installed the next session's store must never lose its arrival and
+    // reminder rows to the retired store's withdrawal (the retired ids
+    // would trim the successor's batch and drop its wake rows, leaving its
+    // pending messages without a wake). Engines without an inbox slot keep
+    // the permissive default (they model no replacement).
+    let inbox = match (engine, inbox) {
+        (Some(engine), Some((store, arrivals))) => {
+            engine.inbox_is_live(store).then_some((store, arrivals))
+        }
+        // The engine-less test path: no slot to validate against.
+        (None, inbox @ Some(_)) => inbox,
+        (_, None) => None,
+    };
     // The legacy full-row withdrawal (the kill-switch lane): the
     // front-most match across the two lanes, never the whole set.
     let mut removed = false;
@@ -994,10 +1009,8 @@ pub(crate) fn withdraw_bash_completion_notice(
                     inbox_rows_changed = true;
                 }
                 // A queued reminder repeats the count the withdrawal may
-                // have changed: re-render it with the live count and wait.
-                let waited_ms = pa_core::autonomous::now_millis()
-                    .saturating_sub(oldest_arrived_at_ms.unwrap_or_default());
-                let reminder = pa_core::session_engine::inbox::reminder_notice(count, waited_ms);
+                // have changed: re-render it with the live count.
+                let reminder = pa_core::session_engine::inbox::reminder_notice(count);
                 for item in &mut core_guard.steering {
                     if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
                         && item.message != reminder

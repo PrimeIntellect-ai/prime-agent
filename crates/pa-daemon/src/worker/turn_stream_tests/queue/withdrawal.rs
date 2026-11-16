@@ -190,6 +190,8 @@ async fn headless_completion_counts_the_bash_lane() {
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
+        /*inbox*/
+        None, // The legacy steering lane carries no inbox store.
         &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "fixture command".to_string(),
