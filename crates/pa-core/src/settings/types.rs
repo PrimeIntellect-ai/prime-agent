@@ -370,6 +370,8 @@ pub struct Settings {
     pub emoji_shortcodes: Option<bool>,
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
+    /// Session storage can restore executable kernel state, so only global
+    /// settings (or an explicit CLI/environment override) may select it.
     pub session_dir: Option<String>,
     /// Log per-request provider timing phases to the diagnostic log
     /// (unset means OFF, exactly the TS default).

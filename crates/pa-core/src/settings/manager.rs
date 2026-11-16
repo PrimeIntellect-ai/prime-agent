@@ -1039,8 +1039,9 @@ fn load_scope(
     let mut settings = from_value_lenient(&migrated);
     if scope == SettingsScope::Project {
         // A repository can supply this file before the user opens it. Keep its
-        // document on disk, but never let it select a process, command prefix,
-        // package installer, or MCP server through an effective settings read.
+        // document on disk, but never let it select session storage or executable
+        // settings through an effective settings read.
+        settings.session_dir = None;
         settings.shell_path = None;
         settings.shell_command_prefix = None;
         settings.npm_command = None;

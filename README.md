@@ -155,6 +155,15 @@ If you use this codebase in your research, please cite Prime Agent:
 
 Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
 
+### Session storage
+
+Session storage can be selected with `--session-dir`,
+`PRIME_AGENT_SESSION_DIR`, or `sessionDir` in user settings. A repository's
+`.prime/agent/settings.json` cannot set `sessionDir`, because resumed sessions
+may restore executable kernel state from that location. Existing session files
+are not deleted; move an intentional project setting to user settings or pass
+an explicit override to continue using its directory.
+
 ### Automatic compaction settings
 
 `/settings` exposes the global automatic compaction percentage in five-point steps,
