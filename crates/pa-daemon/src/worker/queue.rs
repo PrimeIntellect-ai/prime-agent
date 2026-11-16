@@ -347,6 +347,7 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     if first.custom_message.is_some()
         || first.policy == TurnPolicy::Direct
         || crate::session_commands::parse_prompt_session_command(&first.message).is_some()
+        || crate::agent_engine::mcp_elicitation::parse_elicit_command(&first.message).is_some()
     {
         batch.push(items.pop_front().expect("front checked"));
         return batch;
@@ -359,6 +360,8 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
                 || next.custom_message.is_some()
                 || (forced && !next.forced_batch)
                 || crate::session_commands::parse_prompt_session_command(&next.message).is_some()
+                || crate::agent_engine::mcp_elicitation::parse_elicit_command(&next.message)
+                    .is_some()
             {
                 break;
             }

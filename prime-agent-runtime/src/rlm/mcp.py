@@ -102,6 +102,9 @@ _MAX_LISTING_PAGES = 25
 # must not be able to exhaust the kernel with a single read.
 _MAX_RESOURCE_BYTES = 256 * 1024
 _MAX_URI_LENGTH = 4096
+# A server's elicitation waits on the human; the daemon declines first on its own
+# timeout, so this one only bounds a wedged host.
+_ELICITATION_TIMEOUT = 300.0
 _MAX_RESOURCE_ITEMS = 512
 # Subscription bookkeeping: one URI list per server, capped like the rest.
 _MAX_SUBSCRIPTIONS = 32
@@ -328,6 +331,7 @@ class _Generation:
                             message_handler=self._on_message,
                             logging_callback=self._on_logging,
                             sampling_callback=self._on_sampling,
+                            elicitation_callback=self._on_elicitation,
                         )
                     )
                     try:
@@ -701,6 +705,45 @@ class _Generation:
             role="assistant",
             content=TextContent(type="text", text=text),
             model=model if isinstance(model, str) and model else "unknown",
+        )
+
+    # -- elicitation (server → user) ---------------------------------------
+
+    async def _on_elicitation(self, _context: Any, params: Any) -> Any:
+        """Ask the user through the host, and never block past the host's answer.
+
+        The daemon owns the interaction: it shows the request, waits with its own
+        timeout, and answers `accept` / `decline` / `cancel`. Any failure here is a
+        decline with a reason — a server never gets fabricated input.
+        """
+        from mcp.types import ElicitResult, ErrorData
+
+        try:
+            async with asyncio.timeout(_ELICITATION_TIMEOUT):
+                reply = await host_request(
+                    "mcp.elicitation",
+                    {
+                        "server": self.server,
+                        "message": str(_field(params, "message", default="") or ""),
+                        "requestedSchema": _plain(
+                            _field(
+                                params,
+                                "requestedSchema",
+                                "requested_schema",
+                                default=None,
+                            )
+                        ),
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 - the server learns why, not a traceback
+            return ErrorData(code=-32603, message=f"MCP elicitation unavailable: {exc}")
+        action = reply.get("action") if isinstance(reply, dict) else None
+        if action not in ("accept", "decline", "cancel"):
+            return ErrorData(code=-32603, message="MCP elicitation returned no decision")
+        content = reply.get("content") if isinstance(reply, dict) else None
+        return ElicitResult(
+            action=action,
+            content=content if action == "accept" and isinstance(content, dict) else None,
         )
 
     # -- server notifications ----------------------------------------------

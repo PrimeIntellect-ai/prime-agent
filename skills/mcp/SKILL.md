@@ -129,6 +129,23 @@ product **refuses by default**; only servers the user lists in
 completion each (token-capped). A refusal is a normal answer — the row
 `[mcp_sampling]` says which server asked and why.
 
+## Elicitation (a server asking the user)
+
+`elicitation/create` reaches the user, not you. The request lands as an
+`[mcp_elicitation]` row naming the server and the exact answer syntax:
+
+```
+/elicit accept <value>   # answer one text, choice, boolean, or number field
+/elicit decline          # refuse
+/elicit cancel           # abandon the interaction
+/elicit                  # report whether anything is waiting
+```
+
+A request nobody answers is declined after two minutes; a schema this surface
+cannot represent (several fields, objects, arrays) is declined up front with
+the reason in the row. The answer belongs to the user: never type `/elicit`
+for them, and treat a decline or cancel as the server's cue to stop.
+
 ## Large or integrity-critical payloads
 
 `mcp.call_tool` runs the MCP client session inside this kernel. Arguments go

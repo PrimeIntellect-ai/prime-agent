@@ -188,6 +188,8 @@ A server that does not advertise resources or prompts raises a named error for t
 
 A connected server may ask this machine's model for a completion (MCP sampling). It is **refused by default**: only servers the user listed in `settings.mcpSampling.allowedServers` are served, and a refusal appears as an `[mcp_sampling]` row. You cannot enable it from here — mention the setting if the user asks how.
 
+A server may also ask the user a question (MCP elicitation). It arrives as an `[mcp_elicitation]` row carrying the exact answer syntax — `/elicit accept <value>`, `/elicit decline`, `/elicit cancel` — and the user answers it; nobody else can, and a request nobody answers is declined on a timeout. The answer is the user's, never yours: do not issue `/elicit` on their behalf, and treat a declined or cancelled request as a refusal to continue down that path.
+
 Server notifications (tool/prompt/resource inventory changes, subscribed resource updates, log lines, progress) are buffered per server and also land as `[mcp_notification]` rows in the conversation. Inventory changes and resource updates wake you with that row; log lines and progress do not. Pull what you missed with:
 - `mcp.notifications(server: str | None = None, kind: str | None = None, since: int | None = None, limit: int = 50) -> dict`: `{notifications, nextSince, dropped}`; pass a previous `nextSince` as `since` to continue, and treat a non-zero `dropped` as a gap you missed
 - `mcp.notification_status() -> dict`: per-server buffered/dropped/forwarded counters

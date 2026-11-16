@@ -160,6 +160,9 @@ const INTERNAL_HOST_REQUESTS: &[&str] = &[
     // A server's `sampling/createMessage` callback asks the host; the model never
     // issues this request itself.
     "mcp.sampling",
+    // The server's `elicitation/create` callback asks the user through the host
+    // (`/elicit`); the model never issues this request.
+    "mcp.elicitation",
 ];
 
 /// Map one registered host-request type to the prompt token that documents

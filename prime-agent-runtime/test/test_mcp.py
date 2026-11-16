@@ -1781,5 +1781,75 @@ class McpSamplingCallbackTest(unittest.TestCase):
         self.assertIn("svc", result.message)
 
 
+class McpElicitationCallbackTest(unittest.TestCase):
+    """The kernel's `elicitation/create` callback asks the host and returns its decision."""
+
+    def generation(self):
+        session = SimpleNamespace(
+            server_capabilities=SimpleNamespace(resources=None, prompts=None)
+        )
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = session
+        return generation
+
+    def params(self):
+        return SimpleNamespace(
+            message="Your name?",
+            requestedSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+            },
+        )
+
+    def test_an_accepted_answer_becomes_an_elicit_result(self):
+        seen = {}
+
+        async def accepted(request_type, payload):
+            seen["type"] = request_type
+            seen["payload"] = payload
+            return {"action": "accept", "content": {"name": "Jev"}}
+
+        generation = self.generation()
+        with mock.patch.object(mcp, "host_request", accepted):
+            result = run(generation._on_elicitation(None, self.params()))
+        self.assertEqual(seen["type"], "mcp.elicitation")
+        self.assertEqual(seen["payload"]["server"], "svc")
+        self.assertEqual(seen["payload"]["message"], "Your name?")
+        self.assertEqual(seen["payload"]["requestedSchema"]["type"], "object")
+        self.assertEqual(result.action, "accept")
+        self.assertEqual(result.content, {"name": "Jev"})
+
+    def test_a_decline_never_carries_content(self):
+        async def declined(_request_type, _payload):
+            return {"action": "decline", "content": {"name": "unused"}}
+
+        generation = self.generation()
+        with mock.patch.object(mcp, "host_request", declined):
+            result = run(generation._on_elicitation(None, self.params()))
+        self.assertEqual(result.action, "decline")
+        self.assertIsNone(result.content)
+
+    def test_an_unavailable_host_becomes_an_error_for_the_server(self):
+        async def broken(_request_type, _payload):
+            raise RuntimeError("host connection closed")
+
+        generation = self.generation()
+        with mock.patch.object(mcp, "host_request", broken):
+            result = run(generation._on_elicitation(None, self.params()))
+        self.assertIsInstance(result, ErrorData)
+        self.assertIn("unavailable", result.message)
+
+    def test_a_reply_without_a_decision_is_an_error(self):
+        async def empty(_request_type, _payload):
+            return {}
+
+        generation = self.generation()
+        with mock.patch.object(mcp, "host_request", empty):
+            result = run(generation._on_elicitation(None, self.params()))
+        self.assertIsInstance(result, ErrorData)
+        self.assertIn("no decision", result.message)
+
+
 if __name__ == "__main__":
     unittest.main()

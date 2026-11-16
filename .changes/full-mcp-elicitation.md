@@ -1,0 +1,1 @@
+- MCP elicitation (`elicitation/create`) reaches the user: the server's request appears as an `[mcp_elicitation]` row with its answer syntax (`/elicit accept <value>`, `/elicit decline`, `/elicit cancel`), a request nobody answers is declined on a two-minute timeout, and a schema the surface cannot represent is declined up front with the reason.

@@ -138,6 +138,9 @@ impl AgentSessionEngine {
             kernel_notice_sink: std::sync::Mutex::new(None),
             mcp_notification_row_sink: std::sync::Mutex::new(None),
             mcp_sampling_runner: std::sync::Mutex::new(None),
+            mcp_elicitations: std::sync::Arc::new(
+                crate::agent_engine::mcp_elicitation::PendingElicitations::default(),
+            ),
             mcp_sampling_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
@@ -854,6 +857,21 @@ impl AgentSessionEngine {
             .clone()
         {
             crate::agent_engine::mcp_sampling::register_mcp_sampling_handler(runner, &mut handlers);
+        }
+        // MCP elicitation: the request is a visible row, the answer is an
+        // `/elicit` command, and a timeout declines. The row sink is the same
+        // seam, so a session without one registers no handler.
+        let rows = self
+            .mcp_notification_row_sink
+            .lock()
+            .expect("mcp notification row sink lock")
+            .clone();
+        if let Some(rows) = rows {
+            crate::agent_engine::mcp_elicitation::register_mcp_elicitation_handler(
+                std::sync::Arc::clone(&self.mcp_elicitations),
+                rows,
+                &mut handlers,
+            );
         }
         Some(handlers)
     }

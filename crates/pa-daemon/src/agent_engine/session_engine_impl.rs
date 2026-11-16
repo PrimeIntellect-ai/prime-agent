@@ -1349,6 +1349,17 @@ impl SessionEngine for AgentSessionEngine {
                 row.text = self.expand_skill_submission(&row.text);
             }
         }
+        // `/elicit` answers a pending MCP elicitation: a message, never a model
+        // turn (the same idle-wait rule as session commands). Outside a daemon
+        // worker there is no elicitation surface, so the text stays a prompt.
+        if let Some(command) =
+            crate::agent_engine::mcp_elicitation::parse_elicit_command(&request.message)
+        {
+            if self.answer_elicitation(command) {
+                let _ = emit(EngineEvent::Done(Ok(())));
+                return;
+            }
+        }
         // Session commands never admit a model turn or record a user row
         // (the durable echo row replaces it). Execute before admission so
         // the idle-wait loop stays reachable only for real turns.

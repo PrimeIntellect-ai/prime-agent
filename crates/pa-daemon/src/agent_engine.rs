@@ -48,6 +48,7 @@ pub(crate) use tests::FAUX_TEST_LOCK;
 
 mod goalcore;
 mod lifecycle;
+pub(crate) mod mcp_elicitation;
 pub(crate) mod mcp_sampling;
 mod turn_types;
 
@@ -159,6 +160,9 @@ pub struct AgentSessionEngine {
         std::sync::Mutex<Option<pa_core::session_engine::mcp_notices::McpNotificationRowSink>>,
     /// The MCP sampling runner (worker-installed): policy plus one bounded completion.
     pub(crate) mcp_sampling_runner: std::sync::Mutex<Option<mcp_sampling::SamplingRunner>>,
+    /// The MCP elicitation requests waiting for a `/elicit` answer. Its handler
+    /// waits with a bounded timeout, so a request never blocks the TUI.
+    pub(crate) mcp_elicitations: std::sync::Arc<mcp_elicitation::PendingElicitations>,
     /// Completions this session served, against the per-session cap.
     pub(crate) mcp_sampling_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
