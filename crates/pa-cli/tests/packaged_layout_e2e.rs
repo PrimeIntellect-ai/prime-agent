@@ -1007,8 +1007,17 @@ fn bootstrap_kernel_venv_from_packaged_sidecar() {
     let goal_file = String::from_utf8_lossy(&import_probe.stdout)
         .trim()
         .to_string();
+    // Python resolves a symlinked TMPDIR (macOS defaults /tmp through
+    // /private/tmp) in `goal.__file__` while the staged tempdir path keeps
+    // the symlink: compare canonicalized paths or this false-fails there.
+    let staged_real = staged
+        .canonicalize()
+        .unwrap_or_else(|_| staged.to_path_buf());
+    let goal_real = Path::new(&goal_file)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&goal_file));
     assert!(
-        Path::new(&goal_file).starts_with(staged),
+        goal_real.starts_with(&staged_real),
         "goal must import from the staged payload, got {goal_file}"
     );
 

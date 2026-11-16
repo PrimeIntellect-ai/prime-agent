@@ -184,6 +184,22 @@ pub(crate) async fn bootstrap_venv(
     .await
 }
 
+/// Record `skill` as installed. uv replaces any same-named distribution, so the
+/// venv holds one package per import name: a record for that import name from
+/// another package path is stale (its code is no longer installed) and must go,
+/// or the next session short-circuits `kernel_ready` on it and imports the
+/// other source's code while advertising this record's skill.
+fn record_installed_skill(
+    installed: &mut HashMap<String, BootstrapPythonSkill>,
+    skill: &BootstrapPythonSkill,
+) {
+    // A changed pyproject (hash moved) replaces the stale record.
+    installed.retain(|_, existing| {
+        existing.import_name != skill.import_name || existing.package_path == skill.package_path
+    });
+    installed.insert(bootstrap_skill_key(skill), skill.clone());
+}
+
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
 /// changed are installed. Per-skill failures warn and continue.
 pub(crate) async fn sync_python_skills(
@@ -240,9 +256,8 @@ pub(crate) async fn sync_python_skills(
             .await
             .is_ok()
         {
-            // A changed pyproject (hash moved) replaces the stale record.
             for skill in &missing {
-                installed.insert(bootstrap_skill_key(skill), (*skill).clone());
+                record_installed_skill(&mut installed, skill);
             }
         } else {
             for skill in &missing {
@@ -262,7 +277,7 @@ pub(crate) async fn sync_python_skills(
                 .await;
                 match result {
                     Ok(()) => {
-                        installed.insert(bootstrap_skill_key(skill), (*skill).clone());
+                        record_installed_skill(&mut installed, skill);
                     }
                     Err(error) => options.report(&format!(
                         "Warning: Python skill {} failed to install and will be unavailable: {error}",

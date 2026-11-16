@@ -1120,6 +1120,79 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
 }
 
+/// The override lifecycle: uv replaces a same-named distribution, so a sync
+/// that installs another source's `goal` must drop the user-path record with
+/// it. Otherwise the next session short-circuits `kernel_ready` on the stale
+/// record and imports the packaged code while advertising the user's skill.
+#[cfg(unix)]
+#[tokio::test]
+async fn installing_a_skill_drops_records_replaced_by_the_same_import_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            dir.path().join("uv.log").display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let user_goal = dir.path().join("home/skills/goal");
+    let packaged_goal = dir.path().join("payload/skills/goal");
+    std::fs::create_dir_all(&user_goal).unwrap();
+    std::fs::create_dir_all(&packaged_goal).unwrap();
+    let user_skill = skill("goal", user_goal.to_str().unwrap(), "user-hash");
+    let packaged_skill = skill("goal", packaged_goal.to_str().unwrap(), "packaged-hash");
+    let uv_command = UvCommand {
+        executable: uv.to_str().unwrap(),
+        project: None,
+    };
+    // A previous session installed and recorded the user's override.
+    write_bootstrap_version(&venv, "sha256:rt", std::slice::from_ref(&user_skill)).unwrap();
+
+    // The install-time prewarm syncs the packaged skill set: uv replaces the
+    // user's `goal` distribution, so its record must not survive.
+    sync_python_skills(
+        &uv_command,
+        &venv,
+        dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
+        "sha256:rt",
+        std::slice::from_ref(&packaged_skill),
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let recorded = read_bootstrap_version(&venv)
+        .expect("version written")
+        .python_skills
+        .expect("skills recorded");
+    assert_eq!(recorded, vec![packaged_skill.clone()]);
+    assert!(
+        !recorded_skills_cover(Some(&recorded), std::slice::from_ref(&user_skill)),
+        "the replaced record must not satisfy the next session's kernel_ready"
+    );
+
+    // The next session resyncs its own discovery: the user override returns
+    // and the packaged record goes.
+    sync_python_skills(
+        &uv_command,
+        &venv,
+        dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
+        "sha256:rt",
+        std::slice::from_ref(&user_skill),
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let recorded = read_bootstrap_version(&venv)
+        .expect("version written")
+        .python_skills
+        .expect("skills recorded");
+    assert_eq!(recorded, vec![user_skill]);
+}
+
 /// Permission semantics need a non-root runner: `chmod` cannot deny root, so these
 /// tests skip as root and the gate harness runs the binary via `runuser` as a
 /// non-root user (a shared install dir readable but not writable, like the verifiers
