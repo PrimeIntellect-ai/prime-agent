@@ -178,6 +178,10 @@ pub struct SessionInbox {
     /// the slot). `append_journal` owns it; a separate slot because it
     /// runs under the state lock.
     persistence_error: Mutex<Option<String>>,
+    /// The daemon's post-drain seam (set once at session build): every
+    /// successful read runs it so the queued wake rows can retract or
+    /// re-render over what is left.
+    read_hook: Mutex<Option<InboxReadHook>>,
 }
 
 impl std::fmt::Debug for SessionInbox {
@@ -1534,6 +1538,7 @@ mod tests {
         let store = SessionInbox {
             journal: Some(journal),
             state: Mutex::new(InboxState::default()),
+            persistence_error: Mutex::new(None),
             read_hook: Mutex::new(None),
         };
         store.push(
