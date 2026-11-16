@@ -173,15 +173,14 @@ async fn admit(
     model: &Model,
     prompt: String,
 ) -> Result<(), String> {
-    admit_with_harness_dir(boundary, engine, model, prompt, std::path::PathBuf::new()).await
+    admit_turn(boundary, engine, model, prompt).await
 }
 
-async fn admit_with_harness_dir(
+async fn admit_turn(
     boundary: &mut TurnBoundary,
     engine: &SessionEngine,
     model: &Model,
     prompt: String,
-    global_harness_dir: std::path::PathBuf,
 ) -> Result<(), String> {
     boundary.run_pre_turn(engine, model, None).await?;
     engine
@@ -190,9 +189,7 @@ async fn admit_with_harness_dir(
         .await
         .expect("the prompt admits");
     engine.session.agent().wait_for_idle().await;
-    boundary
-        .run_at_settled_turn(engine, model, None, global_harness_dir)
-        .await?;
+    boundary.run_at_settled_turn(engine, model, None).await?;
     // Existing outcome tests observe background completion explicitly. The
     // held-planner regression below exercises admission before this wait.
     boundary.wait_for_refinement_reports().await;
@@ -214,9 +211,7 @@ async fn admit_turn_with_scheduled_request(
         .await
         .expect("the prompt admits");
     engine.session.agent().wait_for_idle().await;
-    boundary
-        .run_at_settled_turn(engine, model, None, std::path::PathBuf::new())
-        .await?;
+    boundary.run_at_settled_turn(engine, model, None).await?;
     boundary.wait_for_refinement_reports().await;
     Ok(())
 }
@@ -1287,7 +1282,6 @@ async fn requested_refinement_failure_emits_the_refine_failed_event() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
     engine
@@ -1297,15 +1291,9 @@ async fn requested_refinement_failure_emits_the_refine_failed_event() {
             global: true,
         })
         .await;
-    admit_with_harness_dir(
-        &mut boundary,
-        &engine,
-        &model,
-        "seed turn".to_string(),
-        global_dir,
-    )
-    .await
-    .unwrap();
+    admit_turn(&mut boundary, &engine, &model, "seed turn".to_string())
+        .await
+        .unwrap();
     let events = events.lock().unwrap().clone();
     let failed = events
         .iter()
@@ -1330,7 +1318,6 @@ async fn requested_refinement_streams_rows_and_refine_complete() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
     engine
@@ -1340,15 +1327,9 @@ async fn requested_refinement_streams_rows_and_refine_complete() {
             global: true,
         })
         .await;
-    admit_with_harness_dir(
-        &mut boundary,
-        &engine,
-        &model,
-        "seed turn".to_string(),
-        global_dir,
-    )
-    .await
-    .unwrap();
+    admit_turn(&mut boundary, &engine, &model, "seed turn".to_string())
+        .await
+        .unwrap();
     let events = events.lock().unwrap().clone();
     let outcome_at = events
         .iter()
@@ -1399,15 +1380,13 @@ async fn compact_trigger_auto_refine_streams_at_the_next_boundary() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_with_harness_dir(
+    admit_turn(
         &mut boundary,
         &engine,
         &model,
         format!("seed turn {}", "x".repeat(48_000)),
-        global_dir.clone(),
     )
     .await
     .unwrap();
@@ -1431,15 +1410,9 @@ async fn compact_trigger_auto_refine_streams_at_the_next_boundary() {
             .all(|event| event["type"] != "refine_complete"),
         "no auto-refine before the next boundary"
     );
-    admit_with_harness_dir(
-        &mut boundary,
-        &engine,
-        &model,
-        "third turn".to_string(),
-        global_dir,
-    )
-    .await
-    .unwrap();
+    admit_turn(&mut boundary, &engine, &model, "third turn".to_string())
+        .await
+        .unwrap();
     let events = events.lock().unwrap().clone();
     let outcome_at = events
         .iter()
@@ -1487,24 +1460,21 @@ async fn overflow_retry_compact_trigger_streams_the_ts_surface() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_with_harness_dir(
+    admit_turn(
         &mut boundary,
         &engine,
         &model,
         format!("seed turn {}", "x".repeat(48_000)),
-        global_dir,
     )
     .await
     .unwrap();
-    admit_with_harness_dir(
+    admit_turn(
         &mut boundary,
         &engine,
         &model,
         format!("overflow probe {}", "x".repeat(48_000)),
-        std::path::PathBuf::new(),
     )
     .await
     .unwrap();
@@ -1555,15 +1525,13 @@ async fn compact_trigger_drains_at_disposal_off_the_stream() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_with_harness_dir(
+    admit_turn(
         &mut boundary,
         &engine,
         &model,
         format!("seed turn {}", "x".repeat(48_000)),
-        global_dir.clone(),
     )
     .await
     .unwrap();
@@ -1588,7 +1556,7 @@ async fn compact_trigger_drains_at_disposal_off_the_stream() {
     // The print runtime's disposal order: the subscription is gone, so
     // the drain runs the round silently.
     boundary
-        .drain_compact_auto_refine_at_disposal(&engine, &model, None, global_dir)
+        .drain_compact_auto_refine_at_disposal(&engine, &model, None)
         .await;
     boundary.wait_for_refinement_reports().await;
     let rows = refine_rows(&engine).await;
@@ -1622,15 +1590,13 @@ async fn auto_refine_review_decline_surfaces_nothing() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_with_harness_dir(
+    admit_turn(
         &mut boundary,
         &engine,
         &model,
         format!("seed turn {}", "x".repeat(48_000)),
-        global_dir.clone(),
     )
     .await
     .unwrap();
@@ -1644,15 +1610,9 @@ async fn auto_refine_review_decline_surfaces_nothing() {
     .await
     .unwrap();
     assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");
-    admit_with_harness_dir(
-        &mut boundary,
-        &engine,
-        &model,
-        "third turn".to_string(),
-        global_dir,
-    )
-    .await
-    .unwrap();
+    admit_turn(&mut boundary, &engine, &model, "third turn".to_string())
+        .await
+        .unwrap();
     assert!(refine_rows(&engine).await.is_empty(), "no refinement ran");
     let events = events.lock().unwrap().clone();
     assert!(
@@ -1689,15 +1649,13 @@ async fn auto_refine_disabled_settings_drop_the_trigger() {
         None,
     )
     .await;
-    let global_dir = tempfile::TempDir::new().unwrap().keep();
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_with_harness_dir(
+    admit_turn(
         &mut boundary,
         &engine,
         &model,
         format!("seed turn {}", "x".repeat(48_000)),
-        global_dir.clone(),
     )
     .await
     .unwrap();
@@ -1710,15 +1668,9 @@ async fn auto_refine_disabled_settings_drop_the_trigger() {
     )
     .await
     .unwrap();
-    admit_with_harness_dir(
-        &mut boundary,
-        &engine,
-        &model,
-        "third turn".to_string(),
-        global_dir,
-    )
-    .await
-    .unwrap();
+    admit_turn(&mut boundary, &engine, &model, "third turn".to_string())
+        .await
+        .unwrap();
     assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");
     assert!(refine_rows(&engine).await.is_empty(), "no refinement ran");
     let events = events.lock().unwrap().clone();

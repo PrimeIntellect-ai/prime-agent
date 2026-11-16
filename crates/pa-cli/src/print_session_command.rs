@@ -86,7 +86,6 @@ pub(crate) async fn execute_prompt_session_command(
     goal: &Arc<PrintGoalSurface>,
     model: &Model,
     api_key: Option<String>,
-    global_harness_dir: std::path::PathBuf,
     autonomous: &Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     boundary: &mut crate::print_boundary::TurnBoundary,
     command: &SessionSlashCommand,
@@ -111,7 +110,6 @@ pub(crate) async fn execute_prompt_session_command(
         let mut params = SessionCommandParams {
             model,
             api_key,
-            global_harness_dir,
             autonomous: &mut autonomous,
         };
         execute_session_command(engine, &mut params, command, images).await
@@ -268,7 +266,6 @@ mod tests {
         goal: Arc<PrintGoalSurface>,
         autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
         frames: Frames,
-        harness_dir: std::path::PathBuf,
         /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
         /// weakly).
         _run: Arc<crate::headless_autonomous::HeadlessAutonomous>,
@@ -371,7 +368,6 @@ mod tests {
             goal,
             autonomous,
             frames,
-            harness_dir: dir.path().join("harness"),
             _run: run,
             _dir: dir,
         }
@@ -390,7 +386,6 @@ mod tests {
             &bed.goal,
             &bed.model,
             None,
-            bed.harness_dir.clone(),
             &bed.autonomous,
             &mut boundary,
             &command(text),
@@ -407,20 +402,13 @@ mod tests {
                     &mut boundary,
                     &bed.model,
                     None,
-                    bed.harness_dir.clone(),
                     &continuation,
                 )
                 .await
                 .unwrap();
         }
         bed.goal
-            .drive_boundary(
-                &bed.engine,
-                &mut boundary,
-                &bed.model,
-                None,
-                bed.harness_dir.clone(),
-            )
+            .drive_boundary(&bed.engine, &mut boundary, &bed.model, None)
             .await
             .unwrap();
         None

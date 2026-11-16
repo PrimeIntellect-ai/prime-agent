@@ -4,8 +4,6 @@
 //! re-issues). A success schedules the auto-refine review; json mode streams
 //! the wire events, text mode stays quiet.
 
-use std::path::PathBuf;
-
 use pa_core::session_engine::compact_session::{CompactOutcome, CompactRun};
 use pa_core::session_engine::engine::SessionEngine;
 use pa_core::session_engine::messages::{CompactionOutcomeKind, CompactionOutcomeReason};
@@ -135,16 +133,9 @@ impl TurnBoundary {
         engine: &SessionEngine,
         model: &Model,
         api_key: Option<String>,
-        global_harness_dir: PathBuf,
     ) -> Result<(), String> {
         self.count_settled_turns(engine).await;
-        self.consume_compact_auto_refine(
-            engine,
-            model,
-            api_key.clone(),
-            global_harness_dir.clone(),
-            RefineSurface::Checkpoint,
-        );
+        self.consume_compact_auto_refine(engine, model, api_key.clone(), RefineSurface::Checkpoint);
         let arm_finished = loop {
             let outcome = self
                 .overflow_recovery_attempt(
@@ -159,7 +150,6 @@ impl TurnBoundary {
                     engine,
                     model,
                     api_key.clone(),
-                    global_harness_dir.clone(),
                     RefineSurface::Checkpoint,
                 );
             } else {
@@ -172,10 +162,7 @@ impl TurnBoundary {
         }
         // The requested refinement runs whenever the turn did not
         // re-issue (a retried turn consumes it at its own boundary).
-        if let Some(pending) = engine
-            .start_pending_refinement(model, api_key, global_harness_dir)
-            .await
-        {
+        if let Some(pending) = engine.start_pending_refinement(model, api_key).await {
             self.report_background_refinement(pending, /*fails_run*/ false);
         }
         Ok(())
@@ -189,7 +176,6 @@ impl TurnBoundary {
         model: &Model,
         api_key: Option<String>,
         prompt: &str,
-        global_harness_dir: PathBuf,
     ) -> Result<(), String> {
         self.run_pre_turn(engine, model, api_key.clone()).await?;
         engine
@@ -205,8 +191,7 @@ impl TurnBoundary {
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
-        self.run_at_settled_turn(engine, model, api_key, global_harness_dir)
-            .await
+        self.run_at_settled_turn(engine, model, api_key).await
     }
 }
 

@@ -212,23 +212,36 @@ pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult
 #[must_use]
 pub fn load_refinement_history(
     session: &SessionManager,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
 ) -> Vec<RefinementResult> {
-    let global = load_global_refinement_history(global_harness_dir);
+    let global = load_global_refinement_history(&stores.global_dir);
     let session_entries = session.refinement_history();
     crate::refinement::merge_refinement_history(&global, &session_entries)
 }
 
-/// The session's local harness state directory (under the session dir).
-///
-/// # Panics
-///
-/// The `expect` cannot fire: the mapping is total for `Some` session dirs.
-#[must_use]
-pub fn local_harness_state_dir(session: &SessionManager) -> PathBuf {
-    let session_dir = session.get_session_dir().to_path_buf();
-    crate::refinement::get_local_harness_state_dir(Some(&session_dir))
-        .expect("session dir always yields a local harness dir")
+/// The refinement stores: the same directory pair the kernel reads and the
+/// harness digest renders — the global under the agent dir's harness path,
+/// the local in the session's own artifact state. Refinement paths derive
+/// their stores from the session's harness digest context; no host passes
+/// its own (the deleted per-host parameter is how the daemon's writes
+/// drifted to `~/.prime/agent/harness_state.json` and one shared
+/// `<sessions>/harness` file).
+#[derive(Debug, Clone)]
+pub struct RefinementStores {
+    /// Global harness state directory (`<agent dir>/harness`).
+    pub global_dir: PathBuf,
+    /// The session's own local harness state directory, when the session
+    /// persists artifacts.
+    pub local_dir: Option<PathBuf>,
+}
+
+impl From<&super::harness_digest::HarnessDigestContext> for RefinementStores {
+    fn from(context: &super::harness_digest::HarnessDigestContext) -> Self {
+        Self {
+            global_dir: context.global_dir.clone(),
+            local_dir: context.local_dir.clone(),
+        }
+    }
 }
 
 /// Strip display-only `local:`/`global:` prefixes from edit ids.
@@ -282,7 +295,7 @@ pub async fn execute_refinement(
     session: &tokio::sync::Mutex<SessionManager>,
     agent: &pa_agent::agent::Agent,
     transcript: RefinementTranscript<'_>,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
     model: &pa_types::ai::Model,
     options: &RefineOptions,
     source: RefinementSource,
@@ -293,7 +306,7 @@ pub async fn execute_refinement(
         session,
         agent_dir,
         transcript,
-        global_harness_dir,
+        stores,
         model,
         options,
         refine_call,
@@ -343,7 +356,7 @@ pub(crate) async fn run_refinement(
     source: RefinementSource,
     model: pa_types::ai::Model,
     refine_call: crate::refinement::executor::RefinerFn,
-    global_harness_dir: PathBuf,
+    stores: RefinementStores,
 ) -> anyhow::Result<CommittedRefinement> {
     let _flight = RefinementFlightGuard::enter(refinements_in_flight);
     let ready = pa_agent::abort::race_with_abort(
@@ -362,7 +375,7 @@ pub(crate) async fn run_refinement(
                     messages: &messages,
                     refinement_history: &refinement_history,
                 },
-                &global_harness_dir,
+                &stores,
                 &model,
                 &options,
                 refine_call,
@@ -399,7 +412,7 @@ pub(crate) async fn prepare_refinement(
     session: &tokio::sync::Mutex<SessionManager>,
     agent_dir: Option<&Path>,
     transcript: RefinementTranscript<'_>,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
     model: &pa_types::ai::Model,
     options: &RefineOptions,
     refine_call: crate::refinement::executor::RefinerFn,
@@ -408,13 +421,9 @@ pub(crate) async fn prepare_refinement(
         messages,
         refinement_history,
     } = transcript;
-    let (local_harness_dir, has_session_dir, cwd) = {
+    let (local_harness_dir, cwd) = {
         let session = session.lock().await;
-        (
-            local_harness_state_dir(&session),
-            session.has_session_dir(),
-            session.get_cwd().to_path_buf(),
-        )
+        (stores.local_dir.clone(), session.get_cwd().to_path_buf())
     };
     // The live master gate decides before any harness load or plan request:
     // a disabled session never plans. The one settings construction rides
@@ -445,23 +454,29 @@ pub(crate) async fn prepare_refinement(
     } else {
         HarnessScope::Local
     };
-    // A local refinement needs the session's own directory: its harness state
-    // and artifact paths live there. The daemon's engine session is deliberately
-    // non-persisted but carries the session's directory, so local refinement runs.
-    if options.rollback_id.is_none() && requested_scope == HarnessScope::Local && !has_session_dir {
+    // A local refinement needs the session's own harness state directory
+    // (the digest context's `local_dir`): the per-session artifact store the
+    // kernel and the digest read. Sessions without one — a pathless session —
+    // refuse rather than write a store no digest ever shows.
+    if options.rollback_id.is_none()
+        && requested_scope == HarnessScope::Local
+        && local_harness_dir.is_none()
+    {
         anyhow::bail!(
-            "Local harness refinement requires a session directory; use global refinement instead."
+            "Local harness refinement requires the session's harness state directory; use global refinement instead."
         );
     }
     // Planning state: global, or merged global+local for local refinements.
-    let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
+    let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
     let planning_state = if requested_scope == HarnessScope::Global {
         global_state.clone()
     } else {
-        let local_state = load_harness_state(&local_harness_dir, HarnessScope::Local);
-        merge_harness_states(&global_state, Some(&local_state))
+        let local_state = local_harness_dir
+            .as_deref()
+            .map(|dir| load_harness_state(dir, HarnessScope::Local));
+        merge_harness_states(&global_state, local_state.as_ref())
     };
-    let global = load_global_refinement_history(global_harness_dir);
+    let global = load_global_refinement_history(&stores.global_dir);
     let history = crate::refinement::merge_refinement_history(&global, refinement_history);
     // Baseline captured before the (slow) LLM pass, so concurrent kernel
     // writes are rejected instead of clobbered.
@@ -472,8 +487,8 @@ pub(crate) async fn prepare_refinement(
         .and_then(crate::refinement::infer_refinement_result_scope)
         .unwrap_or(requested_scope);
     let baseline_dir = match baseline_scope {
-        HarnessScope::Global => global_harness_dir.to_path_buf(),
-        HarnessScope::Local => local_harness_dir.clone(),
+        HarnessScope::Global => stores.global_dir.clone(),
+        HarnessScope::Local => local_store_dir(&local_harness_dir)?,
     };
     let baseline_state = load_harness_state(&baseline_dir, baseline_scope);
 
@@ -490,8 +505,8 @@ pub(crate) async fn prepare_refinement(
 
     let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
     let target_dir = match target_scope {
-        HarnessScope::Global => global_harness_dir.to_path_buf(),
-        HarnessScope::Local => local_harness_dir.clone(),
+        HarnessScope::Global => stores.global_dir.clone(),
+        HarnessScope::Local => local_store_dir(&local_harness_dir)?,
     };
     Ok(ReadyRefinement {
         plan,
@@ -499,9 +514,18 @@ pub(crate) async fn prepare_refinement(
         baseline_state,
         target_scope,
         target_dir,
-        global_harness_dir: global_harness_dir.to_path_buf(),
+        global_harness_dir: stores.global_dir.clone(),
         settings,
     })
+}
+
+/// The local store dir for a scope that resolved local: a session without
+/// one cannot apply or roll back a local refinement, so it refuses rather
+/// than write a store no digest ever shows.
+fn local_store_dir(local_dir: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    local_dir
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Local harness refinement requires the session's harness state directory; use global refinement instead."))
 }
 
 type RefinementCommitGuards<'a> = (
@@ -779,7 +803,7 @@ async fn review_compact_refinement(
     usage_store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
     model: &pa_types::ai::Model,
     api_key: Option<String>,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
     turns_since_last_review: u32,
     branch_version: u64,
 ) -> anyhow::Result<Option<AutoRefineReview>> {
@@ -787,13 +811,15 @@ async fn review_compact_refinement(
     // against, extracted under this lock from the retained rows.
     let (parts, merged_state, history, session_id) = {
         let session = session.lock().await;
-        let local_state =
-            load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
-        let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
+        let local_state = stores
+            .local_dir
+            .as_deref()
+            .map(|dir| load_harness_state(dir, HarnessScope::Local));
+        let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
         (
             session.refine_transcript_parts(),
-            merge_harness_states(&global_state, Some(&local_state)),
-            load_global_refinement_history(global_harness_dir),
+            merge_harness_states(&global_state, local_state.as_ref()),
+            load_global_refinement_history(&stores.global_dir),
             session.get_session_id().to_string(),
         )
     };
@@ -838,7 +864,32 @@ async fn review_compact_refinement(
     Ok(Some(review))
 }
 
+/// The refusal for a session built without a harness digest context: it has
+/// no store pair to read or write, so every refinement entry point errors
+/// instead of guessing a directory.
+pub(crate) fn refinement_stores_missing_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "refinement requires the session's harness digest context; this session was built without one"
+    )
+}
+
 impl AgentSession {
+    /// The refinement stores: the session's harness digest context's store
+    /// pair — the same directories the kernel reads and the digest renders.
+    /// Every refinement entry point on the session derives its stores here;
+    /// no host passes its own directory.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the session was built without a harness digest context;
+    /// engine-built sessions always carry one.
+    pub(crate) fn refinement_stores(&self) -> anyhow::Result<RefinementStores> {
+        self.harness_digest
+            .as_ref()
+            .map(RefinementStores::from)
+            .ok_or_else(refinement_stores_missing_error)
+    }
+
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
     /// decline; `Ok(Some(review))` a fresh approval.
@@ -855,13 +906,13 @@ impl AgentSession {
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: &Path,
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> anyhow::Result<Option<AutoRefineReview>> {
         if !self.harness_refinements_enabled() {
             return Ok(None);
         }
+        let stores = self.refinement_stores()?;
         pa_agent::abort::race_with_abort(
             review_compact_refinement(
                 &self.session,
@@ -870,7 +921,7 @@ impl AgentSession {
                 std::sync::Arc::clone(&self.usage_store),
                 model,
                 api_key,
-                global_harness_dir,
+                &stores,
                 turns_since_last_review,
                 branch_version,
             ),
@@ -886,7 +937,6 @@ impl AgentSession {
         &self,
         model: pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: PathBuf,
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> tokio::task::JoinHandle<anyhow::Result<Option<CommittedRefinement>>> {
@@ -899,6 +949,9 @@ impl AgentSession {
         let agent_dir = self.agent_dir.clone();
         let usage_store = std::sync::Arc::clone(&self.usage_store);
         let cancel = self.refinement_signal();
+        let Ok(stores) = self.refinement_stores() else {
+            return tokio::spawn(async { Err(refinement_stores_missing_error()) });
+        };
         tokio::spawn(async move {
             let Some(review) = pa_agent::abort::race_with_abort(
                 review_compact_refinement(
@@ -908,7 +961,7 @@ impl AgentSession {
                     std::sync::Arc::clone(&usage_store),
                     &model,
                     api_key.clone(),
-                    &global_harness_dir,
+                    &stores,
                     turns_since_last_review,
                     branch_version,
                 ),
@@ -940,7 +993,7 @@ impl AgentSession {
                 RefinementSource::Auto,
                 model,
                 refiner,
-                global_harness_dir,
+                stores,
             )
             .await
             .map(Some)
@@ -954,9 +1007,9 @@ impl AgentSession {
         review: &AutoRefineReview,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
         cancel: pa_agent::abort::AbortSignal,
     ) -> anyhow::Result<RefinementResult> {
+        let stores = self.refinement_stores()?;
         let options = RefineOptions {
             global: false,
             instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
@@ -986,7 +1039,7 @@ impl AgentSession {
             RefinementSource::Auto,
             model.clone(),
             refiner,
-            global_harness_dir,
+            stores,
         )
         .await
         .map(|committed| committed.result)
@@ -1142,7 +1195,10 @@ mod tests {
                 messages: &[],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1160,7 +1216,10 @@ mod tests {
                 messages: &[user_message("remember this")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::SelfRefine,
@@ -1179,9 +1238,10 @@ mod tests {
             entries_before.as_slice()
         );
         let session_guard = session.lock().await;
-        assert!(!local_harness_state_dir(&session_guard)
-            .join("harness_state.json")
-            .exists());
+        let local_dir =
+            crate::refinement::get_local_harness_state_dir(Some(session_guard.get_session_dir()))
+                .expect("session dir always yields a local harness dir");
+        assert!(!local_dir.join("harness_state.json").exists());
         assert!(!global_dir.exists());
     }
 
@@ -1283,7 +1343,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1318,7 +1381,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1359,7 +1425,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1387,7 +1456,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1418,7 +1490,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1448,7 +1523,17 @@ Reviewer instructions: record it"
             .collect();
         assert_eq!(custom_messages.len(), 2);
         let session = session.lock().await;
-        assert_eq!(load_refinement_history(&session, &global_dir).len(), 1);
+        assert_eq!(
+            load_refinement_history(
+                &session,
+                &RefinementStores {
+                    global_dir: global_dir.clone(),
+                    local_dir: None,
+                },
+            )
+            .len(),
+            1
+        );
     }
 
     /// The failed rows stay live-indexed so the in-process history sees
@@ -1478,7 +1563,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("x")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1579,7 +1667,10 @@ Reviewer instructions: record it"
                     messages: &messages,
                     refinement_history: &refinement_history,
                 },
-                &global_harness_dir,
+                &RefinementStores {
+                    global_dir: global_harness_dir.clone(),
+                    local_dir: Some(dir.path().join("harness")),
+                },
                 &test_model(),
                 &RefineOptions::default(),
                 RefinementSource::User,
@@ -1660,7 +1751,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("x")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions {
                 global: true,
@@ -1687,7 +1781,10 @@ Reviewer instructions: record it"
                 messages: &[],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(dir.path().join("session").join("harness")),
+            },
             &test_model(),
             &RefineOptions {
                 global: true,

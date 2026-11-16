@@ -1,0 +1,1 @@
+- Daemon refinements now write the harness stores the session's digest reads: the global store under the agent dir's `harness/` path and the local store in the session's own artifact directory, instead of `~/.prime/agent/harness_state.json` and one shared `sessions/harness` file.

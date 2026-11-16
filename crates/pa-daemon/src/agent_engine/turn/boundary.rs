@@ -60,7 +60,6 @@ impl AgentSessionEngine {
             }
         };
         let (model, api_key) = self.resolve_request_target(model);
-        let global_harness_dir = self.config.agent_dir.clone();
         // The start event goes out before the summarizer runs, carrying the
         // pending instructions.
         let scheduled = {
@@ -103,10 +102,7 @@ impl AgentSessionEngine {
                 let compaction = engine
                     .consume_pending_compaction(&model, api_key.clone(), Some(&signal))
                     .await;
-                if let Some(pending) = engine
-                    .start_pending_refinement(&model, api_key, global_harness_dir)
-                    .await
-                {
+                if let Some(pending) = engine.start_pending_refinement(&model, api_key).await {
                     self.report_background_refinement(pending);
                 }
                 compaction
@@ -224,6 +220,10 @@ mod tests {
         // `None`, so the config is written here.
         let dir = tempfile::TempDir::new().unwrap();
         write_compaction_settings(dir.path(), 1);
+        // The daemon worker's durable conversation log: the engine session
+        // is non-persisted, so its artifact tree (and local harness store)
+        // is the one the log path implies.
+        let conversation_log = dir.path().join("sessions").join("engine-session.jsonl");
         let engine = std::sync::Arc::new(
             AgentSessionEngine::new(AgentEngineConfig {
                 cwd: dir.path().to_path_buf(),
@@ -233,7 +233,7 @@ mod tests {
                 api_key: None,
                 thinking: None,
                 session_dir: Some(dir.path().join("sessions")),
-                session_file: None,
+                session_file: Some(conversation_log.clone()),
                 faux_script: Some(
                     json!({"responses": [
                         {"text": "seed reply"},
@@ -242,6 +242,17 @@ mod tests {
                             "rationale": "Fixture only",
                             "expectedOutcome": "No change",
                             "edits": []
+                        }).to_string()},
+                        {"text": json!({
+                            "summary": "Record the shared seam",
+                            "rationale": "Fixture only",
+                            "edits": [{
+                                "action": "create",
+                                "kind": "memory",
+                                "id": "g1",
+                                "title": "Global tactic",
+                                "content": "Prefer the shared seam"
+                            }]
                         }).to_string()}
                     ]})
                     .to_string(),
@@ -286,6 +297,65 @@ mod tests {
         assert_eq!(
             outcomes, 1,
             "one durable outcome, including a no-op refinement"
+        );
+        // P0-2: a daemon global refinement writes the agent dir's harness
+        // path — the store the session's digest context carries — never a
+        // store file dropped directly in the agent dir (the drifted
+        // `~/.prime/agent/harness_state.json` shape).
+        {
+            let guard = engine.session.blocking_lock();
+            let session = guard.as_ref().expect("built session");
+            engine
+                .runtime
+                .block_on(session.turn_boundary.schedule_refine(PendingRefine {
+                    instructions: Some("Record a durable global tactic".to_string()),
+                    global: true,
+                }));
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        *engine.refinement_completion_sink.lock().unwrap() =
+            Some(std::sync::Arc::new(move |pending| {
+                send.send(pending).unwrap();
+            }));
+        let boundary = engine.run_turn_boundary(&mut |_| true);
+        assert!(matches!(boundary, BoundaryRun::Proceed));
+        let pending = receive
+            .try_recv()
+            .expect("completion handed to background sink");
+        engine.runtime.block_on(pending).unwrap().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let global_dir = pa_core::refinement::get_global_harness_state_dir(&agent_dir);
+        let global_state = pa_core::refinement::load_harness_state(
+            &global_dir,
+            pa_core::refinement::HarnessScope::Global,
+        );
+        assert!(
+            global_state.entries[&pa_core::refinement::RefinementKind::Memory].contains_key("g1"),
+            "the global edit lands in the agent dir's harness store"
+        );
+        assert!(
+            !agent_dir.join("harness_state.json").exists()
+                && !agent_dir.join("refinement_history.jsonl").exists(),
+            "no orphan store files dropped directly in the agent dir"
+        );
+        // The next digest shows the entry: the render the cold-boundary
+        // delivery sends reads the same store pair the refinement wrote.
+        let context = pa_core::session_engine::harness_digest::HarnessDigestContext {
+            global_dir,
+            local_dir: pa_core::session_engine::harness_digest::local_harness_dir_for_log(
+                &conversation_log,
+            ),
+            include_ipython: false,
+            include_shell_examples: false,
+            include_refine: false,
+        };
+        let digest = pa_core::session_engine::harness_digest::harness_digest_text(
+            &context,
+            pa_core::refinement::ranking::HarnessQueryTerms::default(),
+        );
+        assert!(
+            digest.contains("global:g1]"),
+            "the digest shows the daemon refinement's global entry: {digest}"
         );
     }
 }

@@ -142,7 +142,6 @@ async fn run_session_command(
         let mut params = SessionCommandParams {
             model: &model,
             api_key: api_key.clone(),
-            global_harness_dir: state.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
         // The executor never errors out of the call: failures ride
