@@ -151,17 +151,36 @@ impl Worker {
         // refresh run under the same core lock as the admission, so a
         // delivery that raced the clear either lands before it (and
         // leaves) or waits for it (and stays).
+        let mut withdrawn_texts = Vec::new();
+        let mut wake_on_follow_up = false;
         if let Some(inbox) = self.agent_engine.as_ref().and_then(|engine| engine.inbox()) {
-            if !inbox
-                .withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
-                .is_empty()
-            {
+            // The batch rides ONE wake row (it never splits), so the
+            // row's lane before the refresh is the withdrawn prompts'
+            // lane in the reply; no row means older unread records only,
+            // and they follow the delivery default (steering).
+            wake_on_follow_up = core.follow_up.iter().any(|item| {
+                item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
+            });
+            let withdrawn =
+                inbox.withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE);
+            if !withdrawn.is_empty() {
+                withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
                 crate::worker::refresh_inbox_wake_rows_locked(
                     &mut core,
                     &self.inbox_arrivals,
                     &inbox,
                 );
             }
+        }
+        // The withdrawn prompts report like the direct route's marker
+        // rows: the reply says what the clear took, never an empty set
+        // over records it removed (the report-only defect this pins
+        // shut). A follow-up delivery coalesced under a steering wake
+        // row reports under steering (one row, one lane).
+        if wake_on_follow_up {
+            follow_up.extend(withdrawn_texts);
+        } else {
+            steering.extend(withdrawn_texts);
         }
         crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
         drop(core);
