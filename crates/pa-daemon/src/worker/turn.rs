@@ -496,9 +496,14 @@ impl TurnRunner {
                     engine.on_turn_done();
                 }
                 // Durable model cleanup is independent of visual abort-row
-                // suppression and emits no client-facing frame.
+                // suppression and emits no client-facing frame. An admitted user
+                // row passes too: the core put it in the live context, so the
+                // transcript must keep it.
                 if core.abort_requested
-                    && !matches!(&event, EngineEvent::ModelChange(_))
+                    && !matches!(
+                        &event,
+                        EngineEvent::ModelChange(_) | EngineEvent::UserMessage(_)
+                    )
                     && (core.suppress_aborted_row || !(abort_settle || aborted_row))
                 {
                     return false;
@@ -1034,8 +1039,9 @@ impl TurnRunner {
                 }
             }
             emitting_prefix_rows.set(false);
-            // Sample the worker-owned leaf in memory before accepted rows
-            // persist. The engine stays lazy and the accepted event stays first.
+            // Sample the worker-owned leaf in memory before the turn runs: the
+            // lazy engine restores context through it. Accepted user rows
+            // persist only after core admission, inside the run.
             let (file_backed, prompt_context_leaf) = {
                 let core = core.lock().unwrap();
                 core.store.as_ref().map_or((false, None), |store| {
