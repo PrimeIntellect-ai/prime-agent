@@ -926,7 +926,7 @@ pub(crate) fn withdraw_bash_completion_notice(
         (None, inbox @ Some(_)) => inbox,
         (_, None) => None,
     };
-    // The legacy full-row withdrawal (the kill-switch lane): the
+    // The direct-lane full-row withdrawal (the kill-switch lane): the
     // front-most match across the two lanes, never the whole set.
     let mut removed = false;
     let mut withdraw_one = |item: &QueuedItem| {
