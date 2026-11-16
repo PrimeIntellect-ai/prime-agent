@@ -538,7 +538,6 @@ impl TurnRunner {
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     EngineEvent::AgentEnd { messages, .. } => {
-                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
                         herdr
                             .lock()
                             .unwrap()

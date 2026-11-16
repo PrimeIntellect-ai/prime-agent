@@ -260,7 +260,10 @@ impl AgentSessionEngine {
                                     .filter_map(session_wire_value)
                                     .collect::<Vec<Value>>();
                                 boundary_passed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                let _ = tx.send(EngineEvent::AgentEnd { messages, aborted });
+                                let _ = tx.send(EngineEvent::AgentEnd {
+                                    messages,
+                                    aborted: *aborted,
+                                });
                             }
                             AgentEvent::TurnEnd {
                                 message,

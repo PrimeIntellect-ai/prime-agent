@@ -1708,8 +1708,6 @@ async fn run_interactive_surface(
             }
         }
 
-        session.sync_goal_tray(&mut view);
-
         // OSC 7501 program status.
         if renderer.is_terminal() {
             crate::program_status::report(session.program_status(&view));

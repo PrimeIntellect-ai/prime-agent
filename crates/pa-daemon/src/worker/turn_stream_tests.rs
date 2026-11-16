@@ -129,7 +129,6 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 #[derive(Default)]
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
-    frames: Vec<EngineEvent>,
     before_delivery: Mutex<Option<Box<dyn Fn() + Send>>>,
     boundaries: Mutex<Vec<Option<String>>>,
     turns_done: std::sync::atomic::AtomicUsize,
@@ -311,120 +310,6 @@ async fn a_later_run_without_its_end_still_gets_the_fallback_closer() {
     assert!(
         ends[1] > *starts.last().unwrap(),
         "the closer follows the later run's start: {events:?}"
-    );
-}
-
-/// A turn aborted under row suppression (a manual compaction or tree move)
-/// still reaches the engine's turn boundary at its swallowed `Done`, so
-/// child prompts held for that turn are released.
-#[tokio::test]
-async fn a_suppressed_abort_still_ends_the_engine_turn() {
-    for done in [EngineEvent::Done(Ok(())), EngineEvent::DoneAborted] {
-        let engine = Arc::new(GateProbeEngine {
-            frames: vec![done],
-            ..GateProbeEngine::default()
-        });
-        let dynamic: Arc<dyn SessionEngine> = engine.clone();
-        let runner = burst_runner(Arc::clone(&dynamic));
-        {
-            let mut core = runner.core.lock().unwrap();
-            core.abort_requested = true;
-            core.suppress_aborted_row = true;
-        }
-        runner
-            .run_turn(
-                dynamic,
-                Lane::Steering,
-                vec![QueuedItem {
-                    priority: QueuePriority::Human,
-                    preview: None,
-                    message: "aborted".to_string(),
-                    custom_message: None,
-                    agent_message: None,
-                    queue_key: None,
-                    admission_id: None,
-                    images: Vec::new(),
-                    done: None,
-                    queue_visible: true,
-                    policy: TurnPolicy::Queued,
-                    forced_batch: false,
-                }],
-            )
-            .await;
-        assert_eq!(
-            engine.turns_done.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-    }
-}
-
-/// #4: the turn's tool executions count onto the session's `toolUseCount`
-/// (TS bumps the child's counter per `tool_execution_start`), the value the
-/// worker's roster deltas carry.
-#[tokio::test]
-async fn a_turns_tool_executions_count_onto_the_summary() {
-    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
-        frames: vec![
-            EngineEvent::ToolExecutionStart {
-                tool_call_id: "t1".to_string(),
-                tool_name: "bash".to_string(),
-                args: Value::Null,
-            },
-            EngineEvent::ToolExecutionEnd {
-                tool_call_id: "t1".to_string(),
-                result: Value::Null,
-                is_error: false,
-            },
-            EngineEvent::ToolExecutionStart {
-                tool_call_id: "t2".to_string(),
-                tool_name: "edit".to_string(),
-                args: Value::Null,
-            },
-            EngineEvent::Done(Ok(())),
-        ],
-        ..GateProbeEngine::default()
-    });
-    let runner = burst_runner(Arc::clone(&engine));
-    runner
-        .run_turn(
-            engine,
-            Lane::Steering,
-            vec![QueuedItem {
-                priority: QueuePriority::Human,
-                preview: None,
-                message: "tools".to_string(),
-                custom_message: None,
-                agent_message: None,
-                queue_key: None,
-                admission_id: None,
-                images: Vec::new(),
-                done: None,
-                queue_visible: true,
-                policy: TurnPolicy::Queued,
-                forced_batch: false,
-            }],
-        )
-        .await;
-    let summary = {
-        let core = runner.core.lock().unwrap();
-        session_summary(
-            &core,
-            SummaryInputs {
-                thinking_level: "default".to_string(),
-                model: None,
-                model_fallback_message: None,
-                bash_running: false,
-                quota_parked: false,
-                subagents_running: false,
-                progress_note: None,
-            },
-        )
-    };
-    let summary = serde_json::to_value(&summary).unwrap();
-    assert_eq!(
-        summary["toolUseCount"],
-        json!(2),
-        "the summary: {summary:?}"
     );
 }
 
@@ -726,6 +611,50 @@ async fn a_failed_runs_agent_end_follows_its_final_retry_end() {
     );
 }
 
+/// A turn aborted under row suppression (a manual compaction or tree move)
+/// still reaches the engine's turn boundary at its swallowed `Done`, so
+/// child prompts held for that turn are released.
+#[tokio::test]
+async fn a_suppressed_abort_still_ends_the_engine_turn() {
+    for done in [EngineEvent::Done(Ok(())), EngineEvent::DoneAborted] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![done],
+            ..GateProbeEngine::default()
+        });
+        let dynamic: Arc<dyn SessionEngine> = engine.clone();
+        let runner = burst_runner(Arc::clone(&dynamic));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.abort_requested = true;
+            core.suppress_aborted_row = true;
+        }
+        runner
+            .run_turn(
+                dynamic,
+                Lane::Steering,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "aborted".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        assert_eq!(
+            engine.turns_done.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+}
+
 /// #4: the turn's tool executions count onto the session's `toolUseCount`
 /// (TS bumps the child's counter per `tool_execution_start`), the value the
 /// worker's roster deltas carry.
@@ -795,6 +724,7 @@ async fn a_turns_tool_executions_count_onto_the_summary() {
         "the summary: {summary:?}"
     );
 }
+
 /// A settle frame that would forward on a plain flag sighting drops when
 /// `suppress_aborted_row` is set; the fallback still closes the run.
 #[tokio::test]

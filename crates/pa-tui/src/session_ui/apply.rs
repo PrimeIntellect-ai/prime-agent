@@ -505,7 +505,7 @@ impl SessionUi {
                 aborted,
             } => {
                 // One LLM turn ended; the run, and with it the busy state, lasts until
-                // `agent_end`.
+                // `agent_end` (#3998). The OSC outcome tracks the run separately below.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
                 // An aborted settle ends the run (the abort fallback frame

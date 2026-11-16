@@ -1317,20 +1317,6 @@ async fn run_agents_view_surface(
                 ));
             }
         }
-        // OSC 7501 program status.
-        if matches!(renderer, Renderer::Terminal { .. }) {
-            crate::program_status::report(
-                if mode
-                    .rows
-                    .get(mode.selected)
-                    .is_some_and(|row| row.section == Section::Running)
-                {
-                    crate::program_status::Status::Working
-                } else {
-                    crate::program_status::Status::Idle
-                },
-            );
-        }
         if redraw {
             renderer.draw(&mut mode);
         }
