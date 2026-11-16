@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ErrorData, TextContent
 from rlm import McpToolError, mcp
 from rlm import mcp_notify
 from rlm.mcp_base import _parse_result
@@ -1729,6 +1729,56 @@ class McpSubscriptionTest(unittest.TestCase):
                     await mcp.subscribe_resource("svc", "file:///over")
 
         run(scenario())
+
+
+class McpSamplingCallbackTest(unittest.TestCase):
+    """The kernel's `sampling/createMessage` callback maps host replies and refusals."""
+
+    def generation(self):
+        session = SimpleNamespace(
+            server_capabilities=SimpleNamespace(resources=None, prompts=None)
+        )
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = session
+        return generation
+
+    def params(self):
+        return SimpleNamespace(
+            messages=[SimpleNamespace(role="user", content="summarize")],
+            maxTokens=64,
+            systemPrompt="be brief",
+        )
+
+    def test_a_served_reply_becomes_a_create_message_result(self):
+        seen = {}
+
+        async def served(request_type, payload):
+            seen["type"] = request_type
+            seen["payload"] = payload
+            return {"text": "the answer", "model": "mock-1"}
+
+        generation = self.generation()
+        with mock.patch.object(mcp, "host_request", served):
+            result = run(generation._on_sampling(None, self.params()))
+        self.assertEqual(seen["type"], "mcp.sampling")
+        self.assertEqual(seen["payload"]["server"], "svc")
+        self.assertEqual(seen["payload"]["maxTokens"], 64)
+        self.assertEqual(seen["payload"]["systemPrompt"], "be brief")
+        self.assertEqual(result.role, "assistant")
+        self.assertEqual(result.content.text, "the answer")
+        self.assertEqual(result.model, "mock-1")
+
+    def test_a_refusal_becomes_an_error_for_the_server(self):
+        async def refused(_request_type, _payload):
+            raise RuntimeError("MCP sampling is refused for server 'svc': not allowed")
+
+        generation = self.generation()
+        with mock.patch.object(mcp, "host_request", refused):
+            result = run(generation._on_sampling(None, self.params()))
+        self.assertIsInstance(result, ErrorData)
+        self.assertIn("refused", result.message)
+        self.assertIn("svc", result.message)
 
 
 if __name__ == "__main__":

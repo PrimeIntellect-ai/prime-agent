@@ -137,6 +137,8 @@ impl AgentSessionEngine {
             goal_admission_sink: std::sync::Mutex::new(None),
             kernel_notice_sink: std::sync::Mutex::new(None),
             mcp_notification_row_sink: std::sync::Mutex::new(None),
+            mcp_sampling_runner: std::sync::Mutex::new(None),
+            mcp_sampling_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
@@ -843,6 +845,16 @@ impl AgentSessionEngine {
         register_agent_message_host_handlers(sender, &mut handlers);
         register_agent_observe_host_handlers(observer, &mut handlers);
         self.register_kernel_notice_host_handlers(&mut handlers);
+        // MCP sampling: the worker installs a runner; the handler only validates and
+        // dispatches, and the refusal/served rows ride Phase 2's row sink.
+        if let Some(runner) = self
+            .mcp_sampling_runner
+            .lock()
+            .expect("mcp sampling runner lock")
+            .clone()
+        {
+            crate::agent_engine::mcp_sampling::register_mcp_sampling_handler(runner, &mut handlers);
+        }
         Some(handlers)
     }
 

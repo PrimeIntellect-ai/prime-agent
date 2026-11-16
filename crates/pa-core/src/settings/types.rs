@@ -288,6 +288,23 @@ pub struct TelemetrySettings {
 /// The default time limit for user `python_repl` cells: 60 seconds.
 pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
 
+/// `mcpSampling`: the per-server sampling permission (MCP `sampling/createMessage`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSamplingSettings {
+    /// Server names allowed to request a sampling completion. Exact match
+    /// against the configured `mcpServers` key; no wildcards and no global switch.
+    #[serde(default)]
+    pub allowed_servers: Vec<String>,
+    /// The model serving a sampling completion ("provider/model-id" or a bare
+    /// id); unset means the session model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-request token cap (default 512, clamped to 4096).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -343,6 +360,10 @@ pub struct Settings {
     /// compiled built-ins; first source wins per id, and no bundled id can be shadowed.
     /// Read from global settings only, like executable MCP server configuration.
     pub mcp_catalog_sources: Option<Vec<String>>,
+    /// `mcpSampling`: which MCP servers may ask this machine's model for a
+    /// completion. Absent or an empty `allowedServers` denies every server —
+    /// there is no global switch, and the default path never calls a model.
+    pub mcp_sampling: Option<McpSamplingSettings>,
     pub packages: Option<Vec<serde_json::Value>>,
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,

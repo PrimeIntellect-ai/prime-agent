@@ -48,6 +48,7 @@ pub(crate) use tests::FAUX_TEST_LOCK;
 
 mod goalcore;
 mod lifecycle;
+pub(crate) mod mcp_sampling;
 mod turn_types;
 
 use turn_types::{
@@ -156,6 +157,10 @@ pub struct AgentSessionEngine {
     /// significant kinds go through `kernel_notice_sink` instead.
     pub(crate) mcp_notification_row_sink:
         std::sync::Mutex<Option<pa_core::session_engine::mcp_notices::McpNotificationRowSink>>,
+    /// The MCP sampling runner (worker-installed): policy plus one bounded completion.
+    pub(crate) mcp_sampling_runner: std::sync::Mutex<Option<mcp_sampling::SamplingRunner>>,
+    /// Completions this session served, against the per-session cap.
+    pub(crate) mcp_sampling_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,
     /// Whether the settled turn parked: the park's pause, not the goal's death.
     pub(crate) quota_parked_this_run: std::sync::Arc<std::sync::atomic::AtomicBool>,

@@ -5,7 +5,7 @@
 use anyhow::{anyhow, Result};
 
 use super::manager::SettingsManager;
-use super::types::WebSearchProvider;
+use super::types::{McpSamplingSettings, WebSearchProvider};
 
 impl SettingsManager {
     /// Global preference controlling refinement creation and context loading (default on).
@@ -172,6 +172,13 @@ impl SettingsManager {
             .get_or_insert_with(Default::default)
             .block_images = Some(blocked);
         self.save_global_scope(&["images.blockImages"])
+    }
+
+    /// `mcpSampling`: the per-server sampling permission. Absent settings deny
+    /// every server — the default path never calls a model.
+    #[must_use]
+    pub fn get_mcp_sampling(&self) -> McpSamplingSettings {
+        self.settings().mcp_sampling.clone().unwrap_or_default()
     }
 
     #[must_use]

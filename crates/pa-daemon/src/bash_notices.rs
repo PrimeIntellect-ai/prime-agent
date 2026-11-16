@@ -46,6 +46,22 @@ impl AgentSessionEngine {
             .expect("mcp notification row sink lock") = Some(row);
     }
 
+    /// Wire the MCP sampling runner (policy + bounded completion), called by the
+    /// worker before the session builds.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the runner mutex is poisoned.
+    pub fn set_mcp_sampling_runner(
+        &self,
+        runner: crate::agent_engine::mcp_sampling::SamplingRunner,
+    ) {
+        *self
+            .mcp_sampling_runner
+            .lock()
+            .expect("mcp sampling runner lock") = Some(runner);
+    }
+
     /// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
     /// handlers. Registered only when both seams are wired — no worker queue
     /// leaves the requests honestly unavailable.

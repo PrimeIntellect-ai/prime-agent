@@ -26,6 +26,7 @@ pub mod image_model_routing;
 pub mod ipython_state;
 pub mod late_sent_messages;
 pub mod mcp_notices;
+pub mod mcp_sampling;
 pub mod messages;
 pub mod model_usage;
 pub mod provider_adapter;

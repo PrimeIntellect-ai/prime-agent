@@ -186,6 +186,8 @@ prime-agent has support for programmatic tools that are defined in the MCP forma
 
 A server that does not advertise resources or prompts raises a named error for the call; do not probe it by other means.
 
+A connected server may ask this machine's model for a completion (MCP sampling). It is **refused by default**: only servers the user listed in `settings.mcpSampling.allowedServers` are served, and a refusal appears as an `[mcp_sampling]` row. You cannot enable it from here — mention the setting if the user asks how.
+
 Server notifications (tool/prompt/resource inventory changes, subscribed resource updates, log lines, progress) are buffered per server and also land as `[mcp_notification]` rows in the conversation. Inventory changes and resource updates wake you with that row; log lines and progress do not. Pull what you missed with:
 - `mcp.notifications(server: str | None = None, kind: str | None = None, since: int | None = None, limit: int = 50) -> dict`: `{notifications, nextSince, dropped}`; pass a previous `nextSince` as `since` to continue, and treat a non-zero `dropped` as a gap you missed
 - `mcp.notification_status() -> dict`: per-server buffered/dropped/forwarded counters

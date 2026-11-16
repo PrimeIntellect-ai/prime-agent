@@ -157,6 +157,9 @@ const INTERNAL_HOST_REQUESTS: &[&str] = &[
     // The kernel forwards buffered MCP server notifications; the model pulls
     // them with `mcp.notifications`, never by issuing this host request.
     "mcp.notification",
+    // A server's `sampling/createMessage` callback asks the host; the model never
+    // issues this request itself.
+    "mcp.sampling",
 ];
 
 /// Map one registered host-request type to the prompt token that documents

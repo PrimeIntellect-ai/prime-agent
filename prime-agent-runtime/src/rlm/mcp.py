@@ -327,6 +327,7 @@ class _Generation:
                             read_timeout_seconds=self.call_timeout,
                             message_handler=self._on_message,
                             logging_callback=self._on_logging,
+                            sampling_callback=self._on_sampling,
                         )
                     )
                     try:
@@ -663,6 +664,44 @@ class _Generation:
     async def unsubscribe(self, uri: str) -> None:
         async with asyncio.timeout(self.call_timeout):
             await self.session.unsubscribe_resource(uri)
+
+    # -- sampling (server → client) ----------------------------------------
+
+    async def _on_sampling(self, _context: Any, params: Any) -> Any:
+        """Answer a server's `sampling/createMessage` through the host.
+
+        The host owns the policy (default deny, per server) and the model call;
+        a refusal reaches the server as a JSON-RPC error, never as fabricated
+        content.
+        """
+        from mcp.types import CreateMessageResult, ErrorData, TextContent
+
+        try:
+            messages = [
+                _plain(message) for message in (getattr(params, "messages", None) or [])
+            ]
+            reply = await host_request(
+                "mcp.sampling",
+                {
+                    "server": self.server,
+                    "messages": messages,
+                    "systemPrompt": _field(
+                        params, "systemPrompt", "system_prompt", default=None
+                    ),
+                    "maxTokens": _field(params, "maxTokens", "max_tokens", default=None),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - the server learns why, not a traceback
+            return ErrorData(code=-32603, message=f"MCP sampling refused: {exc}")
+        text = reply.get("text") if isinstance(reply, dict) else None
+        model = reply.get("model") if isinstance(reply, dict) else None
+        if not isinstance(text, str):
+            return ErrorData(code=-32603, message="MCP sampling returned no text")
+        return CreateMessageResult(
+            role="assistant",
+            content=TextContent(type="text", text=text),
+            model=model if isinstance(model, str) and model else "unknown",
+        )
 
     # -- server notifications ----------------------------------------------
 

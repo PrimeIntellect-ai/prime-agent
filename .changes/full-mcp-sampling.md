@@ -1,0 +1,1 @@
+- MCP sampling (`sampling/createMessage`) is supported with a default-deny policy: a server may ask this machine's model for a completion only when it is named in `settings.mcpSampling.allowedServers` (per server, revocable, no global switch). Refusals are visible in the conversation, and an allowed completion is a single tool-free turn with a token cap.

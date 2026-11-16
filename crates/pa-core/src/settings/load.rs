@@ -41,6 +41,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "npmCommand",
     "mcpServers",
     "mcpCatalogSources",
+    "mcpSampling",
     "packages",
     "skills",
     "prompts",

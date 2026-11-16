@@ -121,6 +121,14 @@ Subscriptions survive a reload (the kernel re-subscribes on the new session);
 one the server refuses shows up as a `subscription_lost` notification, so a
 stale URI is never silently assumed live.
 
+## Sampling (a server asking for a completion)
+
+Some servers call back into the client with `sampling/createMessage`. This
+product **refuses by default**; only servers the user lists in
+`settings.mcpSampling.allowedServers` are served, one bounded, tool-free
+completion each (token-capped). A refusal is a normal answer — the row
+`[mcp_sampling]` says which server asked and why.
+
 ## Large or integrity-critical payloads
 
 `mcp.call_tool` runs the MCP client session inside this kernel. Arguments go

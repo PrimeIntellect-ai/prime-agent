@@ -673,6 +673,30 @@ impl Worker {
                         summary::broadcast_custom_row_locked(&mut core, &row_events, &value);
                     });
                 concrete.set_mcp_notification_row_sink(mcp_row_sink);
+                // The MCP sampling runner: policy and the bounded completion live on the
+                // engine; the host handler only validates and dispatches.
+                let sampling_engine = std::sync::Arc::clone(concrete);
+                let sampling_runner: crate::agent_engine::mcp_sampling::SamplingRunner =
+                    std::sync::Arc::new(move |request| {
+                        let engine = std::sync::Arc::clone(&sampling_engine);
+                        // The completion takes the session's blocking lock, which panics
+                        // under a runtime context: run it on a plain OS thread (the
+                        // side-question seam's shape) and hand the result back through a
+                        // channel. The async worker never blocks on it.
+                        Box::pin(async move {
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            std::thread::Builder::new()
+                                .name("mcp-sampling".to_string())
+                                .spawn(move || {
+                                    let _ = tx.send(engine.run_mcp_sampling_blocking(request));
+                                })
+                                .map_err(|error| format!("sampling thread failed: {error}"))?;
+                            rx.await.map_err(|_| {
+                                "the sampling run ended without a result".to_string()
+                            })?
+                        })
+                    });
+                concrete.set_mcp_sampling_runner(sampling_runner);
                 // The accepted note frames as a session event on the pump.
                 let note_core = Arc::clone(&core);
                 let note_events = events.clone();
