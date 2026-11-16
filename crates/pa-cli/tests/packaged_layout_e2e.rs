@@ -988,6 +988,54 @@ fn bootstrap_kernel_venv_from_packaged_sidecar() {
     };
     assert!(venv_python.exists(), "kernel venv python missing");
 
+    // The installer prewarm must leave the packaged Python skills imported:
+    // `import goal` succeeds before any session can repair the venv, and the
+    // module resolves inside the staged payload (the editable install points
+    // at `skills/goal`, not at some other environment's copy).
+    let import_probe = std::process::Command::new(&venv_python)
+        .arg("-c")
+        .arg("import goal; print(goal.__file__)")
+        .env("HOME", box_.home.path())
+        .output()
+        .expect("run kernel venv python");
+    assert_eq!(
+        import_probe.status.code(),
+        Some(0),
+        "import goal must succeed right after the installer bootstrap: {}",
+        String::from_utf8_lossy(&import_probe.stderr)
+    );
+    let goal_file = String::from_utf8_lossy(&import_probe.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        Path::new(&goal_file).starts_with(staged),
+        "goal must import from the staged payload, got {goal_file}"
+    );
+
+    // The installed prompt (the `prompt` command's normal resources and
+    // formatter) carries the goal and factory inventory.
+    let prompt = box_
+        .command(staged)
+        .arg("prompt")
+        .output()
+        .expect("run prompt command");
+    assert_eq!(
+        prompt.status.code(),
+        Some(0),
+        "prompt stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&prompt.stdout),
+        String::from_utf8_lossy(&prompt.stderr)
+    );
+    let prompt_stdout = String::from_utf8_lossy(&prompt.stdout);
+    assert!(
+        prompt_stdout.contains("<name>goal</name>"),
+        "goal missing from the installed prompt inventory"
+    );
+    assert!(
+        prompt_stdout.contains("<name>factory</name>"),
+        "factory missing from the installed prompt inventory: {prompt_stdout}"
+    );
+
     // A session boots on the fresh venv, without any kernel override.
     let receipt = box_.home.path().join("kernel-receipt.json");
     let script = kernel_boot_script(&receipt);

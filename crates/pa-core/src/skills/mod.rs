@@ -204,7 +204,7 @@ pub(crate) use validate_description as validate_skill_description;
 pub(crate) use validate_name as validate_skill_name;
 
 /// Format skills for a system prompt (Agent Skills XML standard); skills
-/// with disableModelInvocation are excluded.
+/// with `disable-model-invocation` are excluded.
 #[must_use]
 pub fn format_skills_for_prompt(skills: &[Skill]) -> String {
     let visible: Vec<&Skill> = skills
@@ -428,6 +428,54 @@ mod tests {
         let (expanded, used) = expand_skill_command("/skill:gone", &skills);
         assert_eq!(expanded, "/skill:gone");
         assert!(used.is_none());
+    }
+
+    /// The documented `disable-model-invocation` contract, through discovery:
+    /// a flagged SKILL.md on disk stays out of the prompt inventory while
+    /// `/skill:<name>` still finds and expands it (`skills/skill-creator/SKILL.md`).
+    #[test]
+    fn a_flagged_skill_stays_prompt_hidden_and_expands_when_named() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join("flagged");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---
+name: flagged
+description: A flagged fixture
+disable-model-invocation: true
+---
+FLAGGED_BODY",
+        )
+        .expect("write");
+        let discovered = crate::skills::load_skills_from_dir(dir.path(), "user");
+        assert_eq!(
+            discovered.skills.len(),
+            1,
+            "the flagged fixture must load: {:?}",
+            discovered.diagnostics
+        );
+        let skills = discovered.skills;
+        assert!(
+            skills[0].disable_model_invocation,
+            "the kebab-case flag must be discovered"
+        );
+        assert_eq!(
+            format_skills_for_prompt(&skills),
+            "",
+            "a flagged skill stays out of the prompt inventory"
+        );
+        let (expanded, used) = expand_skill_command("/skill:flagged probe-argument", &skills);
+        let used = used.expect("a flagged skill is found when named");
+        assert_eq!(used.name, "flagged");
+        assert!(
+            expanded.contains("FLAGGED_BODY"),
+            "the named expansion carries the body: {expanded}"
+        );
+        assert!(
+            expanded.ends_with("probe-argument"),
+            "the named expansion retains the argument: {expanded}"
+        );
     }
 
     #[test]

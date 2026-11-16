@@ -1,0 +1,1 @@
+- Fixed fresh installs missing built-in skills: the installer now pre-installs the packaged Python skills (including `goal`) into the kernel venv, and the bundled `factory` skill no longer disappears from the skill list because of invalid frontmatter.

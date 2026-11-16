@@ -335,8 +335,21 @@ fn run_runtime_bootstrap() -> Result<i32, String> {
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
+    // The packaged built-in skills (the exe-adjacent `skills/` directory the
+    // installer just extracted): their Python packages are pre-installed so
+    // the first session starts with them importable. Project and user skill
+    // paths stay out; they are session-time discovery.
+    let packaged_skills = pa_core::skills::load_skills_from_dir(
+        &crate::config::package_dir().join("skills"),
+        "package",
+    );
+    let python_skills =
+        pa_core::session_engine::runtime_wiring::kernel_python_skills(&packaged_skills.skills);
     match runtime.block_on(pa_core::kernel::ensure_kernel_python(
-        pa_core::kernel::EnsureKernelPythonOptions::default(),
+        pa_core::kernel::EnsureKernelPythonOptions {
+            python_skills,
+            ..Default::default()
+        },
     )) {
         Ok(python) => {
             println!("kernel python: {}", python.display());
