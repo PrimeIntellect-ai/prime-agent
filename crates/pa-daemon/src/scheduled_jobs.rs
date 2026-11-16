@@ -432,6 +432,14 @@ impl ScheduledJobs {
             return;
         }
         let key = format!("heartbeat:{}", job.id);
+        // The inbox route's withdrawal seam: the live engine and its
+        // store, when the fire routed into the durable inbox.
+        let seam = self
+            .hooks
+            .inbox_seam
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         {
             let mut core = self
                 .hooks
@@ -442,6 +450,29 @@ impl ScheduledJobs {
                 .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
             core.follow_up
                 .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
+            if let Some(seam) = &seam {
+                if let Some(engine) = seam.engine.upgrade() {
+                    if let Some(inbox) = engine.inbox() {
+                        // The captured store is re-checked under the
+                        // slot's own mutex, inside this critical section
+                        // like the reminder's check: a replacement's
+                        // successor rows never sweep for the retired
+                        // store's job.
+                        if engine.is_live_inbox(&inbox)
+                            && !inbox.withdraw_heartbeat(&job.id).is_empty()
+                        {
+                            // The wake rows that promised the withdrawn
+                            // fire refresh over what is left (an emptied
+                            // inbox leaves no stale notice or reminder).
+                            crate::worker::refresh_inbox_wake_rows_locked(
+                                &mut core,
+                                &seam.arrivals,
+                                &inbox,
+                            );
+                        }
+                    }
+                }
+            }
         }
         // Same settle as the other withdrawals: the verdict and snapshot must not keep the
         // withdrawn fire's busy=true (a revive would replay the deleted heartbeat's prompt).

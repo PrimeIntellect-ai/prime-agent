@@ -535,6 +535,38 @@ impl SessionInbox {
         removed
     }
 
+    /// Withdraw one heartbeat job's waiting fires: the management hook's
+    /// drop-queued withdrawal (pause/stop/delete/rewrite) must not leave a
+    /// durable prompt for a job that no longer runs. Matches the
+    /// `heartbeat` class and the job's id (the notice's sender); the same
+    /// journal-first, then-store order the class withdrawal uses. Returns
+    /// the removed messages in arrival order.
+    pub fn withdraw_heartbeat(&self, job_id: &str) -> Vec<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut removed = Vec::new();
+        let mut remaining = Vec::new();
+        for message in std::mem::take(&mut state.messages) {
+            if message.class == INBOX_CLASS_HEARTBEAT && message.sender.as_deref() == Some(job_id) {
+                removed.push(message);
+            } else {
+                remaining.push(message);
+            }
+        }
+        for message in &removed {
+            self.append_journal(
+                &serde_json::to_value(InboxRecord::Withdrawn {
+                    id: message.id.clone(),
+                })
+                .unwrap_or(Value::Null),
+            );
+        }
+        state.messages = remaining;
+        removed
+    }
+
     /// The waiting messages in arrival order: the wake-row refresh
     /// rebuilds an unknown recovered batch from them.
     #[must_use]

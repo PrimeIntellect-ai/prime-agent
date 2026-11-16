@@ -1306,7 +1306,11 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let socket = dir.join("daemon.sock");
     let kernel_venv = dir.join("kernel-venv");
-    let url = spawn_mock_with(&NEXT_CHILD, child_lifecycle_script);
+    let url = spawn_mock_with(
+        &NEXT_CHILD,
+        child_lifecycle_script,
+        RequestBodies::default(),
+    );
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
