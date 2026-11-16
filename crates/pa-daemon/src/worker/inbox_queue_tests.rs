@@ -2020,7 +2020,7 @@ async fn a_minted_child_notice_routes_into_the_inbox() {
         rows.is_empty(),
         "the wake rides the follow-up lane: {rows:?}"
     );
-    let follow_up: Vec<(String, Option<String>, bool)> = worker
+    let follow_up: Vec<(String, Option<String>, Option<String>)> = worker
         .core
         .lock()
         .unwrap()
@@ -2030,20 +2030,25 @@ async fn a_minted_child_notice_routes_into_the_inbox() {
             (
                 item.message.clone(),
                 item.queue_key.clone(),
-                item.custom_message.is_some(),
+                item.custom_message
+                    .as_ref()
+                    .and_then(|row| row.get("customType"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
             )
         })
         .collect();
     assert_eq!(follow_up.len(), 1, "one coalesced wake row: {follow_up:?}");
-    let (wake, queue_key, full_row) = &follow_up[0];
+    let (wake, queue_key, custom_type) = &follow_up[0];
     assert!(
         wake.contains("1 new message (child-failed)"),
         "the wake counts the class: {wake}"
     );
     assert_eq!(queue_key.as_deref(), Some(INBOX_ARRIVAL_QUEUE_KEY));
-    assert!(
-        !full_row,
-        "no full notice row rides the wake: {follow_up:?}"
+    assert_eq!(
+        custom_type.as_deref(),
+        Some(pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE),
+        "the wake carries its inbox-notice twin, never the full notice row: {follow_up:?}"
     );
     // The arrival is journal busy evidence like every inbox admission.
     assert!(
@@ -2532,8 +2537,8 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
         "the next arrival coalesces into the one daemon-authored row: {rows:?}"
     );
     assert!(
-        rows.iter()
-            .all(|(text, _, _)| { text.starts_with("[inbox ") && text.contains("+2 arrived") }),
+        rows.iter().all(|(text, _, _)| text.starts_with("[inbox ")
+            && text.contains("2 new messages (1 bash-done, 1 factory-progress)")),
         "the row stays the coalesced notice, never a user instruction: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
