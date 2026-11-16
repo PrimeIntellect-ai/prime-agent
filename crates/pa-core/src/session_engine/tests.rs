@@ -822,6 +822,118 @@ Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
     let _ = held.await;
 }
 
+/// A busy image delivery never re-routes a live episode: while the run
+/// streams, the busy branch queues the batch without consulting the
+/// router seam (the streaming run keeps its own target; the steered
+/// rows join the live episode, so the routing decision belongs to the
+/// run that actually serves them). The router records every call, so
+/// the pin goes red the moment the busy branch touches routing while
+/// `is_streaming` holds. Mutation: dropping the `!state.is_streaming`
+/// guard in the busy branch routes this delivery mid-episode — `decide`
+/// and `swap_target` both record.
+#[tokio::test]
+async fn a_busy_streaming_image_delivery_never_touches_the_router() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_stalled_turn("holding the turn");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut session = AgentSession::new(
+        Arc::new(Agent::new(options)),
+        SessionManager::in_memory(tmp.path()),
+        vec![],
+    )
+    .await
+    .unwrap();
+    // The recording router: every `decide` and `swap_target` call counts.
+    let decide_calls = Arc::new(std::sync::Mutex::new(0u32));
+    let swap_calls = Arc::new(std::sync::Mutex::new(0u32));
+    session.set_image_model_router(Some(image_model_routing::ImageModelRouter {
+        decide: {
+            let decide_calls = Arc::clone(&decide_calls);
+            Arc::new(move |_carries_images, _level| {
+                *decide_calls.lock().unwrap() += 1;
+                Ok(None)
+            })
+        },
+        swap_target: {
+            let swap_calls = Arc::clone(&swap_calls);
+            Arc::new(move |_target| {
+                *swap_calls.lock().unwrap() += 1;
+            })
+        },
+    }));
+    let session = Arc::new(session);
+    // Start the stalled run and wait until the session streams.
+    let held = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let _ = session
+                .prompt("hold the turn", PromptOptions::default())
+                .await;
+        })
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.agent().state().await.is_streaming {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stalled run never registered"
+        );
+        tokio::task::yield_now().await;
+    }
+    // The stalled run's own idle admission legitimately consulted the
+    // router at its dispatch; zero the recorders so the pins below count
+    // only the busy delivery's calls.
+    *decide_calls.lock().unwrap() = 0;
+    *swap_calls.lock().unwrap() = 0;
+    let images = vec![pa_agent::types::ImageContent {
+        data: "aGk=".to_string(),
+        mime_type: "image/png".to_string(),
+    }];
+    let outcome = session
+        .prompt_with_images(
+            "describe this",
+            images,
+            PromptOptions {
+                streaming_behavior: Some(StreamingBehavior::Steer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        PromptOutcome::Queued,
+        "the image delivery queues behind the run"
+    );
+    assert_eq!(
+        *decide_calls.lock().unwrap(),
+        0,
+        "the busy branch never consults routing while the run streams"
+    );
+    assert_eq!(
+        *swap_calls.lock().unwrap(),
+        0,
+        "the live episode keeps its own serving target"
+    );
+    assert_eq!(
+        session.agent().steering_previews().len(),
+        1,
+        "the image delivery parked its row on the steering lane"
+    );
+
+    // Cleanup: abort the stalled run and let everything unwind.
+    session.agent().abort();
+    session.agent().wait_for_idle().await;
+    let _ = held.await;
+}
+
 /// The comparison covers the whole request - system prompt, tools, and
 /// every message row - with only the per-run timestamps normalized.
 #[tokio::test]
