@@ -603,13 +603,17 @@ impl MockSupervisor {
                         ]),
                         // The pending retry's countdown is cancelled; the daemon's
                         // fallback turn_end settles the delivery (the prompt ACK
-                        // armed the loader).
+                        // armed the loader) and its fallback closer pairs the
+                        // delivery's own open run with a bare `agent_end` —
+                        // every delivery opens one, and the engine's run
+                        // already closed its own before the countdown armed.
                         Some("retry-cancel") => Some(vec![
                             json!({
                                 "type": "auto_retry_end", "success": false, "attempt": 1,
                                 "finalError": "Retry cancelled", "aborted": true,
                             }),
                             json!({ "type": "turn_end" }),
+                            json!({ "type": "agent_end" }),
                         ]),
                         _ => None,
                     };
