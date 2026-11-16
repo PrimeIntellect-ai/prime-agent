@@ -120,6 +120,13 @@ pub(crate) fn detected(reply: Option<crossterm::terminal::ProgramStatusSupport>)
     reporter.flush();
 }
 
+/// Stand the reports down for the process exit: a detection answer that
+/// lands during the exit restore records its support but writes nothing,
+/// so on exit the terminal keeps the record it has.
+pub(crate) fn release_for_exit() {
+    reporter().current = None;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +158,24 @@ mod tests {
         let without_done = supported(&["idle", "working", "blocked", "error"]);
         assert_eq!(reporter(without_done, Status::Done).owed(), Some("idle"));
         assert_eq!(reporter(supported(&["working"]), Status::Done).owed(), None);
+    }
+
+    #[test]
+    fn a_detection_answer_after_the_exit_release_writes_nothing() {
+        let _lock = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *super::reporter() = Reporter {
+            support: Support::Pending,
+            current: None,
+            written: None,
+        };
+        report(Status::Working);
+        crate::enhanced_keys::release_for_exit();
+        detected(Some(crossterm::terminal::ProgramStatusSupport {
+            states: None,
+            kinds: None,
+        }));
+        assert_eq!(super::reporter().written, None);
     }
 }

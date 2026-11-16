@@ -157,9 +157,11 @@ pub(crate) fn kitty_probe_pending() -> bool {
 }
 
 /// Mark the terminal released for process exit, before writing the restore
-/// sequences: no probe push can land after the final pop.
+/// sequences: no probe push can land after the final pop, and a probe
+/// answer writes no program status report.
 pub(crate) fn release_for_exit() {
     EXIT_RELEASE.store(true, Ordering::SeqCst);
+    crate::program_status::release_for_exit();
 }
 
 /// What one `enable` does about the kitty protocol, decided from the process-global state.
