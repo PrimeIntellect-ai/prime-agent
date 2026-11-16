@@ -1,0 +1,3 @@
+- The Rust TUI reports its status to terminals that support OSC 7501 (the Program Status Protocol), such as Rex: it asks the terminal once at startup and writes reports only when the terminal answers. A chat reports working for the whole agent run (including a pending provider retry), done when the run ends normally, error when it fails for good, and idle at rest or after an interrupt; the agents view reports idle. On exit it leaves the terminal's record alone, as the protocol asks.
+- The daemon sends a failed run's `agent_end` after the retry loop's next event, so clients see a pending `auto_retry_start` before the end of the attempt it retries.
+- Run completion keeps its original cancellation outcome even when an abort request races delivery of the final event.
