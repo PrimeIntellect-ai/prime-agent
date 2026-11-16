@@ -1016,7 +1016,31 @@ class _Registry:
             generation = await self._get(server)
             return copy.deepcopy(await generation.read_resource(uri))
 
-        return await self._tracked(operation)
+        contents = await self._tracked(operation)
+        self._report_usage("resource_read")
+        return contents
+
+    def _report_usage(self, kind: str) -> None:
+        """Report one MCP usage kind to the host, fire-and-forget.
+
+        `mcp.usage` only feeds the session's telemetry counters: no reply is
+        awaited, a missing host is a no-op, and the payload is the fixed kind
+        alone — never a server name, a URI, or content.
+        """
+        from . import repl
+
+        if not repl.is_active():
+            return
+        try:
+            repl._send(
+                {
+                    "event": "host_request",
+                    "id": uuid.uuid4().hex,
+                    "data": {"type": "mcp.usage", "kind": kind},
+                }
+            )
+        except Exception:  # noqa: BLE001 - a broken pipe must not fail the read
+            pass
 
     async def prompts(self, server: str) -> list[dict[str, Any]]:
         async def operation() -> list[dict[str, Any]]:

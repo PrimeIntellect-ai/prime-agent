@@ -95,7 +95,10 @@ impl AgentSessionEngine {
             return;
         };
         pa_core::session_engine::mcp_notices::register_mcp_notification_host_handler(
-            mcp_notice, row, handlers,
+            mcp_notice,
+            row,
+            Some(self.mcp_usage_sink()),
+            handlers,
         );
     }
 }

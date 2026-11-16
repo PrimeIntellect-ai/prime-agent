@@ -50,6 +50,7 @@ mod goalcore;
 mod lifecycle;
 pub(crate) mod mcp_elicitation;
 pub(crate) mod mcp_sampling;
+pub(crate) mod mcp_usage;
 mod turn_types;
 
 use turn_types::{
@@ -163,6 +164,13 @@ pub struct AgentSessionEngine {
     /// The MCP elicitation requests waiting for a `/elicit` answer. Its handler
     /// waits with a bounded timeout, so a request never blocks the TUI.
     pub(crate) mcp_elicitations: std::sync::Arc<mcp_elicitation::PendingElicitations>,
+    /// The built session's per-session telemetry counters (the same Arc its
+    /// telemetry handle finalizes on `agent session ended`). Empty until the
+    /// session builds — and no kernel exists before then, so no `mcp.*`
+    /// traffic can precede it.
+    pub(crate) mcp_counters: std::sync::Arc<
+        std::sync::OnceLock<std::sync::Arc<pa_core::session_engine::telemetry::SessionCounters>>,
+    >,
     /// Completions this session served, against the per-session cap.
     pub(crate) mcp_sampling_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub(crate) quota_park: std::sync::Arc<std::sync::Mutex<Option<QuotaParkState>>>,

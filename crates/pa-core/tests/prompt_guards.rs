@@ -163,6 +163,9 @@ const INTERNAL_HOST_REQUESTS: &[&str] = &[
     // The server's `elicitation/create` callback asks the user through the host
     // (`/elicit`); the model never issues this request.
     "mcp.elicitation",
+    // The kernel reports one MCP usage kind (a `resources/read`) for the
+    // per-session counters; the model never issues this request.
+    "mcp.usage",
 ];
 
 /// Map one registered host-request type to the prompt token that documents

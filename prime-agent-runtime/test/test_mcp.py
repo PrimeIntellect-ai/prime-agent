@@ -19,6 +19,7 @@ from unittest import mock
 
 from mcp.types import CallToolResult, ErrorData, TextContent
 from rlm import McpToolError, mcp
+from rlm import repl as rlm_repl
 from rlm import mcp_notify
 from rlm.mcp_base import _parse_result
 
@@ -1849,6 +1850,56 @@ class McpElicitationCallbackTest(unittest.TestCase):
             result = run(generation._on_elicitation(None, self.params()))
         self.assertIsInstance(result, ErrorData)
         self.assertIn("no decision", result.message)
+
+
+class McpUsageReportingTest(unittest.TestCase):
+    """A completed `resources/read` reports one fixed usage kind to the host."""
+
+    def generation(self, contents):
+        generation = mcp._Generation("svc", {"type": "http", "url": "https://example.test/mcp"})
+        generation.stack = FakeStack()
+        generation.session = _resources_session(contents=contents)
+        return generation
+
+    def read(self, generation, sent, active=True):
+        async def scenario():
+            mcp._registry._owner_loop = asyncio.get_running_loop()
+            with mock.patch.object(
+                mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)
+            ), mock.patch.object(rlm_repl, "is_active", return_value=active), mock.patch.object(
+                rlm_repl, "_send", side_effect=sent.append
+            ):
+                return await mcp.read_resource("svc", "file:///a.txt")
+
+        return run(scenario())
+
+    def test_a_completed_read_reports_the_usage_kind(self):
+        generation = self.generation(
+            [SimpleNamespace(uri="file:///a.txt", mime_type="text/plain", text="hi")]
+        )
+        sent = []
+        contents = self.read(generation, sent)
+        self.assertEqual(contents[0]["text"], "hi")
+        self.assertEqual(
+            [frame["data"] for frame in sent if frame.get("event") == "host_request"],
+            [{"type": "mcp.usage", "kind": "resource_read"}],
+        )
+
+    def test_a_failed_read_reports_nothing(self):
+        generation = self.generation(
+            [SimpleNamespace(uri="file:///a.txt", mime_type="", text=None, blob=None)]
+        )
+        sent = []
+        with self.assertRaises(mcp.McpRequestError):
+            self.read(generation, sent)
+        self.assertEqual(sent, [], "a failed read is not a use")
+
+    def test_no_host_means_no_reporting(self):
+        generation = self.generation(
+            [SimpleNamespace(uri="file:///a.txt", mime_type="text/plain", text="hi")]
+        )
+        contents = self.read(generation, [], active=False)
+        self.assertEqual(contents[0]["text"], "hi")
 
 
 if __name__ == "__main__":

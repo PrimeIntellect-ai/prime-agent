@@ -141,6 +141,7 @@ impl AgentSessionEngine {
             mcp_elicitations: std::sync::Arc::new(
                 crate::agent_engine::mcp_elicitation::PendingElicitations::default(),
             ),
+            mcp_counters: std::sync::Arc::new(std::sync::OnceLock::new()),
             mcp_sampling_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
@@ -870,6 +871,7 @@ impl AgentSessionEngine {
             crate::agent_engine::mcp_elicitation::register_mcp_elicitation_handler(
                 std::sync::Arc::clone(&self.mcp_elicitations),
                 rows,
+                Some(self.mcp_usage_sink()),
                 &mut handlers,
             );
         }
@@ -1213,6 +1215,15 @@ impl AgentSessionEngine {
         })
         .await
         .inspect(|engine| {
+            // The MCP usage seams count into the same per-session counters the
+            // telemetry handle finalizes (`agent session ended`).
+            if let Some(counters) = engine
+                .telemetry
+                .as_ref()
+                .map(|telemetry| telemetry.session_counters())
+            {
+                let _ = self.mcp_counters.set(counters);
+            }
             // A queue-mode switch that landed mid-build wrote only the live slot: re-apply the
             // modes so the first build never serves a stale one.
             let (steering_mode, follow_up_mode) = {

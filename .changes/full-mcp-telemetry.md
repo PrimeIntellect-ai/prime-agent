@@ -1,0 +1,1 @@
+- MCP capability use is counted per session and reported on `agent session ended`: server notification frames, sampling served/refused, elicitation accepted/declined, and kernel resource reads. Counts only — no server name, URI, prompt, or answer is ever attached.

@@ -518,6 +518,13 @@ async fn session_counters_ride_session_ended() {
     telemetry.note_skill_used();
     telemetry.note_child_usage_attributed(50_208, 2_929, 0, 0, 0.008_995_7);
     counters.note_mcp_connector_use();
+    counters.note_mcp_usage(McpUsageKind::Notification);
+    counters.note_mcp_usage(McpUsageKind::Notification);
+    counters.note_mcp_usage(McpUsageKind::SamplingServed);
+    counters.note_mcp_usage(McpUsageKind::SamplingRefused);
+    counters.note_mcp_usage(McpUsageKind::ElicitationAccepted);
+    counters.note_mcp_usage(McpUsageKind::ElicitationDeclined);
+    counters.note_mcp_usage(McpUsageKind::ResourceRead);
     counters.note_kernel_bootstrap(true, true, 1_200);
     counters.note_kernel_bootstrap(false, false, 300);
     telemetry.note_feature_outcome("goal", "completed", Some("create"));
@@ -531,11 +538,32 @@ async fn session_counters_ride_session_ended() {
     assert_eq!(ended["rlm_child_output_tokens"], serde_json::json!(2_929));
     assert!((ended["rlm_child_cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
     assert_eq!(ended["mcp_connector_use_count"], serde_json::json!(1));
+    assert_eq!(ended["mcp_notification_count"], serde_json::json!(2));
+    assert_eq!(ended["mcp_sampling_count"], serde_json::json!(1));
+    assert_eq!(ended["mcp_sampling_refused_count"], serde_json::json!(1));
+    assert_eq!(ended["mcp_elicitation_count"], serde_json::json!(1));
+    assert_eq!(
+        ended["mcp_elicitation_declined_count"],
+        serde_json::json!(1)
+    );
+    assert_eq!(ended["mcp_resource_read_count"], serde_json::json!(1));
     assert_eq!(ended["kernel_bootstrap_count"], serde_json::json!(2));
     assert_eq!(ended["kernel_bootstrap_cold_count"], serde_json::json!(1));
     assert_eq!(ended["kernel_bootstrap_failed_count"], serde_json::json!(1));
     assert_eq!(ended["kernel_bootstrap_max_ms"], serde_json::json!(1_200));
     assert_eq!(ended["feature_goal_completed_count"], serde_json::json!(1));
+}
+
+/// The `mcp.usage` wire vocabulary is closed: only a known kind counts.
+#[test]
+fn mcp_usage_kinds_are_a_fixed_wire_vocabulary() {
+    assert_eq!(
+        McpUsageKind::from_wire("resource_read"),
+        Some(McpUsageKind::ResourceRead)
+    );
+    assert_eq!(McpUsageKind::from_wire("resource-read"), None);
+    assert_eq!(McpUsageKind::from_wire(""), None);
+    assert_eq!(McpUsageKind::from_wire("notion"), None);
 }
 
 /// `build_client` reuses the installation id a TS install wrote to

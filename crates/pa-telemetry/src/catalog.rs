@@ -694,6 +694,14 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
         ("rlm_child_cache_read_tokens", optional(tokens())),
         ("rlm_child_cache_write_tokens", optional(tokens())),
         ("rlm_child_cost", optional(cost())),
+        // MCP capability counters: counts only — no server name, URI, prompt
+        // text, or answer ever rides them.
+        ("mcp_notification_count", optional(count())),
+        ("mcp_sampling_count", optional(count())),
+        ("mcp_sampling_refused_count", optional(count())),
+        ("mcp_elicitation_count", optional(count())),
+        ("mcp_elicitation_declined_count", optional(count())),
+        ("mcp_resource_read_count", optional(count())),
         ("feature_model_initiated_count", optional(count())),
         ("feature_model_completed_count", optional(count())),
         ("feature_model_failed_count", optional(count())),

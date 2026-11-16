@@ -20,6 +20,7 @@ use pa_types::session::CustomMessage;
 use serde_json::{json, Value};
 
 use super::bash_notices::{KernelNotice, KernelNoticeSink};
+use super::telemetry::{McpUsageKind, McpUsageSink};
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
 /// The custom row type one notification frame lands as
@@ -55,6 +56,7 @@ pub type McpNotificationRowSink = Arc<dyn Fn(CustomMessage) + Send + Sync>;
 pub fn register_mcp_notification_host_handler(
     notice: KernelNoticeSink,
     row: McpNotificationRowSink,
+    usage: Option<McpUsageSink>,
     handlers: &mut HostRequestHandlers,
 ) {
     handlers.register(
@@ -62,8 +64,12 @@ pub fn register_mcp_notification_host_handler(
         host_handler(move |payload| {
             let notice = Arc::clone(&notice);
             let row = Arc::clone(&row);
+            let usage = usage.clone();
             Box::pin(async move {
                 let batch = validate_entries(&payload.data)?;
+                if let Some(usage) = usage.as_ref() {
+                    usage(McpUsageKind::Notification);
+                }
                 let message = batch.message()?;
                 if batch.all_significant {
                     notice(KernelNotice {
@@ -212,7 +218,7 @@ mod tests {
     ) {
         let (notice, row, steered, rowed) = sinks();
         let mut handlers = HostRequestHandlers::new();
-        register_mcp_notification_host_handler(notice, row, &mut handlers);
+        register_mcp_notification_host_handler(notice, row, None, &mut handlers);
         let handler = handlers.get("mcp.notification").expect("registered");
         let result = handler(crate::kernel::shared::HostRequestPayload { data }).await;
         let steered = steered.lock().unwrap().clone();
@@ -257,6 +263,32 @@ mod tests {
         assert_eq!(
             rowed[0].content,
             UserContent::Text("[svc] logging: warn: slow (x3)".to_string())
+        );
+    }
+
+    /// Every accepted frame reports one count; a refused frame reports none.
+    #[tokio::test]
+    async fn every_accepted_frame_reports_one_usage_count() {
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let usage: McpUsageSink = {
+            let reported = Arc::clone(&reported);
+            Arc::new(move |kind| reported.lock().unwrap().push(kind))
+        };
+        let (notice, row, _, _) = sinks();
+        let mut handlers = HostRequestHandlers::new();
+        register_mcp_notification_host_handler(notice, row, Some(usage), &mut handlers);
+        let handler = handlers.get("mcp.notification").expect("registered");
+        for data in [
+            json!({"entries": [{"server": "svc", "kind": "tools_changed", "summary": "x"}]}),
+            json!({"entries": [{"server": "svc", "kind": "logging", "summary": "y"}]}),
+            json!({"entries": []}),
+        ] {
+            let _ = handler(crate::kernel::shared::HostRequestPayload { data }).await;
+        }
+        assert_eq!(
+            reported.lock().unwrap().clone(),
+            vec![McpUsageKind::Notification, McpUsageKind::Notification],
+            "accepted frames count; the refused frame does not"
         );
     }
 

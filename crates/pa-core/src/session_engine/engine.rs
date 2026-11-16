@@ -366,6 +366,29 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 counters.note_mcp_connector_use();
             })));
     }
+    // Kernel-side MCP usage (`mcp.usage`, e.g. `resources/read`) carries a fixed
+    // kind and counts into the same per-session counters `agent session ended`
+    // reports — never a server name, a URI, or content.
+    if config.telemetry.is_some() {
+        let counters = std::sync::Arc::clone(&session_counters);
+        handlers.register(
+            "mcp.usage",
+            crate::kernel::shared::host_handler(move |payload| {
+                let counters = std::sync::Arc::clone(&counters);
+                Box::pin(async move {
+                    if let Some(kind) = payload
+                        .data
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(super::telemetry::McpUsageKind::from_wire)
+                    {
+                        counters.note_mcp_usage(kind);
+                    }
+                    Ok(serde_json::json!({}))
+                })
+            }),
+        );
+    }
     // The registration takes the shared manager: the inventory handlers
     // serve live views per request.
     crate::mcp::McpManager::register_host_handlers(&mcp_manager, &mut handlers);

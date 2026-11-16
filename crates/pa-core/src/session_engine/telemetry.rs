@@ -106,6 +106,13 @@ pub struct SessionTelemetry {
 }
 
 impl SessionTelemetry {
+    /// The session counters this handle finalizes (`agent session ended`
+    /// writes them): the daemon's MCP seams count through the same Arc.
+    #[must_use]
+    pub fn session_counters(&self) -> Arc<SessionCounters> {
+        Arc::clone(&self.counters)
+    }
+
     /// A handle with no live subscription, for tests driving the state machine directly.
     #[cfg(test)]
     pub(crate) fn detached(
@@ -315,6 +322,41 @@ pub struct SessionCounters {
     telemetry_enabled: std::sync::OnceLock<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
+/// The MCP capabilities that count into the session counters. A fixed
+/// vocabulary: no server name, URI, or content ever travels with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpUsageKind {
+    /// One server notification frame reached the host.
+    Notification,
+    /// One `sampling/createMessage` was served.
+    SamplingServed,
+    /// One `sampling/createMessage` was refused.
+    SamplingRefused,
+    /// One `elicitation/create` the user accepted.
+    ElicitationAccepted,
+    /// One `elicitation/create` not accepted (declined, cancelled, timed out,
+    /// or an unsupported schema).
+    ElicitationDeclined,
+    /// One `resources/read` the kernel completed.
+    ResourceRead,
+}
+
+impl McpUsageKind {
+    /// The wire name a kernel `mcp.usage` frame carries.
+    #[must_use]
+    pub fn from_wire(kind: &str) -> Option<Self> {
+        match kind {
+            "resource_read" => Some(Self::ResourceRead),
+            _ => None,
+        }
+    }
+}
+
+/// A per-occurrence MCP usage reporter. Handlers hold this instead of the
+/// counters object, so a seam can be registered before the session (and its
+/// counters) exists.
+pub type McpUsageSink = Arc<dyn Fn(McpUsageKind) + Send + Sync>;
+
 #[derive(Default)]
 struct CounterValues {
     skill_use_count: u64,
@@ -329,6 +371,12 @@ struct CounterValues {
     rlm_child_cache_read_tokens: u64,
     rlm_child_cache_write_tokens: u64,
     rlm_child_cost: f64,
+    mcp_notification_count: u64,
+    mcp_sampling_count: u64,
+    mcp_sampling_refused_count: u64,
+    mcp_elicitation_count: u64,
+    mcp_elicitation_declined_count: u64,
+    mcp_resource_read_count: u64,
     /// `feature_<name>_<outcome>_count` over the fixed feature vocabulary.
     feature_outcomes: std::collections::BTreeMap<String, u64>,
 }
@@ -363,6 +411,18 @@ impl SessionCounters {
     /// An MCP connector call (the server name never uploads).
     pub fn note_mcp_connector_use(&self) {
         self.with(|values| values.mcp_connector_use_count += 1);
+    }
+
+    /// One MCP capability occurrence, by the fixed vocabulary.
+    pub fn note_mcp_usage(&self, kind: McpUsageKind) {
+        self.with(|values| match kind {
+            McpUsageKind::Notification => values.mcp_notification_count += 1,
+            McpUsageKind::SamplingServed => values.mcp_sampling_count += 1,
+            McpUsageKind::SamplingRefused => values.mcp_sampling_refused_count += 1,
+            McpUsageKind::ElicitationAccepted => values.mcp_elicitation_count += 1,
+            McpUsageKind::ElicitationDeclined => values.mcp_elicitation_declined_count += 1,
+            McpUsageKind::ResourceRead => values.mcp_resource_read_count += 1,
+        });
     }
 
     /// One kernel boot: cold or revived, its outcome, its duration.
@@ -401,6 +461,18 @@ impl SessionCounters {
                     "rlm_child_cache_write_tokens",
                     values.rlm_child_cache_write_tokens,
                 ),
+                ("mcp_notification_count", values.mcp_notification_count),
+                ("mcp_sampling_count", values.mcp_sampling_count),
+                (
+                    "mcp_sampling_refused_count",
+                    values.mcp_sampling_refused_count,
+                ),
+                ("mcp_elicitation_count", values.mcp_elicitation_count),
+                (
+                    "mcp_elicitation_declined_count",
+                    values.mcp_elicitation_declined_count,
+                ),
+                ("mcp_resource_read_count", values.mcp_resource_read_count),
             ] {
                 properties.set(key, Value::from(value));
             }

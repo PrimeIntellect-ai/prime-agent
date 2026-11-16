@@ -19,6 +19,8 @@ use pa_types::ai::UserContent as SessionUserContent;
 use pa_types::session::CustomMessage;
 use serde_json::{json, Value};
 
+use pa_core::session_engine::telemetry::McpUsageKind;
+
 use super::AgentSessionEngine;
 
 /// The custom row type a sampling request/refusal lands as.
@@ -107,12 +109,14 @@ impl AgentSessionEngine {
                 model.provider, model.id, reply.usage.input, reply.usage.output
             ),
         );
+        self.note_mcp_usage(McpUsageKind::SamplingServed);
         Ok(reply)
     }
 
     /// Record the refusal as a visible row and answer the caller with the reason.
     fn refuse_sampling(&self, server: &str, reason: &str) -> String {
         self.write_sampling_row(server, &format!("refused a sampling request ({reason})"));
+        self.note_mcp_usage(McpUsageKind::SamplingRefused);
         format!("MCP sampling is refused for server '{server}': {reason}")
     }
 

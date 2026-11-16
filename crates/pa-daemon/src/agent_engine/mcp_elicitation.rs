@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use pa_core::kernel::shared::{host_handler, HostRequestHandlers, HostRequestPayload};
 use pa_core::session_engine::mcp_notices::McpNotificationRowSink;
+use pa_core::session_engine::telemetry::{McpUsageKind, McpUsageSink};
 use pa_types::ai::UserContent as SessionUserContent;
 use pa_types::session::CustomMessage;
 use serde_json::{json, Value};
@@ -382,9 +383,10 @@ pub(crate) fn instruction_row(
 pub fn register_mcp_elicitation_handler(
     pending: Arc<PendingElicitations>,
     rows: McpNotificationRowSink,
+    usage: Option<McpUsageSink>,
     handlers: &mut HostRequestHandlers,
 ) {
-    register_with_wait(pending, rows, ELICITATION_WAIT, handlers);
+    register_with_wait(pending, rows, usage, ELICITATION_WAIT, handlers);
 }
 
 /// The same handler with an explicit wait, so a test can exercise the timeout
@@ -392,6 +394,7 @@ pub fn register_mcp_elicitation_handler(
 pub(crate) fn register_with_wait(
     pending: Arc<PendingElicitations>,
     rows: McpNotificationRowSink,
+    usage: Option<McpUsageSink>,
     wait: Duration,
     handlers: &mut HostRequestHandlers,
 ) {
@@ -400,6 +403,7 @@ pub(crate) fn register_with_wait(
         host_handler(move |payload: HostRequestPayload| {
             let pending = Arc::clone(&pending);
             let rows = Arc::clone(&rows);
+            let usage = usage.clone();
             Box::pin(async move {
                 let request = parse_request(&payload.data)?;
                 let field = match single_field(&request.requested_schema) {
@@ -409,6 +413,7 @@ pub(crate) fn register_with_wait(
                             "[{}] elicitation declined: {reason}",
                             request.server
                         )));
+                        report(usage.as_ref(), McpUsageKind::ElicitationDeclined);
                         return Ok(declined());
                     }
                 };
@@ -419,6 +424,7 @@ pub(crate) fn register_with_wait(
                             "[{}] elicitation declined: {reason}",
                             request.server
                         )));
+                        report(usage.as_ref(), McpUsageKind::ElicitationDeclined);
                         return Ok(declined());
                     }
                 };
@@ -448,10 +454,26 @@ pub(crate) fn register_with_wait(
                     request.server,
                     decision.action()
                 )));
+                report(
+                    usage.as_ref(),
+                    match &decision {
+                        ElicitationDecision::Accept(_) => McpUsageKind::ElicitationAccepted,
+                        ElicitationDecision::Decline | ElicitationDecision::Cancel => {
+                            McpUsageKind::ElicitationDeclined
+                        }
+                    },
+                );
                 Ok(json!({ "action": decision.action(), "content": content }))
             })
         }),
     );
+}
+
+/// Report one counter event when the seam is wired.
+fn report(usage: Option<&McpUsageSink>, kind: McpUsageKind) {
+    if let Some(usage) = usage {
+        usage(kind);
+    }
 }
 
 fn declined() -> Value {
@@ -557,7 +579,12 @@ mod tests {
         let (sink, log) = recorder();
         let pending = Arc::new(PendingElicitations::default());
         let mut handlers = HostRequestHandlers::default();
-        register_mcp_elicitation_handler(Arc::clone(&pending), Arc::clone(&sink), &mut handlers);
+        register_mcp_elicitation_handler(
+            Arc::clone(&pending),
+            Arc::clone(&sink),
+            None,
+            &mut handlers,
+        );
         let call = handlers.get("mcp.elicitation").expect("registered").clone();
         let task = tokio::spawn(call(HostRequestPayload {
             data: text_request(),
@@ -587,7 +614,12 @@ mod tests {
         let (sink, log) = recorder();
         let pending = Arc::new(PendingElicitations::default());
         let mut handlers = HostRequestHandlers::default();
-        register_mcp_elicitation_handler(Arc::clone(&pending), Arc::clone(&sink), &mut handlers);
+        register_mcp_elicitation_handler(
+            Arc::clone(&pending),
+            Arc::clone(&sink),
+            None,
+            &mut handlers,
+        );
         let call = handlers.get("mcp.elicitation").expect("registered").clone();
         let request = json!({
             "server": "svc",
@@ -624,7 +656,12 @@ mod tests {
         let (sink, log) = recorder();
         let pending = Arc::new(PendingElicitations::default());
         let mut handlers = HostRequestHandlers::default();
-        register_mcp_elicitation_handler(Arc::clone(&pending), Arc::clone(&sink), &mut handlers);
+        register_mcp_elicitation_handler(
+            Arc::clone(&pending),
+            Arc::clone(&sink),
+            None,
+            &mut handlers,
+        );
         let call = handlers.get("mcp.elicitation").expect("registered").clone();
         for (schema, reason) in [
             (
@@ -662,6 +699,7 @@ mod tests {
         register_with_wait(
             Arc::clone(&pending),
             Arc::clone(&sink),
+            None,
             Duration::from_millis(20),
             &mut handlers,
         );
@@ -701,7 +739,12 @@ mod tests {
         let (sink, log) = recorder();
         let pending = Arc::new(PendingElicitations::default());
         let mut handlers = HostRequestHandlers::default();
-        register_mcp_elicitation_handler(Arc::clone(&pending), Arc::clone(&sink), &mut handlers);
+        register_mcp_elicitation_handler(
+            Arc::clone(&pending),
+            Arc::clone(&sink),
+            None,
+            &mut handlers,
+        );
         let call = handlers.get("mcp.elicitation").expect("registered").clone();
         let first = tokio::spawn(call(HostRequestPayload {
             data: json!({ "server": "one", "requestedSchema": { "type": "string" } }),
@@ -721,6 +764,48 @@ mod tests {
         );
         apply_elicit_command(&pending, &sink, ElicitCommand::Decline);
         assert_eq!(first.await.unwrap().unwrap()["action"], "decline");
+    }
+
+    /// Both decision paths report exactly one counter kind (the seam the session
+    /// counters read), and nothing else travels with it.
+    #[tokio::test]
+    async fn the_user_decision_reports_one_usage_kind() {
+        let reported: Arc<StdMutex<Vec<McpUsageKind>>> = Arc::new(StdMutex::new(Vec::new()));
+        let usage: McpUsageSink = {
+            let reported = Arc::clone(&reported);
+            Arc::new(move |kind| reported.lock().unwrap().push(kind))
+        };
+        let (sink, log) = recorder();
+        let pending = Arc::new(PendingElicitations::default());
+        let mut handlers = HostRequestHandlers::default();
+        register_with_wait(
+            Arc::clone(&pending),
+            Arc::clone(&sink),
+            Some(usage),
+            Duration::from_millis(20),
+            &mut handlers,
+        );
+        let call = handlers.get("mcp.elicitation").expect("registered").clone();
+        let accepted = tokio::spawn(call(HostRequestPayload {
+            data: text_request(),
+        }));
+        wait_for_row(&log, "`/elicit accept <name>`").await;
+        apply_elicit_command(&pending, &sink, ElicitCommand::Accept("Jev".to_string()));
+        accepted.await.unwrap().unwrap();
+        // Nobody answers this one: the timeout is the second, declined path.
+        let timed_out = call(HostRequestPayload {
+            data: text_request(),
+        })
+        .await
+        .expect("a timeout is a reply");
+        assert_eq!(timed_out["action"], "decline");
+        assert_eq!(
+            reported.lock().unwrap().clone(),
+            vec![
+                McpUsageKind::ElicitationAccepted,
+                McpUsageKind::ElicitationDeclined,
+            ]
+        );
     }
 
     /// The answer syntax is the whole command surface: unknown verbs and bare words
