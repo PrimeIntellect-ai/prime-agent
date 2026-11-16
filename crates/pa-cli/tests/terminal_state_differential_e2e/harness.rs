@@ -578,10 +578,14 @@ impl MockSupervisor {
                             json!({ "type": "turn_end", "error": "lifecycle-failure-sentinel" }),
                             json!({ "type": "agent_end", "messages": [message] }),
                         ]),
-                        // An abort the gate settles: the aborted fallback frame alone.
-                        Some("terminal-abort") => Some(vec![json!({
-                            "type": "turn_end", "error": "No response produced.", "aborted": true,
-                        })]),
+                        // An abort the gate settles: the aborted fallback
+                        // turn_end, then the closer's `agent_end` (the
+                        // daemon pairs the run's `agent_start` even on the
+                        // aborted settle).
+                        Some("terminal-abort") => Some(vec![
+                            json!({ "type": "turn_end", "error": "No response produced.", "aborted": true }),
+                            json!({ "type": "agent_end" }),
+                        ]),
                         // A failed attempt cancelled before its retry starts.
                         Some("cancel-failed") => Some(vec![
                             json!({ "type": "message_end", "message": message }),
