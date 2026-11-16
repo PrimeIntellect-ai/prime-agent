@@ -663,6 +663,12 @@ impl SessionUi {
                 }
             }
             TurnUpdate::Idle { aborted } => {
+                // A pending retry defers the outcome settle past the run's end
+                // and outlives it: the daemon holds the failed attempt's
+                // `agent_end` until after `auto_retry_start`, so a countdown
+                // held here is the next attempt's, never a stale one (the
+                // loop's own frames close it).
+                let retry_pending = view.retry.is_some();
                 self.end_run(view);
                 // The run's end settles its outcome. An abort between steps
                 // and tools keeps the original toolUse turn_end, so only the
@@ -676,7 +682,7 @@ impl SessionUi {
                     if !aborted {
                         if view.compaction.is_some() {
                             self.outcome_after_compaction = Some(self.run_outcome);
-                        } else if view.retry.is_none() {
+                        } else if !retry_pending {
                             self.settled = Some(self.run_outcome);
                         }
                     }
@@ -758,15 +764,16 @@ impl SessionUi {
     }
 
     /// The agent run ended: the busy state clears and the held bash cards stream into the
-    /// transcript.
+    /// transcript. A pending retry countdown is not run state — the daemon holds the
+    /// failed attempt's `agent_end` until after `auto_retry_start`, so it survives here
+    /// and the retry loop's own frames close it.
     fn end_run(&mut self, view: &mut AgentView) {
         self.turn_active = false;
         view.working = None;
         view.working_since = None;
         // A run that ends without its `turn_end` (a pre-run abort, a detach) still
-        // leaves no live streaming slot or retry countdown behind.
+        // leaves no live streaming slot behind.
         self.streaming_index = None;
-        view.retry = None;
         Self::flush_pending_bash(view);
         // A detached run's `turn_end` never arrives: its open cards settle here.
         crate::snapshot::settle_pending_tool_cards(
