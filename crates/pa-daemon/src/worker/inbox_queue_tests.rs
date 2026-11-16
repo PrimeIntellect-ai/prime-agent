@@ -341,13 +341,14 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
 async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -401,18 +402,19 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     worker.core.lock().unwrap().busy = true;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
     );
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -422,6 +424,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -576,7 +579,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
 async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
@@ -586,6 +589,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
             pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
             "still waiting",
         ),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -593,13 +597,14 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
     // The older message's row delivered; its message stays waiting.
     let delivered = worker.core.lock().unwrap().steering.pop_front();
     assert!(delivered.is_some());
-    admit_inbox_notice(
+    let _ = admit_inbox_notice(
         &worker.recovery,
         &worker.core,
         &notify,
         &inbox,
         &arrivals,
         bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
         || false,
         |_, _| None,
         None,
@@ -635,6 +640,103 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
+/// A collection whose captured store a replacement retired must not touch
+/// the successor's rows: the withdrawal re-checks the store's identity
+/// under the slot lock inside the core's critical section (the reminder's
+/// pattern), so the retired store's ids never trim the successor's batch
+/// or drop its wake rows. Mutation: reverting to the unvalidated capture
+/// drops the successor's arrival row and trims its batch with the retired
+/// store's waiting set (both pins go red).
+#[tokio::test]
+async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
+    let (worker, retired, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    // The retired store still holds the collected bash-done: the sink
+    // captured it before the replacement retired the store.
+    retired.push(bash_done_notice(4321, "sleep 1"), 1_000);
+    // The successor session: its own store installed in the engine's
+    // slot, its own arrival row and batch entries.
+    let dir = tempfile::tempdir().unwrap();
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    let successor = Arc::new(SessionInbox::open(Some(&dir.path().join("successor"))));
+    engine.set_inbox(std::sync::Arc::clone(&successor));
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &successor,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "successor milestone",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        Some(engine.as_ref()),
+    );
+    assert_eq!(
+        steering_rows(&worker).len(),
+        1,
+        "the successor's arrival row queues"
+    );
+    // The consumed withdrawal fires with the RETIRED capture: the store a
+    // replacement left behind, still holding its bash-done.
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some((&retired, &arrivals)),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        Some(engine.as_ref() as &dyn crate::engine::SessionEngine),
+    );
+    assert_eq!(
+        steering_rows(&worker).len(),
+        1,
+        "the successor's arrival row survives the retired store's withdrawal"
+    );
+    let batch_ids = arrivals
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        !batch_ids.is_empty(),
+        "the successor's batch kept its entries: {batch_ids:?}"
+    );
+    let waiting = successor.waiting_ids();
+    assert!(
+        batch_ids.iter().all(|id| waiting.contains(id)),
+        "the successor's batch still covers its waiting ids: {batch_ids:?}"
+    );
+    assert_eq!(
+        retired.count().0,
+        1,
+        "the retired store keeps its own message (the withdrawal never touched it)"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
 /// A collection racing an arrival must not deadlock: the consumed
 /// withdrawal and the arrival admission run on separate host-request
 /// tasks, and the withdrawal takes the locks in the admission's order.
@@ -643,13 +745,14 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     for i in 0..200u32 {
-        admit_inbox_notice(
+        let _ = admit_inbox_notice(
             &worker.recovery,
             &worker.core,
             &notify,
             &inbox,
             &arrivals,
             bash_done_notice(10_000 + i, "job a"),
+            Lane::Steering,
             || false,
             |_, _| None,
             None,
@@ -667,13 +770,14 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
             );
             std::thread::spawn(move || {
                 barrier.wait();
-                admit_inbox_notice(
+                let _ = admit_inbox_notice(
                     &worker.recovery,
                     &worker.core,
                     &notify,
                     &inbox,
                     &arrivals,
                     bash_done_notice(20_000 + i, "job b"),
+                    Lane::Steering,
                     || false,
                     |_, _| None,
                     None,
