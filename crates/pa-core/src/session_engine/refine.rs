@@ -488,7 +488,7 @@ pub(crate) async fn prepare_refinement(
         .unwrap_or(requested_scope);
     let baseline_dir = match baseline_scope {
         HarnessScope::Global => stores.global_dir.clone(),
-        HarnessScope::Local => local_store_dir(&local_harness_dir)?,
+        HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     let baseline_state = load_harness_state(&baseline_dir, baseline_scope);
 
@@ -506,7 +506,7 @@ pub(crate) async fn prepare_refinement(
     let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
     let target_dir = match target_scope {
         HarnessScope::Global => stores.global_dir.clone(),
-        HarnessScope::Local => local_store_dir(&local_harness_dir)?,
+        HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     Ok(ReadyRefinement {
         plan,
@@ -522,9 +522,9 @@ pub(crate) async fn prepare_refinement(
 /// The local store dir for a scope that resolved local: a session without
 /// one cannot apply or roll back a local refinement, so it refuses rather
 /// than write a store no digest ever shows.
-fn local_store_dir(local_dir: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
+fn local_store_dir(local_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
     local_dir
-        .clone()
+        .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("Local harness refinement requires the session's harness state directory; use global refinement instead."))
 }
 
