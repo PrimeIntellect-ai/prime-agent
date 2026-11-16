@@ -234,6 +234,18 @@ async fn run_session_command(
         let agent = engine.session.agent();
         agent.wait_for_idle().await;
         while agent.has_queued_messages() {
+            // An RPC abort suspends the pump — the queued input waits for
+            // the resume like every other queued row — and the
+            // continuation drain honors it with the same check the queue
+            // pump makes before every admission (`kick_queue_pump`):
+            // without it, an abort mid-drain re-admits the parked
+            // continuation on a fresh controller.
+            if state
+                .pump_suspended
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                break;
+            }
             match agent.continue_run().await {
                 Ok(()) => break,
                 Err(error) => match error.downcast_ref::<pa_agent::agent::AgentContinueError>() {

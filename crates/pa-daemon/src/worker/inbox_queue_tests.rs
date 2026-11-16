@@ -800,10 +800,16 @@ async fn a_clear_drops_unread_agent_messages_and_their_wake_rows() {
     assert_eq!(reminder_rows(&worker), 1, "the reminder row queued");
     let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
     assert!(cleared.success, "clear failed: {cleared:?}");
+    // The reply reports the withdrawn inbox prompt like the direct
+    // route's marker rows (never an empty set over records it removed):
+    // the wake row rode steering, so the prompt reports under steering.
+    // Mutation: dropping the withdrawn-texts wiring returns the empty
+    // shape while the removal assertions below still pass - exactly the
+    // report-only regression the finding named.
     assert_eq!(
         cleared.data,
-        Some(json!({ "steering": [], "followUp": [] })),
-        "the lane shape is unchanged"
+        Some(json!({ "steering": ["[agent-message from peer]\n\npeer note"], "followUp": [] })),
+        "the clear reports the withdrawn inbox prompt"
     );
     assert_eq!(
         inbox.count().0,
