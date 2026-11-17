@@ -381,6 +381,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_yaml_frontmatter_reports_the_parse_error() {
+        // An unquoted `: ` inside a plain scalar (the shipped factory skill's
+        // old description) is invalid YAML: the warning carries the parser's
+        // error instead of a misleading missing-description complaint.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join("colon");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let yaml = "name: colon\ndescription: Run workflows: store and resume them";
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\n{yaml}\n---\nbody"),
+        )
+        .expect("write");
+        let yaml_error = serde_yaml::from_str::<serde_yaml::Value>(yaml).unwrap_err();
+        let result = crate::skills::load_skills_from_dir(dir.path(), "user");
+        assert!(result.skills.is_empty());
+        assert_eq!(
+            result.diagnostics,
+            vec![crate::skills::ResourceDiagnostic::Warning {
+                message: format!("invalid YAML frontmatter: {yaml_error}"),
+                path: Some(skill_dir.join("SKILL.md").display().to_string()),
+            }]
+        );
+    }
+
+    #[test]
     fn an_empty_frontmatter_name_falls_back_to_the_parent_directory() {
         // TS `frontmatter.name || parentDirName`.
         let dir = tempfile::tempdir().expect("tempdir");
