@@ -184,11 +184,12 @@ pub(crate) async fn bootstrap_venv(
     .await
 }
 
-/// Record `skill` as installed. uv replaces any same-named distribution, so the
-/// venv holds one package per import name: a record for that import name from
-/// another package path is stale (its code is no longer installed) and must go,
-/// or the next session short-circuits `kernel_ready` on it and imports the
-/// other source's code while advertising this record's skill.
+/// Record `skill` as installed. A cached record for the same import name
+/// from another package path goes first: uv replaces distributions by
+/// project name, so this install may have replaced that record's code, and
+/// the stale record would otherwise short-circuit a later sync's
+/// `kernel_ready` check into skipping an install that is needed. Dropping a
+/// record whose code is still installed only costs one redundant reinstall.
 fn record_installed_skill(
     installed: &mut HashMap<String, BootstrapPythonSkill>,
     skill: &BootstrapPythonSkill,
@@ -280,7 +281,7 @@ pub(crate) async fn sync_python_skills(
                         record_installed_skill(&mut installed, skill);
                     }
                     Err(error) => options.report(&format!(
-                        "Warning: Python skill {} failed to install and will be unavailable: {error}",
+                        "Warning: Python skill {} failed to install and stays unavailable until a later session retries it: {error}",
                         skill.import_name
                     )),
                 }

@@ -953,7 +953,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 /// Heavy (network + uv): the packaged sidecar bootstraps a fresh kernel
 /// venv and boots a session: `cargo test -p pa-cli --test packaged_layout_e2e -- --ignored`
 #[test]
-#[ignore = "network + uv bootstrap (~minutes); the lane verifier runs it explicitly"]
+#[ignore = "network + uv bootstrap (~minutes); run explicitly with --ignored"]
 fn bootstrap_kernel_venv_from_packaged_sidecar() {
     let dir = tempfile::TempDir::new().expect("stage dir");
     let staged = dir.path();
@@ -1063,5 +1063,126 @@ fn bootstrap_kernel_venv_from_packaged_sidecar() {
         payload["kernel_boot"],
         serde_json::Value::Bool(true),
         "receipt: {payload}"
+    );
+}
+
+/// Heavy (network + uv): the install-time prewarm resolves the session's skill
+/// set, so a user override of a bundled Python skill keeps the bundled package
+/// out of the venv: `cargo test -p pa-cli --test packaged_layout_e2e -- --ignored`
+#[test]
+#[ignore = "network + uv bootstrap (~minutes); run explicitly with --ignored"]
+fn installer_prewarm_respects_a_user_override_of_a_bundled_python_skill() {
+    let _guard = serial_lock();
+    let dir = tempfile::TempDir::new().expect("stage dir");
+    let staged = dir.path();
+    stage_packaged_layout(staged, true);
+    let box_ = sandbox();
+    let venv = box_.home.path().join("kernel-venv");
+
+    // A user `websearch` skill built from the skill-creator template: its
+    // distribution is named after the skill (`websearch`), so installing it
+    // never replaces the bundled `prime-agent-skill-websearch` distribution.
+    // Only the session's selection (the user's copy wins the name collision)
+    // keeps the bundled package out of the venv; prewarming the whole
+    // packaged set would leave both distributions installed and import the
+    // bundled one.
+    let user_skill = box_.agent_dir.join("skills").join("websearch");
+    std::fs::create_dir_all(user_skill.join("src").join("websearch")).expect("user skill dir");
+    std::fs::write(
+        user_skill.join("SKILL.md"),
+        "---\nname: websearch\ndescription: User override fixture for the prewarm pin.\n---\n\n# websearch\n\nFixture body.\n",
+    )
+    .expect("user SKILL.md");
+    std::fs::write(
+        user_skill.join("pyproject.toml"),
+        "[project]\nname = \"websearch\"\nversion = \"0.1.0\"\nrequires-python = \">=3.10\"\ndependencies = []\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"src/websearch\"]\n",
+    )
+    .expect("user pyproject");
+    std::fs::write(
+        user_skill.join("src").join("websearch").join("__init__.py"),
+        "ORIGIN = \"USER_OVERRIDE_PIN\"\n",
+    )
+    .expect("user module");
+
+    // --prime-agent-bootstrap prewarms the session's set.
+    let output = box_
+        .command(staged)
+        .arg("--prime-agent-bootstrap")
+        .env("PRIME_AGENT_KERNEL_VENV", &venv)
+        .output()
+        .expect("run packaged binary");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "bootstrap failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let venv_python = if cfg!(windows) {
+        venv.join("Scripts").join("python.exe")
+    } else {
+        venv.join("bin").join("python")
+    };
+    assert!(venv_python.exists(), "kernel venv python missing");
+
+    // The prewarm must have installed the user's websearch, not the bundled
+    // distribution (whose editable install would shadow it on sys.path).
+    let import_probe = std::process::Command::new(&venv_python)
+        .arg("-c")
+        .arg("import websearch; print(websearch.__file__); print(websearch.ORIGIN)")
+        .env("HOME", box_.home.path())
+        .output()
+        .expect("run kernel venv python");
+    assert_eq!(
+        import_probe.status.code(),
+        Some(0),
+        "import websearch must succeed right after the installer bootstrap: {}",
+        String::from_utf8_lossy(&import_probe.stderr)
+    );
+    let probe_stdout = String::from_utf8_lossy(&import_probe.stdout);
+    let mut probe_lines = probe_stdout.lines();
+    let websearch_file = probe_lines.next().unwrap_or_default().trim().to_string();
+    let origin = probe_lines.next().unwrap_or_default().trim().to_string();
+    let agent_real = box_
+        .agent_dir
+        .canonicalize()
+        .unwrap_or_else(|_| box_.agent_dir.clone());
+    let websearch_real = Path::new(&websearch_file)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&websearch_file));
+    assert!(
+        websearch_real.starts_with(&agent_real),
+        "websearch must import from the user's agent dir, got {websearch_file}"
+    );
+    assert_eq!(
+        origin, "USER_OVERRIDE_PIN",
+        "the user's websearch module must win the import"
+    );
+
+    // The non-overridden bundled skills still prewarm: `goal` imports from
+    // the staged payload (the release blocker this prewarm exists to fix).
+    let goal_probe = std::process::Command::new(&venv_python)
+        .arg("-c")
+        .arg("import goal; print(goal.__file__)")
+        .env("HOME", box_.home.path())
+        .output()
+        .expect("run kernel venv python");
+    assert_eq!(
+        goal_probe.status.code(),
+        Some(0),
+        "import goal must succeed right after the installer bootstrap: {}",
+        String::from_utf8_lossy(&goal_probe.stderr)
+    );
+    let goal_file = String::from_utf8_lossy(&goal_probe.stdout)
+        .trim()
+        .to_string();
+    let staged_real = staged
+        .canonicalize()
+        .unwrap_or_else(|_| staged.to_path_buf());
+    let goal_real = Path::new(&goal_file)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&goal_file));
+    assert!(
+        goal_real.starts_with(&staged_real),
+        "goal must import from the staged payload, got {goal_file}"
     );
 }

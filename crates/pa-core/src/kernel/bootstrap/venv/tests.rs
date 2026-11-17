@@ -1190,7 +1190,57 @@ async fn installing_a_skill_drops_records_replaced_by_the_same_import_name() {
         .expect("version written")
         .python_skills
         .expect("skills recorded");
-    assert_eq!(recorded, vec![user_skill]);
+    assert_eq!(recorded, vec![user_skill.clone()]);
+
+    // The per-skill fallback must drop the displaced record too: a uv that
+    // fails every multi-skill batch forces the batch branch off, so the
+    // records come from the per-skill loop alone.
+    let per_skill_uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nn=$(printf '%s\\n' \"$*\" | grep -o -- '--editable' | wc -l)\nif [ \"$n\" -gt 1 ]; then exit 1; fi\nexit 0\n",
+            dir.path().join("uv-fallback.log").display()
+        ),
+    );
+    let packaged_other = skill("edit", "/payload/skills/edit", "edit-hash");
+    write_bootstrap_version(&venv, "sha256:rt", std::slice::from_ref(&user_skill)).unwrap();
+    sync_python_skills(
+        &UvCommand {
+            executable: per_skill_uv.to_str().unwrap(),
+            project: None,
+        },
+        &venv,
+        dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
+        "sha256:rt",
+        &[packaged_skill.clone(), packaged_other.clone()],
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let calls = std::fs::read_to_string(dir.path().join("uv-fallback.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls.len(),
+        3,
+        "one failed batch then one call per skill: {calls:?}"
+    );
+    let recorded = read_bootstrap_version(&venv)
+        .expect("version written")
+        .python_skills
+        .expect("skills recorded");
+    assert_eq!(
+        recorded,
+        vec![packaged_other.clone(), packaged_skill.clone()],
+        "the per-skill fallback also drops the replaced user record"
+    );
+    assert!(
+        !recorded_skills_cover(Some(&recorded), std::slice::from_ref(&user_skill)),
+        "the replaced record must not satisfy the next session's kernel_ready"
+    );
 }
 
 /// Permission semantics need a non-root runner: `chmod` cannot deny root, so these
