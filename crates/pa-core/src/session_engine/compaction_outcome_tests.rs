@@ -314,6 +314,48 @@ fn refine_plan_call(plan: &'static str) -> crate::refinement::executor::RefinerF
     })
 }
 
+/// [`refine_plan_call`] over a seam that records the prompt it was handed,
+/// so a test can assert on what the planner read.
+fn refine_plan_call_capturing(
+    plan: &'static str,
+    captured: Arc<std::sync::Mutex<Vec<String>>>,
+) -> crate::refinement::executor::RefinerFn {
+    Box::new(move |_model, _system, prompt| {
+        captured.lock().unwrap().push(prompt);
+        let reply = plan_reply(plan);
+        Box::pin(async move { Ok(reply) })
+    })
+}
+
+/// Seed one local memory entry into a harness store dir, the shape a
+/// prior refinement wrote.
+fn seed_local_memory(dir: &std::path::Path, id: &str, title: &str) {
+    let mut state = crate::refinement::empty_harness_state();
+    state
+        .entries
+        .get_mut(&crate::refinement::RefinementKind::Memory)
+        .unwrap()
+        .insert(
+            id.to_string(),
+            crate::refinement::HarnessEntry {
+                id: id.to_string(),
+                kind: crate::refinement::RefinementKind::Memory,
+                title: title.to_string(),
+                content: format!("Seeded local entry {id}"),
+                path: "general".to_string(),
+                scope: Some(crate::refinement::HarnessScope::Local),
+                reference: serde_json::Map::default(),
+                arguments: serde_json::Map::default(),
+                metadata: serde_json::Map::default(),
+                source: "agent".to_string(),
+                created_at: "2026-11-16T00:00:00Z".to_string(),
+                updated_at: "2026-11-16T00:00:00Z".to_string(),
+                version: 1,
+            },
+        );
+    crate::refinement::save_harness_state(dir, &state).unwrap();
+}
+
 const APPLIED_PLAN: &str = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
 const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
 
@@ -352,18 +394,21 @@ async fn refine_test_session_with(
         }))
         .unwrap();
     manager.append_message(refine_assistant_row(false)).unwrap();
-    // The daemon-shaped digest context: the global store under the agent
-    // dir's harness path, the local store under the session's own
-    // directory — the same pair `create_session` wires for production
-    // sessions, so the parity seam derives the same stores the kernel and
-    // the digest read.
+    // The digest context `create_session` wires for this session: the
+    // global store under the (fixture) agent dir's harness path, the
+    // local store the session's own artifact dir implies — the same
+    // derivation the engine uses, so the parity seam derives the same
+    // stores the kernel and the digest read.
+    let local_harness_dir = crate::refinement::get_local_harness_state_dir(
+        manager.get_session_artifact_dir().as_deref(),
+    );
     let session = AgentSession::from_session_arc(
         Arc::new(agent),
         Arc::new(tokio::sync::Mutex::new(manager)),
         vec![],
         Some(super::harness_digest::HarnessDigestContext {
             global_dir: tmp.path().join("harness"),
-            local_dir: Some(tmp.path().join("session").join("harness")),
+            local_dir: local_harness_dir,
             include_ipython: false,
             include_shell_examples: false,
             include_refine: false,
@@ -415,6 +460,10 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
         include_shell_examples: false,
         include_refine: false,
     };
+    // One entry a prior refinement wrote into the session's own local
+    // store: the planner must read it back from that store.
+    let seeded_local_dir = harness_digest.local_dir.clone().unwrap();
+    seed_local_memory(&seeded_local_dir, "seed", "Seeded local tactic");
     let provider = Arc::new(ScriptedProvider::new(test_model()));
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
@@ -442,16 +491,33 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
     };
     session.agent().set_messages(live).await;
     let plan = r#"{"summary":"bench","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    let planner_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let result = session
         .refine_with_refiner(
             &refine::RefineOptions::default(),
             refine::RefinementSource::User,
             &session_ai_model(),
-            refine_plan_call(plan),
+            refine_plan_call_capturing(plan, Arc::clone(&planner_prompts)),
         )
         .await
         .unwrap();
     assert!(result.applied_edits.iter().all(|edit| edit.applied));
+    // The planner read the session's own local store: the pre-seeded
+    // entry appears in the `<current_harness_state>` it planned against.
+    let planner_prompt = planner_prompts
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the local refinement planned once");
+    assert!(
+        planner_prompt.contains("<current_harness_state>"),
+        "the planner prompt carries the harness state: {planner_prompt}"
+    );
+    assert!(
+        planner_prompt.contains("local:seed] Seeded local tactic"),
+        "the planner reads the session's own local store: {planner_prompt}"
+    );
     // The write lands in the session's own artifact store: the exact
     // directory the digest context carries, which the kernel and the
     // digest read.
@@ -463,12 +529,9 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
         .clone()
         .expect("the conversation log implies the artifact store");
     assert_eq!(
-        local_dir,
-        dir.path()
-            .join("session-artifacts")
-            .join(&session_id)
-            .join("harness"),
-        "the local store is the session's own artifact harness dir"
+        std::path::Path::new(&result.harness_state_path),
+        crate::refinement::get_harness_state_path(&local_dir),
+        "the local refinement wrote the digest context's local store"
     );
     let state =
         crate::refinement::load_harness_state(&local_dir, crate::refinement::HarnessScope::Local);
@@ -486,7 +549,7 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
     // A global refinement on the same session writes the agent dir's
     // harness store.
     let global_plan = r#"{"summary":"bench","edits":[{"action":"create","kind":"memory","id":"g1","title":"Global tactic","content":"Prefer the shared seam"}]}"#;
-    session
+    let global_result = session
         .refine_with_refiner(
             &refine::RefineOptions {
                 global: true,
@@ -499,7 +562,11 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
         .await
         .unwrap();
     let global_dir = crate::refinement::get_global_harness_state_dir(&agent_dir);
-    assert_eq!(global_dir, dir.path().join("agent").join("harness"));
+    assert_eq!(
+        std::path::Path::new(&global_result.harness_state_path),
+        crate::refinement::get_harness_state_path(&global_dir),
+        "the global refinement wrote the agent dir's harness store"
+    );
     let global_state =
         crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global);
     assert!(
@@ -888,6 +955,69 @@ async fn refinement_and_auto_review_send_the_session_request_identity() {
             );
             2
         ]
+    );
+}
+
+/// The compact-review prompt reads the session's real local store: an
+/// entry pre-seeded into the session's own artifact harness dir — the
+/// dir `create_session` wires — appears in the review's
+/// `<current_harness_state>`.
+#[tokio::test]
+async fn the_compact_review_prompt_reads_the_sessions_local_store() {
+    let (session, _tmp) = refine_test_session().await;
+    // Seed one local entry where the engine wires the local store: the
+    // session's own artifact harness dir, derived independently of the
+    // fixture's digest context.
+    let local_dir = {
+        let persistence = session.shared_persistence();
+        let manager = persistence.lock().await;
+        crate::refinement::get_local_harness_state_dir(
+            manager.get_session_artifact_dir().as_deref(),
+        )
+        .expect("a materialized session always has an artifact dir")
+    };
+    seed_local_memory(&local_dir, "seed", "Seeded local tactic");
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions::default());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let step = |text: &'static str| {
+        let observed = Arc::clone(&observed);
+        pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |context, _, _, _| {
+            let prompt = match context.messages.first() {
+                Some(pa_types::ai::Message::User(user)) => match &user.content {
+                    pa_types::ai::UserContent::Text(text) => text.clone(),
+                    pa_types::ai::UserContent::Blocks(_) => String::new(),
+                },
+                _ => String::new(),
+            };
+            observed.lock().unwrap().push(prompt);
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                text,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }))
+    };
+    registration.set_responses(vec![step(
+        r#"{"shouldRefine":false,"rationale":"fixture"}"#,
+    )]);
+    let model = registration.get_model();
+    session
+        .review_compact_auto_refine(&model, None, 5, 0)
+        .await
+        .unwrap();
+    let prompt = observed
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the review made one model call");
+    assert!(
+        prompt.contains("<current_harness_state>"),
+        "the review prompt carries the harness state: {prompt}"
+    );
+    assert!(
+        prompt.contains("local:seed] Seeded local tactic"),
+        "the review reads the session's own local store: {prompt}"
     );
 }
 

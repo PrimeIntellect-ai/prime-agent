@@ -321,11 +321,15 @@ mod tests {
             manager.materialize_session_file(Some(tmp.path().join("session")));
         }
         // The refinement stores the engine always wires: the digest
-        // context's store pair, so the review and refine paths find their
-        // stores exactly as a production session does.
+        // context's store pair — the local half the session's own
+        // artifact dir implies, `None` for the pathless shape — so the
+        // review and refine paths find their stores exactly as a
+        // production session does.
         let harness_digest = super::super::harness_digest::HarnessDigestContext {
             global_dir: tmp.path().join("harness"),
-            local_dir: persisted.then(|| tmp.path().join("session").join("harness")),
+            local_dir: crate::refinement::get_local_harness_state_dir(
+                manager.get_session_artifact_dir().as_deref(),
+            ),
             include_ipython: false,
             include_shell_examples: false,
             include_refine: false,
