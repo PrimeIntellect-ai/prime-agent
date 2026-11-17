@@ -195,19 +195,6 @@ fn displaces_install(existing: &BootstrapPythonSkill, skill: &BootstrapPythonSki
                 == normalize_project_name(&read_python_skill_project_name(skill)))
 }
 
-/// Record `skill` as installed. Records this install displaces go first:
-/// the stale record would otherwise short-circuit a later sync's
-/// `kernel_ready` check into skipping an install that is needed. Dropping a
-/// record whose code is still installed only costs one redundant reinstall.
-fn record_installed_skill(
-    installed: &mut HashMap<String, BootstrapPythonSkill>,
-    skill: &BootstrapPythonSkill,
-) {
-    // A changed pyproject (hash moved) replaces the stale record.
-    installed.retain(|_, existing| !displaces_install(existing, skill));
-    installed.insert(bootstrap_skill_key(skill), skill.clone());
-}
-
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
 /// changed are installed. Per-skill failures warn and continue.
 pub(crate) async fn sync_python_skills(
@@ -302,8 +289,9 @@ pub(crate) async fn sync_python_skills(
             .await
             .is_ok()
         {
+            // A changed pyproject (hash moved) replaces the stale record.
             for skill in &missing {
-                record_installed_skill(&mut installed, skill);
+                installed.insert(bootstrap_skill_key(skill), (*skill).clone());
             }
         } else {
             for skill in &missing {
@@ -323,10 +311,10 @@ pub(crate) async fn sync_python_skills(
                 .await;
                 match result {
                     Ok(()) => {
-                        record_installed_skill(&mut installed, skill);
+                        installed.insert(bootstrap_skill_key(skill), (*skill).clone());
                     }
                     Err(error) => options.report(&format!(
-                        "Warning: Python skill {} failed to install and stays unavailable until a later session retries it: {error}",
+                        "Warning: Python skill {} failed to install and will be unavailable: {error}",
                         skill.import_name
                     )),
                 }
