@@ -298,6 +298,26 @@ mod tests {
             outcomes, 1,
             "one durable outcome, including a no-op refinement"
         );
+        // The daemon's local refinement writes the store the session's
+        // digest context reads — the artifact dir the conversation log
+        // implies — never the shared `<sessions root>/harness` file the
+        // old session-dir derivation wrote.
+        let local_store =
+            pa_core::session_engine::harness_digest::local_harness_dir_for_log(&conversation_log)
+                .expect("the conversation log implies the artifact store");
+        assert_eq!(
+            std::path::Path::new(&committed.result.harness_state_path),
+            pa_core::refinement::get_harness_state_path(&local_store),
+            "the daemon's local refinement wrote the session's own artifact store"
+        );
+        assert!(
+            !dir.path()
+                .join("sessions")
+                .join("harness")
+                .join("harness_state.json")
+                .exists(),
+            "no write to the shared sessions-root harness file"
+        );
         // A daemon global refinement writes the agent dir's harness store,
         // the one the session's digest context carries.
         {
@@ -320,7 +340,7 @@ mod tests {
         let pending = receive
             .try_recv()
             .expect("completion handed to background sink");
-        engine.runtime.block_on(pending).unwrap().unwrap();
+        let global_committed = engine.runtime.block_on(pending).unwrap().unwrap();
         let agent_dir = dir.path().join("agent");
         let global_dir = pa_core::refinement::get_global_harness_state_dir(&agent_dir);
         let global_state = pa_core::refinement::load_harness_state(
@@ -336,25 +356,17 @@ mod tests {
                 && !agent_dir.join("refinement_history.jsonl").exists(),
             "no orphan store files dropped directly in the agent dir"
         );
-        // The next digest shows the entry: a context rebuilt over the
-        // same store pair the refinement wrote — the pair the engine
-        // wires from the conversation log — renders the global entry.
-        let context = pa_core::session_engine::harness_digest::HarnessDigestContext {
-            global_dir,
-            local_dir: pa_core::session_engine::harness_digest::local_harness_dir_for_log(
-                &conversation_log,
-            ),
-            include_ipython: false,
-            include_shell_examples: false,
-            include_refine: false,
-        };
-        let digest = pa_core::session_engine::harness_digest::harness_digest_text(
-            &context,
-            pa_core::refinement::ranking::HarnessQueryTerms::default(),
+        assert_eq!(
+            std::path::Path::new(&global_committed.result.harness_state_path),
+            pa_core::refinement::get_harness_state_path(&global_dir),
+            "the daemon's global refinement wrote the agent dir's harness store"
         );
-        assert!(
-            digest.contains("global:g1]"),
-            "the digest shows the daemon refinement's global entry: {digest}"
-        );
+        // The digest half of the pair is pinned at the pa-core seam
+        // (`daemon_shaped_local_refinement_writes_the_sessions_own_harness_store`):
+        // the digest renders the session's own digest context, and the
+        // refinement's `harness_state_path` asserts above pin that same
+        // context's store pair through the daemon's wiring. Rebuilding
+        // the context here by hand would re-derive the paths this test
+        // just asserted and could not fail.
     }
 }

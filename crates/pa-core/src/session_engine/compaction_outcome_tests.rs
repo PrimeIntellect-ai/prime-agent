@@ -1612,6 +1612,91 @@ async fn contended_harness_lock_does_not_reserve_the_next_provider_run() {
     assert!(state_path.exists());
 }
 
+/// The kernel's writer locks `realpath(state).lock` (`harness.py`'s
+/// `_locked`); the refine side locks the state path as given. Through a
+/// symlinked store directory those two path strings differ, but the
+/// `mkdir` the lock protocol uses resolves symlinked parents at the OS
+/// level, so both writers still name one lock directory and contend.
+/// This pins that sharing — the one scenario where the two writers could
+/// have silently missed each other.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_store_shares_the_kernels_lock_dir() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let (session, tmp) = refine_test_session_with(provider, Vec::new()).await;
+    // The global store behind a symlink, the macOS `$TMPDIR` shape: the
+    // session's digest context names the link; the real directory is
+    // elsewhere.
+    let real = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(real.path(), tmp.path().join("harness")).unwrap();
+    let linked_store = tmp.path().join("harness");
+    let state_path = crate::refinement::get_harness_state_path(&linked_store);
+    // Hold the lock the way the kernel does: an empty directory at
+    // `realpath(state).lock`, derived from the real directory's own
+    // resolved path, fresh enough to read as a live holder.
+    let kernel_lock = std::fs::canonicalize(real.path())
+        .unwrap()
+        .join("harness_state.json.lock");
+    std::fs::create_dir(&kernel_lock).unwrap();
+    let commit_once = || async {
+        let options = refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        };
+        let ready = refine::prepare_refinement(
+            &session.session,
+            None,
+            refine::RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &session.refinement_stores().unwrap(),
+            &session_ai_model(),
+            &options,
+            refine_plan_call(APPLIED_PLAN),
+        )
+        .await
+        .unwrap();
+        refine::commit_refinement(
+            &session.session,
+            session.agent(),
+            ready,
+            refine::RefinementSource::User,
+            None,
+            Some(&session.compaction_flight),
+            &pa_agent::abort::AbortSignal::never(),
+        )
+        .await
+    };
+    // While the kernel holds the lock, the commit exhausts its retry
+    // budget and fails without touching the store.
+    tokio::time::timeout(std::time::Duration::from_secs(5), commit_once())
+        .await
+        .expect("the contended commit fails within its retry budget")
+        .unwrap_err();
+    assert!(
+        !state_path.exists(),
+        "no harness mutation while the kernel holds the lock"
+    );
+    std::fs::remove_dir(&kernel_lock).unwrap();
+    // Once the lock frees, the commit lands through the link in the real
+    // store: one file, the one both writers name.
+    commit_once().await.unwrap();
+    let state = crate::refinement::load_harness_state(
+        &linked_store,
+        crate::refinement::HarnessScope::Global,
+    );
+    assert!(
+        state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "the edit lands in the symlinked store's real file"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&state_path).unwrap(),
+        std::fs::canonicalize(real.path().join("harness_state.json")).unwrap(),
+        "the link and the real directory name one state file"
+    );
+}
+
 #[tokio::test]
 async fn idle_reservation_excludes_both_direct_prompt_and_continue_admission() {
     let provider = Arc::new(ScriptedProvider::new(test_model()));

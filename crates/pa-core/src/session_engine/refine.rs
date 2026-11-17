@@ -1185,6 +1185,36 @@ mod tests {
         .expect("a materialized manager always has an artifact dir")
     }
 
+    /// Seed one memory entry into a harness store dir, the shape a prior
+    /// refinement wrote. `merge_harness_states` re-scopes by source store,
+    /// so the entry's scope field only names the store it was seeded into.
+    fn seed_store_memory(dir: &std::path::Path, id: &str, scope: HarnessScope) {
+        let mut state = crate::refinement::empty_harness_state();
+        state
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                id.to_string(),
+                crate::refinement::HarnessEntry {
+                    id: id.to_string(),
+                    kind: crate::refinement::RefinementKind::Memory,
+                    title: format!("Seeded {id} entry"),
+                    content: format!("Seeded {id} content"),
+                    path: "general".to_string(),
+                    scope: Some(scope),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
+                    source: "agent".to_string(),
+                    created_at: "2026-11-16T00:00:00Z".to_string(),
+                    updated_at: "2026-11-16T00:00:00Z".to_string(),
+                    version: 1,
+                },
+            );
+        crate::refinement::save_harness_state(dir, &state).unwrap();
+    }
+
     fn user_message(text: &str) -> AgentMessage {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
@@ -1726,7 +1756,15 @@ Reviewer instructions: record it"
                 probe.await.unwrap();
                 std::fs::write(&path, &body).unwrap();
             }
+            // Two distinct stores, the shape every production session
+            // wires: the global store and the session's own local store
+            // never share a directory. Each carries one seeded entry, so
+            // a crossed read — the local half reading the global store —
+            // changes the prompt this test compares.
             let global_harness_dir = dir.path().join("harness");
+            let local_harness_dir = dir.path().join("local-harness");
+            seed_store_memory(&global_harness_dir, "gseed", HarnessScope::Global);
+            seed_store_memory(&local_harness_dir, "lseed", HarnessScope::Local);
             let parts = session.refine_transcript_parts();
             let crate::session::manager::RefineTranscriptParts {
                 messages,
@@ -1746,7 +1784,7 @@ Reviewer instructions: record it"
                 },
                 &RefinementStores {
                     global_dir: global_harness_dir.clone(),
-                    local_dir: Some(dir.path().join("harness")),
+                    local_dir: Some(local_harness_dir.clone()),
                 },
                 &test_model(),
                 &RefineOptions::default(),
@@ -1782,6 +1820,16 @@ Reviewer instructions: record it"
         assert!(
             captured[0].user.contains("hello 4"),
             "the fixture's conversation must appear in the prompt"
+        );
+        assert!(
+            captured[0].user.contains("global:gseed]"),
+            "the planner read the global store: {}",
+            captured[0].user
+        );
+        assert!(
+            captured[0].user.contains("local:lseed]"),
+            "the planner read the session's own local store: {}",
+            captured[0].user
         );
 
         // The read-leg proof: the unleased window must serve an
