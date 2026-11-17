@@ -1,1 +1,5 @@
-- Fixed fresh installs missing built-in skills: the installer now pre-installs the Python skills the first session would use (including the bundled `goal`) without displacing a user's override of a bundled skill, and the bundled `factory` skill now appears in the skill list instead of being dropped for invalid frontmatter.
+- Bundled skills now win name clashes: a project or user skill with the same name (for example `goal`) no longer replaces the bundled one. To use your own skill instead, add `"skills": ["-<name>"]` to `~/.prime/agent/settings.json`.
+- The bundled `factory` skill loads again, and a skill with invalid frontmatter now reports the YAML error instead of vanishing.
+- New `prime-agent skills` command lists every discovered skill and why it is active, hidden, shadowed, disabled, or invalid. A new session also shows a warning when a skill could not load.
+- `/skill:<name>` now works anywhere in a message, including for hidden skills. Unknown skill names show a notice.
+- Switching a Python skill between the bundled copy and your own now installs the selected copy into the Python kernel.
