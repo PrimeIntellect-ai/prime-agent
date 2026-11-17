@@ -560,7 +560,11 @@ async fn reserve_refinement_commit<'a>(
     compaction_flight: Option<&'a tokio::sync::Mutex<()>>,
 ) -> anyhow::Result<RefinementCommitGuards<'a>> {
     tokio::fs::create_dir_all(&target_dir).await?;
-    let state_path = crate::refinement::get_harness_state_path(target_dir);
+    // Lock the file the kernel locks: the real file behind a state
+    // symlink, so both writers contend on one lock directory.
+    let state_path = crate::refinement::resolved_state_file(
+        &crate::refinement::get_harness_state_path(target_dir),
+    );
     let mut attempts = 0;
     let guards = loop {
         let admission = agent.reserve_idle().await;

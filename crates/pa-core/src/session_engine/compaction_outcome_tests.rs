@@ -1697,6 +1697,114 @@ async fn a_symlinked_store_shares_the_kernels_lock_dir() {
     );
 }
 
+/// The kernel's writer locks and replaces the REAL file behind a state
+/// symlink (`harness.py` resolves `realpath(state)` for both); the refine
+/// side must resolve the same way. Locking the alias would miss the
+/// kernel's lock entirely — two writers on two files — and the atomic
+/// rename would replace the link itself. The symlinked-directory case is
+/// pinned above; this is the file-symlink case.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_state_file_symlink_shares_the_kernels_lock_and_survives_the_commit() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let (session, tmp) = refine_test_session_with(provider, Vec::new()).await;
+    // The global store's state file is a link: the real file lives in
+    // another directory, seeded the way a prior kernel save left it.
+    let real = tempfile::tempdir().unwrap();
+    crate::refinement::save_harness_state(real.path(), &crate::refinement::empty_harness_state())
+        .unwrap();
+    let linked_store = tmp.path().join("harness");
+    std::fs::create_dir(&linked_store).unwrap();
+    let alias = crate::refinement::get_harness_state_path(&linked_store);
+    let real_state = real.path().join("harness_state.json");
+    std::os::unix::fs::symlink(&real_state, &alias).unwrap();
+    // Hold the lock the way the kernel does: an owner directory at
+    // `realpath(state).lock` naming a live pid.
+    let kernel_lock = real.path().join("harness_state.json.lock");
+    std::fs::create_dir(&kernel_lock).unwrap();
+    std::fs::write(
+        kernel_lock.join("owner"),
+        format!("{} kernel-style-token\n", std::process::id()),
+    )
+    .unwrap();
+    let commit_once = || async {
+        let options = refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        };
+        let ready = refine::prepare_refinement(
+            &session.session,
+            None,
+            refine::RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &session.refinement_stores().unwrap(),
+            &session_ai_model(),
+            &options,
+            refine_plan_call(APPLIED_PLAN),
+        )
+        .await
+        .unwrap();
+        refine::commit_refinement(
+            &session.session,
+            session.agent(),
+            ready,
+            refine::RefinementSource::User,
+            None,
+            Some(&session.compaction_flight),
+            &pa_agent::abort::AbortSignal::never(),
+        )
+        .await
+    };
+    // While the kernel holds the real file's lock, the commit contends
+    // and exhausts its retry budget without touching either file.
+    tokio::time::timeout(std::time::Duration::from_secs(5), commit_once())
+        .await
+        .expect("the contended commit fails within its retry budget")
+        .unwrap_err();
+    assert!(
+        std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the refused commit leaves the alias a link"
+    );
+    let untouched = crate::refinement::load_harness_state(
+        &linked_store,
+        crate::refinement::HarnessScope::Global,
+    );
+    assert!(
+        !untouched.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "no harness mutation while the kernel holds the lock"
+    );
+    std::fs::remove_file(kernel_lock.join("owner")).unwrap();
+    std::fs::remove_dir(&kernel_lock).unwrap();
+    // Once the lock frees, the commit writes the real file behind the
+    // link: one file, the one both writers name, and the link survives.
+    commit_once().await.unwrap();
+    let state = crate::refinement::load_harness_state(
+        &linked_store,
+        crate::refinement::HarnessScope::Global,
+    );
+    assert!(
+        state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "the edit lands in the real file behind the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the commit that wrote through the link leaves the alias a link"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&alias).unwrap(),
+        std::fs::canonicalize(&real_state).unwrap(),
+        "the link and the real file name one state file"
+    );
+}
+
 #[tokio::test]
 async fn idle_reservation_excludes_both_direct_prompt_and_continue_admission() {
     let provider = Arc::new(ScriptedProvider::new(test_model()));
