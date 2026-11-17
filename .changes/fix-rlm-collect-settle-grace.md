@@ -1,1 +1,0 @@
-- Fixed `rlm.collect` reporting a child as completed (`done`, settled) when it read idle for a moment right after its task was admitted and then started running.

@@ -1,1 +1,0 @@
-- Retrying a session whose worker crashed now relaunches the worker instead of reporting success while the worker is dead.
