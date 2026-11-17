@@ -60,6 +60,14 @@ behavioral difference worth reporting.
   `crates/pa-cli/src/print_runtime.rs`.
 - Daemon startup: `crates/pa-daemon/src/agent_engine/model.rs`.
 
+A production-instance run (2026-11-17, the same product build): the local
+dinglao daemon instance — `PRIME_AGENT_CODING_AGENT_DIR=~/.prime/agent`, a
+brand-new session `wiretest` created through the control API — sent three
+requests (22:57:56 / 22:58:00 / 22:58:05) whose bodies all carried
+`model="deepseek-flash"`. The provider `baseUrl` override used to capture them
+was reverted immediately afterwards. This is a production path, not a
+harness-only run.
+
 ## Case study (2026-11-17)
 
 Checking `defaultModel: deepseek-flash` on Windows: a first probe reported the
