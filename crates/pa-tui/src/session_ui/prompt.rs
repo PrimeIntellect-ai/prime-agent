@@ -437,8 +437,11 @@ impl SessionUi {
             self.start_side_question(text, view).await?;
             return Ok(());
         }
-        // A `/skill:<name>` the session does not know stays plain text; say so
-        // (nothing is flagged before the session's command catalog loads).
+        if text.starts_with('/') {
+            return self.handle_slash(text, behavior, view).await;
+        }
+        // A `/skill:<name>` mid-message the session does not know stays plain
+        // text; say so (nothing is flagged before the command catalog loads).
         if !self.skill_commands_cache.is_empty() {
             let unknown: Vec<String> = pa_types::skill_blocks::skill_references(text)
                 .into_iter()
@@ -453,9 +456,6 @@ impl SessionUi {
             if !unknown.is_empty() {
                 self.note(&format!("Unknown skill: {}", unknown.join(", ")), view);
             }
-        }
-        if text.starts_with('/') {
-            return self.handle_slash(text, behavior, view).await;
         }
         self.send_prompt(text, behavior, view)
     }
