@@ -1,1 +1,0 @@
-- Sessions created with `rlm.create_session` now keep the parent's telemetry opt-out (`DO_NOT_TRACK`, `PI_OFFLINE`, `PRIME_AGENT_TELEMETRY`).

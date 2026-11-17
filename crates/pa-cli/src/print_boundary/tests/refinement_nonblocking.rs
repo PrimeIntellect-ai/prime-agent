@@ -116,7 +116,6 @@ impl Origin {
         engine: &SessionEngine,
         planner_model: &Model,
         boundary: &mut TurnBoundary,
-        global_dir: std::path::PathBuf,
     ) -> Option<
         tokio::task::JoinHandle<
             anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
@@ -130,7 +129,6 @@ impl Origin {
                 let mut params = pa_core::session_engine::session_commands::SessionCommandParams {
                     model: planner_model,
                     api_key: None,
-                    global_harness_dir: global_dir,
                     autonomous: &mut autonomous,
                 };
                 let command = pa_core::session_engine::slash_commands::SessionSlashCommand {
@@ -163,7 +161,7 @@ impl Origin {
                     .await;
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    boundary.run_at_settled_turn(engine, planner_model, None, global_dir),
+                    boundary.run_at_settled_turn(engine, planner_model, None),
                 )
                 .await
                 .expect("requested planning must leave the boundary")
@@ -175,7 +173,6 @@ impl Origin {
                     engine,
                     planner_model,
                     None,
-                    global_dir,
                     RefineSurface::Checkpoint,
                 );
             }
@@ -189,7 +186,7 @@ impl Origin {
 #[tokio::test]
 async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_prefix() {
     for origin in [Origin::Slash, Origin::Requested, Origin::Auto] {
-        let (engine, dir, model) = faux_engine_with_settings(
+        let (engine, _dir, model) = faux_engine_with_settings(
             json!({ "responses": [{"text": "seed"}, {"text": "next user reply"}] }),
             json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
             None,
@@ -223,9 +220,8 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
         };
         let planner_model = HeldPlanner::register(&model, started.clone(), release.clone(), reply);
         let mut boundary = TurnBoundary::new(false);
-        let global_dir = dir.path().join("global-refinement");
         let pending = origin
-            .schedule(&engine, &planner_model, &mut boundary, global_dir)
+            .schedule(&engine, &planner_model, &mut boundary)
             .await;
         tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
             .await
@@ -270,7 +266,7 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
 /// would let the session drop abort the planning.
 #[tokio::test]
 async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
-    let (engine, dir, model) = faux_engine_with_settings(
+    let (engine, _dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
         None,
@@ -291,17 +287,16 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
         r#"{"summary":"background note","edits":[]}"#,
     );
     let mut boundary = TurnBoundary::new(false);
-    let global_dir = dir.path().join("global-refinement");
     // The last turn's requested refinement: the boundary owns its report.
     let _pending = Origin::Requested
-        .schedule(&engine, &planner_model, &mut boundary, global_dir.clone())
+        .schedule(&engine, &planner_model, &mut boundary)
         .await;
     tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
         .await
         .expect("planner entered");
     let mut drain = std::pin::pin!(async {
         boundary
-            .drain_compact_auto_refine_at_disposal(&engine, &planner_model, None, global_dir)
+            .drain_compact_auto_refine_at_disposal(&engine, &planner_model, None)
             .await;
     });
     // While the planner is held the drain must stay pending: the session
@@ -321,7 +316,7 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
 /// the drain cannot wait for.
 #[tokio::test]
 async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
-    let (engine, dir, model) = faux_engine_with_settings(
+    let (engine, _dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
         None,
@@ -343,7 +338,6 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
         r#"{"summary":"background note","edits":[]}"#,
     );
     let mut boundary = TurnBoundary::new(false);
-    let global_dir = dir.path().join("global-refinement");
     let goal = Arc::new(crate::print_goal::PrintGoalSurface::new(false));
     let autonomous = Arc::new(tokio::sync::Mutex::new(
         pa_core::autonomous::create_autonomous_runtime_state(None, None),
@@ -358,7 +352,6 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
         &goal,
         &planner_model,
         None,
-        global_dir.clone(),
         &autonomous,
         &mut boundary,
         &command,
@@ -370,7 +363,7 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
         .expect("planner entered");
     let mut drain = std::pin::pin!(async {
         boundary
-            .drain_compact_auto_refine_at_disposal(&engine, &planner_model, None, global_dir)
+            .drain_compact_auto_refine_at_disposal(&engine, &planner_model, None)
             .await;
     });
     assert!(
@@ -504,7 +497,7 @@ async fn refine_status(engine: &SessionEngine) -> serde_json::Value {
 /// the model-requested boundary consumption.
 #[tokio::test]
 async fn refine_status_reports_a_user_refine_in_flight() {
-    let (engine, dir, model) = faux_engine_with_settings(
+    let (engine, _dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
         None,
@@ -525,9 +518,8 @@ async fn refine_status_reports_a_user_refine_in_flight() {
         r#"{"summary":"background note","edits":[]}"#,
     );
     let mut boundary = TurnBoundary::new(false);
-    let global_dir = dir.path().join("global-refinement");
     let pending = Origin::Slash
-        .schedule(&engine, &planner_model, &mut boundary, global_dir)
+        .schedule(&engine, &planner_model, &mut boundary)
         .await
         .expect("the user /refine scheduled its refinement");
     tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
@@ -555,7 +547,7 @@ async fn refine_status_reports_a_user_refine_in_flight() {
 /// fresh timestamp after the fact.
 #[tokio::test]
 async fn background_completion_replays_the_persisted_refinement_rows() {
-    let (engine, dir, model) = faux_engine_with_settings(
+    let (engine, _dir, model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed"}] }),
         json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
         None,
@@ -577,9 +569,8 @@ async fn background_completion_replays_the_persisted_refinement_rows() {
     );
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    let global_dir = dir.path().join("global-refinement");
     let pending = Origin::Slash
-        .schedule(&engine, &planner_model, &mut boundary, global_dir)
+        .schedule(&engine, &planner_model, &mut boundary)
         .await
         .expect("the user /refine scheduled its refinement");
     tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())

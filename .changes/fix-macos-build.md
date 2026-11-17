@@ -1,1 +1,0 @@
-- Fixed sessions whose sessions folder sat behind a symlink (such as macOS `/tmp`) silently dropping every message after the first session was created, and stopping an attached session on macOS showing "connection lost" instead of the stop notice.

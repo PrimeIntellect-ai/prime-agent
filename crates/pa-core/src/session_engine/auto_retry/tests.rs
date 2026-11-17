@@ -127,6 +127,7 @@ async fn quota_reset_beyond_cap_parks_through_the_seam() {
     assert_eq!(events.len(), 1, "one parked end: {events:?}");
     let final_error = match events.as_slice() {
         [AutoRetryEvent::End {
+            aborted: false,
             success: false,
             final_error: Some(final_error),
             ..
@@ -167,6 +168,7 @@ async fn quota_reset_beyond_cap_keeps_the_give_up_when_the_seam_declines() {
     let events = events.lock().unwrap().clone();
     let final_error = match events.as_slice() {
         [AutoRetryEvent::End {
+            aborted: false,
             success: false,
             final_error: Some(final_error),
             ..
@@ -275,6 +277,7 @@ async fn transient_failure_is_retried_until_success_with_events() {
                 ..
             },
             AutoRetryEvent::End {
+                aborted: false,
                 success: true,
                 attempt: 2,
                 final_error: None,
@@ -333,6 +336,7 @@ async fn exhausted_retries_surface_the_final_error() {
     assert_eq!(
         events.last(),
         Some(&AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 3,
             final_error: Some("provider down".to_string()),
@@ -426,6 +430,7 @@ async fn stream_drop_retries_until_the_turn_completes() {
                     ..
                 },
                 AutoRetryEvent::End {
+                    aborted: false,
                     success: true,
                     attempt: 1,
                     final_error: None,
@@ -476,6 +481,7 @@ async fn stream_drop_exhausts_retries_surfacing_the_class() {
     let events = events.lock().unwrap().clone();
     let final_error = match events.last() {
         Some(AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 3,
             final_error: Some(final_error),
@@ -530,6 +536,7 @@ async fn permanent_failures_never_retry_but_disclose() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         &[AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("provider down".to_string()),
@@ -578,6 +585,7 @@ async fn payment_failures_settle_once_with_the_disclosure() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         &[AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("provider down".to_string()),
@@ -628,6 +636,7 @@ async fn safety_failures_are_permanent_never_retry_but_disclose() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         &[AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("provider down".to_string()),
@@ -709,6 +718,7 @@ async fn cancelled_wait_aborts_with_retry_cancelled() {
     assert_eq!(
         events.lock().unwrap().last(),
         Some(&AutoRetryEvent::End {
+            aborted: true,
             success: false,
             attempt: 1,
             final_error: Some("Retry cancelled".to_string()),
@@ -720,13 +730,19 @@ async fn cancelled_wait_aborts_with_retry_cancelled() {
 #[tokio::test]
 async fn aborted_signal_racing_failure_stops_aborted() {
     let controller = pa_agent::abort::AbortController::new();
-    controller.abort();
+    let events = Arc::new(Mutex::new(Vec::new()));
     let message = run_turn_with_auto_retry(
         &fast_policy(),
         0,
         Some(&controller.signal()),
-        || async { Ok(error_message(Some("server_error"), None, None)) },
-        |_| async { Ok(()) },
+        || {
+            controller.abort();
+            async { Ok(error_message(Some("server_error"), None, None)) }
+        },
+        |event| {
+            events.lock().unwrap().push(event);
+            async { Ok(()) }
+        },
         |_| async { true },
         None,
         None,
@@ -734,6 +750,55 @@ async fn aborted_signal_racing_failure_stops_aborted() {
     .await
     .unwrap();
     assert_eq!(message.stop_reason, StopReason::Aborted);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![AutoRetryEvent::End {
+            aborted: true,
+            success: false,
+            attempt: 0,
+            final_error: Some("Retry cancelled".to_string()),
+            restored_model: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn an_aborted_retry_attempt_carries_cancellation_provenance() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut calls = 0;
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        || {
+            calls += 1;
+            let mut message = error_message(Some("server_error"), None, None);
+            if calls == 2 {
+                message.stop_reason = StopReason::Aborted;
+            }
+            async move { Ok(message) }
+        },
+        |event| {
+            events.lock().unwrap().push(event);
+            async { Ok(()) }
+        },
+        |_| async { true },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Aborted);
+    assert_eq!(
+        events.lock().unwrap().last(),
+        Some(&AutoRetryEvent::End {
+            aborted: true,
+            success: true,
+            attempt: 1,
+            final_error: None,
+            restored_model: None,
+        })
+    );
 }
 
 #[tokio::test]
@@ -773,6 +838,7 @@ async fn server_retry_after_over_cap_ends_the_loop() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         &[AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some(
@@ -824,6 +890,7 @@ async fn disabled_policy_never_retries_but_discloses() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         &[AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("provider down".to_string()),
@@ -892,6 +959,7 @@ async fn unsupported_tool_failures_surface_with_the_disclosure() {
     assert_eq!(
         events.lock().unwrap().as_slice(),
         &[AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("404 No endpoints found that support tool use.".to_string()),
@@ -946,6 +1014,7 @@ async fn an_auth_rejection_whose_recovery_ends_the_turn_never_retries() {
     assert_eq!(
         *events.lock().unwrap(),
         vec![AutoRetryEvent::End {
+            aborted: false,
             success: false,
             attempt: 0,
             final_error: Some("sign in again".to_string()),

@@ -799,7 +799,6 @@ impl AgentSessionEngine {
         let mut params = SessionCommandParams {
             model: &model,
             api_key,
-            global_harness_dir: self.config.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
         // The lock covers the clone only: the command below can run a summarizer call, so the

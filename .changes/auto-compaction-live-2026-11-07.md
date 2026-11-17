@@ -1,1 +1,0 @@
-- Turning auto-compaction on or off in a running daemon session now takes effect at the next turn instead of after the session restarts.

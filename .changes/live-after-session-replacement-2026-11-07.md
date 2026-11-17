@@ -1,1 +1,0 @@
-- A session that replaced another in the same daemon worker (fork, import, new or switched session) no longer stays marked closed: its goal and autonomous continuations run again, and background bash completion notices reach it.

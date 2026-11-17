@@ -1,1 +1,0 @@
-- Project settings can no longer redirect session storage or select executable configuration when opening a repository.

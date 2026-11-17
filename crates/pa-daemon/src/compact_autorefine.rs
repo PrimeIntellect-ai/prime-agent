@@ -94,7 +94,6 @@ impl AgentSessionEngine {
             return Ok(None);
         };
         let (model, api_key) = self.resolve_request_target(model);
-        let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only (see `run_compaction`): holding the
         // session mutex across the review serialized every client read seam
         // behind it. The cloned engine keeps the round alive across a rebuild.
@@ -108,12 +107,7 @@ impl AgentSessionEngine {
         self.runtime.block_on(async {
             engine
                 .session
-                .consume_compact_auto_refine(
-                    &model,
-                    api_key,
-                    global_harness_dir,
-                    CompactAutoRefineSurface::Checkpoint,
-                )
+                .consume_compact_auto_refine(&model, api_key, CompactAutoRefineSurface::Checkpoint)
                 .await
         })
     }
