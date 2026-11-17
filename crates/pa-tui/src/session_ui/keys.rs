@@ -432,6 +432,36 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
+        // The message-navigation keys walk the user messages. The editor's
+        // ctrl+up/ctrl+down paragraph motion keeps them while a draft is in
+        // progress — the transcript jump runs only on the empty editor (the
+        // plain Up/Down deference pattern).
+        let (message_prev, message_next) = {
+            let kb = view.editor.keybindings();
+            (
+                kb.matches(&id, "tui.viewport.prevMessage"),
+                kb.matches(&id, "tui.viewport.nextMessage"),
+            )
+        };
+        if (message_prev || message_next) && view.editor.get_text().trim().is_empty() {
+            view.editor.clear_selection();
+            let direction = if message_prev {
+                crate::view::message_nav::MessageNavDirection::Prev
+            } else {
+                crate::view::message_nav::MessageNavDirection::Next
+            };
+            view.navigate_messages(direction);
+            self.track_scroll(
+                if message_prev {
+                    "message_prev"
+                } else {
+                    "message_next"
+                },
+                view.is_following(),
+            );
+            self.dirty = true;
+            return Ok(());
+        }
         // The activity dock owns focus while focused; every other key falls
         // through after releasing the focus.
         if self.subagents_focused {
@@ -974,7 +1004,11 @@ pub(crate) fn opening_echo_key_claimed(
     if editor.get_text().trim().is_empty()
         && (kb.matches(id, "app.agents.back")
             || kb.matches(id, "app.session.tree")
-            || kb.matches(id, "app.session.fork"))
+            || kb.matches(id, "app.session.fork")
+            // The message-navigation keys walk the transcript only on the
+            // empty editor; with a draft the editor's paragraph motion stays.
+            || kb.matches(id, "tui.viewport.prevMessage")
+            || kb.matches(id, "tui.viewport.nextMessage"))
     {
         return true;
     }
@@ -1039,6 +1073,24 @@ mod opening_echo_claim_tests {
             !opening_echo_key_claimed(&kb, "left", &editor),
             "left with text is the editor's cursor motion"
         );
+    }
+
+    /// The message-navigation keys claim on the empty editor only: with a
+    /// draft in progress the editor's ctrl+up/ctrl+down paragraph motion
+    /// stays (the plain Up/Down deference pattern).
+    #[test]
+    fn message_navigation_keys_defer_to_a_draft() {
+        let kb = KeybindingsManager::new();
+        for id in ["ctrl+up", "ctrl+down"] {
+            assert!(
+                opening_echo_key_claimed(&kb, id, &editor_with("")),
+                "{id} on the empty editor walks the transcript"
+            );
+            assert!(
+                !opening_echo_key_claimed(&kb, id, &editor_with("draft")),
+                "{id} with a draft is the editor's paragraph motion"
+            );
+        }
     }
 
     /// The plain typing keys the opening loop echoes (space, backspace,

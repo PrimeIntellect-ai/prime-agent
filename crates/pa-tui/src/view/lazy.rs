@@ -55,6 +55,19 @@ impl SparseWindow {
         }
     }
 
+    /// A top-anchored window at an absolute row: the message-navigation
+    /// jump's re-anchor (`scroll_to_top` with a nonzero row).
+    pub(super) fn at_row(row: usize, detail: Detail, width: usize) -> Self {
+        Self {
+            anchor: Anchor::Top(row),
+            detail,
+            width,
+            visible_rows: 0,
+            cursor: None,
+            pending: 0,
+        }
+    }
+
     pub(super) fn at_tail(&self) -> bool {
         matches!(self.anchor, Anchor::Tail(0))
     }
@@ -78,6 +91,19 @@ impl SparseWindow {
 }
 
 impl AgentView {
+    /// The sparse window's absolute top row under the given fresh layout
+    /// total (`resolve_sparse_geometry`'s anchor math without the pass);
+    /// `scroll_top` when no window is mounted.
+    pub(super) fn sparse_window_top_row(&self, total: usize) -> usize {
+        match self.sparse_window.as_ref().map(|window| &window.anchor) {
+            Some(Anchor::Tail(distance)) => total
+                .saturating_sub(*distance)
+                .saturating_sub(self.window_rows),
+            Some(Anchor::Top(offset)) => *offset,
+            None => self.scroll_top,
+        }
+    }
+
     /// Whether the sparse window anchors to the transcript end
     /// (tail-relative selection coordinates) or to an absolute row.
     pub(super) fn sparse_window_is_tail_anchored(&self) -> bool {

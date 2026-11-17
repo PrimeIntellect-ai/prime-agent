@@ -182,7 +182,7 @@ impl EntryRows {
 pub(crate) struct TranscriptLayout {
     pub(super) splash: Vec<Line>,
     /// Absolute row starts, including the end sentinel.
-    offsets: Vec<usize>,
+    pub(super) offsets: Vec<usize>,
     pub(super) tail: Vec<Line>,
     pub(super) total: usize,
 }

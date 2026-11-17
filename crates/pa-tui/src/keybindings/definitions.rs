@@ -259,6 +259,25 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
             "Scroll to bottom and follow output (fullscreen)"
         ),
     ),
+    // SANCTIONED DIVERGENCE from TS (pa-gpui parity, operator ask 2026-11-17): TS has no
+    // prev/next-message transcript keys; the defaults follow pa-gpui's `prev_message`/
+    // `next_message` (widgets.rs). Both keys are also the editor-scope paragraph motions,
+    // and the session dispatch gives the editor precedence while a draft is in progress —
+    // the transcript jump runs only on the empty editor.
+    (
+        "tui.viewport.prevMessage",
+        def!(
+            &["ctrl+up"],
+            "Scroll to the previous user message (fullscreen)"
+        ),
+    ),
+    (
+        "tui.viewport.nextMessage",
+        def!(
+            &["ctrl+down"],
+            "Scroll to the next user message (fullscreen)"
+        ),
+    ),
     ("tui.select.up", def!(&["up"], "Move selection up")),
     ("tui.select.down", def!(&["down"], "Move selection down")),
     ("tui.select.pageUp", def!(&["pageUp"], "Selection page up")),

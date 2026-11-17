@@ -19,6 +19,7 @@ mod geometry;
 mod handoff;
 mod layout;
 pub(crate) mod lazy;
+pub(crate) mod message_nav;
 mod panels;
 mod restyle;
 mod rows;
@@ -151,6 +152,12 @@ pub struct AgentView {
     /// How many first-draw windows this view served from an adopted
     /// layout handoff: the verifiers assert the reuse happened.
     pub(crate) handoff_seeds: u32,
+    /// The user-message entry index the last ctrl+up/ctrl+down navigation
+    /// landed on (pa-gpui `nav_message_ix` parity). The resend affordance
+    /// is deliberately not ported (no Ctrl-R resend), so the index has no
+    /// production reader yet.
+    #[allow(dead_code)]
+    message_nav: Option<usize>,
     /// Entries whose card a click flipped away from the level's
     /// tool-output expansion (see `view/expansion.rs`).
     toggled_cards: std::collections::BTreeSet<usize>,
@@ -340,6 +347,7 @@ impl AgentView {
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
             pending_handoff: None,
+            message_nav: None,
             handoff_seeds: 0,
             click: click::ClickSurface::default(),
         }
@@ -510,6 +518,7 @@ impl AgentView {
             .iter()
             .map(|index| index + count)
             .collect();
+        self.message_nav = self.message_nav.map(|index| index + count);
         self.note_prepended_entries(count, seam_before, cursor_spacing_before);
     }
 
@@ -517,6 +526,7 @@ impl AgentView {
     /// rebuild re-renders every row).
     pub fn clear_chat(&mut self) {
         self.pending_handoff = None;
+        self.message_nav = None;
         self.sparse_enabled = true;
         self.sparse_entries.clear();
         self.toggled_cards.clear();
