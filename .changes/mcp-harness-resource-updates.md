@@ -1,0 +1,1 @@
+- MCP resource updates now arrive with their content: the harness re-reads a subscribed resource when the server reports it changed and the `[mcp_notification]` row carries the new text (bounded per update and per frame), so the model no longer has to read it back itself. `mcp.read_resource` stays available for gaps and truncated content.

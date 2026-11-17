@@ -103,7 +103,9 @@ await mcp.clear_notifications("notion")
 ```
 
 - `tools_changed` / `prompts_changed` / `resources_changed`: re-list before acting.
-- `resource_updated`: re-read the subscribed URI.
+- `resource_updated`: the harness re-reads the subscribed URI for you and the
+  row carries the content (bounded); act on that text. Call `read_resource`
+  only when the content is missing or a truncation note says it was cut.
 - `logging` / `progress`: bounded, coalesced; never a wake. Pull them if you
   need the detail.
 - A non-zero `dropped` means the bounded buffer evicted entries: you missed
@@ -112,7 +114,7 @@ await mcp.clear_notifications("notion")
 ### Subscriptions
 
 ```python
-await mcp.subscribe_resource("notion", "notion://page/123")   # then resources/updated arrives for it
+await mcp.subscribe_resource("notion", "notion://page/123")   # updates then carry the content
 await mcp.list_subscriptions("notion")                        # {servers: {"notion": ["notion://page/123"]}}
 await mcp.unsubscribe_resource("notion", "notion://page/123")
 ```

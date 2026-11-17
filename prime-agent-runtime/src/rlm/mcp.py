@@ -108,6 +108,9 @@ _ELICITATION_TIMEOUT = 300.0
 _MAX_RESOURCE_ITEMS = 512
 # Subscription bookkeeping: one URI list per server, capped like the rest.
 _MAX_SUBSCRIPTIONS = 32
+# A resource update's injected content: the harness reads the changed resource
+# and hands the model its text, bounded so one push cannot flood the context.
+_MAX_INJECTED_CHARS = 3000
 # Defensive only: the host must already whitelist safe metadata in inventory
 # entries. Never applied to live tool schemas or results — argument names there
 # are server-defined and legitimately credential-like.
@@ -254,6 +257,23 @@ def _prompt_argument_entry(argument: Any) -> dict[str, Any]:
     }
 
 
+def _resource_update_content(entries: list[dict[str, Any]]) -> str:
+    """The bounded text an update carries: text parts joined, blobs described."""
+    parts: list[str] = []
+    for entry in entries:
+        text = entry.get("text")
+        if text is not None:
+            parts.append(str(text))
+        elif entry.get("blobBase64") is not None:
+            parts.append(
+                f"[binary {entry.get('mimeType') or 'unknown'} content omitted]"
+            )
+    content = "\n".join(parts).strip()
+    if len(content) > _MAX_INJECTED_CHARS:
+        content = content[:_MAX_INJECTED_CHARS].rstrip() + "\n…(truncated)"
+    return content
+
+
 def _prompt_entry(prompt: Any) -> dict[str, Any]:
     arguments = _field(prompt, "arguments", default=None) or []
     return {
@@ -269,9 +289,14 @@ class _Generation:
         server: str,
         config: dict[str, Any],
         notifications: mcp_notify.NotificationBus | None = None,
+        subscribed: set[str] | None = None,
     ):
         self.server = server
         self.config = config
+        # The registry owns the subscription set; an update for a URI outside it
+        # is recorded but never read (a server must not pull content by pushing).
+        self.subscribed: set[str] = subscribed if subscribed is not None else set()
+        self._refreshing: dict[str, asyncio.Task[None]] = {}
         # The bus outlives one generation (the registry owns it), so a reload
         # keeps the notifications the model has not pulled yet.
         self.notifications = notifications or mcp_notify.NotificationBus()
@@ -768,7 +793,10 @@ class _Generation:
             )
         elif method == "notifications/resources/updated":
             uri = str(_field(params, "uri", default="") or "")
-            self.notifications.submit(self.server, mcp_notify.RESOURCE_UPDATED, uri, uri=uri)
+            if not uri:
+                return
+            self._schedule_resource_refresh(uri)
+            return
         else:
             # `logging/message` arrives through `logging_callback`, progress
             # through the per-call callback; roots-listing changes are not ours.
@@ -786,6 +814,46 @@ class _Generation:
             f"{level}{' ' + logger if logger else ''}: {data}",
             level=level,
             logger=logger,
+        )
+        self._schedule_forward()
+
+    def _schedule_resource_refresh(self, uri: str) -> None:
+        """Re-read one changed resource off the receive loop.
+
+        The harness delivers resource content, not the model: a subscribed
+        resource's update is read here (bounded), and the forwarded row carries
+        the text. One read per URI is in flight at a time.
+        """
+        if uri not in self.subscribed:
+            # Not our subscription: record the notification without reading, so
+            # a server cannot pull arbitrary content by pushing updates.
+            self.notifications.submit(self.server, mcp_notify.RESOURCE_UPDATED, uri, uri=uri)
+            self._schedule_forward()
+            return
+        task = self._refreshing.get(uri)
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._refreshing[uri] = loop.create_task(self._ingest_resource_update(uri))
+
+    async def _ingest_resource_update(self, uri: str) -> None:
+        """Read a changed resource and submit the update with its content."""
+        try:
+            contents = await self.read_resource(uri)
+            content = _resource_update_content(contents)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - the row tells the model why
+            content = f"(the changed resource could not be read: {error})"
+        self.notifications.submit(
+            self.server,
+            mcp_notify.RESOURCE_UPDATED,
+            uri,
+            content=content,
+            uri=uri,
         )
         self._schedule_forward()
 
@@ -933,7 +1001,9 @@ class _Registry:
                 self._generations.pop(server, None)
         self._accepting_work()
         bus = self._buses.setdefault(server, mcp_notify.NotificationBus())
-        generation = _Generation(server, config, bus)
+        generation = _Generation(
+            server, config, bus, self._subscriptions.setdefault(server, set())
+        )
         self._generations[server] = generation
         try:
             await generation.open()

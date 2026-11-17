@@ -195,7 +195,7 @@ Server notifications (tool/prompt/resource inventory changes, subscribed resourc
 - `mcp.notification_status() -> dict`: per-server buffered/dropped/forwarded counters
 - `mcp.clear_notifications(server: str | None = None) -> dict`: drop the buffer
 
-When a `tools_changed` or `resources_updated` row arrives, re-list the tools or re-read the resource before acting on it.
+A `resource_updated` row carries the changed resource's content: the harness re-reads subscribed resources for you, so act on that text directly. Call `mcp.read_resource` only when the content is missing (a gap, a truncation note, or a non-zero `dropped` count). After a `tools_changed` row, re-list the tools.
 
 Subscriptions (when the server advertises them) make `resources/updated` arrive for a URI:
 - `mcp.subscribe_resource(server: str, uri: str) -> dict`

@@ -46,6 +46,10 @@ MAX_BUFFERED = 256
 MAX_FORWARD_BATCH = 8
 COALESCE_WINDOW_SECONDS = 2.0
 MAX_SUMMARY_CHARS = 500
+# A `resource_updated` entry may carry the changed resource's content (the
+# harness reads it for the model). Its own cap: content is not a summary and
+# must not be collapsed to one line.
+MAX_CONTENT_CHARS = 4096
 
 
 def _summary(text: Any) -> str:
@@ -73,8 +77,18 @@ class NotificationBus:
 
     # -- ingestion ---------------------------------------------------------
 
-    def submit(self, server: str, kind: str, summary: str = "", **extra: Any) -> dict[str, Any]:
+    def submit(
+        self,
+        server: str,
+        kind: str,
+        summary: str = "",
+        content: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
         """Record one notification and queue it for forwarding.
+
+        `content` is the one non-summary payload: a changed resource's text the
+        harness read for the model. It keeps its newlines and its own cap.
 
         Returns the entry (with its sequence number) as it also sits in the
         pull buffer."""
@@ -86,6 +100,13 @@ class NotificationBus:
             "timestamp": time.time(),
             "summary": _summary(summary),
         }
+        if content:
+            text = str(content)
+            entry["content"] = (
+                text
+                if len(text) <= MAX_CONTENT_CHARS
+                else text[:MAX_CONTENT_CHARS] + "…(truncated)"
+            )
         for key, value in extra.items():
             if isinstance(value, str):
                 entry[key] = _summary(value)

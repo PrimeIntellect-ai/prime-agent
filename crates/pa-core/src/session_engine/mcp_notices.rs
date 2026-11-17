@@ -33,6 +33,12 @@ const MAX_ENTRIES: usize = 8;
 const MAX_SERVER_CHARS: usize = 128;
 const MAX_SUMMARY_CHARS: usize = 512;
 const MAX_CONTENT_CHARS: usize = 4096;
+/// One entry's harness-read resource content (the kernel caps it at 3000
+/// before sending; this is the defensive ceiling).
+const MAX_ENTRY_CONTENT_CHARS: usize = 4096;
+/// All content in one frame: the row shares the same 4096-character cap as
+/// everything else, so the payload budget leaves room for the line prefixes.
+const MAX_FRAME_CONTENT_CHARS: usize = 3500;
 
 /// Kinds that mean the model's picture of the server is stale: these wake a turn.
 const SIGNIFICANT_KINDS: [&str; 5] = [
@@ -128,6 +134,7 @@ pub(crate) fn validate_entries(data: &Value) -> anyhow::Result<NotificationBatch
     );
     let mut lines = Vec::with_capacity(entries.len());
     let mut all_significant = true;
+    let mut content_chars = 0;
     for entry in entries {
         let server = bounded_str(entry, "server", MAX_SERVER_CHARS)?;
         let kind = bounded_str(entry, "kind", 32)?;
@@ -152,11 +159,41 @@ pub(crate) fn validate_entries(data: &Value) -> anyhow::Result<NotificationBatch
         } else {
             String::new()
         };
-        let detail = if summary.is_empty() {
+        let mut detail = if summary.is_empty() {
             format!("[{server}] {kind}{suffix}")
         } else {
             format!("[{server}] {kind}: {summary}{suffix}")
         };
+        // A changed resource may carry the content the harness read for the
+        // model; only `resource_updated` may, and only within the frame budget.
+        let content = entry
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            content.chars().count() <= MAX_ENTRY_CONTENT_CHARS,
+            "mcp.notification content is over {MAX_ENTRY_CONTENT_CHARS} characters"
+        );
+        anyhow::ensure!(
+            content.is_empty() || kind == "resource_updated",
+            "only a resource_updated entry carries content"
+        );
+        if !content.is_empty() {
+            let remaining = MAX_FRAME_CONTENT_CHARS.saturating_sub(content_chars);
+            if remaining == 0 {
+                detail.push_str("\n…(content truncated)");
+            } else if content.chars().count() <= remaining {
+                detail.push('\n');
+                detail.push_str(content);
+                content_chars += content.chars().count();
+            } else {
+                let clipped: String = content.chars().take(remaining).collect();
+                detail.push('\n');
+                detail.push_str(&clipped);
+                detail.push_str("\n…(content truncated)");
+                content_chars = MAX_FRAME_CONTENT_CHARS;
+            }
+        }
         lines.push(detail);
     }
     Ok(NotificationBatch {
@@ -290,6 +327,69 @@ mod tests {
             vec![McpUsageKind::Notification, McpUsageKind::Notification],
             "accepted frames count; the refused frame does not"
         );
+    }
+
+    /// A `resource_updated` entry carries the content the harness read for
+    /// the model: the row shows it, so the model never has to call
+    /// `mcp.read_resource` for an update it was told about.
+    #[tokio::test]
+    async fn a_resource_update_carries_the_harness_content() {
+        let (steered, _rowed, result) = run_frame(json!({
+            "entries": [{
+                "server": "svc",
+                "kind": "resource_updated",
+                "summary": "file:///a",
+                "content": "line one\nline two"
+            }]
+        }))
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(steered.len(), 1, "a resource update steers (it wakes)");
+        assert_eq!(
+            steered[0].content,
+            UserContent::Text("[svc] resource_updated: file:///a\nline one\nline two".to_string())
+        );
+    }
+
+    /// Content is only for `resource_updated`: another kind carrying it is a
+    /// frame this host refuses.
+    #[tokio::test]
+    async fn content_on_another_kind_is_refused() {
+        let (steered, rowed, result) = run_frame(json!({
+            "entries": [{ "server": "svc", "kind": "logging", "summary": "x", "content": "y" }]
+        }))
+        .await;
+        assert!(result.is_err());
+        assert!(steered.is_empty() && rowed.is_empty());
+    }
+
+    /// Oversized content never reaches a row.
+    #[tokio::test]
+    async fn oversized_content_is_refused() {
+        let oversized = "x".repeat(MAX_ENTRY_CONTENT_CHARS + 1);
+        let (steered, rowed, result) = run_frame(json!({
+            "entries": [{ "server": "svc", "kind": "resource_updated", "summary": "u", "content": oversized }]
+        }))
+        .await;
+        assert!(result.is_err());
+        assert!(steered.is_empty() && rowed.is_empty());
+    }
+
+    /// The frame's content budget clips with a visible marker and the row stays
+    /// inside the shared character cap.
+    #[tokio::test]
+    async fn the_frame_content_budget_clips_visibly() {
+        let long = "y".repeat(MAX_ENTRY_CONTENT_CHARS);
+        let (steered, _rowed, result) = run_frame(json!({
+            "entries": [{ "server": "svc", "kind": "resource_updated", "summary": "u", "content": long }]
+        }))
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        let UserContent::Text(text) = &steered[0].content else {
+            panic!("a text row");
+        };
+        assert!(text.ends_with("…(content truncated)"), "{}", text.len());
+        assert!(text.chars().count() <= MAX_CONTENT_CHARS);
     }
 
     #[tokio::test]

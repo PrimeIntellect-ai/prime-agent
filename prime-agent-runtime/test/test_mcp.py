@@ -1952,5 +1952,84 @@ class McpNotificationCallbackContractTest(unittest.TestCase):
         )
 
 
+class McpResourceUpdateInjectionTest(unittest.TestCase):
+    """The harness reads a subscribed resource's update and forwards its text.
+
+    The model must not have to call `mcp.read_resource` for an update it was
+    told about: the forwarded entry itself carries the content.
+    """
+
+    def generation(self, session, subscribed=("file:///a",)):
+        generation = mcp._Generation(
+            "svc",
+            {"type": "http", "url": "https://example.test/mcp"},
+            subscribed=set(subscribed),
+        )
+        generation.stack = FakeStack()
+        generation.session = session
+        generation._schedule_forward = lambda: None
+        return generation
+
+    def deliver_update(self, generation, uri="file:///a"):
+        async def scenario():
+            await generation._on_message(
+                SimpleNamespace(
+                    method="notifications/resources/updated",
+                    params=SimpleNamespace(uri=uri),
+                )
+            )
+            task = generation._refreshing.get(uri)
+            if task is not None:
+                await task
+
+        run(scenario())
+
+    def session(self, contents):
+        return _resources_session(contents=contents)
+
+    def test_a_subscribed_update_carries_the_resource_text(self):
+        session = self.session(
+            [SimpleNamespace(uri="file:///a", mime_type="text/plain", text="hello")]
+        )
+        generation = self.generation(session)
+        self.deliver_update(generation)
+        entries = generation.notifications.snapshot()["notifications"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], mcp_notify.RESOURCE_UPDATED)
+        self.assertEqual(entries[0]["content"], "hello")
+        self.assertEqual(session.read_uris, ["file:///a"])
+
+    def test_an_unsubscribed_update_is_not_read(self):
+        session = self.session(
+            [SimpleNamespace(uri="file:///a", mime_type="text/plain", text="hello")]
+        )
+        generation = self.generation(session, subscribed=())
+        self.deliver_update(generation)
+        entries = generation.notifications.snapshot()["notifications"]
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn("content", entries[0])
+        self.assertEqual(session.read_uris, [])
+
+    def test_oversized_content_is_truncated(self):
+        big = "x" * 5000
+        session = self.session(
+            [SimpleNamespace(uri="file:///a", mime_type="text/plain", text=big)]
+        )
+        generation = self.generation(session)
+        self.deliver_update(generation)
+        content = generation.notifications.snapshot()["notifications"][0]["content"]
+        self.assertTrue(content.endswith("(truncated)"), content[-40:])
+        self.assertLessEqual(len(content), mcp._MAX_INJECTED_CHARS + len("\n…(truncated)"))
+
+    def test_a_failed_read_still_reports_the_update(self):
+        session = self.session(
+            [SimpleNamespace(uri="file:///a", mime_type="", text=None, blob=None)]
+        )
+        generation = self.generation(session)
+        self.deliver_update(generation)
+        content = generation.notifications.snapshot()["notifications"][0]["content"]
+        self.assertIn("could not be read", content)
+
+
 if __name__ == "__main__":
     unittest.main()
