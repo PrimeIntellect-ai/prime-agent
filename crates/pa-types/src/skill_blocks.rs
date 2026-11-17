@@ -58,6 +58,50 @@ pub fn parse_skill_block(text: &str) -> Option<ParsedSkillBlock> {
     }
 }
 
+/// The prefix of a skill reference in user text.
+pub const SKILL_REFERENCE_PREFIX: &str = "/skill:";
+
+/// The skill names a message references as `/skill:<name>`, in first-use
+/// order, each once. A reference stands as its own word (start or
+/// whitespace before, end or whitespace after) and its name holds only
+/// skill-name characters, so an attached path (`/skill:x/SKILL.md`) or
+/// trailing punctuation is no reference; text inside triple-backtick fences
+/// or inline code spans never references.
+#[must_use]
+pub fn skill_references(text: &str) -> Vec<&str> {
+    let mut names: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    let mut in_inline_code = false;
+    let mut at_word_start = true;
+    let mut chars = text.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        let rest = &text[index..];
+        if rest.starts_with("```") {
+            in_fence = !in_fence;
+            // The fence's other two backticks.
+            chars.nth(1);
+            at_word_start = false;
+            continue;
+        }
+        if ch == '`' && !in_fence {
+            in_inline_code = !in_inline_code;
+        } else if at_word_start && !in_fence && !in_inline_code {
+            if let Some(after) = rest.strip_prefix(SKILL_REFERENCE_PREFIX) {
+                let token = after.split(char::is_whitespace).next().unwrap_or_default();
+                let is_name = !token.is_empty()
+                    && token
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                if is_name && !names.contains(&token) {
+                    names.push(token);
+                }
+            }
+        }
+        at_word_start = ch.is_whitespace();
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

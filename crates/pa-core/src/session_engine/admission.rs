@@ -83,14 +83,14 @@ impl AgentSession {
         let expand = options.expand_prompt_templates.unwrap_or(true);
         // TS `_finishSubmissionNormalization` order: skill commands expand first, prompt templates
         // second; both are gated by the same policy flag.
-        let (normalized, used_skill) = if expand {
-            let (skill_expanded, used_skill) =
+        let (normalized, used_skills) = if expand {
+            let (skill_expanded, used_skills) =
                 crate::skills::expand_skill_command(text, &self.skills);
             let normalized =
                 crate::skills::expand_prompt_template(&skill_expanded, &self.prompt_templates);
-            (normalized, used_skill)
+            (normalized, used_skills)
         } else {
-            (text.to_string(), None)
+            (text.to_string(), Vec::new())
         };
 
         if let Some(command) = parse_session_command(&self.slash_commands, &normalized) {
@@ -104,7 +104,7 @@ impl AgentSession {
         // once. A pre-expanded block (the daemon emits the accepted row
         // before admission) counts here too — the block parse carries the
         // skill identity.
-        let skill_used = used_skill.is_some()
+        let skill_used = !used_skills.is_empty()
             || pa_types::skill_blocks::parse_skill_block(&normalized)
                 .is_some_and(|block| self.skills.iter().any(|skill| skill.name == block.name));
         if skill_used {
