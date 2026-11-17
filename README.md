@@ -66,11 +66,6 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
-## Terminal program status (OSC 7501)
-
-Terminals that support OSC 7501 (the Program Status Protocol, such as Rex) can show what Prime Agent is doing in another tab or window. Prime Agent asks the terminal once at startup whether it supports the protocol, and writes a report only when the terminal answers. Terminals that do not answer get nothing new.
-
-A chat reports `working` for the whole agent run (including tool steps and a pending provider retry), `done` when the run ends normally, `error` when it fails for good, and `idle` at rest or after an interrupt. On exit Prime Agent sends nothing: the terminal keeps the last record, as the protocol asks.
 ## Getting Started
 
 Start Prime Agent from the repository or directory you want it to work in:
