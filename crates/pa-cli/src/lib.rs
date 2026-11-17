@@ -335,26 +335,8 @@ fn run_runtime_bootstrap() -> Result<i32, String> {
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    // The prewarm set is the session's set: the same resource resolution a
-    // session runs selects the skills, so a user override of a bundled skill,
-    // `enableBuiltinSkills: false`, and the web-search key gate keep the
-    // bundled package out of the venv (uv would otherwise leave both
-    // distributions installed and import the bundled one). A resolution
-    // failure only skips the prewarm; the first session retries it.
-    let python_skills = match prewarm_python_skills() {
-        Ok(skills) => skills,
-        Err(error) => {
-            eprintln!(
-                "Warning: skill prewarm skipped; the first session installs its skills: {error:#}"
-            );
-            Vec::new()
-        }
-    };
     match runtime.block_on(pa_core::kernel::ensure_kernel_python(
-        pa_core::kernel::EnsureKernelPythonOptions {
-            python_skills,
-            ..Default::default()
-        },
+        pa_core::kernel::EnsureKernelPythonOptions::default(),
     )) {
         Ok(python) => {
             println!("kernel python: {}", python.display());
@@ -362,51 +344,6 @@ fn run_runtime_bootstrap() -> Result<i32, String> {
         }
         Err(error) => Err(format!("{error:#}")),
     }
-}
-
-/// The Python skills the install-time prewarm installs: the session's
-/// selection, resolved exactly the way `prime-agent prompt` resolves it
-/// (settings, auto-discovery, and MCP gating). Project-scope Python skills
-/// stay out of this set: the loader demotes them to markdown, so the
-/// prewarm never installs repository code.
-fn prewarm_python_skills() -> anyhow::Result<Vec<pa_core::kernel::KernelPythonSkill>> {
-    let agent_dir = crate::config::get_agent_dir();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-    let (skill_overrides, _generic_servers) = mcp_gating(&settings, &agent_dir);
-    let resources =
-        pa_core::resources::load_resources(pa_core::resources::ResourceLoaderOptions {
-            extra_builtin_skill_overrides: skill_overrides,
-            system_prompt: None,
-            ..pa_core::resources::ResourceLoaderOptions::new(cwd, agent_dir)
-        })?;
-    Ok(pa_core::session_engine::runtime_wiring::kernel_python_skills(&resources.skills))
-}
-
-/// User/global MCP gating for resource resolution: `-<server>/SKILL.md`
-/// overrides for built-in integrations the user is not logged into, plus the
-/// enabled persistent generic servers. The prompt dump and the install-time
-/// prewarm share one resolution shape.
-fn mcp_gating(
-    settings: &pa_core::settings::SettingsManager,
-    agent_dir: &std::path::Path,
-) -> (Vec<String>, Vec<String>) {
-    // MCP execution is user/global only, matching TS getGlobalMcpServers.
-    let user_servers = settings
-        .global_settings()
-        .mcp_servers
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(server, config)| {
-            serde_json::from_value(config)
-                .ok()
-                .map(|parsed| (server, parsed))
-        })
-        .collect::<std::collections::HashMap<String, pa_core::mcp::McpServerConfig>>();
-    let (skill_overrides, generic_servers, _manager) =
-        pa_core::mcp::McpManager::prompt_gating(user_servers, agent_dir);
-    (skill_overrides, generic_servers)
 }
 
 /// Run the daemon session-worker runtime (the process the supervisor spawns

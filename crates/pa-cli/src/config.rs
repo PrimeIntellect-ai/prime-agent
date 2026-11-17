@@ -59,7 +59,7 @@ pub fn version() -> &'static str {
 /// The packaged package-dir (`PI_PACKAGE_DIR` wins, else the directory of
 /// the executable, launcher symlinks resolved through pa-core's
 /// `exe_dir_of`).
-pub(crate) fn package_dir() -> PathBuf {
+fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
             return expand_tilde_path(&env_dir);
