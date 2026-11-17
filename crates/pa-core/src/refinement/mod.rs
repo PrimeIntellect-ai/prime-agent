@@ -133,6 +133,35 @@ pub fn get_harness_state_path(harness_state_dir: &Path) -> PathBuf {
     harness_state_dir.join("harness_state.json")
 }
 
+/// The file a harness-state writer must lock and write: the state file
+/// resolved through file symlinks. The kernel resolves the same way for
+/// both halves (`harness.py`'s `_locked` locks `realpath(state).lock`,
+/// its save replaces the real file and leaves aliases in place), so a
+/// file symlink at `harness_state.json` names the real file behind it —
+/// locking or renaming the alias would miss the kernel's lock entirely
+/// and replace the link itself. Every other spelling stays as given: a
+/// missing or regular file, or a symlinked parent directory (the OS
+/// resolves those on `mkdir` and rename).
+pub(crate) fn resolved_state_file(state_path: &Path) -> PathBuf {
+    let mut current = state_path.to_path_buf();
+    // Follow a chain of file links the way `realpath` does; the bound
+    // mirrors the OS's own ELOOP guard against cyclic links.
+    for _ in 0..40 {
+        let Ok(target) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = if target.is_absolute() {
+            target
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        };
+    }
+    current
+}
+
 /// The settings file the factory opt-in gate reads: the agent dir's
 /// settings.json, the same document the kernel-side gate resolves through
 /// `PRIME_AGENT_CODING_AGENT_DIR` (the host exports the session's agent
@@ -281,7 +310,9 @@ pub fn save_harness_state(
     state: &HarnessState,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(harness_state_dir)?;
-    let state_path = get_harness_state_path(harness_state_dir);
+    // Replace the real file behind a state symlink, never the alias: the
+    // link survives and both writers keep naming one file.
+    let state_path = resolved_state_file(&get_harness_state_path(harness_state_dir));
     let content = format!("{}\n", serde_json::to_string_pretty(state)?);
     crate::settings::storage::atomic_write_with(
         &state_path,
@@ -312,7 +343,9 @@ pub(crate) fn try_update_harness_state<R>(
     update: impl FnOnce(&mut HarnessState) -> anyhow::Result<R>,
 ) -> anyhow::Result<(R, PathBuf)> {
     std::fs::create_dir_all(harness_state_dir)?;
-    let state_path = get_harness_state_path(harness_state_dir);
+    // Lock the file the kernel locks: the real file behind a state
+    // symlink, so both writers contend on one lock directory.
+    let state_path = resolved_state_file(&get_harness_state_path(harness_state_dir));
     let lock = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
         &state_path,
         std::time::Duration::from_secs(10),

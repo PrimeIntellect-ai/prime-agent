@@ -32,7 +32,6 @@ pub struct SessionCommandParams<'a> {
     pub model: &'a pa_types::ai::Model,
     /// Resolved API key (None falls back to provider resolution).
     pub api_key: Option<String>,
-    pub global_harness_dir: std::path::PathBuf,
     pub autonomous: &'a mut AutonomousRuntimeState,
 }
 
@@ -292,7 +291,6 @@ fn execute_refine(
         RefinementSource::User,
         params.model.clone(),
         params.api_key.take(),
-        params.global_harness_dir.clone(),
     ));
     Ok(())
 }
@@ -530,7 +528,6 @@ mod tests {
             &mut SessionCommandParams {
                 model: &scripted_model(),
                 api_key: None,
-                global_harness_dir: std::path::PathBuf::from("/tmp"),
                 autonomous: &mut autonomous,
             },
             &command("autonomous", "on --max-turns 5"),

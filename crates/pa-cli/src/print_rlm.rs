@@ -368,7 +368,6 @@ pub(crate) async fn drive_to_quiescence(
     boundary: &mut TurnBoundary,
     model: &Model,
     api_key: Option<String>,
-    global_harness_dir: std::path::PathBuf,
 ) -> Result<bool, String> {
     let mut drained = false;
     loop {
@@ -396,7 +395,7 @@ pub(crate) async fn drive_to_quiescence(
                 .map_err(|error| format!("{error:#}"))?;
             agent.wait_for_idle().await;
             boundary
-                .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+                .run_at_settled_turn(engine, model, api_key.clone())
                 .await?;
             drained = true;
             continue;
@@ -421,9 +420,6 @@ pub(crate) async fn drive_to_quiescence(
 /// keep listening — a settled child re-runs on a later message until it
 /// is disposed or deleted (TS `child.isSessionActive`).
 async fn drive_child(child: Arc<InlineChild>) {
-    let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(
-        &child.node.recipe.options.config.agent_dir,
-    );
     loop {
         let mut boundary = TurnBoundary::new(/*json_mode*/ false);
         let run_error = drive_to_quiescence(
@@ -432,7 +428,6 @@ async fn drive_child(child: Arc<InlineChild>) {
             &mut boundary,
             &child.model,
             child.api_key.clone(),
-            global_harness_dir.clone(),
         )
         .await
         .err();

@@ -27,7 +27,7 @@ pub struct RpcOptions {
     pub engine_factory: Option<RpcEngineFactory>,
     /// The session's cwd (the engine replacement reads it).
     pub cwd: std::path::PathBuf,
-    /// The agent dir (model registry auth, refinement history).
+    /// The agent dir (model registry auth).
     pub agent_dir: std::path::PathBuf,
     /// The CLI autonomous flags seeding the host-owned autonomous state (`None` starts disabled).
     pub autonomous_config: Option<pa_core::autonomous::AgentAutonomousConfig>,
