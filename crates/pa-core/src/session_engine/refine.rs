@@ -489,6 +489,31 @@ pub(crate) async fn prepare_refinement(
         HarnessScope::Global => stores.global_dir.clone(),
         HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
+    // A rollback must land in the store its target actually wrote, named
+    // by the recorded `harness_state_path`. A mismatch means the record
+    // predates the store split (the orphan agent-dir file, the shared
+    // sessions-root file) or belongs to another session; applying the
+    // inverse to the current store would edit entries the refinement
+    // never touched, so refuse and name both files.
+    if let Some(rollback_id) = &core_options.rollback_id {
+        if let Some(recorded) = history
+            .iter()
+            .find(|item| &item.id == rollback_id)
+            .map(|item| item.harness_state_path.clone())
+            .filter(|recorded| !recorded.is_empty())
+        {
+            let current = crate::refinement::get_harness_state_path(&target_dir);
+            if Path::new(&recorded) != current {
+                anyhow::bail!(
+                    "Refinement {rollback_id} was recorded against the harness store {recorded}, \
+                     not this session's current store {}; the recorded file predates the store \
+                     split and is no longer read, so the rollback is refused — remove or edit the \
+                     entry by hand in the current store if it was merged there",
+                    current.display()
+                );
+            }
+        }
+    }
     Ok(ReadyRefinement {
         plan,
         core_options,
@@ -1855,6 +1880,131 @@ Reviewer instructions: record it"
         let global_state = load_harness_state(&global_dir, HarnessScope::Global);
         assert!(
             !global_state.entries[&crate::refinement::RefinementKind::Memory].contains_key("g1")
+        );
+    }
+
+    /// A rollback whose target recorded a different harness store than the
+    /// session's current one — a pre-split record (the old session-dir or
+    /// orphan agent-dir file) or another session's store — refuses and
+    /// names both files instead of applying the inverse to a store the
+    /// refinement never touched.
+    #[tokio::test]
+    async fn a_rollback_recorded_against_another_store_refuses_and_names_both() {
+        let dir = TempDir::new().unwrap();
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let global_dir = dir.path().join("harness");
+        // The pre-upgrade local record: the session dir's harness store,
+        // the derivation this change replaced.
+        let legacy_local_store = dir.path().join("session").join("harness");
+        let legacy_local = RefinementResult {
+            id: "refine_legacy_local".to_string(),
+            summary: "legacy local".to_string(),
+            rationale: "legacy".to_string(),
+            expected_outcome: "legacy".to_string(),
+            applied_edits: vec![],
+            harness_state_path: crate::refinement::get_harness_state_path(&legacy_local_store)
+                .display()
+                .to_string(),
+            rollback_of: None,
+            scope: Some(HarnessScope::Local),
+        };
+        // The pre-upgrade global record: the orphan file directly in the
+        // agent dir.
+        let legacy_global_store = dir.path().join("agent").join("harness_state.json");
+        let legacy_global = RefinementResult {
+            id: "refine_legacy_global".to_string(),
+            summary: "legacy global".to_string(),
+            rationale: "legacy".to_string(),
+            expected_outcome: "legacy".to_string(),
+            applied_edits: vec![],
+            harness_state_path: legacy_global_store.display().to_string(),
+            rollback_of: None,
+            scope: Some(HarnessScope::Global),
+        };
+        let rollback = |rollback_id: &str, global: bool| RefineOptions {
+            global,
+            rollback_id: Some(rollback_id.to_string()),
+            ..Default::default()
+        };
+        // The local arm: the current store is the session's artifact dir.
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: std::slice::from_ref(&legacy_local),
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &rollback("refine_legacy_local", false),
+            RefinementSource::User,
+            seam("unused"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(&legacy_local.harness_state_path),
+            "the refusal names the recorded store: {error:#}"
+        );
+        assert!(
+            error.to_string().contains(
+                crate::refinement::get_harness_state_path(&local_dir)
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "the refusal names the current store: {error:#}"
+        );
+        assert!(
+            !local_dir.join("harness_state.json").exists(),
+            "the refusal happens before any write to the current store"
+        );
+        // The global arm: the current store is the agent dir's harness
+        // dir, not the orphan file beside it.
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: std::slice::from_ref(&legacy_global),
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &rollback("refine_legacy_global", true),
+            RefinementSource::User,
+            seam("unused"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&legacy_global.harness_state_path),
+            "the refusal names the recorded store: {error:#}"
+        );
+        assert!(
+            error.to_string().contains(
+                crate::refinement::get_harness_state_path(&global_dir)
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "the refusal names the current store: {error:#}"
+        );
+        assert!(
+            !global_dir.join("harness_state.json").exists(),
+            "the refusal happens before any write to the current store"
         );
     }
 }
