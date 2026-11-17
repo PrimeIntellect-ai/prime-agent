@@ -90,6 +90,7 @@ impl SessionUi {
             || view.goal_panel.is_some()
             || view.bash_view.is_some()
             || view.info_panel.is_some()
+            || view.builds_panel.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -366,6 +367,9 @@ impl SessionUi {
         }
         if view.info_panel.is_some() {
             return self.handle_info_panel_key(key, view);
+        }
+        if view.builds_panel.is_some() {
+            return self.handle_builds_panel_key(key, view);
         }
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -781,6 +785,13 @@ impl SessionUi {
                 self.dirty = true;
                 return Ok(());
             }
+            if kb.matches(&id, "app.builds.toggle") {
+                if view.builds_panel.take().is_none() {
+                    view.builds_panel = Some(crate::builds_view::BuildsPanel::default());
+                }
+                self.dirty = true;
+                return Ok(());
+            }
         }
         {
             let (older, newer, earlier, later) = {
@@ -971,9 +982,10 @@ pub(crate) fn opening_echo_key_claimed(
     // The always-fire arms: the transcript viewport, the image paste, the
     // escape ladder, the interrupt family, suspend, the model picker and
     // cycles, the detail cycle, the dock focus, the external editor, the
-    // stash, the session-level commands, the queue browse, and the
-    // follow-up key.
-    if kb.matches(id, "tui.viewport.pageUp")
+    // stash, the session-level commands, the queue browse, the builds
+    // toggle, and the follow-up key.
+    if kb.matches(id, "app.builds.toggle")
+        || kb.matches(id, "tui.viewport.pageUp")
         || kb.matches(id, "tui.viewport.pageDown")
         || kb.matches(id, "tui.viewport.top")
         || kb.matches(id, "tui.viewport.follow")
@@ -1091,6 +1103,21 @@ mod opening_echo_claim_tests {
                 "{id} with a draft is the editor's paragraph motion"
             );
         }
+    }
+
+    /// ctrl+alt+b (the builds toggle) is claimed with or without a draft:
+    /// it shares nothing with the editor's ctrl+b cursor-left motion.
+    #[test]
+    fn builds_toggle_claimed_regardless_of_draft() {
+        let kb = KeybindingsManager::new();
+        assert!(
+            opening_echo_key_claimed(&kb, "ctrl+alt+b", &editor_with("")),
+            "ctrl+alt+b on the empty editor toggles the builds panel"
+        );
+        assert!(
+            opening_echo_key_claimed(&kb, "ctrl+alt+b", &editor_with("draft")),
+            "ctrl+alt+b with a draft still toggles the builds panel"
+        );
     }
 
     /// The plain typing keys the opening loop echoes (space, backspace,

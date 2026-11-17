@@ -464,4 +464,8 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.tree.filter.cycleBackward",
         def!(&["shift+ctrl+o"], "Tree filter: cycle backward"),
     ),
+    (
+        "app.builds.toggle",
+        def!(&["ctrl+alt+b"], "Toggle the builds panel"),
+    ),
 ];

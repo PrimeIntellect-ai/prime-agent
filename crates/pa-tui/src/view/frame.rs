@@ -104,6 +104,16 @@ impl AgentView {
                 info_viewport_rows,
             ));
             Some(dock)
+        } else if let Some(panel) = self.builds_panel.as_mut() {
+            let mut dock = prompt_context;
+            dock.extend(panel.render(
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+                &self.builds,
+                info_viewport_rows,
+            ));
+            Some(dock)
         } else {
             None
         };
@@ -285,6 +295,7 @@ impl AgentView {
             || self.goal_panel.is_some()
             || self.bash_view.is_some()
             || self.info_panel.is_some()
+            || self.builds_panel.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()

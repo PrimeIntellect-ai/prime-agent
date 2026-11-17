@@ -588,6 +588,8 @@ impl SessionUi {
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
             view.info_panel = None;
+            view.builds_panel = None;
+            view.builds = crate::builds_view::BuildsState::default();
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }

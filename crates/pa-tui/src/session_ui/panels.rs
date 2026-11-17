@@ -354,6 +354,32 @@ impl SessionUi {
         Ok(())
     }
 
+    /// The builds panel owns the frame while open: the toggle, close and
+    /// back keys dismiss it, the navigation keys scroll the tree window,
+    /// every other key is consumed.
+    pub(super) fn handle_builds_panel_key(
+        &mut self,
+        key: KeyEvent,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        // The panel consumes Ctrl+C (close, not exit); report it so the force-quit
+        // guard can disarm.
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        if view.builds_panel.as_mut().is_some_and(|panel| {
+            panel.handle_key(&id, view.editor.keybindings())
+                == crate::builds_view::BuildsPanelAction::Close
+        }) {
+            view.builds_panel = None;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// The activity dock follows the scoped heartbeat catalog (the tray no
     /// longer carries a heartbeat count beside the model name).
     pub(crate) fn sync_activity_dock(&mut self, view: &mut AgentView) {

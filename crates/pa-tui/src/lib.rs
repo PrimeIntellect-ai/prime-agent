@@ -37,6 +37,7 @@ pub mod bash_card;
 pub mod bash_view;
 pub(crate) mod branch;
 pub(crate) mod browser;
+pub mod builds_view;
 pub mod chat;
 pub mod chat_slash;
 mod choice_picker;
