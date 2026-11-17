@@ -494,7 +494,11 @@ pub(crate) async fn prepare_refinement(
     // predates the store split (the orphan agent-dir file, the shared
     // sessions-root file) or belongs to another session; applying the
     // inverse to the current store would edit entries the refinement
-    // never touched, so refuse and name both files.
+    // never touched, so refuse and name both files. The recorded path is
+    // the raw join `save_harness_state` returned, so the same store can
+    // carry two spellings (a symlinked or relative dir): compare the
+    // real files, keeping a spelling only when that side no longer
+    // exists on disk.
     if let Some(rollback_id) = &core_options.rollback_id {
         if let Some(recorded) = history
             .iter()
@@ -503,12 +507,16 @@ pub(crate) async fn prepare_refinement(
             .filter(|recorded| !recorded.is_empty())
         {
             let current = crate::refinement::get_harness_state_path(&target_dir);
-            if Path::new(&recorded) != current {
+            let recorded_store = crate::skills::loader::canonicalize_path(Path::new(&recorded));
+            let current_store = crate::skills::loader::canonicalize_path(&current);
+            if recorded_store != current_store {
                 anyhow::bail!(
                     "Refinement {rollback_id} was recorded against the harness store {recorded}, \
-                     not this session's current store {}; the recorded file predates the store \
-                     split and is no longer read, so the rollback is refused — remove or edit the \
-                     entry by hand in the current store if it was merged there",
+                     not this session's current store {}; the rollback is refused rather than \
+                     edit a store the refinement never touched. The recorded store is either a \
+                     pre-split file nothing reads anymore or another session's store (a fork \
+                     inherits its parent's records): edit or remove the entry by hand in the \
+                     recorded store, or roll the refinement back from the session that wrote it",
                     current.display()
                 );
             }
@@ -2010,6 +2018,19 @@ Reviewer instructions: record it"
             ),
             "the refusal names the current store: {error:#}"
         );
+        // The refusal stays true for both mismatch kinds: it names
+        // another session's store (the fork-copied record) and drops
+        // the pre-split-only claim that was false for that case.
+        assert!(
+            error.to_string().contains("another session's store"),
+            "the refusal covers the fork-copied record: {error:#}"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("predates the store split and is no longer read"),
+            "no claim that every recorded file predates the split: {error:#}"
+        );
         assert!(
             !local_dir.join("harness_state.json").exists(),
             "the refusal happens before any write to the current store"
@@ -2053,6 +2074,83 @@ Reviewer instructions: record it"
         assert!(
             !global_dir.join("harness_state.json").exists(),
             "the refusal happens before any write to the current store"
+        );
+    }
+
+    /// A rollback whose record spells the current store through a symlink
+    /// still applies: the recorded `harness_state_path` is the raw join
+    /// `save_harness_state` returned, so one store can carry two spellings
+    /// (a symlinked dir — the macOS `$TMPDIR` shape — or a relative one),
+    /// and the guard compares the real files, not the path strings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rollback_recorded_through_a_re_spelled_store_still_applies() {
+        let dir = TempDir::new().unwrap();
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let global_dir = dir.path().join("harness");
+        // A real create through the session's own store.
+        let reply = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+        let result = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+            None,
+        )
+        .await
+        .unwrap();
+        // The same store re-spelled through a symlink, the shape a
+        // differently-resolved dir records.
+        let linked_store = dir.path().join("linked-store");
+        std::os::unix::fs::symlink(&local_dir, &linked_store).unwrap();
+        let mut record = result;
+        record.harness_state_path = crate::refinement::get_harness_state_path(&linked_store)
+            .display()
+            .to_string();
+        let rolled = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: std::slice::from_ref(&record),
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &RefineOptions {
+                rollback_id: Some(record.id.clone()),
+                ..Default::default()
+            },
+            RefinementSource::User,
+            seam("unused"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rolled.rollback_of.as_deref(),
+            Some(record.id.as_str()),
+            "the re-spelled record still rolls back: {rolled:#?}"
+        );
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
+        assert!(
+            !state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+            "the inverse Delete landed in the session's own store"
         );
     }
 }
