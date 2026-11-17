@@ -208,17 +208,6 @@ pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult
         .collect()
 }
 
-/// Merged cross-session + in-session refinement history.
-#[must_use]
-pub fn load_refinement_history(
-    session: &SessionManager,
-    stores: &RefinementStores,
-) -> Vec<RefinementResult> {
-    let global = load_global_refinement_history(&stores.global_dir);
-    let session_entries = session.refinement_history();
-    crate::refinement::merge_refinement_history(&global, &session_entries)
-}
-
 /// The refinement stores, the same directory pair the kernel reads and the
 /// harness digest renders: the global under the agent dir's harness path,
 /// the local in the session's own artifact state. Refinement paths derive
@@ -455,13 +444,8 @@ pub(crate) async fn prepare_refinement(
     // (the digest context's `local_dir`): the per-session artifact store the
     // kernel and the digest read. Sessions without one — a pathless session —
     // refuse rather than write a store no digest ever shows.
-    if options.rollback_id.is_none()
-        && requested_scope == HarnessScope::Local
-        && local_harness_dir.is_none()
-    {
-        anyhow::bail!(
-            "Local harness refinement requires the session's harness state directory; use global refinement instead."
-        );
+    if options.rollback_id.is_none() && requested_scope == HarnessScope::Local {
+        local_store_dir(local_harness_dir.as_deref())?;
     }
     // Planning state: global, or merged global+local for local refinements.
     let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
@@ -518,11 +502,15 @@ pub(crate) async fn prepare_refinement(
 
 /// The local store dir for a scope that resolved local: a session without
 /// one cannot apply or roll back a local refinement, so it refuses rather
-/// than write a store no digest ever shows.
+/// than write a store no digest ever shows. The refusal keeps the TS
+/// wording (v0.9.8 `agent-session.ts`): it names the user's real next step,
+/// not the internal path the session lacks.
 fn local_store_dir(local_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
-    local_dir
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow::anyhow!("Local harness refinement requires the session's harness state directory; use global refinement instead."))
+    local_dir.map(Path::to_path_buf).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Local harness refinement requires a persisted session; use global refinement instead."
+        )
+    })
 }
 
 type RefinementCommitGuards<'a> = (
@@ -1161,6 +1149,17 @@ mod tests {
         session
     }
 
+    /// The local store a production session's digest context carries for a
+    /// materialized manager: the session's own artifact harness dir
+    /// (`<dir>/session-artifacts/<id>/harness`), the derivation
+    /// `create_session` wires — not the session dir itself.
+    fn local_store_for(manager: &SessionManager) -> PathBuf {
+        crate::refinement::get_local_harness_state_dir(
+            manager.get_session_artifact_dir().as_deref(),
+        )
+        .expect("a materialized manager always has an artifact dir")
+    }
+
     fn user_message(text: &str) -> AgentMessage {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
@@ -1176,6 +1175,7 @@ mod tests {
         manager
             .append_message(user_message("remember this"))
             .unwrap();
+        let local_dir = local_store_for(&manager);
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
@@ -1193,7 +1193,7 @@ mod tests {
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1214,7 +1214,7 @@ mod tests {
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1233,12 +1233,80 @@ mod tests {
             session.lock().await.retained_entries(),
             entries_before.as_slice()
         );
-        let session_guard = session.lock().await;
-        let local_dir =
-            crate::refinement::get_local_harness_state_dir(Some(session_guard.get_session_dir()))
-                .expect("session dir always yields a local harness dir");
         assert!(!local_dir.join("harness_state.json").exists());
         assert!(!global_dir.exists());
+    }
+
+    /// A local refinement on a session without a local store refuses with the
+    /// TS wording (v0.9.8's persisted-session message) before any planner call.
+    #[tokio::test]
+    async fn a_local_refinement_without_a_local_store_refuses_with_the_ts_message() {
+        let dir = TempDir::new().unwrap();
+        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &RefinementStores {
+                global_dir: dir.path().join("harness"),
+                local_dir: None,
+            },
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            Box::new(|_, _, _| panic!("a refused local refinement must not call the planner")),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Local harness refinement requires a persisted session; use global refinement instead."
+        );
+    }
+
+    /// A session built without a harness digest context (`AgentSession::new`
+    /// is the only such constructor) refuses at the refinement entry points
+    /// instead of guessing a store pair.
+    #[tokio::test]
+    async fn a_session_without_a_digest_context_refuses_refinements() {
+        let dir = TempDir::new().unwrap();
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let session = AgentSession::new(agent, persisted_session(&dir), Vec::new())
+            .await
+            .unwrap();
+        let error = session
+            .refine_with_refiner(
+                &RefineOptions::default(),
+                RefinementSource::User,
+                &test_model(),
+                seam(r#"{"summary":"bench","edits":[]}"#),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "refinement requires the session's harness digest context; this session was built without one"
+        );
+        // The background funnel refuses the same way.
+        let error = session
+            .start_refinement(
+                RefineOptions::default(),
+                RefinementSource::User,
+                test_model(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "refinement requires the session's harness digest context; this session was built without one"
+        );
     }
 
     #[test]
@@ -1328,7 +1396,9 @@ Reviewer instructions: record it"
         // is off, the edit refuses with the one exact disabled message
         // and nothing persists; enabled, the same proposal applies.
         let dir = TempDir::new().unwrap();
-        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
@@ -1341,7 +1411,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1356,10 +1426,7 @@ Reviewer instructions: record it"
             disabled.applied_edits[0].error.as_deref(),
             Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
         );
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
         // The user opts in: the same proposal applies, read live from the
         // agent dir's settings.json.
@@ -1379,7 +1446,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1391,7 +1458,7 @@ Reviewer instructions: record it"
         .unwrap();
         assert!(enabled.applied_edits[0].applied);
         assert!(enabled.applied_edits[0].error.is_none());
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].contains_key("sweep"));
     }
 
@@ -1405,7 +1472,9 @@ Reviewer instructions: record it"
         // persists, and a plan authored while disabled that lands after
         // the opt-in applies.
         let dir = TempDir::new().unwrap();
-        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let agent_dir = dir.path().join("agent");
@@ -1423,7 +1492,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1438,10 +1507,7 @@ Reviewer instructions: record it"
             turned_off.applied_edits[0].error.as_deref(),
             Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
         );
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
         // Authored while disabled; the request opts in.
         std::fs::write(&settings, r#"{"factory": {"enabled": false}}"#).unwrap();
@@ -1454,7 +1520,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1475,6 +1541,7 @@ Reviewer instructions: record it"
         manager
             .append_message(user_message("do a thing twice"))
             .unwrap();
+        let local_dir = local_store_for(&manager);
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
@@ -1488,7 +1555,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1502,10 +1569,7 @@ Reviewer instructions: record it"
         assert!(result.applied_edits[0].applied);
         let state_path = Path::new(&result.harness_state_path);
         assert!(state_path.exists());
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"));
         let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
@@ -1519,17 +1583,11 @@ Reviewer instructions: record it"
             .collect();
         assert_eq!(custom_messages.len(), 2);
         let session = session.lock().await;
-        assert_eq!(
-            load_refinement_history(
-                &session,
-                &RefinementStores {
-                    global_dir: global_dir.clone(),
-                    local_dir: None,
-                },
-            )
-            .len(),
-            1
+        let merged_history = crate::refinement::merge_refinement_history(
+            &load_global_refinement_history(&global_dir),
+            &session.refinement_history(),
         );
+        assert_eq!(merged_history.len(), 1);
     }
 
     /// The failed rows stay live-indexed so the in-process history sees
@@ -1550,6 +1608,7 @@ Reviewer instructions: record it"
         let file = manager.get_session_file().unwrap().to_path_buf();
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
+        let local_dir = local_store_for(&manager);
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let error = execute_refinement(
@@ -1561,7 +1620,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions::default(),
@@ -1575,10 +1634,7 @@ Reviewer instructions: record it"
             error.to_string().contains("audit:"),
             "the audit error surfaces after the durable writes: {error:#}"
         );
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m9"));
         let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
@@ -1736,7 +1792,9 @@ Reviewer instructions: record it"
     #[tokio::test]
     async fn global_refinement_appends_history() {
         let dir = TempDir::new().unwrap();
-        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"global lesson","edits":[{"action":"create","kind":"memory","id":"g1","title":"Lesson","content":"durable"}]}"#;
@@ -1749,7 +1807,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions {
@@ -1779,7 +1837,7 @@ Reviewer instructions: record it"
             },
             &RefinementStores {
                 global_dir: global_dir.clone(),
-                local_dir: Some(dir.path().join("session").join("harness")),
+                local_dir: Some(local_dir.clone()),
             },
             &test_model(),
             &RefineOptions {
