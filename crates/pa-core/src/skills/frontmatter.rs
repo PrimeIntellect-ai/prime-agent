@@ -33,7 +33,6 @@ fn extract_frontmatter(content: &str) -> (Option<String>, String) {
 
 /// Parse `---` YAML frontmatter into a JSON object plus the body. Invalid
 /// YAML is the frontmatter's `Err`; the body is split off either way.
-#[must_use]
 pub fn parse_frontmatter(content: &str) -> (Result<Value, serde_yaml::Error>, String) {
     let (yaml_string, body) = extract_frontmatter(content);
     let Some(yaml_string) = yaml_string else {

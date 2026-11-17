@@ -68,6 +68,9 @@ pub fn load_project_context_files(cwd: &Path, agent_dir: &Path) -> Vec<ContextFi
 
 // Session resource resolution (package-manager `resolve()`) feeds the loader below.
 pub(crate) mod resolution;
+mod skill_status;
+
+pub use skill_status::{SkillState, SkillStatus};
 
 use anyhow::Result;
 
@@ -78,6 +81,8 @@ use crate::settings::SettingsManager;
 pub struct LoadedResources {
     pub skills: Vec<Skill>,
     pub skill_diagnostics: Vec<ResourceDiagnostic>,
+    /// Every discovered skill and why it is or is not in the session.
+    pub skill_statuses: Vec<SkillStatus>,
     pub prompts: Vec<PromptTemplate>,
     pub agents_files: Vec<ContextFile>,
     pub system_prompt: Option<String>,
@@ -156,8 +161,8 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
 
     let mut resources = LoadedResources::default();
 
-    // Skills: CLI paths + additional paths first, then resolved paths in
-    // precedence order; name collisions resolve first-wins in load order.
+    // Skills: bundled skills, then CLI/additional paths, then resolved paths
+    // in precedence order; name collisions resolve first-wins in load order.
     let skills_result = if options.no_skills && resolution.skill_paths.is_empty() {
         crate::skills::LoadSkillsResult {
             skills: Vec::new(),
@@ -171,6 +176,7 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
             include_defaults: false,
         })
     };
+    let mut demoted: Vec<PathBuf> = Vec::new();
     resources.skills = skills_result
         .skills
         .into_iter()
@@ -186,6 +192,7 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
                 // executable code from a repository on session startup.
                 skill.kind = SkillKind::Markdown;
                 skill.python = None;
+                demoted.push(skill.file_path.clone());
             }
             skill
         })
@@ -209,6 +216,13 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
             });
         }
     }
+    resources.skill_statuses = skill_status::skill_statuses(
+        &resources.skills,
+        &demoted,
+        &mut resources.skill_diagnostics,
+        &resolution.resolved.skills,
+        &options.agent_dir.join("settings.json"),
+    );
 
     // Prompt templates: CLI paths + resolved paths, then additional paths.
     let all_prompts = if options.no_prompt_templates && resolution.prompt_paths.is_empty() {
@@ -340,6 +354,7 @@ pub fn discover_append_system_prompt_file(cwd: &Path, agent_dir: &Path) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packages::DisabledBy;
     use std::fs;
 
     #[test]
@@ -582,5 +597,179 @@ mod tests {
             .skill_diagnostics
             .iter()
             .any(|d| matches!(d, ResourceDiagnostic::Collision { .. })));
+    }
+
+    /// A skill directory: `SKILL.md` with `frontmatter`, plus a Python
+    /// package (pyproject named `project`) when given.
+    fn write_skill_dir(dir: &Path, frontmatter: &str, project: Option<&str>) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let skill_file = dir.join("SKILL.md");
+        fs::write(&skill_file, format!("---\n{frontmatter}\n---\nBody")).unwrap();
+        if let Some(project) = project {
+            let import = dir.file_name().unwrap().to_string_lossy().replace('-', "_");
+            fs::create_dir_all(dir.join("src").join(&import)).unwrap();
+            fs::write(dir.join("src").join(&import).join("__init__.py"), "").unwrap();
+            fs::write(
+                dir.join("pyproject.toml"),
+                format!("[project]\nname = \"{project}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        }
+        skill_file
+    }
+
+    fn named(name: &str) -> String {
+        format!("name: {name}\ndescription: The {name} skill")
+    }
+
+    fn status(name: &str, path: &Path, state: SkillState) -> SkillStatus {
+        SkillStatus {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            state,
+        }
+    }
+
+    /// Every state a discovered skill can be in, from one resolution: the
+    /// bundled skill wins its name over a project copy (which keeps the
+    /// bundled Python code importable), a project skill shadows a user one,
+    /// and settings, frontmatter, and project scope each explain the rest.
+    #[test]
+    fn skill_statuses_explain_every_discovered_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let bundled = tmp.path().join("bundled");
+        let cwd = tmp.path().join("proj");
+        let project_skills = cwd.join(".prime/agent/skills");
+        let user_skills = agent_dir.join("skills");
+        let bundled_goal = write_skill_dir(&bundled.join("goal"), &named("goal"), Some("goal"));
+        let project_goal = write_skill_dir(&project_skills.join("goal"), &named("goal"), None);
+        let project_code = write_skill_dir(
+            &project_skills.join("proj-code"),
+            &named("proj-code"),
+            Some("x"),
+        );
+        let project_twin = write_skill_dir(&project_skills.join("twin"), &named("twin"), None);
+        let user_twin = write_skill_dir(&user_skills.join("twin"), &named("twin"), None);
+        let hidden = write_skill_dir(
+            &user_skills.join("hidden"),
+            &format!("{}\ndisable-model-invocation: true", named("hidden")),
+            None,
+        );
+        let broken_yaml = "name: broken\ndescription: Runs: things";
+        let broken = write_skill_dir(&user_skills.join("broken"), broken_yaml, None);
+        let off = write_skill_dir(&user_skills.join("off"), &named("off"), None);
+        fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({"skills": ["-skills/off"]}).to_string(),
+        )
+        .unwrap();
+
+        let resources = load_resources(ResourceLoaderOptions {
+            bundled_skills_dir: BundledSkillsDir::Directory(bundled),
+            ..ResourceLoaderOptions::new(&cwd, &agent_dir)
+        })
+        .unwrap();
+
+        let yaml_error = serde_yaml::from_str::<serde_yaml::Value>(broken_yaml).unwrap_err();
+        let settings_path = agent_dir.join("settings.json").display().to_string();
+        assert_eq!(
+            resources.skill_statuses,
+            vec![
+                status(
+                    "broken",
+                    &broken,
+                    SkillState::Invalid {
+                        message: format!("invalid YAML frontmatter: {yaml_error}"),
+                    },
+                ),
+                status("goal", &bundled_goal, SkillState::Active),
+                status(
+                    "goal",
+                    &project_goal,
+                    SkillState::IgnoredForBundled {
+                        winner_path: bundled_goal.display().to_string(),
+                        settings_path: settings_path.clone(),
+                    },
+                ),
+                status("hidden", &hidden, SkillState::Hidden),
+                status(
+                    "off",
+                    &off,
+                    SkillState::Disabled {
+                        by: DisabledBy::Settings,
+                    },
+                ),
+                status("proj-code", &project_code, SkillState::ProjectCodeNotLoaded),
+                status(
+                    "twin",
+                    &user_twin,
+                    SkillState::Shadowed {
+                        winner_path: project_twin.display().to_string(),
+                    },
+                ),
+                status("twin", &project_twin, SkillState::Active),
+            ]
+        );
+        let goal = resources
+            .skills
+            .iter()
+            .find(|skill| skill.name == "goal")
+            .unwrap();
+        assert_eq!(
+            goal.kind,
+            SkillKind::Python,
+            "the bundled code stays importable"
+        );
+        let collision_message = resources
+            .skill_diagnostics
+            .iter()
+            .find_map(|diagnostic| match diagnostic {
+                ResourceDiagnostic::Collision {
+                    message, collision, ..
+                } if collision.name == "goal" => Some(message.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            collision_message.contains(r#""skills": ["-goal"]"#)
+                && collision_message.contains(&settings_path),
+            "the losing skill's diagnostic names the settings line: {collision_message}"
+        );
+    }
+
+    /// `"skills": ["-<name>"]` in the global settings disables exactly the
+    /// bundled skill, so the user's same-named Python skill loads instead.
+    #[test]
+    fn the_global_settings_line_lets_a_user_skill_replace_a_bundled_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let bundled = tmp.path().join("bundled");
+        let cwd = tmp.path().join("proj");
+        fs::create_dir_all(&cwd).unwrap();
+        let bundled_goal = write_skill_dir(&bundled.join("goal"), &named("goal"), Some("goal"));
+        let user_goal = write_skill_dir(
+            &agent_dir.join("skills/goal"),
+            &named("goal"),
+            Some("user-goal"),
+        );
+        let goal_file = || {
+            load_resources(ResourceLoaderOptions {
+                bundled_skills_dir: BundledSkillsDir::Directory(bundled.clone()),
+                ..ResourceLoaderOptions::new(&cwd, &agent_dir)
+            })
+            .unwrap()
+            .skills
+            .into_iter()
+            .find(|skill| skill.name == "goal")
+            .map(|skill| (skill.file_path, skill.kind))
+        };
+        assert_eq!(goal_file(), Some((bundled_goal, SkillKind::Python)));
+        fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({"skills": ["-goal"]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(goal_file(), Some((user_goal, SkillKind::Python)));
     }
 }

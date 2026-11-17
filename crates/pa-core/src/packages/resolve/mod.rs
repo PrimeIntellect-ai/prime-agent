@@ -69,12 +69,33 @@ pub struct PathMetadata {
     pub base_dir: Option<PathBuf>,
 }
 
-/// One resolved resource: a path, its enablement, and its provenance.
+/// Which override list turned a resolved resource off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisabledBy {
+    /// A `skills`/`prompts`/`themes` pattern in settings.
+    Settings,
+    /// Web search is off (the bundled `websearch`): no key for the selected
+    /// provider, or `bundledSkills.websearch: false`.
+    WebSearchOff,
+    /// The built-in skill's MCP integration is not logged in.
+    McpLogin,
+}
+
+/// One resolved resource: a path, why it is off (`None` when enabled), and
+/// its provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedResource {
     pub path: PathBuf,
-    pub enabled: bool,
+    pub disabled_by: Option<DisabledBy>,
     pub metadata: PathMetadata,
+}
+
+impl ResolvedResource {
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.disabled_by.is_none()
+    }
 }
 
 /// The `resolve()` output: ranked resources per kind plus diagnostics.
@@ -154,23 +175,31 @@ impl PiManifest {
 /// Insertion-ordered map of resolved paths (first insert wins per path).
 #[derive(Default)]
 pub(crate) struct ResourceMap {
-    entries: Vec<(PathBuf, PathMetadata, bool)>,
+    entries: Vec<(PathBuf, PathMetadata, Option<DisabledBy>)>,
     index: std::collections::HashMap<PathBuf, usize>,
 }
 
 impl ResourceMap {
-    pub(crate) fn add(&mut self, path: &std::path::Path, metadata: PathMetadata, enabled: bool) {
+    pub(crate) fn add(
+        &mut self,
+        path: &std::path::Path,
+        metadata: PathMetadata,
+        disabled_by: Option<DisabledBy>,
+    ) {
         if path.as_os_str().is_empty() || self.index.contains_key(path) {
             return;
         }
         self.index.insert(path.to_path_buf(), self.entries.len());
-        self.entries.push((path.to_path_buf(), metadata, enabled));
+        self.entries
+            .push((path.to_path_buf(), metadata, disabled_by));
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&PathBuf, &PathMetadata, bool)> {
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&PathBuf, &PathMetadata, Option<DisabledBy>)> {
         self.entries
             .iter()
-            .map(|(path, metadata, enabled)| (path, metadata, *enabled))
+            .map(|(path, metadata, disabled_by)| (path, metadata, *disabled_by))
     }
 }
 
@@ -199,9 +228,9 @@ pub(crate) fn to_resolved_paths(accumulator: ResourceAccumulator) -> ResolvedPat
     let map_to_resolved = |map: ResourceMap| -> Vec<ResolvedResource> {
         let mut resolved: Vec<ResolvedResource> = map
             .iter()
-            .map(|(path, metadata, enabled)| ResolvedResource {
+            .map(|(path, metadata, disabled_by)| ResolvedResource {
                 path: path.clone(),
-                enabled,
+                disabled_by,
                 metadata: metadata.clone(),
             })
             .collect();

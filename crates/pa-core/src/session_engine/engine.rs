@@ -291,6 +291,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         ..Default::default()
     })?;
 
+    let skill_problems: Vec<crate::resources::SkillStatus> = resources
+        .skill_statuses
+        .iter()
+        .filter(|status| status.state.is_problem())
+        .cloned()
+        .collect();
+
     let model = config
         .model
         .ok_or_else(|| anyhow::anyhow!("a resolved model is required"))?;
@@ -624,6 +631,29 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         let has_service_tier_entry = session.has_service_tier();
         (messages, has_thinking_entry, has_service_tier_entry)
     };
+    // Skill problems report once, when a root session starts fresh: a
+    // revived session or a child of the same cwd would repeat them.
+    if !skill_problems.is_empty()
+        && existing_messages.is_empty()
+        && config.rlm_depth.unwrap_or(0) == 0
+    {
+        // No tracing subscriber is installed; the daemon's per-worker log
+        // captures stderr.
+        for problem in &skill_problems {
+            eprintln!(
+                "Warning: skill {} ({}): {}",
+                problem.name,
+                problem.path,
+                problem.describe()
+            );
+        }
+        boot_notice_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(super::skill_problems_notice::notice_message(
+                &skill_problems,
+            ));
+    }
     let thinking_level = config.thinking_level.unwrap_or(ThinkingLevel::Off);
     {
         let mut session = wiring.session.lock().await;

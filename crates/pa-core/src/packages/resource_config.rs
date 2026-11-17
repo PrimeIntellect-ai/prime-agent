@@ -150,7 +150,7 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
             });
         group.subgroups[subgroup_index].items.push(ResourceItem {
             path: resource.path.clone(),
-            enabled: resource.enabled,
+            enabled: resource.enabled(),
             metadata: resource.metadata.clone(),
             resource_type,
             display_name: display_name(&resource.path, resource_type),
@@ -420,7 +420,7 @@ mod tests {
     fn resource(path: &str, metadata: PathMetadata, enabled: bool) -> ResolvedResource {
         ResolvedResource {
             path: PathBuf::from(path),
-            enabled,
+            disabled_by: (!enabled).then_some(crate::packages::DisabledBy::Settings),
             metadata,
         }
     }

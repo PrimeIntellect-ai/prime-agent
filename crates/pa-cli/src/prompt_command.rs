@@ -1,7 +1,7 @@
 //! `prime-agent prompt`: dump the fully-assembled effective system prompt with
 //! its per-layer breakdown, without starting a session or a provider.
 
-use pa_core::resources::{load_resources, ResourceLoaderOptions};
+use pa_core::resources::{load_resources, LoadedResources, ResourceLoaderOptions};
 use pa_core::settings::SettingsManager;
 
 use crate::config::get_agent_dir;
@@ -76,22 +76,33 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
     }
 }
 
+/// The resources a fresh root session in `cwd` loads: its settings,
+/// auto-discovery, and the user's MCP gating (auth-gated built-in
+/// integrations drop their skills), plus the enabled generic MCP servers the
+/// prompt's MCP guidance names. `prompt` and `skills` share it.
+pub(crate) fn load_session_resources(
+    cwd: &std::path::Path,
+    agent_dir: &std::path::Path,
+) -> anyhow::Result<(LoadedResources, Vec<String>)> {
+    let settings = SettingsManager::create(cwd, agent_dir);
+    let (skill_overrides, generic_servers, _manager) =
+        pa_core::resources::mcp_gating(settings.global_settings(), agent_dir);
+    let resources = load_resources(ResourceLoaderOptions {
+        settings: Some(settings),
+        extra_builtin_skill_overrides: skill_overrides,
+        system_prompt: None,
+        ..ResourceLoaderOptions::new(cwd, agent_dir)
+    })?;
+    Ok((resources, generic_servers))
+}
+
 fn assemble_breakdown(
     cwd: &std::path::Path,
     model: Option<&str>,
 ) -> anyhow::Result<(pa_core::prompts::SystemPromptBreakdown, Vec<String>)> {
     let agent_dir = get_agent_dir();
     let model_prompts = pa_core::prompts::model_prompts::load_model_prompts(model, &agent_dir);
-    let settings = SettingsManager::create(cwd, &agent_dir);
-    // User/global MCP gating: auth-gated built-in integrations drop their skills; enabled generic
-    // servers add the prompt MCP guidance.
-    let (skill_overrides, generic_servers, _manager) =
-        pa_core::resources::mcp_gating(settings.global_settings(), &agent_dir);
-    let resources = load_resources(ResourceLoaderOptions {
-        extra_builtin_skill_overrides: skill_overrides,
-        system_prompt: None,
-        ..ResourceLoaderOptions::new(cwd.to_path_buf(), agent_dir)
-    })?;
+    let (resources, generic_servers) = load_session_resources(cwd, &agent_dir)?;
     let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
             cwd: cwd.display().to_string(),
