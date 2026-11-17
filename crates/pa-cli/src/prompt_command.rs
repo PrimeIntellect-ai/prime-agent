@@ -85,20 +85,8 @@ fn assemble_breakdown(
     let settings = SettingsManager::create(cwd, &agent_dir);
     // User/global MCP gating: auth-gated built-in integrations drop their skills; enabled generic
     // servers add the prompt MCP guidance.
-    let user_servers = settings
-        .global_settings()
-        .mcp_servers
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(server, config)| {
-            serde_json::from_value(config)
-                .ok()
-                .map(|parsed| (server, parsed))
-        })
-        .collect::<std::collections::HashMap<String, pa_core::mcp::McpServerConfig>>();
     let (skill_overrides, generic_servers, _manager) =
-        pa_core::mcp::McpManager::prompt_gating(user_servers, &agent_dir);
+        pa_core::resources::mcp_gating(settings.global_settings(), &agent_dir);
     let resources = load_resources(ResourceLoaderOptions {
         extra_builtin_skill_overrides: skill_overrides,
         system_prompt: None,

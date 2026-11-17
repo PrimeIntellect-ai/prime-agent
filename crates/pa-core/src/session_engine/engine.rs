@@ -162,31 +162,12 @@ async fn mcp_gating(
     settings: &crate::settings::SettingsManager,
     agent_dir: std::path::PathBuf,
 ) -> anyhow::Result<(Vec<String>, Vec<String>, crate::mcp::McpManager)> {
-    // MCP execution is user/global only, matching TS getGlobalMcpServers.
-    let user_servers = settings
-        .global_settings()
-        .mcp_servers
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(server, config)| {
-            serde_json::from_value(config)
-                .ok()
-                .map(|parsed| (server, parsed))
-        })
-        .collect::<std::collections::HashMap<String, crate::mcp::McpServerConfig>>();
+    let global_settings = settings.global_settings().clone();
     // The MCP manager snapshots auth with a blocking lock; run it off the
     // async runtime.
-    tokio::task::spawn_blocking(move || mcp_gating_blocking(user_servers, &agent_dir))
+    tokio::task::spawn_blocking(move || crate::resources::mcp_gating(&global_settings, &agent_dir))
         .await
         .map_err(|error| anyhow::anyhow!("MCP gating task failed: {error}"))
-}
-
-fn mcp_gating_blocking(
-    user_servers: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
-    agent_dir: &std::path::Path,
-) -> (Vec<String>, Vec<String>, crate::mcp::McpManager) {
-    crate::mcp::McpManager::prompt_gating(user_servers, agent_dir)
 }
 
 /// Assemble a session: load resources, build the system prompt, and start the

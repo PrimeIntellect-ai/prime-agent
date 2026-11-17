@@ -116,6 +116,30 @@ impl ResourceLoaderOptions {
     }
 }
 
+/// The user's MCP gating of session resources: `-<server>/SKILL.md`
+/// overrides for the built-in integrations the user is not logged into, the
+/// enabled persistent generic servers, and the manager that decided them.
+/// MCP execution is user/global only (TS `getGlobalMcpServers`), so only the
+/// global settings count. Reads the auth store under a blocking lock.
+#[must_use]
+pub fn mcp_gating(
+    global_settings: &crate::settings::Settings,
+    agent_dir: &Path,
+) -> (Vec<String>, Vec<String>, crate::mcp::McpManager) {
+    let user_servers = global_settings
+        .mcp_servers
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(server, config)| {
+            serde_json::from_value(config)
+                .ok()
+                .map(|parsed| (server, parsed))
+        })
+        .collect::<std::collections::HashMap<String, crate::mcp::McpServerConfig>>();
+    crate::mcp::McpManager::prompt_gating(user_servers, agent_dir)
+}
+
 /// Load all session resources: package-manager resolution (configured
 /// packages, settings arrays, auto-discovery, bundled skills) feeds the
 /// enabled skill and prompt paths.
