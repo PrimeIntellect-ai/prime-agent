@@ -173,15 +173,6 @@ async fn admit(
     model: &Model,
     prompt: String,
 ) -> Result<(), String> {
-    admit_turn(boundary, engine, model, prompt).await
-}
-
-async fn admit_turn(
-    boundary: &mut TurnBoundary,
-    engine: &SessionEngine,
-    model: &Model,
-    prompt: String,
-) -> Result<(), String> {
     boundary.run_pre_turn(engine, model, None).await?;
     engine
         .session
@@ -1291,7 +1282,7 @@ async fn requested_refinement_failure_emits_the_refine_failed_event() {
             global: true,
         })
         .await;
-    admit_turn(&mut boundary, &engine, &model, "seed turn".to_string())
+    admit(&mut boundary, &engine, &model, "seed turn".to_string())
         .await
         .unwrap();
     let events = events.lock().unwrap().clone();
@@ -1327,7 +1318,7 @@ async fn requested_refinement_streams_rows_and_refine_complete() {
             global: true,
         })
         .await;
-    admit_turn(&mut boundary, &engine, &model, "seed turn".to_string())
+    admit(&mut boundary, &engine, &model, "seed turn".to_string())
         .await
         .unwrap();
     let events = events.lock().unwrap().clone();
@@ -1382,7 +1373,7 @@ async fn compact_trigger_auto_refine_streams_at_the_next_boundary() {
     .await;
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_turn(
+    admit(
         &mut boundary,
         &engine,
         &model,
@@ -1410,7 +1401,7 @@ async fn compact_trigger_auto_refine_streams_at_the_next_boundary() {
             .all(|event| event["type"] != "refine_complete"),
         "no auto-refine before the next boundary"
     );
-    admit_turn(&mut boundary, &engine, &model, "third turn".to_string())
+    admit(&mut boundary, &engine, &model, "third turn".to_string())
         .await
         .unwrap();
     let events = events.lock().unwrap().clone();
@@ -1462,7 +1453,7 @@ async fn overflow_retry_compact_trigger_streams_the_ts_surface() {
     .await;
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_turn(
+    admit(
         &mut boundary,
         &engine,
         &model,
@@ -1470,7 +1461,7 @@ async fn overflow_retry_compact_trigger_streams_the_ts_surface() {
     )
     .await
     .unwrap();
-    admit_turn(
+    admit(
         &mut boundary,
         &engine,
         &model,
@@ -1527,7 +1518,7 @@ async fn compact_trigger_drains_at_disposal_off_the_stream() {
     .await;
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_turn(
+    admit(
         &mut boundary,
         &engine,
         &model,
@@ -1592,7 +1583,7 @@ async fn auto_refine_review_decline_surfaces_nothing() {
     .await;
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_turn(
+    admit(
         &mut boundary,
         &engine,
         &model,
@@ -1610,7 +1601,7 @@ async fn auto_refine_review_decline_surfaces_nothing() {
     .await
     .unwrap();
     assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");
-    admit_turn(&mut boundary, &engine, &model, "third turn".to_string())
+    admit(&mut boundary, &engine, &model, "third turn".to_string())
         .await
         .unwrap();
     assert!(refine_rows(&engine).await.is_empty(), "no refinement ran");
@@ -1651,7 +1642,7 @@ async fn auto_refine_disabled_settings_drop_the_trigger() {
     .await;
     let (sink, events) = capture_sink();
     let mut boundary = TurnBoundary::with_sink(true, sink);
-    admit_turn(
+    admit(
         &mut boundary,
         &engine,
         &model,
@@ -1668,7 +1659,7 @@ async fn auto_refine_disabled_settings_drop_the_trigger() {
     )
     .await
     .unwrap();
-    admit_turn(&mut boundary, &engine, &model, "third turn".to_string())
+    admit(&mut boundary, &engine, &model, "third turn".to_string())
         .await
         .unwrap();
     assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");

@@ -336,8 +336,9 @@ mod tests {
                 && !agent_dir.join("refinement_history.jsonl").exists(),
             "no orphan store files dropped directly in the agent dir"
         );
-        // The next digest shows the entry: the render the cold-boundary
-        // delivery sends reads the same store pair the refinement wrote.
+        // The next digest shows the entry: a context rebuilt over the
+        // same store pair the refinement wrote — the pair the engine
+        // wires from the conversation log — renders the global entry.
         let context = pa_core::session_engine::harness_digest::HarnessDigestContext {
             global_dir,
             local_dir: pa_core::session_engine::harness_digest::local_harness_dir_for_log(
