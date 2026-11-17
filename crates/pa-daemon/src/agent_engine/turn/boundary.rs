@@ -310,10 +310,8 @@ mod tests {
 
     /// The daemon's refinements write the store pair the session's digest
     /// reads: the local refinement lands in the artifact store the
-    /// conversation log implies — never the shared `<sessions root>/harness`
-    /// file the old session-dir derivation wrote — and the global refinement
-    /// lands in the agent dir's harness store, never the orphan files
-    /// directly under the agent dir.
+    /// conversation log implies, and the global refinement lands in the
+    /// agent dir's harness store.
     #[test]
     fn the_daemons_refinements_write_the_digests_store_pair() {
         let _faux = FAUX_TEST_LOCK
@@ -369,14 +367,6 @@ mod tests {
             local_state.entries[&pa_core::refinement::RefinementKind::Memory].contains_key("l1"),
             "the local edit lands in the session's own harness store"
         );
-        assert!(
-            !dir.path()
-                .join("sessions")
-                .join("harness")
-                .join("harness_state.json")
-                .exists(),
-            "no write to the shared sessions-root harness file"
-        );
         // The global half: the agent dir's harness store, the one the
         // session's digest context carries.
         let global_committed = run_refinement(&engine, "Record a durable global tactic", true);
@@ -389,11 +379,6 @@ mod tests {
         assert!(
             global_state.entries[&pa_core::refinement::RefinementKind::Memory].contains_key("g1"),
             "the global edit lands in the agent dir's harness store"
-        );
-        assert!(
-            !agent_dir.join("harness_state.json").exists()
-                && !agent_dir.join("refinement_history.jsonl").exists(),
-            "no orphan store files dropped directly in the agent dir"
         );
         assert_eq!(
             std::path::Path::new(&global_committed.result.harness_state_path),

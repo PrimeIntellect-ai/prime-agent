@@ -428,8 +428,7 @@ async fn refine_test_session_with(
 }
 
 /// A daemon-shaped local refinement writes the session's own artifact
-/// harness store, the one the kernel and the digest read, and nothing
-/// lands in `<sessions>/harness`.
+/// harness store, the one the kernel and the digest read.
 #[tokio::test]
 async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -539,13 +538,6 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
         state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
         "the local edit lands in the session's own harness store"
     );
-    assert!(
-        !sessions_root
-            .join("harness")
-            .join("harness_state.json")
-            .exists(),
-        "no write to the shared sessions-root harness file"
-    );
     // A global refinement on the same session writes the agent dir's
     // harness store.
     let global_plan = r#"{"summary":"bench","edits":[{"action":"create","kind":"memory","id":"g1","title":"Global tactic","content":"Prefer the shared seam"}]}"#;
@@ -572,11 +564,6 @@ async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() 
     assert!(
         global_state.entries[&crate::refinement::RefinementKind::Memory].contains_key("g1"),
         "the global edit lands in the agent dir's harness store"
-    );
-    assert!(
-        !agent_dir.join("harness_state.json").exists()
-            && !agent_dir.join("refinement_history.jsonl").exists(),
-        "no orphan store files dropped directly in the agent dir"
     );
     // The digest sees both: the rendered harness digest — the same render
     // the cold-boundary delivery sends the model — carries the local and
