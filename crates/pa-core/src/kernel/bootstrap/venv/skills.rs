@@ -61,6 +61,12 @@ pub(super) fn read_python_skill_project_name(skill: &BootstrapPythonSkill) -> St
     name.unwrap_or_else(|| skill.import_name.replace('_', "-"))
 }
 
+/// The identity uv replaces distributions by: project names are compared
+/// case-insensitively with `-`/`_` equivalent.
+pub(super) fn normalize_project_name(name: &str) -> String {
+    name.replace('_', "-").to_lowercase()
+}
+
 fn parse_dependency_package_name(dependency: &str) -> Option<String> {
     let without_marker = dependency.split(';').next()?.trim();
     if without_marker.is_empty() {
@@ -168,11 +174,7 @@ fn resolve_sibling_python_skill_dependency(
             pyproject_path: pyproject_path.to_string_lossy().to_string(),
             pyproject_hash: file_content_hash(&pyproject_path),
         };
-        if read_python_skill_project_name(&candidate)
-            .replace('_', "-")
-            .to_lowercase()
-            == dependency_name
-        {
+        if normalize_project_name(&read_python_skill_project_name(&candidate)) == dependency_name {
             return Some(candidate);
         }
     }

@@ -1207,12 +1207,14 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
     // The faux provider's conversation-scoped prompt cache reports a rewritten
     // prompt as both input and cache-write tokens, so the first turn after a
     // compaction reads about twice the retained history. Keep that doubled
-    // reading below the 42_769 retention floor (10_000 + 2 * 16_384 + 1).
+    // reading below the 41_769 retention floor (9_000 + 2 * 16_384 + 1): the
+    // bundled skill inventory (factory included since its frontmatter was
+    // repaired) rides the system prompt, so the floor leaves headroom for it.
     std::fs::write(
         dir.path().join("agent/settings.json"),
         serde_json::json!({"compaction": {
             "enabled": true, "thresholdPercent": 5,
-            "reserveTokens": 16_384, "keepRecentTokens": 10_000
+            "reserveTokens": 16_384, "keepRecentTokens": 9_000
         }})
         .to_string(),
     )
@@ -1285,7 +1287,7 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
         pa_core::session_engine::compaction::CompactionSettings {
             threshold_percent: 75.0,
             reserve_tokens: 16_384,
-            keep_recent_tokens: 10_000,
+            keep_recent_tokens: 9_000,
             ..Default::default()
         }
     );

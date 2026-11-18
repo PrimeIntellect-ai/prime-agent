@@ -20,7 +20,7 @@ pub use manager::{
     ProgressAction, ProgressEvent, ProgressEventKind, UserOrProject,
 };
 pub use resolve::{
-    MetadataSource, MissingSourceAction, PathMetadata, ResolvedPaths, ResolvedResource,
+    DisabledBy, MetadataSource, MissingSourceAction, PathMetadata, ResolvedPaths, ResolvedResource,
     ResourceOrigin, ResourceType,
 };
 pub use source::{parse_git_url, GitSource, LocalSource, NpmSource, ParsedSource, SourceScope};

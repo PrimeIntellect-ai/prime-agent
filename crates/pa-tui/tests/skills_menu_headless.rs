@@ -537,3 +537,27 @@ fn a_completed_skill_with_args_sends_the_command_and_request() {
         "the with-args submit shows no notice: {all}"
     );
 }
+
+/// A `/skill:<name>` the session does not know stays in the sent text, and a
+/// notice names it; a known one mid-message raises nothing.
+#[test]
+fn an_unknown_skill_reference_sends_as_text_with_a_notice() {
+    let text = "check /skill:web-search and /skill:nope now";
+    let (frames, prompts) = run_plan_with_prompts(vec![
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Type(text.to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(300),
+    ]);
+    assert_eq!(prompts.len(), 1, "one prompt dispatched: {prompts:?}");
+    assert_eq!(
+        prompts[0].get("message").and_then(Value::as_str),
+        Some(text),
+        "the text travels unchanged: {prompts:?}"
+    );
+    let all = frames.join("\n");
+    assert!(
+        all.contains("Unknown skill: /skill:nope") && !all.contains("Unknown skill: /skill:web"),
+        "only the unknown reference is named: {all}"
+    );
+}
