@@ -663,6 +663,27 @@ mod tests {
         assert_eq!(params.get("enable_thinking"), Some(&json!(true)));
     }
 
+    /// The `deepseek/deepseek-v4-flash-0731` route takes low, high, and max and does not make
+    /// reasoning mandatory: offline, thinking off disables thinking and low sends `low`.
+    #[test]
+    fn compiled_deepseek_v4_flash_0731_keeps_thinking_off_and_sends_low() {
+        let sent = |level| {
+            let params =
+                compiled_params("prime-inference", "deepseek/deepseek-v4-flash-0731", level);
+            (
+                params.get("thinking").cloned(),
+                params.get("reasoning_effort").cloned(),
+            )
+        };
+        assert_eq!(
+            [ModelThinkingLevel::Off, ModelThinkingLevel::Low].map(sent),
+            [
+                (Some(json!({ "type": "disabled" })), None),
+                (Some(json!({ "type": "enabled" })), Some(json!("low"))),
+            ]
+        );
+    }
+
     /// A `reasoning: false` model whose map addresses levels (the live catalog's
     /// `gpt-5.3-chat-latest` / `openai/gpt-5.2-chat` shape) is thinking-capable: the requested
     /// level clamps through the map and the request carries the mapped reasoning parameter. The

@@ -1421,7 +1421,6 @@ compat: Some(RawCompat {
         base_url: "https://api.pinference.ai/api/v1",
         reasoning: true,
         thinking_levels: &[
-                (crate::types::ModelThinkingLevel::Off, None),
                 (crate::types::ModelThinkingLevel::Minimal, None),
                 (crate::types::ModelThinkingLevel::Low, Some("low")),
                 (crate::types::ModelThinkingLevel::Medium, None),
