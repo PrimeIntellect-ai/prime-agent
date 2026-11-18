@@ -200,6 +200,7 @@ mod navigation_pause_tests;
 mod queue_tests;
 mod sidecar_exit_tests;
 mod summary_tests;
+mod wake_starvation_tests;
 mod warning_marker_tests;
 mod windowed_attach_tests;
 #[tokio::test]

@@ -1813,11 +1813,18 @@ async fn prompt_turn(
                     .map(|image| json!({ "type": "image", "data": image.data, "mimeType": image.mime_type }))
                     .collect::<Vec<_>>())
             }),
-            // TS sends `followUp` + `queueIfBusy: true` on every ACP
-            // prompt (acp-mode.ts): a prompt carrying a streaming
-            // behavior is the worker's resume site for the post-abort
-            // queued-input suspension, so a prompt after a Stop runs.
-            streaming_behavior: Some(pa_types::daemon::StreamingBehavior::FollowUp),
+            // The async contract (the dev port of 48ad250c9) promises a
+            // user message ends a running cell's wait early, and every wake
+            // mechanism reads the steering lane alone (the cell wake, its
+            // pending probe, and the run-stop probe) — a follow-up row is
+            // invisible to all three, so an ordinary user prompt arriving
+            // over a sleeping cell starved until the cell settled. The
+            // adapter therefore steers (the TUI's Enter path already
+            // sends `steer`); the worker still honors an explicit
+            // follow-up lane for machine work. The prompt keeps its
+            // streaming behavior, so it stays the worker's resume site
+            // for the post-abort queued-input suspension.
+            streaming_behavior: Some(pa_types::daemon::StreamingBehavior::Steer),
             queue_if_busy: Some(true),
             expand_prompt_templates: None,
             source: None,
@@ -2718,6 +2725,64 @@ mod tests {
             arm_cancel_locked("acp-1", &mut stopping),
             CancelOrder::None
         ));
+    }
+
+    /// BUG 2 (auto-background wake starvation): the ACP adapter steers
+    /// ordinary user prompts — every wake mechanism reads the steering
+    /// lane alone, so a `followUp` prompt starved behind a sleeping cell
+    /// until the cell settled. The prompt keeps a streaming behavior, so
+    /// it remains the worker's resume site for the post-abort suspension.
+    #[tokio::test]
+    async fn an_acp_user_prompt_admits_on_the_steering_lane() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            server_capabilities: Vec::new(),
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        // The admission owns the turn slot (prompt_turn treats a missing or
+        // mismatched slot as cancelled and never reaches the link).
+        let mut with_turn = state(Some(hosted_session()));
+        with_turn.session.as_mut().unwrap().turn = Some(ActiveTurn {
+            admission_id: "prompt-admission:1".to_string(),
+            cancelled: false,
+        });
+        let state = Arc::new(Mutex::new(with_turn));
+        let handler = tokio::spawn({
+            let link = Arc::clone(&link);
+            async move {
+                prompt_turn(
+                    json!(1),
+                    json!({
+                        "sessionId": "acp-1",
+                        "prompt": [{ "type": "text", "text": "steer over the sleeping cell" }],
+                    }),
+                    "prompt-admission:1",
+                    &link,
+                    &state,
+                )
+                .await
+            }
+        });
+        let sent = commands
+            .recv()
+            .await
+            .expect("the prompt reaches the worker");
+        let envelope: DaemonCommandEnvelope = serde_json::from_str(&sent).unwrap();
+        let DaemonCommand::PromptAndWait { input, .. } = envelope.command else {
+            panic!("the prompt reached the worker: {sent}");
+        };
+        assert_eq!(
+            input.streaming_behavior,
+            Some(pa_types::daemon::StreamingBehavior::Steer),
+            "an ordinary ACP user prompt steers: {sent}"
+        );
+        handler.abort();
     }
 
     /// An otherwise-idle cancel orders the scoped background-cell abort,
