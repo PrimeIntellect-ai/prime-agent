@@ -3,6 +3,16 @@
 Release notes for Prime Agent. Historical TypeScript release notes are
 recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
 
+## [0.10.5] - 2026-11-18
+
+- Daemon, print/JSON (`prime-agent -p`), and RPC stdio-mode refinements now write the harness stores the session's digest reads: the global store under the agent dir's `harness/` path and the local store in the session's own artifact directory, instead of the orphan `~/.prime/agent/harness_state.json` and `~/.prime/agent/refinement_history.jsonl` (written by daemon and RPC `/refine --global`), one shared `~/.prime/agent/sessions/harness/harness_state.json` (written by every session whose session dir is the sessions root), and `<session dir>/harness/harness_state.json` under any custom session dir (`--session-dir`, `PRIME_AGENT_SESSION_DIR`, or the `sessionDir` setting). The old files stay on disk but nothing reads them anymore. No automatic migration ships: entries in the orphaned global file can be merged by hand into `~/.prime/agent/harness/harness_state.json`; the shared local files mix sessions and cannot be attributed back.
+- Bundled skills now win name clashes: a project or user skill with the same name (for example `goal`) no longer replaces the bundled one. To use your own skill instead, add `"skills": ["-<name>"]` to `~/.prime/agent/settings.json`.
+- The bundled `factory` skill loads again, and a skill with invalid frontmatter now reports the YAML error instead of vanishing.
+- New `prime-agent skills` command lists every discovered skill and why it is active, hidden, shadowed, disabled, or invalid. A new session also shows a warning when a skill could not load.
+- `/skill:<name>` now works anywhere in a message, including for hidden skills. Unknown skill names show a notice.
+- Switching a Python skill between the bundled copy and your own now installs the selected copy into the Python kernel.
+- Fixed uv discovery rejecting the global `~/.local/bin/uv` install when Prime Agent is launched from the home directory (notably on Windows), and made the missing-uv install hint match the platform.
+
 ## [0.10.4] - 2026-11-17
 
 - Fixed `rlm.collect` reporting a child as completed (`done`, settled) when it read idle for a moment right after its task was admitted and then started running.
