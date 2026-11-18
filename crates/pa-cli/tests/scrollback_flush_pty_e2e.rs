@@ -374,6 +374,9 @@ impl PtyReader {
 fn spawn_child(socket: &Path, slave: &OwnedFd, kill_switch: bool) -> Child {
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
+        // The ioctl request type is c_ulong on linux-gnu and c_uint on Apple, so
+        // the widening cast is lossless on one target and a no-op on the other.
+        #[allow(clippy::cast_lossless, clippy::unnecessary_cast)]
         let rc = unsafe { libc::ioctl(fd, libc::TIOCSCTTY as libc::c_ulong, 0) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
