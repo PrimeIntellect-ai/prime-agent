@@ -1,0 +1,1 @@
+- The prompt highlights `@` file references exactly as `@` completion reads them: an unclosed `@"...` stays highlighted to the end of the line, and an `@path` right after `=` or a quote (`--file=@src/main.rs`) highlights too.

@@ -17,9 +17,10 @@ use regex::RegexBuilder;
 
 use super::file_index::{Answer, FileIndex, IndexScope};
 use super::{
-    build_completion_value, expand_home_path, parse_path_prefix, CompletionItem, SuggestionKind,
-    SuggestionLookup, Suggestions,
+    build_completion_value, expand_home_path, CompletionItem, SuggestionKind, SuggestionLookup,
+    Suggestions,
 };
+use crate::path_token::PathToken;
 
 /// The `.git` directory name: pruned from every walk.
 pub(super) const GIT_DIR: &str = ".git";
@@ -45,14 +46,10 @@ impl Drop for FileSearch {
 
 /// Look up the typed `@` token against the session cwd: the file index answers on the
 /// caller's thread when it serves the query, else the walk runs in the background.
-pub(super) fn lookup(
-    base: &Path,
-    index: &FileIndex,
-    at_prefix: String,
-) -> Option<SuggestionLookup> {
+pub(super) fn lookup(base: &Path, index: &FileIndex, token: PathToken) -> Option<SuggestionLookup> {
     let cancel = AtomicBool::new(false);
     let mut walk = false;
-    let served = resolve_search(base, &at_prefix, &cancel, |search, scope| {
+    let served = resolve_search(base, &token, &cancel, |search, scope| {
         match index.query(base, scope, search) {
             Answer::Served(answered) => answered,
             Answer::Walk => {
@@ -62,19 +59,19 @@ pub(super) fn lookup(
         }
     });
     if walk {
-        return Some(SuggestionLookup::Searching(spawn(base, at_prefix)));
+        return Some(SuggestionLookup::Searching(spawn(base, token)));
     }
     served.map(SuggestionLookup::Ready)
 }
 
 /// Start the background walk for the typed `@` token.
-fn spawn(base: &Path, at_prefix: String) -> FileSearch {
+fn spawn(base: &Path, token: PathToken) -> FileSearch {
     let (tx, results) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let base = base.to_path_buf();
     let thread_cancel = Arc::clone(&cancel);
     thread::spawn(move || {
-        let _ = tx.send(search(&base, &at_prefix, &thread_cancel));
+        let _ = tx.send(search(&base, &token, &thread_cancel));
     });
     FileSearch { results, cancel }
 }
@@ -141,8 +138,7 @@ fn push_joined_path(target: &mut String, base: &str, form: &str) {
 pub(super) struct AtSearch<'a> {
     pub(super) lower_query: &'a str,
     pub(super) display_base: Option<&'a str>,
-    pub(super) at_prefix: &'a str,
-    pub(super) is_quoted_prefix: bool,
+    pub(super) token: &'a PathToken,
     pub(super) walk_base: &'a Path,
     pub(super) regex: Option<&'a regex::Regex>,
     pub(super) full_path_mode: bool,
@@ -268,8 +264,8 @@ fn walk_directory(search: &AtSearch<'_>) -> Vec<String> {
 
 /// The walk thread body: walk the typed scope and rank. `None` means no menu: fd
 /// matched nothing, or every entry scored zero.
-fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestions> {
-    resolve_search(base, at_prefix, cancel, |search, _| {
+fn search(base: &Path, token: &PathToken, cancel: &AtomicBool) -> Option<Suggestions> {
+    resolve_search(base, token, cancel, |search, _| {
         let found = walk_directory(search);
         suggestions(
             top_ranked(found.iter().filter_map(|form| search.score(form))),
@@ -282,15 +278,14 @@ fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestio
 /// the resolved search to `answer`. An invalid regex answers `None` without it.
 pub(super) fn resolve_search(
     base: &Path,
-    at_prefix: &str,
+    token: &PathToken,
     cancel: &AtomicBool,
     answer: impl FnOnce(&AtSearch<'_>, &IndexScope) -> Option<Suggestions>,
 ) -> Option<Suggestions> {
-    let (raw_query, _is_at_prefix, is_quoted_prefix) = parse_path_prefix(at_prefix);
-    let scoped_query = resolve_scoped_query(base, &raw_query);
+    let scoped_query = resolve_scoped_query(base, &token.path);
     let (walk_base, query) = match &scoped_query {
         Some(scoped) => (scoped.base_dir.clone(), scoped.query.clone()),
-        None => (base.to_path_buf(), raw_query),
+        None => (base.to_path_buf(), token.path.clone()),
     };
     // The fd pattern is the raw query as a regex (smart case), matched against the file
     // name — or the whole path when the query contains a `/`. An empty query matches everything.
@@ -312,8 +307,7 @@ pub(super) fn resolve_search(
         display_base: scoped_query
             .as_ref()
             .map(|scoped| scoped.display_base.as_str()),
-        at_prefix,
-        is_quoted_prefix,
+        token,
         walk_base: &walk_base,
         regex: regex.as_ref(),
         full_path_mode,
@@ -408,8 +402,7 @@ pub(super) fn suggestions(best: Vec<RankedForm<'_>>, search: &AtSearch<'_>) -> O
     }
     let AtSearch {
         display_base,
-        at_prefix,
-        is_quoted_prefix,
+        token,
         ..
     } = search;
     let items: Vec<CompletionItem> = best
@@ -428,7 +421,7 @@ pub(super) fn suggestions(best: Vec<RankedForm<'_>>, search: &AtSearch<'_>) -> O
                 display_path.clone()
             };
             CompletionItem {
-                value: build_completion_value(&completion_path, true, *is_quoted_prefix),
+                value: build_completion_value(&completion_path, true, token.quoting),
                 label: if is_directory {
                     format!("{name}/")
                 } else {
@@ -441,7 +434,7 @@ pub(super) fn suggestions(best: Vec<RankedForm<'_>>, search: &AtSearch<'_>) -> O
         })
         .collect();
     Some(Suggestions {
-        prefix: (*at_prefix).to_string(),
+        prefix: token.text.clone(),
         kind: Some(SuggestionKind::File),
         items,
     })
