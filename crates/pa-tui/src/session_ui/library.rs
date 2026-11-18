@@ -73,7 +73,7 @@ impl super::SessionUi {
             return Ok(());
         };
         if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
+            self.exit_guard.note_key_handled("ctrl+c");
         }
         let action = view
             .library_view
