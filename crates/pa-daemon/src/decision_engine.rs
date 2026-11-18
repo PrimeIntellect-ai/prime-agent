@@ -65,9 +65,10 @@ impl DecisionEngine {
             Arc::clone(&own_summary),
             None,
         ));
-        // The decision model resolves once here, at engine start: the
-        // hot path of the control loop never re-reads settings or
-        // rebuilds the registry; a failed resolution keeps its
+        // The decision model selection resolves once here, at engine
+        // start; every decision re-resolves its request credential
+        // (the expiry check, the OAuth refresh) through the resolved
+        // model's per-request seam. A failed resolution keeps its
         // actionable refusal for every decision.
         let model = pa_core::session_engine::decision_api::resolve_decision_model(cwd, agent_dir);
         Self {
@@ -131,7 +132,7 @@ impl DecisionEngine {
     }
 
     /// Serve one decision request message: run the shared decision path
-    /// (one provider completion) with the engine-start resolution. The
+    /// (one provider completion) with the engine-resolved model. The
     /// request's `state` carries the parent's guidance verbatim — the
     /// engine keeps no channel of its own.
     fn serve(&self, request: Value, aborted: &dyn Fn() -> bool) -> anyhow::Result<Value> {

@@ -11,13 +11,13 @@
 //! unset (or unresolvable) and every decision refuses with an actionable
 //! message naming the setting.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{anyhow, bail};
 use pa_types::ai::{ModelInput, StopReason};
 use serde_json::{json, Value};
 
+use super::provider_adapter::LiveAuthResolver;
 use crate::models::{find_exact_model_reference_match, ModelRegistry};
 
 /// The default decision instructions (the choice question's default).
@@ -180,12 +180,13 @@ fn unusable_message(reference: &str) -> String {
     )
 }
 
-/// The resolved decision model with its request auth: the settings reference
-/// resolved through the registry exactly like `imageModel` routing.
+/// The resolved decision model: the settings reference resolved through
+/// the registry exactly like `imageModel` routing. The model selection is
+/// cached for the engine's lifetime; the request auth is not — every
+/// decision re-resolves it through the live seam's per-request resolver.
 pub struct ResolvedDecisionModel {
     model: pa_types::ai::Model,
-    api_key: Option<String>,
-    headers: Option<BTreeMap<String, String>>,
+    request_auth: LiveAuthResolver,
 }
 
 impl ResolvedDecisionModel {
@@ -206,13 +207,52 @@ impl ResolvedDecisionModel {
     pub fn api(&self) -> &str {
         &self.model.api
     }
+
+    /// One decision call's request auth, resolved fresh through the
+    /// per-request seam: an expired OAuth credential refreshes and a
+    /// rotated key serves, instead of replaying the engine-start key. A
+    /// failed OAuth refresh refuses with the registry's own sentence; a
+    /// credential removed between decisions simply serves none, and the
+    /// provider's rejection reports it — the same arm the live stream
+    /// serves.
+    ///
+    /// The fresh store per call is the tradeoff that makes rotation
+    /// visible: the chat path keeps one registry and reloads it, so a
+    /// failed read keeps its last-read data, while the decision path
+    /// has no last-read data to keep. The blocking auth reads (and any
+    /// refresh) run off the executor; `deadline` bounds the wait, not
+    /// the work — a timed-out resolution keeps running on the blocking
+    /// pool.
+    async fn resolve_request_auth(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> anyhow::Result<crate::models::ResolvedRequestAuth> {
+        let resolver = std::sync::Arc::clone(&self.request_auth);
+        let model = self.model.clone();
+        let resolution = tokio::task::spawn_blocking(move || resolver(&model));
+        let auth = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            resolution,
+        )
+        .await
+        .map_err(|_| anyhow!("the decision model request auth timed out"))?
+        .map_err(|error| anyhow!("the decision auth resolution failed: {error}"))?;
+        if !auth.ok {
+            bail!(
+                "{}",
+                auth.error
+                    .unwrap_or_else(|| unusable_message(&self.label()))
+            );
+        }
+        Ok(auth)
+    }
 }
 
 /// Resolve `decisionModel` through the model registry:
 /// the reference must match an available (authenticated) model, and its
 /// request auth comes from the registry's merged resolution. The decision
-/// engine calls this once at engine start and reuses the result for every
-/// decision.
+/// engine calls this once at engine start and keeps the model selection
+/// for every decision; the request auth is re-resolved per decision.
 ///
 /// # Errors
 ///
@@ -242,10 +282,19 @@ pub fn resolve_decision_model(
     if !resolved.ok {
         return Err(unusable_message(&reference));
     }
+    // The per-request seam: every decision rebuilds the auth store and
+    // the registry and runs the same resolution the live stream runs
+    // per call, so an expired OAuth credential refreshes instead of
+    // replaying the engine-start key.
+    let auth_dir = agent_dir.to_path_buf();
+    let request_auth: LiveAuthResolver = std::sync::Arc::new(move |model: &pa_types::ai::Model| {
+        let auth = crate::auth::AuthStorage::create(&auth_dir);
+        let mut registry = ModelRegistry::create(auth, auth_dir.join("models.json"));
+        registry.get_api_key_and_headers(model, None)
+    });
     Ok(ResolvedDecisionModel {
         model,
-        api_key: resolved.api_key,
-        headers: resolved.headers,
+        request_auth,
     })
 }
 
@@ -414,8 +463,17 @@ async fn serve_decision(
     resolved: &ResolvedDecisionModel,
     request: &DecisionRequest,
 ) -> anyhow::Result<Value> {
+    // One wall-clock budget for the whole call: the auth resolution and
+    // the completion share this deadline, so a slow credential phase
+    // leaves the completion only what remains.
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(DECISION_TIMEOUT_MS);
+    // This call's credential, resolved at request time: the model
+    // selection stays cached for the engine's lifetime, the auth does
+    // not.
+    let auth = resolved.resolve_request_auth(deadline).await?;
     if resolved.model.api == SYSTEMONE_API {
-        return serve_systemone(resolved, request).await;
+        return serve_systemone(resolved, &auth, deadline, request).await;
     }
     let context = build_decision_context(request);
     // The request's cancellation token: the guard above cancels it when
@@ -426,19 +484,28 @@ async fn serve_decision(
         max_tokens: Some(DECISION_MAX_TOKENS),
         timeout_ms: Some(DECISION_TIMEOUT_MS),
         signal: Some(signal.clone()),
-        api_key: resolved.api_key.clone(),
-        headers: resolved
+        api_key: auth.api_key.clone(),
+        headers: auth
             .headers
             .as_ref()
             .map(|headers| headers.clone().into_iter().collect()),
         ..Default::default()
     });
+    // The per-call request model (the xAI credential-class shape): the
+    // resolution may serve a different model shape than the engine-start
+    // selection, exactly like the chat path's per-request target.
+    let request_model = auth
+        .request_model
+        .clone()
+        .unwrap_or_else(|| resolved.model.clone());
     // `timeout_ms` bounds only the request send; the wrap bounds the whole
     // completion, so a stalled body stream is dropped and answered with the
-    // timeout error instead of holding the decision forever.
+    // timeout error instead of holding the decision forever. The wrap
+    // carries the deadline's REMAINING budget: the auth phase and the
+    // completion share one wall-clock bound.
     let response = if let Ok(result) = tokio::time::timeout(
-        std::time::Duration::from_millis(DECISION_TIMEOUT_MS),
-        pa_ai::complete_simple(&resolved.model, &context, Some(options)),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        pa_ai::complete_simple(&request_model, &context, Some(options)),
     )
     .await
     {
@@ -488,6 +555,8 @@ async fn serve_decision(
 /// of paying a client build's trust-store reload per call.
 async fn serve_systemone(
     resolved: &ResolvedDecisionModel,
+    auth: &crate::models::ResolvedRequestAuth,
+    deadline: tokio::time::Instant,
     request: &DecisionRequest,
 ) -> anyhow::Result<Value> {
     let mut criteria = serde_json::Map::new();
@@ -517,12 +586,12 @@ async fn serve_systemone(
         reqwest::header::CONTENT_TYPE,
         "application/json".parse().expect("content-type header"),
     );
-    if let Some(api_key) = resolved.api_key.as_deref() {
+    if let Some(api_key) = auth.api_key.as_deref() {
         if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")) {
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
     }
-    for (name, value) in resolved.headers.as_ref().into_iter().flatten() {
+    for (name, value) in auth.headers.as_ref().into_iter().flatten() {
         if let (Ok(name), Ok(value)) = (
             reqwest::header::HeaderName::from_bytes(name.as_bytes()),
             reqwest::header::HeaderValue::from_str(value),
@@ -534,9 +603,11 @@ async fn serve_systemone(
         "{}/systemone",
         resolved.model.base_url.trim_end_matches('/')
     );
+    // The deadline's remaining budget bounds the whole HTTP leg
+    // (reqwest's timeout covers the body read too).
     let response = pa_ai::utils::shared_http_client()
         .post(&url)
-        .timeout(std::time::Duration::from_millis(DECISION_TIMEOUT_MS))
+        .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()))
         .headers(headers)
         .json(&body)
         .send()
@@ -605,8 +676,9 @@ pub fn decision_model_selector(cwd: &Path, agent_dir: &Path) -> Result<String, S
 
 /// Serve one decision request with an already-resolved decision model:
 /// validate the request body, then run one provider completion. The
-/// decision engine resolves the model once at start and passes it here,
-/// so the decision path never re-reads settings or rebuilds the registry.
+/// decision engine resolves the model selection once at start and passes
+/// it here; the request auth is resolved again for every call, so an
+/// expired credential never replays the engine-start key.
 ///
 /// # Errors
 ///
@@ -811,6 +883,75 @@ mod tests {
             "fixture-decisions/decision-model does not accept image input, so decisions cannot \
              carry images. Drop the images, or set decisionModel to a \
              vision-capable model."
+        );
+    }
+
+    /// Each decision resolves its request credential at serve time: a
+    /// credential that changes on disk after the engine resolved the
+    /// model (a rotated key, the visible half of the refresh the
+    /// auth-store tests pin) serves the new value instead of replaying
+    /// the engine-start key.
+    #[tokio::test]
+    async fn each_decision_serves_the_credential_resolved_at_request_time() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-auth".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        let dir = tempfile::tempdir().unwrap();
+        let models_json = |api_key: &str| {
+            format!(
+                r#"{{ "providers": {{ "fixture-decisions": {{
+                    "baseUrl": "https://fixture.example", "apiKey": "{api_key}",
+                    "api": "faux-decision-auth", "models": [
+                        {{ "id": "decision-model", "input": ["text"] }}
+                    ]
+                }} }} }}"#
+            )
+        };
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionModel": "decision-model" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models.json"), models_json("fixture-key")).unwrap();
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                r#"{"action": {"choice": "left"}}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        registration.set_repeat_last_response(true);
+        let request = json!({ "state": {}, "questions": { "action": {
+            "type": "choice", "criteria": { "left": "go left" }
+        } } });
+        // The engine resolves the model ONCE; both decisions serve
+        // through the same resolved model, the engine-lifetime shape.
+        let resolved = resolve_decision_model(dir.path(), dir.path()).unwrap();
+        serve_decision_request(request.clone(), &resolved)
+            .await
+            .unwrap();
+        // The credential rotates on disk between the two decisions.
+        std::fs::write(
+            dir.path().join("models.json"),
+            models_json("fixture-key-rotated"),
+        )
+        .unwrap();
+        serve_decision_request(request, &resolved).await.unwrap();
+        // The faux provider records the api key each decision sent.
+        assert_eq!(
+            registration.received_api_keys(),
+            vec![
+                Some("fixture-key".to_string()),
+                Some("fixture-key-rotated".to_string()),
+            ],
+            "each decision must send the credential resolved at request time"
         );
     }
 
