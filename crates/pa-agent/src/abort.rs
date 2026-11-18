@@ -144,8 +144,20 @@ where
         return Err(aborted_error());
     }
     tokio::select! {
-        value = operation => Ok(value),
+        // A cancellation the caller requested wins over a result that became
+        // ready in the same poll: the abort branch is polled first, and the
+        // result branch re-checks the signal. Without both, `select!` breaks
+        // the tie at random, so whether an abort is honoured would depend on
+        // which ready branch it picked.
+        biased;
         () = signal.aborted() => Err(aborted_error()),
+        value = operation => {
+            if signal.is_aborted() {
+                Err(aborted_error())
+            } else {
+                Ok(value)
+            }
+        }
     }
 }
 
@@ -216,6 +228,30 @@ mod tests {
         let signal = AbortSignal::never();
         let value = race_with_abort(async { 7 }, &signal).await.unwrap();
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn a_requested_abort_wins_over_a_result_ready_in_the_same_poll() {
+        // The tie: the operation resolves and requests the abort in its own
+        // poll, so both select branches are ready together. Repeating the
+        // tie exposes select's random branch choice instead of trusting one
+        // lucky poll.
+        for _ in 0..256 {
+            let controller = AbortController::new();
+            let signal = controller.signal();
+            let operation = {
+                let controller = controller.clone();
+                async move {
+                    controller.abort();
+                    7
+                }
+            };
+            let result = race_with_abort(operation, &signal).await;
+            assert!(
+                result.is_err(),
+                "a requested abort must win over a same-poll result"
+            );
+        }
     }
 
     #[tokio::test]
