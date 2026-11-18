@@ -91,16 +91,20 @@ fn bg_code(color: Color) -> Option<String> {
 #[must_use]
 pub fn line_to_ansi(line: &Line) -> String {
     let mut out = String::new();
-    let mut open = false;
+    let mut active_style = None;
     for span in line {
-        let codes = sgr_codes(span);
-        if let Some(codes) = codes {
-            let _ = write!(out, "\x1b[{codes}m");
-            open = true;
+        if active_style != Some(span.style) {
+            if active_style.take().is_some() {
+                out.push_str("\x1b[0m");
+            }
+            if let Some(codes) = sgr_codes(span) {
+                let _ = write!(out, "\x1b[{codes}m");
+                active_style = Some(span.style);
+            }
         }
         out.push_str(&span.content);
     }
-    if open {
+    if active_style.is_some() {
         out.push_str("\x1b[0m");
     }
     out
@@ -166,7 +170,23 @@ pub fn raw_span(s: &str) -> Span {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{line_to_ansi, strip_ansi, Color, Modifier, Span};
+    use ratatui::style::Style;
+
+    #[test]
+    fn line_to_ansi_ends_emphasis_and_color_before_following_text() {
+        let line = vec![
+            Span::styled("bold", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled("italic", Style::new().add_modifier(Modifier::ITALIC)),
+            Span::styled("code", Style::new().fg(Color::Rgb(139, 168, 136))),
+            Span::raw("."),
+        ];
+
+        assert_eq!(
+            line_to_ansi(&line),
+            "\x1b[1mbold\x1b[0m\x1b[3mitalic\x1b[0m\x1b[38;2;139;168;136mcode\x1b[0m."
+        );
+    }
 
     /// Goldens generated from the live TS `stripAnsi` binary (the parity ground truth): the
     /// common CSI fast path, OSC-8 (BEL- and ST-terminated), DCS, APC with astral content,
