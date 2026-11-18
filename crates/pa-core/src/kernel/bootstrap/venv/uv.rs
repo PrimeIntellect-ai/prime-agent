@@ -3,6 +3,10 @@
 use super::{anyhow, home_dir, Path, PathBuf};
 use std::ffi::OsStr;
 
+#[cfg(windows)]
+const UV_INSTALL_COMMAND: &str =
+    "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"";
+#[cfg(not(windows))]
 const UV_INSTALL_COMMAND: &str = "curl -LsSf https://astral.sh/uv/install.sh | sh";
 
 fn find_executable(name: &str, path_value: &OsStr, project: Option<&Path>) -> Option<PathBuf> {

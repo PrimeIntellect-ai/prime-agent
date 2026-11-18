@@ -80,8 +80,9 @@ fn safe_path_with_mode(path: &Path, project: Option<&Path>, allow_ancestor: bool
     })
 }
 
-/// The single global uv install is a trusted executable even when HOME is an
-/// enclosing Git checkout. No other HOME path receives this exception.
+/// The single global uv install is a trusted executable even when the launch
+/// boundary is the home directory itself. No other HOME path receives this
+/// exception.
 pub(crate) fn safe_home_uv(path: &Path, project: Option<&Path>) -> bool {
     safe_home_uv_with_home(path, project, pa_types::platform::home_dir().as_deref())
 }
@@ -118,7 +119,14 @@ fn safe_home_uv_with_home(path: &Path, project: Option<&Path>, home: Option<&Pat
         return true;
     }
     let active_boundary = nearest_checkout.unwrap_or(&project);
-    !path_starts_with(&canonical_uv, active_boundary)
+    // The boundary being home itself — a launch from home, or a
+    // home-dotfiles checkout — is the user's own territory, so the global
+    // install stays trusted there: launching from the home directory must
+    // not hide it. HOME merely inside the boundary, such as a wrapper or CI
+    // redirecting HOME into a repository, keeps the pre-fix rejection: a
+    // checked-in uv at $HOME/.local/bin never reaches the kernel bootstrap.
+    paths_equal(active_boundary, &canonical_home)
+        || !path_starts_with(&canonical_uv, active_boundary)
 }
 
 /// Drop ambient Python import roots after caller overrides are applied.
@@ -461,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_direct_home_uv_is_trusted_outside_the_active_checkout() {
+    fn only_the_direct_home_uv_is_trusted() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let tool_dir = home.join(".local/bin");
@@ -473,8 +481,9 @@ mod tests {
         std::fs::create_dir_all(&untrusted).unwrap();
         std::fs::write(&uv, "uv").unwrap();
         std::fs::write(&untrusted_uv, "uv").unwrap();
-        // A no-Git archive opened at HOME can supply this exact path.
-        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
+        // Launching from the home directory itself must not hide the
+        // global install (regression: the boundary check used to reject it).
+        assert!(safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
         assert!(!safe_home_uv_with_home(
             &untrusted_uv,
             Some(&home),
@@ -490,8 +499,10 @@ mod tests {
             std::fs::create_dir(&tool_dir).unwrap();
             std::fs::write(&uv, "uv").unwrap();
         }
+        // Home being a Git checkout changes nothing: the boundary is still
+        // the user's own territory.
         std::fs::create_dir(home.join(".git")).unwrap();
-        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
+        assert!(safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
         let nested = home.join("project");
         let nested_tools = nested.join("tools");
         std::fs::create_dir_all(&nested_tools).unwrap();
@@ -508,6 +519,27 @@ mod tests {
             Some(&nested),
             Some(&home)
         ));
+    }
+
+    #[test]
+    fn home_uv_redirected_inside_a_repository_is_rejected() {
+        // A wrapper or CI can point HOME at a repository directory. The
+        // boundary is the repository, not home, so the checked-in uv at
+        // $HOME/.local/bin must not reach the kernel bootstrap.
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let home = repo.join("home");
+        let project = repo.join("app");
+        let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        let uv = home.join(".local/bin").join(uv_name);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(uv.parent().unwrap()).unwrap();
+        std::fs::write(&uv, "uv").unwrap();
+        assert!(!safe_home_uv_with_home(&uv, Some(&project), Some(&home)));
+        // Launching from the redirected home itself keeps the rejection:
+        // the boundary is the enclosing repository, still not home.
+        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
     }
 
     #[test]
