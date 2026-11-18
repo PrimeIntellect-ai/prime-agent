@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[cfg(any(not(windows), test))]
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Reject executable search paths inside the opened repository, even when the
 /// session cwd is a subdirectory. An ancestor can also expose project files.
@@ -80,13 +80,42 @@ fn safe_path_with_mode(path: &Path, project: Option<&Path>, allow_ancestor: bool
     })
 }
 
-/// The single global uv install is a trusted executable even when HOME is an
-/// enclosing Git checkout. No other HOME path receives this exception.
+/// The single global uv install is a trusted executable even when the launch
+/// boundary is the home directory itself, as long as `HOME` is the account's
+/// own home. No other HOME path receives this exception.
 pub(crate) fn safe_home_uv(path: &Path, project: Option<&Path>) -> bool {
-    safe_home_uv_with_home(path, project, pa_types::platform::home_dir().as_deref())
+    safe_home_uv_with_home(
+        path,
+        project,
+        pa_types::platform::home_dir().as_deref(),
+        account_home().as_deref(),
+    )
 }
 
-fn safe_home_uv_with_home(path: &Path, project: Option<&Path>, home: Option<&Path>) -> bool {
+/// The account's home from the user database, independent of `HOME`.
+#[cfg(unix)]
+fn account_home() -> Option<PathBuf> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+}
+
+/// No dependency exposes the profile known folder, so Windows takes
+/// `USERPROFILE`.
+#[cfg(not(unix))]
+fn account_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .filter(|profile| !profile.is_empty())
+        .map(PathBuf::from)
+}
+
+fn safe_home_uv_with_home(
+    path: &Path,
+    project: Option<&Path>,
+    home: Option<&Path>,
+    account_home: Option<&Path>,
+) -> bool {
     let (Some(project), Some(home)) = (project, home) else {
         return false;
     };
@@ -118,7 +147,18 @@ fn safe_home_uv_with_home(path: &Path, project: Option<&Path>, home: Option<&Pat
         return true;
     }
     let active_boundary = nearest_checkout.unwrap_or(&project);
-    !path_starts_with(&canonical_uv, active_boundary)
+    // The boundary being the account's real home — a launch from home, or a
+    // home-dotfiles checkout — is the user's own territory, so the global
+    // install stays trusted there: launching from the home directory must
+    // not hide it. HOME pointed anywhere else, such as a wrapper or CI
+    // setting HOME to a repository root or a directory inside one, keeps the
+    // pre-fix rejection: a checked-in uv at $HOME/.local/bin never reaches
+    // the kernel bootstrap.
+    let home_is_account_home = account_home
+        .and_then(|account_home| account_home.canonicalize().ok())
+        .is_some_and(|account_home| paths_equal(&account_home, &canonical_home));
+    (home_is_account_home && paths_equal(active_boundary, &canonical_home))
+        || !path_starts_with(&canonical_uv, active_boundary)
 }
 
 /// Drop ambient Python import roots after caller overrides are applied.
@@ -456,12 +496,13 @@ mod tests {
         assert!(safe_home_uv_with_home(
             &uv,
             Some(filesystem_root),
+            Some(&home),
             Some(&home)
         ));
     }
 
     #[test]
-    fn only_the_direct_home_uv_is_trusted_outside_the_active_checkout() {
+    fn only_the_direct_home_uv_is_trusted() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let tool_dir = home.join(".local/bin");
@@ -473,41 +514,108 @@ mod tests {
         std::fs::create_dir_all(&untrusted).unwrap();
         std::fs::write(&uv, "uv").unwrap();
         std::fs::write(&untrusted_uv, "uv").unwrap();
-        // A no-Git archive opened at HOME can supply this exact path.
-        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
-        assert!(!safe_home_uv_with_home(
-            &untrusted_uv,
+        // Launching from the account's home directory itself must not hide
+        // the global install (regression: the boundary check used to reject it).
+        assert!(safe_home_uv_with_home(
+            &uv,
+            Some(&home),
             Some(&home),
             Some(&home)
         ));
+        assert!(!safe_home_uv_with_home(
+            &untrusted_uv,
+            Some(&home),
+            Some(&home),
+            Some(&home)
+        ));
+        // Without a resolvable account home there is no exception.
+        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home), None));
         #[cfg(unix)]
         {
             std::fs::remove_file(&uv).unwrap();
             std::fs::remove_dir(&tool_dir).unwrap();
             std::os::unix::fs::symlink(&untrusted, &tool_dir).unwrap();
-            assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
+            assert!(!safe_home_uv_with_home(
+                &uv,
+                Some(&home),
+                Some(&home),
+                Some(&home)
+            ));
             std::fs::remove_file(&tool_dir).unwrap();
             std::fs::create_dir(&tool_dir).unwrap();
             std::fs::write(&uv, "uv").unwrap();
         }
+        // Home being a Git checkout changes nothing: the boundary is still
+        // the user's own territory.
         std::fs::create_dir(home.join(".git")).unwrap();
-        assert!(!safe_home_uv_with_home(&uv, Some(&home), Some(&home)));
+        assert!(safe_home_uv_with_home(
+            &uv,
+            Some(&home),
+            Some(&home),
+            Some(&home)
+        ));
         let nested = home.join("project");
         let nested_tools = nested.join("tools");
         std::fs::create_dir_all(&nested_tools).unwrap();
         std::fs::create_dir(nested.join(".git")).unwrap();
-        assert!(safe_home_uv_with_home(&uv, Some(&nested), Some(&home)));
+        assert!(safe_home_uv_with_home(
+            &uv,
+            Some(&nested),
+            Some(&home),
+            Some(&home)
+        ));
         assert!(!safe_executable_path(&untrusted_uv, Some(&nested)));
         assert!(!safe_home_uv_with_home(
             &untrusted_uv,
             Some(&nested),
+            Some(&home),
             Some(&home)
         ));
         assert!(!safe_home_uv_with_home(
             &nested_tools.join(uv_name),
             Some(&nested),
+            Some(&home),
             Some(&home)
         ));
+    }
+
+    #[test]
+    fn home_uv_redirected_into_a_repository_is_rejected() {
+        // A wrapper or CI can point HOME into a repository, or at its root
+        // (`HOME=$PWD`). HOME is then not the account's home, so the
+        // checked-in uv at $HOME/.local/bin must not reach the kernel
+        // bootstrap from any launch inside the repository.
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("account");
+        let repo = root.path().join("repo");
+        let home = repo.join("home");
+        let project = repo.join("app");
+        let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        let uv = home.join(".local/bin").join(uv_name);
+        let root_uv = repo.join(".local/bin").join(uv_name);
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(uv.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root_uv.parent().unwrap()).unwrap();
+        std::fs::write(&uv, "uv").unwrap();
+        std::fs::write(&root_uv, "uv").unwrap();
+        for launch in [&project, &home] {
+            assert!(!safe_home_uv_with_home(
+                &uv,
+                Some(launch),
+                Some(&home),
+                Some(&account)
+            ));
+        }
+        for launch in [&repo, &project] {
+            assert!(!safe_home_uv_with_home(
+                &root_uv,
+                Some(launch),
+                Some(&repo),
+                Some(&account)
+            ));
+        }
     }
 
     #[test]
