@@ -255,7 +255,10 @@ pub struct ExecuteOptions {
 /// A typed request from Python code running in the kernel to the host.
 #[derive(Debug, Clone)]
 pub struct HostRequestPayload {
-    /// The request payload.
+    /// The request payload: the WHOLE request object, carrying the
+    /// envelope's routing `type` key beside any request fields — a
+    /// handler that deserializes the body into a strict struct must
+    /// strip that transport key itself (see the inbox read handler).
     pub data: Value,
 }
 
