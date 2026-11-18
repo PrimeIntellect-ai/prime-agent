@@ -301,7 +301,6 @@ impl RefineEngine {
         let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
-        registry.load_private_authorization_from_cache();
         let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
         let resolved = pa_core::models::resolve_cli_model(
             selection.provider.as_deref(),

@@ -875,6 +875,7 @@ impl AgentSessionEngine {
             compaction_skipped: None,
             continuation_message: None,
             error: None,
+            pending_refinement: None,
             refinement: None,
             refinement_failed: None,
         })

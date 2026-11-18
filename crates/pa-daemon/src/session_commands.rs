@@ -52,6 +52,8 @@ pub(crate) fn run_session_command(
                 continuation_message: None,
                 error: Some(error),
                 pending_refinement: None,
+                refinement: None,
+                refinement_failed: None,
             };
             if !emit_compact_end(command, &execution, emit) {
                 return None;

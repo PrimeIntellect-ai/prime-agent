@@ -440,6 +440,7 @@ impl SessionEngine {
         let mut consumption = TurnBoundaryConsumption { compaction: None };
         consumption.compaction = self.consume_pending_compaction(model, api_key, abort).await;
         consumption
+    }
 
     /// Start a pending model-requested refinement without waiting on planning or
     /// its idle-boundary commit. The host owns only completion reporting.

@@ -323,7 +323,7 @@ impl AgentSessionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
+    use crate::agent_engine::tests::admit;
     use crate::agent_engine::FAUX_TEST_LOCK;
     use crate::engine::SessionEngine as _;
     use pa_core::refinement::{empty_harness_state, HarnessScope};
@@ -334,13 +334,34 @@ mod tests {
 
     /// One faux engine with a built session whose local harness store lives
     /// under its temp dir, plus the flight fixture the wake parks.
-    fn park_engine() -> (AgentSessionEngine, tempfile::TempDir) {
-        let (mut engine, dir) =
-            faux_engine_with_settings(&json!({ "responses": [{"text": "seed reply"}] }), 1);
+    fn park_engine() -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
+        // The engine is built here (not through the shared helper): the
+        // apply's local store derives from the session dir, which the
+        // helper pins to None.
+        use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::agent_engine::tests::write_compaction_settings(dir.path(), 1);
         let sessions = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
-        engine.config.session_dir = Some(sessions.clone());
-        engine.set_session_file(sessions.join("park-session.jsonl"));
+        let engine = std::sync::Arc::new(
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: dir.path().join("agent"),
+                provider: None,
+                model: None,
+                api_key: None,
+                thinking: None,
+                session_dir: Some(sessions.clone()),
+                session_file: Some(sessions.join("park-session.jsonl")),
+                faux_script: Some(json!({ "responses": [{"text": "seed reply"}] }).to_string()),
+                supervisor_link: None,
+                telemetry_disabled: None,
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap(),
+        );
+        engine.register_arc();
         let mut events = Vec::new();
         admit(&engine, "seed turn".to_string(), &mut events);
         (engine, dir)
@@ -385,10 +406,15 @@ mod tests {
     }
 
     fn local_harness_state(dir: &std::path::Path) -> serde_json::Value {
-        let path = dir
-            .join("sessions")
-            .join("harness")
-            .join("harness_state.json");
+        // The apply writes the session's own artifact store — the one the
+        // conversation log implies (main's digest context), never a shared
+        // sessions/harness file.
+        let log = dir.join("sessions").join("park-session.jsonl");
+        let Some(store) = pa_core::session_engine::harness_digest::local_harness_dir_for_log(&log)
+        else {
+            return serde_json::Value::Null;
+        };
+        let path = pa_core::refinement::get_harness_state_path(&store);
         std::fs::read_to_string(&path).map_or(serde_json::Value::Null, |content| {
             serde_json::from_str(&content).expect("harness state parses")
         })
@@ -441,7 +467,6 @@ mod tests {
             "the trigger stays armed behind the parked reply"
         );
     }
-
 
     /// The park is ONE lock scope: a racing spawn admission (the same
     /// flight-then-pending read order the spawn's pre-check uses) must never

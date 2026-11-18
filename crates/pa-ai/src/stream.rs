@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::event_stream::AssistantMessageEventStream;
-use crate::providers::simple_options::default_request_max_tokens;
+use crate::providers::simple_options::{default_request_max_tokens, folded_request_max_tokens_at};
 use crate::registry::{ensure_builtins, get_api_provider};
 use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions};
 use crate::utils_inner::ProviderError;
@@ -206,6 +206,61 @@ pub async fn complete_simple(
 ) -> Result<AssistantMessage, ProviderError> {
     let stream = stream_simple(model, context, options)?;
     Ok(stream.result().await)
+}
+
+/// The requested output budget clamped against the model's combined input+output ceiling: a
+/// provider enforcing `input + max_tokens <= contextWindow` rejects an unsatisfiable request
+/// outright, so the facade shrinks the output budget to whatever room the estimated input
+/// leaves. Zero room means the input alone fills the window — no budget can save the request,
+/// so it stays as sent for the overflow recovery arm.
+///
+/// The TS facade never clamps; this is a deliberate Rust-side guard.
+#[must_use]
+pub fn clamped_request_max_tokens(model: &Model, context: &Context, requested: u64) -> u64 {
+    if model.context_window == 0 {
+        return requested; // combined ceiling unknown — leave the request alone
+    }
+    let available = model
+        .context_window
+        .saturating_sub(estimated_input_tokens(context));
+    if requested > available && available > 0 {
+        available
+    } else {
+        requested
+    }
+}
+
+/// The `max_tokens` a simple completion will actually carry on the wire
+/// for `model` against `context` with `options`: the pinned (or default)
+/// budget clamped against the estimated input, with the budget-folding
+/// thinking providers' allowance folded on top — the number a `Length`
+/// stop hit. [`default_request_max_tokens`] names only the pre-facade
+/// budget; callers reporting the effective request limit (the refine
+/// child's output-limit failure) read it from here, never a second copy.
+///
+/// The fold uses the thinking-budget defaults (no `thinking_budgets`):
+/// every current caller pins none, so this is the wire number exactly.
+/// A caller that sets `SimpleStreamOptions::thinking_budgets` must thread
+/// it through [`folded_request_max_tokens_at`] or its report is
+/// approximate by the budgets' delta from the defaults.
+#[must_use]
+pub fn simple_request_max_tokens(
+    model: &Model,
+    context: &Context,
+    options: Option<&crate::types::SimpleStreamOptions>,
+) -> Option<u64> {
+    let requested = options
+        .and_then(|options| options.base.max_tokens)
+        .or_else(|| default_request_max_tokens(model))?;
+    let clamped = if model.context_window == 0 {
+        requested
+    } else {
+        clamped_request_max_tokens(model, context, requested)
+    };
+    let reasoning = options
+        .and_then(|options| options.reasoning)
+        .unwrap_or(crate::types::ModelThinkingLevel::Off);
+    Some(folded_request_max_tokens_at(model, clamped, reasoning))
 }
 
 #[cfg(test)]

@@ -612,6 +612,83 @@ fn kind_name(kind: RefinementKind) -> &'static str {
     }
 }
 
+// --- main's newer planner surface (kept by the merge) ---
+/// Byte-based input token bound (one token per UTF-8 byte).
+fn refinement_input_token_bound(text: &str) -> u64 {
+    text.len() as u64
+}
+
+/// Fit the refinement request into the model context: trim conversation from
+/// the front (binary search) and clamp output tokens.
+///
+/// # Errors
+///
+/// Error when even the trimmed prompt leaves no room for output tokens.
+pub fn refinement_request(
+    model: &pa_types::ai::Model,
+    system_prompt: &str,
+    conversation_text: &str,
+    build_prompt: &dyn Fn(&str) -> String,
+    output_reserve: u64,
+) -> anyhow::Result<(u64, String)> {
+    let system_reserve =
+        refinement_input_token_bound(system_prompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
+    let input_budget = model.context_window.saturating_sub(
+        model
+            .max_tokens
+            .min(output_reserve)
+            .min(model.context_window / 2),
+    );
+    let mut user_prompt = build_prompt(conversation_text);
+    if system_reserve + refinement_input_token_bound(&user_prompt) > input_budget
+        && !conversation_text.is_empty()
+    {
+        let prompt_for_length = |length: usize| -> String {
+            let start = conversation_text.len().saturating_sub(length);
+            // Avoid splitting a UTF-8 sequence (the TS surrogate skip).
+            let mut start = start.min(conversation_text.len());
+            while start < conversation_text.len() && !conversation_text.is_char_boundary(start) {
+                start += 1;
+            }
+            build_prompt(&format!(
+                "[Earlier conversation omitted to fit the model context.]\n{}",
+                &conversation_text[start..]
+            ))
+        };
+        let mut low = 0usize;
+        let mut high = conversation_text.len();
+        while low < high {
+            let length = (low + high).div_ceil(2);
+            if system_reserve + refinement_input_token_bound(&prompt_for_length(length))
+                <= input_budget
+            {
+                low = length;
+            } else {
+                high = length - 1;
+            }
+        }
+        user_prompt = prompt_for_length(low);
+    }
+    let max_tokens = model.max_tokens.min(
+        model
+            .context_window
+            .saturating_sub(system_reserve + refinement_input_token_bound(&user_prompt)),
+    );
+    if max_tokens == 0 {
+        anyhow::bail!("Refinement prompt leaves no room for output in the model's context window; retry with a smaller request.");
+    }
+    Ok((max_tokens, user_prompt))
+}
+
+pub const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS: u64 = 4_096;
+
+pub const AUTO_REFINE_REVIEW_SYSTEM_PROMPT: &str = "You are Prime Agent's automatic /refine review gate.\n\nDecide whether this checkpoint should run /refine. Auto /refine writes local continual harness state by default, so approve when the trajectory contains evidence useful to this session's future turns.\nReject one-off noise, unsupported hypotheses, and transient tool outputs. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified lessons likely to be reused in future sessions.\n\nReturn JSON only:\n{\n  \"shouldRefine\": true|false,\n  \"rationale\": \"short reason\",\n  \"instructions\": \"optional concise instructions for /refine if shouldRefine is true\"\n}";
+
+pub const REFINEMENT_CONTEXT_OVERHEAD_TOKENS: u64 = 1_024;
+
+/// Output caps (reasoning off shares the model's output budget with JSON).
+pub const REFINEMENT_MAX_OUTPUT_TOKENS: u64 = 32_000;
+
 #[cfg(test)]
 mod tests {
     use super::super::empty_harness_state;

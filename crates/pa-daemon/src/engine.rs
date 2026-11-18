@@ -164,7 +164,6 @@ pub trait SessionEngine: Send + Sync {
     /// reads the persisted setting at its build. Blocking: call off the runtime.
     fn set_auto_compaction_enabled(&self, _enabled: bool) {}
 
-
     /// Consume a pending compact-trigger auto-refine round: the engine
     /// reads the gates and, when one is due, spawns the refinement child
     /// (fire-and-wake; its reply applies on arrival). `Ok` is every silent

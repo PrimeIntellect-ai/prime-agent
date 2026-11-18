@@ -972,6 +972,50 @@ pub(crate) fn emit_refinement_event_for_generation(
     true
 }
 
+pub(crate) fn emit_refinement_row_for_generation(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    expected_generation: Option<&str>,
+    message: &Value,
+) -> bool {
+    let mut core = core.lock().unwrap();
+    if expected_generation.is_some_and(|generation| core.generation != generation) {
+        return false;
+    }
+    {
+        let Some(store) = core.store.as_mut() else {
+            return false;
+        };
+        if store.session_id() != review_session_id {
+            pa_core::session_engine::compaction_trace::trace(
+                "autorefine.rows_dropped_session_moved",
+                &serde_json::Value::Null,
+            );
+            return false;
+        }
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    #[cfg(test)]
+    tests::BEFORE_REFINEMENT_ROW_BROADCAST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    // Persistence and both frames belong to the same session generation. A
+    // navigation cannot replace the store between the check and either send.
+    broadcast_custom_row_locked(&mut core, events, message);
+    true
+}
+
 struct CoreUsageStore(Arc<Mutex<SessionCore>>);
 
 fn missing_usage_target(target_id: &str) -> std::io::Error {

@@ -62,6 +62,12 @@ pub struct SessionCommandExecution {
     /// the transcript holds ONE representation of the turn, NOT part of
     /// `messages` — the loop's `message_end` persists it once admitted.
     pub continuation_message: Option<CustomMessage>,
+    /// The brush of the last applied refinement: the command result row's
+    /// payload (the /refine outcome the host renders).
+    pub refinement: Option<crate::refinement::RefinementResult>,
+    /// A failed refinement run surfaced through the command: the host's
+    /// refinement event carries this distinct from the command failure.
+    pub refinement_failed: Option<String>,
     /// The command failed: the TS error message (the failure result row
     /// is already appended to `messages`).
     pub error: Option<String>,
@@ -187,7 +193,7 @@ pub async fn execute_session_command(
     }
     let result = match command.name {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
-        "refine" => execute_refine(engine, params, command, &mut execution),
+        "refine" => execute_refine(engine, params, command, &mut execution).await,
         "goal" => execute_goal(engine, command, images, &mut execution).await,
         "autonomous" => execute_autonomous(params, command, &mut execution),
         other => Err(format!("Unknown session command: {other}")),
@@ -280,7 +286,7 @@ async fn execute_compact(
 /// leaves the spawn to the daemon-backed session command hosts.
 async fn execute_refine(
     engine: &SessionEngine,
-    params: &mut SessionCommandParams<'_>,
+    _params: &mut SessionCommandParams<'_>,
     command: &SessionSlashCommand,
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
@@ -299,13 +305,15 @@ async fn execute_refine(
                 .to_string(),
         );
     }
+    // The rollback's target store comes from the session's own digest
+    // context (main's store pair), never a param the host happened to carry.
+    let stores = engine
+        .session
+        .refinement_stores()
+        .map_err(|error| format!("{error:#}"))?;
     let result = match engine
         .session
-        .run_rollback_refinement(
-            &refine_options,
-            RefinementSource::User,
-            &params.global_harness_dir,
-        )
+        .run_rollback_refinement(&refine_options, RefinementSource::User, &stores.global_dir)
         .await
     {
         Ok(result) => result,

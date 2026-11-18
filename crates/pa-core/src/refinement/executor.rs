@@ -5,13 +5,17 @@
 //! this module owns no provider call.
 
 use super::planner::{
-    apply_refinement_proposal, rollback_proposal, trim_conversation_to_context, ApplyOptions,
-    RefinementProposal,
+    apply_refinement_proposal, parse_proposal, refinement_request, rollback_proposal,
+    trim_conversation_to_context, ApplyOptions, RefinementProposal,
+    AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS, AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
+    REFINEMENT_MAX_OUTPUT_TOKENS, REFINEMENT_SYSTEM_PROMPT,
 };
 use super::{
-    infer_refinement_result_scope, HarnessScope, HarnessState, RefinementKind, RefinementResult,
-    REFINEMENT_KINDS,
+    infer_refinement_result_scope, merge_refinement_history, HarnessScope, HarnessState,
+    RefinementKind, RefinementResult, REFINEMENT_KINDS,
 };
+use pa_types::ai::{AssistantMessage, StopReason};
+use pa_types::session::AgentMessage;
 
 #[derive(Debug, Default, Clone)]
 pub struct RefineOptions {
@@ -345,6 +349,229 @@ pub fn apply_refinement_plan(
     )
 }
 
+// --- main's newer executor surface (kept by the merge) ---
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct AutoRefineReview {
+    pub should_refine: bool,
+    pub rationale: String,
+    pub instructions: Option<String>,
+}
+
+pub struct AutoRefineReviewContext {
+    pub reason: String,
+    pub turns_since_last_review: u32,
+}
+
+/// Model-call seam (test seam over pa-ai completion): takes the request
+/// model (output budget pre-clamped), the call's system prompt, and the
+/// user prompt; returns the reply text.
+pub type RefinerFn = Box<
+    dyn FnOnce(
+            pa_types::ai::Model,
+            &'static str,
+            String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<AssistantMessage>> + Send>,
+        > + Send,
+>;
+
+/// Serialize the conversation for the refine prompt, tail-capped.
+fn conversation_text(messages: &[AgentMessage], cap: usize) -> String {
+    let serialized = crate::session_engine::compaction_utils::serialize_conversation(messages);
+    let chars: Vec<char> = serialized.chars().collect();
+    if chars.len() <= cap {
+        serialized
+    } else {
+        chars[chars.len() - cap..].iter().collect()
+    }
+}
+
+#[must_use]
+pub fn merge_refinement_result_history(
+    global: &[RefinementResult],
+    session: &[RefinementResult],
+) -> Vec<RefinementResult> {
+    merge_refinement_history(global, session)
+}
+
+fn parse_auto_refine_review(text: &str) -> anyhow::Result<AutoRefineReview> {
+    let value = super::planner::extract_json_object(text).map_err(anyhow::Error::msg)?;
+    let record = value.as_object().cloned().unwrap_or_default();
+    Ok(AutoRefineReview {
+        should_refine: record.get("shouldRefine") == Some(&serde_json::Value::Bool(true)),
+        rationale: record
+            .get("rationale")
+            .and_then(|value| value.as_str())
+            .unwrap_or("No rationale provided.")
+            .to_string(),
+        instructions: record
+            .get("instructions")
+            .and_then(|value| value.as_str())
+            .map(std::string::ToString::to_string),
+    })
+}
+
+/// Produce a refinement proposal (rollback, or the LLM pass) without mutating
+/// any harness state. Callers re-read the harness file before applying because
+/// the LLM call can take many seconds.
+///
+/// # Errors
+///
+/// Error on an unknown rollback id, a failed request build or LLM call, or an unparseable reply.
+pub async fn plan_refinement(
+    messages: &[AgentMessage],
+    state: &HarnessState,
+    history: &[RefinementResult],
+    model: &pa_types::ai::Model,
+    options: &RefineOptions,
+    refine_call: RefinerFn,
+) -> anyhow::Result<RefinementPlan> {
+    let id = generate_refinement_id();
+    if let Some(rollback_id) = &options.rollback_id {
+        let Some(target) = history.iter().find(|item| &item.id == rollback_id) else {
+            anyhow::bail!("Refinement {rollback_id} not found");
+        };
+        let fallback_scope = if options.global {
+            HarnessScope::Global
+        } else {
+            HarnessScope::Local
+        };
+        return Ok(RefinementPlan {
+            proposal: rollback_proposal(target),
+            id,
+            rollback_of: Some(target.id.clone()),
+            rollback_scope: Some(infer_refinement_result_scope(target).unwrap_or(fallback_scope)),
+        });
+    }
+
+    let conversation_text = conversation_text(messages, 80_000);
+    let scope_instruction = if options.global {
+        "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
+    } else {
+        "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed."
+    };
+    let build_prompt = |conversation: &str| -> String {
+        let mut sections = vec![
+            format!(
+                "<current_harness_state>\n{}\n</current_harness_state>",
+                overview_for_prompt(state)
+            ),
+            format!(
+                "<refinement_history>\n{}\n</refinement_history>",
+                history_for_prompt(history)
+            ),
+            format!("<conversation>\n{conversation}\n</conversation>"),
+            format!("<scope_policy>\n{scope_instruction}\n</scope_policy>"),
+        ];
+        if let Some(instructions) = &options.instructions {
+            sections.push(format!(
+                "<user_refine_instructions>\n{instructions}\n</user_refine_instructions>"
+            ));
+        }
+        sections.push(
+            "Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale."
+                .to_string(),
+        );
+        sections.join("\n\n")
+    };
+    let (request_max_tokens, user_prompt) = refinement_request(
+        model,
+        super::planner::REFINEMENT_SYSTEM_PROMPT,
+        &conversation_text,
+        &build_prompt,
+        REFINEMENT_MAX_OUTPUT_TOKENS,
+    )?;
+    let mut request_model = model.clone();
+    request_model.max_tokens = request_max_tokens.min(REFINEMENT_MAX_OUTPUT_TOKENS);
+
+    let max_tokens = request_model.max_tokens;
+    let reply = refine_call(request_model, REFINEMENT_SYSTEM_PROMPT, user_prompt).await?;
+    let text = reply_text(&reply, max_tokens, "Refinement failed")?;
+    Ok(RefinementPlan {
+        proposal: parse_proposal(&text).map_err(anyhow::Error::msg)?,
+        id,
+        rollback_of: None,
+        rollback_scope: None,
+    })
+}
+
+/// The text of a side call's reply. A reply cut off at its output limit or
+/// failed by the provider is an error that says so, never parsed as JSON.
+fn reply_text(reply: &AssistantMessage, max_tokens: u64, failure: &str) -> anyhow::Result<String> {
+    match reply.stop_reason {
+        StopReason::Length => anyhow::bail!(
+            "{failure}: the model hit its output limit ({max_tokens} tokens, {}/{})",
+            reply.provider,
+            reply.model
+        ),
+        StopReason::Error => anyhow::bail!(
+            "{failure}: {}",
+            reply.error_message.as_deref().unwrap_or("Unknown error")
+        ),
+        StopReason::Stop | StopReason::ToolUse | StopReason::Aborted => {}
+    }
+    Ok(reply
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The automatic /refine review gate.
+///
+/// # Errors
+///
+/// Error on a failed request build or LLM call, or an unparseable reply.
+pub async fn review_auto_refine(
+    messages: &[AgentMessage],
+    state: &HarnessState,
+    history: &[RefinementResult],
+    model: &pa_types::ai::Model,
+    context: &AutoRefineReviewContext,
+    review_call: RefinerFn,
+) -> anyhow::Result<AutoRefineReview> {
+    let conversation_text = conversation_text(messages, 40_000);
+    let build_prompt = |conversation: &str| -> String {
+        [
+            format!(
+                "<trigger>\n{}; {} assistant turns since last auto-refine review\n</trigger>",
+                context.reason, context.turns_since_last_review
+            ),
+            format!(
+                "<current_harness_state>\n{}\n</current_harness_state>",
+                overview_for_prompt(state)
+            ),
+            format!(
+                "<refinement_history>\n{}\n</refinement_history>",
+                history_for_prompt(history)
+            ),
+            format!("<conversation>\n{conversation}\n</conversation>"),
+            "Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified lessons likely to be reused in future sessions.".to_string(),
+        ]
+        .join("\n\n")
+    };
+    let (request_max_tokens, user_prompt) = refinement_request(
+        model,
+        AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
+        &conversation_text,
+        &build_prompt,
+        AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS,
+    )?;
+    let mut request_model = model.clone();
+    request_model.max_tokens = request_max_tokens.min(AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+    let max_tokens = request_model.max_tokens;
+    let reply = review_call(request_model, AUTO_REFINE_REVIEW_SYSTEM_PROMPT, user_prompt).await?;
+    parse_auto_refine_review(&reply_text(
+        &reply,
+        max_tokens,
+        "Auto-refine review failed",
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::planner::REFINEMENT_SYSTEM_PROMPT;
@@ -580,30 +807,5 @@ mod tests {
                 .to_string(),
             super::super::planner::TRUNCATED_JSON_ERROR
         );
-
-    fn test_model() -> pa_types::ai::Model {
-        pa_types::ai::Model {
-            id: "test".to_string(),
-            name: "test".to_string(),
-            api: "openai-completions".to_string(),
-            provider: "test".to_string(),
-            base_url: "https://example.invalid".to_string(),
-            reasoning: false,
-            thinking_level_map: None,
-            input: vec![],
-            cost: pa_types::ai::ModelCost {
-                input: 0.0.into(),
-                output: 0.0.into(),
-                cache_read: 0.0.into(),
-                cache_write: 0.0.into(),
-            },
-            context_window: 100_000,
-            max_tokens: 8_000,
-            max_tokens_explicit: false,
-            featured: None,
-            serving: None,
-            headers: None,
-            compat: None,
-        }
     }
 }

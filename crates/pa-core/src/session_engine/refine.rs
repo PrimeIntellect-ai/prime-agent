@@ -12,12 +12,12 @@ use super::AgentSession;
 use crate::refinement::executor::{
     apply_refinement_plan, generate_refinement_id, parse_child_proposal, plan_refinement,
     refinement_spawn_prompt, review_auto_refine, rollback_plan, AutoRefineReview,
-    AutoRefineReviewContext, RefineOptions as CoreRefineOptions, RefinementPlan,
-    RefinementRequest,
+    AutoRefineReviewContext, RefineOptions as CoreRefineOptions, RefinementPlan, RefinementRequest,
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
-    load_harness_state, merge_harness_states, HarnessScope, RefinementResult,
+    load_harness_state, merge_harness_states, try_update_harness_state, HarnessScope, HarnessState,
+    RefinementResult,
 };
 use crate::session::manager::SessionManager;
 
@@ -750,18 +750,6 @@ pub struct RefineOptions {
     pub rollback_id: Option<String>,
 }
 
-/// The compact-trigger round's resolution: decline, deferred behind an
-/// active agent turn, or ran.
-pub(crate) enum AutoRefineRound {
-    /// No refinement ran; the caller stamps the review cooldown.
-    Declined,
-    /// Approved mid-stream: the review is retained and the next serviced
-    /// boundary runs it.
-    Deferred(AutoRefineReview),
-    /// The refinement ran.
-    Ran(RefinementResult),
-}
-
 /// The refiner model call on the session model, with the merged request
 /// headers (the Prime team header) the session's own requests send.
 pub(super) async fn session_refiner_call(
@@ -1022,51 +1010,6 @@ impl AgentSession {
             .map(Some)
         })
     }
-
-    /// The approved review's refinement run; the result consumes the
-    /// review.
-    pub(crate) async fn run_approved_refine(
-        &self,
-        review: &AutoRefineReview,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        cancel: pa_agent::abort::AbortSignal,
-    ) -> anyhow::Result<RefinementResult> {
-        let stores = self.refinement_stores()?;
-        let options = RefineOptions {
-            global: false,
-            instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
-            rollback_id: None,
-        };
-        let refiner = session_refiner_call(
-            self.auxiliary_model.clone(),
-            model,
-            api_key,
-            self.session_id().await,
-        )
-        .await?;
-        let refiner = recorded_refiner_call(
-            refiner,
-            "refine",
-            self.session.clone(),
-            self.usage_store.clone(),
-        );
-        run_refinement(
-            self.session.clone(),
-            self.agent.clone(),
-            self.compaction_flight.clone(),
-            self.refinements_in_flight.clone(),
-            cancel,
-            self.agent_dir.clone(),
-            options,
-            RefinementSource::Auto,
-            model.clone(),
-            refiner,
-            stores,
-        )
-        .await
-        .map(|committed| committed.result)
-    }
 }
 
 /// The default model seam over pa-ai completion.
@@ -1104,11 +1047,33 @@ pub fn default_refiner_call(
     })
 }
 
+pub struct PreparedRefinement {
+    pub options: RefineOptions,
+    /// The store this refinement applies to (the rollback may retarget it).
+    pub requested_scope: HarnessScope,
+    /// The harness state as observed at preparation time — the baseline the
+    /// apply's stale check compares the freshly re-read state against, so
+    /// concurrent kernel writes reject instead of clobber.
+    pub baseline_state: HarnessState,
+    /// The refinement id the applied result carries (minted before the
+    /// child, so history and rows agree).
+    pub id: String,
+}
 
 /// The refinement child's session-side surface: prepare the planning request,
 /// apply the child's proposal on the wake, and run the mechanical rollback
 /// inline.
 impl AgentSession {
+    /// Prepare one refinement for the child: the gate check, the local-store
+    /// requirement, the trimmed conversation, and the baseline capture. The
+    /// child reads the harness state itself through the paths the request
+    /// carries — no snapshot rides the prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when refinements are disabled in /settings, when a
+    /// local refinement is requested on an unpersisted session, or when the
+    /// transcript cannot be read.
     pub async fn prepare_refinement(
         &self,
         options: &RefineOptions,
@@ -1124,14 +1089,16 @@ impl AgentSession {
         } else {
             HarnessScope::Local
         };
-        // A local refinement needs the session's own directory: its harness
-        // state and artifact paths live there. The daemon's engine session
-        // is deliberately non-persisted but carries the session's directory,
-        // so local refinement runs.
-        anyhow::ensure!(
-            options.global || self.session.lock().await.has_session_dir(),
-            "Local harness refinement requires a session directory; use global refinement instead."
-        );
+        // A local refinement needs the session's own harness store (the
+        // digest context's local dir): a session without one refuses rather
+        // than write a store no digest ever shows.
+        let stores = self.refinement_stores()?;
+        let local_harness_dir = match (requested_scope, stores.local_dir.clone()) {
+            (HarnessScope::Local, None) => anyhow::bail!(
+                "Local harness refinement requires a persisted session; use global refinement instead."
+            ),
+            (_, dir) => dir.unwrap_or_default(),
+        };
         // The transcript's conversation is extracted under this first lock
         // straight from the retained rows; the child runs without the lock.
         let parts = self.session.lock().await.refine_transcript_parts();
@@ -1141,7 +1108,6 @@ impl AgentSession {
         } = parts.await?;
         let conversation =
             crate::session_engine::compaction_utils::serialize_conversation(&messages);
-        let local_harness_dir = local_harness_state_dir(&*self.session.lock().await);
         // The baseline captured now — before the child's model pass, which
         // can take many seconds — so concurrent kernel writes to the store
         // are rejected at apply time instead of clobbered.
@@ -1215,10 +1181,13 @@ impl AgentSession {
             self.harness_refinements_enabled(),
             "Harness refinements are disabled in /settings"
         );
-        let history = {
-            let session = self.session.lock().await;
-            load_refinement_history(&session, global_harness_dir)
+        let stores = self.refinement_stores()?;
+        let global = load_global_refinement_history(&stores.global_dir);
+        let session_history = {
+            let parts = self.session.lock().await.refine_transcript_parts();
+            parts.await?.refinement_history
         };
+        let history = crate::refinement::merge_refinement_history(&global, &session_history);
         let core_options = CoreRefineOptions {
             global: options.global,
             instructions: options.instructions.clone(),
@@ -1234,7 +1203,13 @@ impl AgentSession {
         });
         let baseline_dir = match target_scope {
             HarnessScope::Global => global_harness_dir.to_path_buf(),
-            HarnessScope::Local => local_harness_state_dir(&*self.session.lock().await),
+            HarnessScope::Local => {
+                self.refinement_stores()?.local_dir.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Local harness refinement requires a persisted session; use global refinement instead."
+                    )
+                })?
+            }
         };
         let baseline_state = load_harness_state(&baseline_dir, target_scope);
         let prepared = PreparedRefinement {
@@ -1283,9 +1258,14 @@ impl AgentSession {
         };
         let plan = strip_display_prefixes(plan);
         let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
+        let stores = self.refinement_stores()?;
         let target_dir = match target_scope {
             HarnessScope::Global => global_harness_dir.to_path_buf(),
-            HarnessScope::Local => local_harness_state_dir(&*self.session.lock().await),
+            HarnessScope::Local => stores.local_dir.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Local harness refinement requires a persisted session; use global refinement instead."
+                )
+            })?,
         };
         // The apply's gates re-read their settings live inside the update
         // (the settings manager reopens), and the factory opt-in resolves
@@ -1362,7 +1342,7 @@ impl AgentSession {
         let rows = context_rows_by_ids(session.retained_entries(), &context_row_ids);
         let loop_rows: Vec<pa_agent::types::AgentMessage> = rows
             .iter()
-            .filter_map(super::session_message_to_loop)
+            .filter_map(|row| super::session_message_to_loop(&AgentMessage::Custom(row.clone())))
             .collect();
         if !loop_rows.is_empty() {
             self.agent.append_messages(loop_rows).await;

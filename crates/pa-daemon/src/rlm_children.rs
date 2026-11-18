@@ -678,7 +678,7 @@ impl SupervisorChildSessions {
         for record in children.iter() {
             let record = record.lock().await;
             if record.rlm_child_id == rlm_child_id {
-                return record.settled_status.is_none();
+                return record.run.is_running();
             }
         }
         false

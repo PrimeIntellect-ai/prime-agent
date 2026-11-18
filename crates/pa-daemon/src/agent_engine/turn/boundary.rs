@@ -141,7 +141,7 @@ impl AgentSessionEngine {
         }
         let mut stopped_for_compaction = false;
         let mut compacted = false;
-        match consumption {
+        match consumption.compaction {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the settled end;
                 // its pair precedes `compaction_end`.
@@ -233,10 +233,8 @@ impl AgentSessionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_engine::tests::{admit, write_compaction_settings};
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
     use crate::agent_engine::FAUX_TEST_LOCK;
-    use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
-    use pa_core::session_engine::refine::CommittedRefinement;
     use pa_core::session_engine::turn_boundary::PendingRefine;
     use serde_json::json;
 
@@ -248,9 +246,8 @@ mod tests {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mut engine, dir) =
+        let (engine, _dir) =
             faux_engine_with_settings(&json!({"responses": [{"text": "seed reply"}]}), 1);
-        engine.config.session_dir = Some(dir.path().join("sessions"));
         admit(&engine, "seed turn".to_string(), &mut Vec::new());
         {
             let guard = engine.session.blocking_lock();
@@ -258,16 +255,15 @@ mod tests {
             engine
                 .runtime
                 .block_on(session.turn_boundary.schedule_refine(PendingRefine {
-                    instructions: Some(instructions.to_string()),
-                    global,
+                    instructions: Some("Verify the completed outcome".to_string()),
+                    global: false,
                 }));
         }
-        let (send, receive) = std::sync::mpsc::channel();
-        *engine.refinement_completion_sink.lock().unwrap() =
-            Some(std::sync::Arc::new(move |pending| {
-                send.send(pending).unwrap();
-            }));
-        let boundary = engine.run_turn_boundary(&mut |_| true);
+        let mut events = Vec::new();
+        let boundary = engine.run_turn_boundary(&mut |event| {
+            events.push(event);
+            true
+        });
         assert!(matches!(boundary, BoundaryRun::Proceed));
         let failure = events
             .iter()

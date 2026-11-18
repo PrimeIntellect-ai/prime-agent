@@ -5,9 +5,7 @@
 //! consumption returns the armed options and the daemon-backed caller
 //! spawns the child; the child-reply wake finishes the round.
 
-use super::refine::{
-    auto_refine_instructions, now_millis, RefineOptions, AUTO_REFINE_COMPACT_REASON,
-};
+use super::refine::{now_millis, RefineOptions, AUTO_REFINE_COMPACT_REASON};
 use super::AgentSession;
 
 /// The boundary a pending trigger is serviced at.
@@ -31,6 +29,9 @@ pub(crate) struct CompactAutoRefineState {
     /// applied yet: a second consumption re-arms the trigger instead of
     /// stacking a second child.
     in_flight: bool,
+    /// A branch move bumps it; a round started on an older version drops
+    /// its result — a review against the abandoned branch never applies.
+    pub(super) branch_version: u64,
 }
 
 impl AgentSession {
@@ -131,7 +132,9 @@ impl AgentSession {
         state.last_review_at = Some(now_millis());
         Some(RefineOptions {
             global: false,
-            instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON)),
+            // The child self-reviews: no retained review rides the round,
+            // so the instruction line is the compaction reason alone.
+            instructions: Some(AUTO_REFINE_COMPACT_REASON.to_string()),
             rollback_id: None,
         })
     }

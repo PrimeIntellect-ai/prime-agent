@@ -8,7 +8,6 @@ use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
 use pa_core::session_engine::refine::RefinementSource;
 
 use crate::agent_engine::AgentSessionEngine;
-use crate::engine::SessionEngine as _;
 
 impl AgentSessionEngine {
     pub(crate) fn report_background_refinement(
@@ -342,11 +341,8 @@ mod tests {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (engine, _dir) = trigger_engine(
-            &json!({ "responses": [ {"text": "seed reply"} ] }),
-            1,
-            true,
-        );
+        let (engine, _dir) =
+            trigger_engine(&json!({ "responses": [ {"text": "seed reply"} ] }), 1, true);
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "seed turn".to_string(), &mut events);
         engine.mark_compact_auto_refine_pending();
