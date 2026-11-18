@@ -144,7 +144,7 @@ impl AgentSessionEngine {
 
     /// The spawn body after the flight check: the prepare, the admission,
     /// and the flight's record.
-    async fn spawn_refine_child_inner(
+    pub(crate) async fn spawn_refine_child_inner(
         &self,
         children: &Arc<SupervisorChildSessions>,
         options: &RefineOptions,
@@ -222,22 +222,25 @@ impl AgentSessionEngine {
         sender_active_session_id: &str,
         message: &str,
     ) -> Option<()> {
-        let flight = {
-            let mut flight = self
-                .refine_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let current = flight.as_ref()?;
-            if current.active_session_id != sender_active_session_id {
-                return None;
-            }
-            flight.take()?
-        };
+        // One lock scope across the whole park: the spawn admission reads
+        // both cells under this same order (flight, then pending), so a
+        // take followed by a separate write would let a concurrent spawn
+        // observe both cells empty and admit a second child over this
+        // one's only answer.
+        let mut flight = self
+            .refine_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = flight.as_ref()?;
+        if current.active_session_id != sender_active_session_id {
+            return None;
+        }
+        let taken = flight.take()?;
         *self
             .pending_refine_reply
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(PendingRefineReply {
-            flight,
+            flight: taken,
             reply: message.to_string(),
         });
         Some(())
@@ -437,6 +440,50 @@ mod tests {
             engine.compact_auto_refine_pending(),
             "the trigger stays armed behind the parked reply"
         );
+    }
+
+
+    /// The park is ONE lock scope: a racing spawn admission (the same
+    /// flight-then-pending read order the spawn's pre-check uses) must never
+    /// observe both cells empty mid-park — that window let the admission
+    /// stack a second child over the first one's only answer. Red on the
+    /// two-region park: the reader catches the gap between the take and the
+    /// parked write.
+    #[test]
+    fn the_park_never_exposes_an_empty_lane_to_a_racing_admission() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, dir) = park_engine();
+        for _ in 0..1000 {
+            park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let _ = engine.park_refine_child_reply("active-1", PROPOSAL);
+                });
+                scope.spawn(|| loop {
+                    let Ok(flight) = engine.refine_flight.try_lock() else {
+                        continue;
+                    };
+                    let Ok(pending) = engine.pending_refine_reply.try_lock() else {
+                        continue;
+                    };
+                    assert!(
+                        flight.is_some() || pending.is_some(),
+                        "a racing admission observed both cells empty mid-park"
+                    );
+                    break;
+                });
+            });
+            *engine
+                .refine_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+            *engine
+                .pending_refine_reply
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
     }
 
     /// The idle apply runs the parked reply once: the proposal applies,
