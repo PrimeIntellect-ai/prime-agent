@@ -321,7 +321,7 @@ impl LibraryView {
         }
         document.push(truncate_line(&header, width, ""));
         document.push(vec![Span::raw("")]);
-        super::FactoryView::render_diagram(theme, &detail.snapshot, &mut document);
+        super::FactoryView::render_diagram(theme, &detail.snapshot, None, &mut document);
         document.push(vec![Span::raw("")]);
         let mut title: Line = vec![Span::raw("  ")];
         title.push(theme.fg_span(ThemeColor::ToolTitle, "mermaid"));
