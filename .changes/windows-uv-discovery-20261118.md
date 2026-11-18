@@ -1,1 +1,0 @@
-- Fixed uv discovery rejecting the global `~/.local/bin/uv` install when Prime Agent is launched from the home directory (notably on Windows), and made the missing-uv install hint match the platform.
