@@ -67,6 +67,80 @@ struct CaptureWriter {
     retained: Arc<AtomicU64>,
 }
 
+impl CaptureWriter {
+    /// A writer handle and the receiving end of its bounded queue, which the drain thread owns.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn channel() -> (Self, Receiver<CaptureJob>) {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(WRITE_QUEUE_CAPACITY.max(1));
+        let writer = CaptureWriter {
+            sender,
+            queued: Arc::new(AtomicUsize::new(0)),
+            retained: Arc::new(AtomicU64::new(0)),
+        };
+        (writer, receiver)
+    }
+
+    /// Hand one request's final outbound body to the queue. Bounded and non-blocking: the
+    /// slot is reserved BEFORE the payload clone; the dispatch path never touches the filesystem.
+    fn handoff(
+        &self,
+        capture: &RequestPayloadCapture,
+        payload: &Value,
+        model: &pa_agent::types::Model,
+        session_id: Option<&str>,
+        request_seq: u64,
+    ) {
+        // Reserve the slot first: the counter is the bound the writer releases from, so it
+        // must never depend on the send's completion.
+        let reserved = self
+            .queued
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                (queued < WRITE_QUEUE_CAPACITY).then_some(queued + 1)
+            })
+            .is_ok();
+        if !reserved {
+            return;
+        }
+        // Reserve the payload's bytes before cloning it: a stalled writer must not accumulate
+        // unbounded resident memory; a body past the budget drops here, its slot releasing.
+        let estimate = payload_bytes(payload);
+        let budgeted = self
+            .retained
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
+                retained
+                    .checked_add(estimate)
+                    .filter(|total| *total <= REQUEST_PAYLOAD_BUDGET_BYTES)
+            })
+            .is_ok();
+        if !budgeted {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let job = CaptureJob {
+            root: capture.root.clone(),
+            dir: capture.dir.clone(),
+            keep: capture.keep,
+            payload: payload.clone(),
+            model: model.clone(),
+            session_id: session_id.map(ToString::to_string),
+            request_seq,
+            now_ms,
+            capture_seq: CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed) + 1,
+            estimate,
+        };
+        if self.sender.try_send(job).is_err() {
+            // The queue filled inside the reservation window: the job never
+            // queued, so its slot and bytes free for the next handoff.
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            self.retained.fetch_sub(estimate, Ordering::Relaxed);
+        }
+    }
+}
+
 /// The one writer, armed on the first recorded capture. The detached thread drops captures
 /// still queued at exit best-effort, the same contract as the rotating log.
 static CAPTURE_WRITER: OnceLock<Option<CaptureWriter>> = OnceLock::new();
@@ -86,11 +160,9 @@ fn capture_writer() -> Option<&'static CaptureWriter> {
             }
             #[cfg(unix)]
             {
-                let (sender, receiver) = std::sync::mpsc::sync_channel(WRITE_QUEUE_CAPACITY.max(1));
-                let queued = Arc::new(AtomicUsize::new(0));
-                let retained = Arc::new(AtomicU64::new(0));
-                let writer_queued = Arc::clone(&queued);
-                let writer_retained = Arc::clone(&retained);
+                let (writer, receiver) = CaptureWriter::channel();
+                let writer_queued = Arc::clone(&writer.queued);
+                let writer_retained = Arc::clone(&writer.retained);
                 std::thread::Builder::new()
                     .name("request-payload-capture".to_string())
                     .spawn(move || {
@@ -99,11 +171,7 @@ fn capture_writer() -> Option<&'static CaptureWriter> {
                         let receiver = receiver;
                         drain_writer(&writer_queued, &writer_retained, &receiver);
                     })
-                    .map(|_| CaptureWriter {
-                        sender,
-                        queued,
-                        retained,
-                    })
+                    .map(|_| writer)
                     .map_err(|error| {
                         tracing::debug!(%error, "payload capture writer thread failed to spawn");
                     })
@@ -157,8 +225,7 @@ impl RequestPayloadCapture {
         }
     }
 
-    /// Hand one request's final outbound body to the writer. Bounded and non-blocking: the
-    /// slot is reserved BEFORE the payload clone; the dispatch path never touches the filesystem.
+    /// Hand one request's final outbound body to the writer (see [`CaptureWriter::handoff`]).
     pub(crate) fn record(
         &self,
         payload: &Value,
@@ -166,56 +233,8 @@ impl RequestPayloadCapture {
         session_id: Option<&str>,
         request_seq: u64,
     ) {
-        let Some(writer) = capture_writer() else {
-            return;
-        };
-        // Reserve the slot first: the counter is the bound the writer releases from, so it
-        // must never depend on the send's completion.
-        let reserved = writer
-            .queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
-                (queued < WRITE_QUEUE_CAPACITY).then_some(queued + 1)
-            })
-            .is_ok();
-        if !reserved {
-            return;
-        }
-        // Reserve the payload's bytes before cloning it: a stalled writer must not accumulate
-        // unbounded resident memory; a body past the budget drops here, its slot releasing.
-        let estimate = payload_bytes(payload);
-        let budgeted = writer
-            .retained
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
-                retained
-                    .checked_add(estimate)
-                    .filter(|total| *total <= REQUEST_PAYLOAD_BUDGET_BYTES)
-            })
-            .is_ok();
-        if !budgeted {
-            writer.queued.fetch_sub(1, Ordering::Relaxed);
-            return;
-        }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let job = CaptureJob {
-            root: self.root.clone(),
-            dir: self.dir.clone(),
-            keep: self.keep,
-            payload: payload.clone(),
-            model: model.clone(),
-            session_id: session_id.map(ToString::to_string),
-            request_seq,
-            now_ms,
-            capture_seq: CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed) + 1,
-            estimate,
-        };
-        if writer.sender.try_send(job).is_err() {
-            // The queue filled inside the reservation window: the job never
-            // queued, so its slot and bytes free for the next handoff.
-            writer.queued.fetch_sub(1, Ordering::Relaxed);
-            writer.retained.fetch_sub(estimate, Ordering::Relaxed);
+        if let Some(writer) = capture_writer() {
+            writer.handoff(self, payload, model, session_id, request_seq);
         }
     }
 }

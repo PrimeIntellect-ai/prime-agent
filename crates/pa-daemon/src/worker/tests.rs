@@ -1,6 +1,13 @@
 //! Worker tests.
 use super::*;
 
+thread_local! {
+    pub(super) static BEFORE_REFINEMENT_ROW_BROADCAST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+mod refinement_row_tests;
+
 /// A created worker over the scripted engine.
 async fn created_dispatch_worker() -> std::sync::Arc<Worker> {
     let dir = std::env::temp_dir().join(format!("pa-worker-susp-{}", uuid::Uuid::new_v4()));
@@ -188,6 +195,7 @@ mod abort_boundary_tests;
 mod connection_state_tests;
 mod goal_tests;
 mod kill_broadcast_tests;
+mod last_answer_tests;
 mod navigation_pause_tests;
 mod queue_tests;
 mod sidecar_exit_tests;

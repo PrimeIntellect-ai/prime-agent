@@ -1187,7 +1187,8 @@ mod tests {
     }
 
     fn temp_socket(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("pa-herdr-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::path::Path::new("/tmp").join(format!("pa-herdr-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("herdr.sock")
     }

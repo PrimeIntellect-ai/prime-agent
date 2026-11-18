@@ -11,9 +11,8 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -42,11 +41,45 @@ pub enum AutoRetryEvent {
     /// `auto_retry_end`: the loop settled. `final_error` is present exactly
     /// when `success` is false; `restored_model` is the restored primary.
     End {
+        /// Immutable cancellation outcome, independent of the error text.
+        aborted: bool,
         success: bool,
         attempt: u32,
         final_error: Option<String>,
         restored_model: Option<String>,
     },
+}
+
+/// The host's verdict on a credential rejection (kind `auth`) about to be retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthRecovery {
+    Retry,
+    /// End the turn with this user-facing error.
+    EndTurn(String),
+}
+
+pub type AuthRecoveryFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = AuthRecovery> + Send>>;
+
+/// Consulted before a credential rejection's one retry.
+pub type AuthRecoveryCallback<'a> = &'a mut dyn FnMut(&AssistantMessage) -> AuthRecoveryFuture;
+
+/// The failed turn carrying the recovery's error, when the recovery ends it.
+pub(super) async fn end_turn_on_auth_rejection(
+    message: &AssistantMessage,
+    auth_recovery: Option<&mut AuthRecoveryCallback<'_>>,
+) -> Option<AssistantMessage> {
+    if provider_stream_failure_kind(message).as_deref() != Some("auth") {
+        return None;
+    }
+    match auth_recovery?(message).await {
+        AuthRecovery::Retry => None,
+        AuthRecovery::EndTurn(error) => {
+            let mut message = message.clone();
+            message.error_message = Some(error);
+            Some(message)
+        }
+    }
 }
 
 /// Drive `attempt` under the shared retry policy until it settles: a turn
@@ -55,6 +88,7 @@ pub enum AutoRetryEvent {
 ///
 /// `park` is the quota-park seam, consulted when a server-requested wait
 /// exceeds the policy cap: `Some` parks the session, `None` gives up.
+/// `auth_recovery` is consulted before a credential rejection's retry.
 ///
 /// # Errors
 ///
@@ -69,6 +103,7 @@ pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     mut emit: E,
     mut wait: W,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -84,6 +119,7 @@ where
         if message.stop_reason != StopReason::Error {
             if retries_performed > 0 {
                 emit(AutoRetryEvent::End {
+                    aborted: message.stop_reason == StopReason::Aborted,
                     success: true,
                     attempt: retries_performed,
                     final_error: None,
@@ -94,12 +130,19 @@ where
             return Ok(message);
         }
         if signal.is_some_and(AbortSignal::is_aborted) {
+            emit(AutoRetryEvent::End {
+                aborted: true,
+                success: false,
+                attempt: retries_performed,
+                final_error: Some("Retry cancelled".to_string()),
+                restored_model: None,
+            })
+            .await?;
             return Ok(with_stop_reason_aborted(message));
         }
         // Non-retryable failures never enter the retry bookkeeping: a
         // permanent failure only closes the active retry.
         let non_retryable = is_agent_lifecycle_failure(&message)
-            || is_faux_provider_queue_exhausted(&message)
             // A context overflow can never succeed unchanged: the
             // compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
@@ -119,6 +162,7 @@ where
                     && !is_context_overflow_failure(&message, context_window))
             {
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: retries_performed,
                     final_error: Some(final_error_of(&message)),
@@ -126,6 +170,17 @@ where
                 })
                 .await?;
             }
+            return Ok(message);
+        }
+        if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
+            emit(AutoRetryEvent::End {
+                aborted: false,
+                success: false,
+                attempt: retries_performed,
+                final_error: Some(final_error_of(&message)),
+                restored_model: None,
+            })
+            .await?;
             return Ok(message);
         }
         // The attempt counter bumps before deciding, so the exhaustion
@@ -145,6 +200,7 @@ where
                 // exhaustion check: a quota-blocked final retry still parks.
                 if retries_performed > policy.max_retries {
                     emit(AutoRetryEvent::End {
+                        aborted: false,
                         success: false,
                         attempt: retries_performed - 1,
                         final_error: Some(final_error_of(&message)),
@@ -183,6 +239,7 @@ where
                     ),
                 };
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: retries_performed - 1,
                     restored_model: None,
@@ -202,6 +259,7 @@ where
         .await?;
         if !wait(std::time::Duration::from_millis(delay_ms)).await {
             emit(AutoRetryEvent::End {
+                aborted: true,
                 success: false,
                 attempt: retries_performed,
                 final_error: Some("Retry cancelled".to_string()),

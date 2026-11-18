@@ -440,10 +440,14 @@ fn effective_config_covers_every_definition() {
 
 #[test]
 fn formats_key_text() {
-    assert_eq!(format_key_text("ctrl+o"), "Ctrl+O");
-    assert_eq!(format_key_text("shift+alt+up"), "Shift+Alt+\u{2191}");
-    assert_eq!(format_key_text("escape"), "Esc");
-    assert_eq!(format_key_text("ctrl+o/alt+o"), "Ctrl+O/Alt+O");
+    let other = LabelPlatform::Other;
+    assert_eq!(format_key_text_on("ctrl+o", other), "Ctrl+O");
+    assert_eq!(
+        format_key_text_on("shift+alt+up", other),
+        "Shift+Alt+\u{2191}"
+    );
+    assert_eq!(format_key_text_on("escape", other), "Esc");
+    assert_eq!(format_key_text_on("ctrl+o/alt+o", other), "Ctrl+O/Alt+O");
 }
 
 #[test]

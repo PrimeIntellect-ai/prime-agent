@@ -1,10 +1,11 @@
 //! Test-only shared state: one crate-wide lock for the process env.
 
-/// Process-wide env reads and writes (the telemetry override vars)
-/// serialize through one lock across the crate's test modules: parallel
-/// test threads in the same binary otherwise race the process env. Both
-/// the supervisor tests' scrub guard and `agent_engine`'s
-/// `telemetry_opt_in` hold this lock through their restores.
+/// Process-wide env reads and writes (the telemetry override vars, the
+/// live-kernel abort test's kernel vars) serialize through one lock across
+/// the crate's test modules: parallel test threads in the same binary
+/// otherwise race the process env. The supervisor tests' scrub guard,
+/// `agent_engine`'s `telemetry_opt_in`, and the abort tests'
+/// `KernelEnvOverride` hold this lock through their restores.
 #[cfg(test)]
 pub(crate) static TELEMETRY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -152,4 +153,61 @@ impl FileReadCounter {
         std::fs::write(&self.path, self.raw).expect("restore file");
         reads
     }
+}
+
+/// Scoped process-env overrides for the live-kernel tests: applied on
+/// construction, restored on drop, under the crate-wide env lock.
+#[cfg(test)]
+pub(crate) struct KernelEnvOverride {
+    saved: Vec<(String, Option<String>)>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl KernelEnvOverride {
+    pub(crate) fn apply(pairs: &[(&str, Option<String>)]) -> Self {
+        let env_lock = TELEMETRY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = pairs
+            .iter()
+            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
+            .collect();
+        for (key, value) in pairs {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        KernelEnvOverride {
+            saved,
+            _env_lock: env_lock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for KernelEnvOverride {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// The kernel python for the live-kernel tests (skipped without one).
+#[cfg(test)]
+pub(crate) fn live_kernel_python() -> Option<std::path::PathBuf> {
+    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+    None
 }

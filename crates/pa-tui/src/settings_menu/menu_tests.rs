@@ -77,7 +77,8 @@ fn tabs_partition_the_settings_rows() {
                 vec![
                     "editor-padding",
                     "autocomplete-max-visible",
-                    "show-hardware-cursor"
+                    "show-hardware-cursor",
+                    "emoji-shortcodes"
                 ]
             ),
             (
@@ -88,6 +89,7 @@ fn tabs_partition_the_settings_rows() {
                     "idle-eviction-minutes",
                     "tree-filter-mode",
                     "harness-refinements",
+                    "web-search-provider",
                 ]
             ),
         ]

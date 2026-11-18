@@ -10,8 +10,9 @@
 
 //! Verifier integration tests for kernel process teardown on drop: a session or harness that boots
 //! a kernel and then drops its handles must not leave the `python -m rlm.repl` process alive. The
-//! kernel Python is ambient product state; skipped when absent.
-#![cfg(unix)]
+//! kernel Python is ambient product state; skipped when absent. The process-table scans read
+//! `/proc`, so the binary is Linux-only.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};

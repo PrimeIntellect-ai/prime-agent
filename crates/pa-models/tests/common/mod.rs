@@ -16,7 +16,7 @@ use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
-type RequestLog = Arc<Mutex<Vec<String>>>;
+type RequestLog = Arc<tokio::sync::watch::Sender<Vec<String>>>;
 
 pub struct MockServer {
     port: u16,
@@ -38,7 +38,7 @@ impl MockServer {
             .await
             .expect("bind mock server");
         let port = listener.local_addr().unwrap().port();
-        let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+        let requests: RequestLog = Arc::new(tokio::sync::watch::Sender::new(Vec::new()));
         let responses: ResponseQueue = Arc::new(Mutex::new(VecDeque::from(scripts)));
         let handle = tokio::spawn(run(listener, Arc::clone(&requests), responses));
         Self {
@@ -53,11 +53,20 @@ impl MockServer {
     }
 
     pub fn recorded_requests(&self) -> Vec<String> {
-        self.requests.lock().unwrap().clone()
+        self.requests.borrow().clone()
     }
 
     pub fn request_count(&self) -> usize {
-        self.requests.lock().unwrap().len()
+        self.requests.borrow().len()
+    }
+
+    /// Resolve once the server has recorded `count` request heads.
+    pub async fn wait_for_requests(&self, count: usize) {
+        self.requests
+            .subscribe()
+            .wait_for(|log| log.len() >= count)
+            .await
+            .expect("the server owns the request log");
     }
 }
 
@@ -98,7 +107,7 @@ async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQue
                 }
             }
             let head = String::from_utf8_lossy(&buffer[..read]).to_string();
-            requests.lock().unwrap().push(head);
+            requests.send_modify(|log| log.push(head));
             let scripted = responses.lock().unwrap().pop_front().unwrap_or_else(|| {
                 Scripted::Response(b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec())
             });

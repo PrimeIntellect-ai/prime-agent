@@ -368,7 +368,6 @@ pub(crate) async fn drive_to_quiescence(
     boundary: &mut TurnBoundary,
     model: &Model,
     api_key: Option<String>,
-    _global_harness_dir: std::path::PathBuf,
 ) -> Result<bool, String> {
     let mut drained = false;
     loop {
@@ -421,9 +420,6 @@ pub(crate) async fn drive_to_quiescence(
 /// keep listening — a settled child re-runs on a later message until it
 /// is disposed or deleted (TS `child.isSessionActive`).
 async fn drive_child(child: Arc<InlineChild>) {
-    let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(
-        &child.node.recipe.options.config.agent_dir,
-    );
     loop {
         let mut boundary = TurnBoundary::new(/*json_mode*/ false);
         let run_error = drive_to_quiescence(
@@ -432,7 +428,6 @@ async fn drive_child(child: Arc<InlineChild>) {
             &mut boundary,
             &child.model,
             child.api_key.clone(),
-            global_harness_dir.clone(),
         )
         .await
         .err();
@@ -738,11 +733,10 @@ impl RlmSubagentHost for InlineHost {
                 )
                 .map_err(|error| anyhow::anyhow!("{error:#}"))?;
                 let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-                let mut registry = pa_core::models::ModelRegistry::create(
+                let registry = pa_core::models::ModelRegistry::create(
                     auth,
                     config.agent_dir.join("models.json"),
                 );
-                registry.load_private_authorization_from_cache();
                 let all: Vec<Model> = registry.get_all().to_vec();
                 let resolved =
                     pa_core::models::resolve_cli_model(/*cli_provider*/ None, &selector, &all);
@@ -1297,7 +1291,6 @@ mod tests {
             model: None,
             thinking: None,
             cwd: None,
-            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         });

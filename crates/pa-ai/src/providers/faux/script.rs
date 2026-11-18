@@ -200,15 +200,15 @@ fn parse_content_block(block: &Value) -> Result<super::AssistantContent, String>
 }
 
 /// Register a faux provider from a parsed script and queue its responses.
+/// Each registration gets its own api id, so concurrent registrations never
+/// share a queue.
 #[must_use]
 pub fn register_faux_provider_from_script(script: &FauxScript) -> FauxProviderRegistration {
     let registration = register_faux_provider(RegisterFauxProviderOptions {
-        api: Some("faux".to_string()),
         provider: Some("faux".to_string()),
         models: Some(vec![script.model.clone()]),
         tokens_per_second: script.tokens_per_second,
-        token_size_min: None,
-        token_size_max: None,
+        ..Default::default()
     });
     registration.set_responses(script.responses.clone());
     registration.set_repeat_last_response(script.repeat_last_response);

@@ -10,6 +10,7 @@ use wrap::{parse_paste_marker, segment_with_markers};
 
 mod autocomplete;
 mod click;
+mod emoji;
 mod input;
 mod kill_ring;
 mod layout;
@@ -124,6 +125,9 @@ pub struct Editor {
     /// The in-flight `@` file search with the editor state it answers: a
     /// result that lands after the lines or cursor moved is dropped.
     autocomplete_search: Option<AutocompleteSearch>,
+    /// Typing `:name` suggests emoji (the host enables it from the
+    /// `emojiShortcodes` setting).
+    emoji_shortcodes: bool,
     events: Vec<EditorEvent>,
 }
 
@@ -180,6 +184,7 @@ impl Editor {
             autocomplete: None,
             pending_autocomplete: None,
             autocomplete_search: None,
+            emoji_shortcodes: false,
             events: Vec::new(),
         }
     }
@@ -943,6 +948,23 @@ mod tests {
         }
         e.handle_input("tab");
         assert_eq!(settled_menu(&mut e), children);
+        assert_eq!(e.get_text(), "@prime-agent/");
+    }
+
+    #[test]
+    fn confirming_a_stale_menu_replaces_the_whole_typed_token() {
+        let (_base, mut e) = at_editor();
+        for ch in "@pr".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        assert!(settled_menu(&mut e).is_some());
+        // Typing on parks a refresh: the open menu still answers `@pr`.
+        for ch in "ime-ag".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        e.handle_input("down");
+        e.handle_input("up");
+        e.handle_input("enter");
         assert_eq!(e.get_text(), "@prime-agent/");
     }
 

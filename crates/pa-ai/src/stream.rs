@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::event_stream::AssistantMessageEventStream;
-use crate::providers::simple_options::{default_request_max_tokens, folded_request_max_tokens_at};
+use crate::providers::simple_options::default_request_max_tokens;
 use crate::registry::{ensure_builtins, get_api_provider};
 use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions};
 use crate::utils_inner::ProviderError;
@@ -77,80 +77,67 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .sum()
 }
 
-/// The requested output budget clamped against the model's combined input+output ceiling: a
-/// provider enforcing `input + max_tokens <= contextWindow` rejects an unsatisfiable request
-/// outright, so the facade shrinks the output budget to whatever room the estimated input
-/// leaves. Zero room means the input alone fills the window — no budget can save the request,
-/// so it stays as sent for the overflow recovery arm.
+/// Clamp the requested output budget against the model's combined input+output ceiling: a provider
+/// enforcing `input + max_tokens <= contextWindow` rejects an unsatisfiable request outright, so
+/// the facade shrinks the output budget to whatever room the estimated input leaves.
 ///
-/// The TS facade never clamps; this is a deliberate Rust-side guard.
-#[must_use]
-pub fn clamped_request_max_tokens(model: &Model, context: &Context, requested: u64) -> u64 {
-    if model.context_window == 0 {
-        return requested; // combined ceiling unknown — leave the request alone
-    }
-    let available = model
-        .context_window
-        .saturating_sub(estimated_input_tokens(context));
-    if requested > available && available > 0 {
-        available
-    } else {
-        requested
-    }
-}
-
-/// Clamp the requested output budget against the model's combined
-/// input+output ceiling (the facade guard over
-/// [`clamped_request_max_tokens`]). Budget-folding thinking providers
-/// (Anthropic, Bedrock) add their budget after this clamp and cap it at
+/// The TS facade never clamps; this is a deliberate Rust-side guard. Budget-folding thinking
+/// providers (Anthropic, Bedrock) add their budget after this clamp and cap it at
 /// `model.max_tokens`.
 fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut StreamOptions>) {
     let Some(options) = options else {
         return;
     };
-    let Some(requested) = options
+    if model.context_window == 0 {
+        return; // combined ceiling unknown — leave the request alone
+    }
+    let requested = options
         .max_tokens
-        .or_else(|| default_request_max_tokens(model))
-    else {
+        .or_else(|| default_request_max_tokens(model));
+    let Some(requested) = requested else {
         return; // no default budget to clamp
     };
-    let sent = clamped_request_max_tokens(model, context, requested);
-    if sent != requested {
-        options.max_tokens = Some(sent);
+    let available = model
+        .context_window
+        .saturating_sub(estimated_input_tokens(context));
+    // Zero room means the input alone fills the window — no budget can save the request, so it
+    // stays as sent for the overflow recovery arm.
+    if requested > available && available > 0 {
+        options.max_tokens = Some(available);
     }
 }
 
-/// The `max_tokens` a simple completion will actually carry on the wire
-/// for `model` against `context` with `options`: the pinned (or default)
-/// budget clamped against the estimated input, with the budget-folding
-/// thinking providers' allowance folded on top — the number a `Length`
-/// stop hit. [`default_request_max_tokens`] names only the pre-facade
-/// budget; callers reporting the effective request limit (the refine
-/// child's output-limit failure) read it from here, never a second copy.
+/// The session-identity header a session-scoped request declares to its inference endpoint.
 ///
-/// The fold uses the thinking-budget defaults (no `thinking_budgets`):
-/// every current caller pins none, so this is the wire number exactly.
-/// A caller that sets `SimpleStreamOptions::thinking_budgets` must thread
-/// it through [`folded_request_max_tokens_at`] or its report is
-/// approximate by the budgets' delta from the defaults.
-#[must_use]
-pub fn simple_request_max_tokens(
-    model: &Model,
-    context: &Context,
-    options: Option<&crate::types::SimpleStreamOptions>,
-) -> Option<u64> {
-    let requested = options
-        .and_then(|options| options.base.max_tokens)
-        .or_else(|| default_request_max_tokens(model))?;
-    let clamped = if model.context_window == 0 {
-        requested
-    } else {
-        clamped_request_max_tokens(model, context, requested)
+/// The `OTel GenAI` semantics put conversation identity in the client's hands: the client declares
+/// its real session id, and the gateway aggregates one session's calls into one trace instead of
+/// fabricating a fallback id per request. The Prime Inference gateway keys its trace aggregation on
+/// this header.
+const SESSION_ID_HEADER: &str = "X-PI-Session-Id";
+
+/// Declare the request's session identity on its caller headers. No session id means no header (a
+/// session-less one-off probe stays bare rather than carrying a fabricated id); an explicit caller
+/// value wins, like every caller header does over the provider's own.
+fn declare_session_identity(options: Option<&mut StreamOptions>) {
+    let Some(options) = options else {
+        return;
     };
-    let reasoning = options
-        .and_then(|options| options.reasoning)
-        .unwrap_or(crate::types::ModelThinkingLevel::Off);
-    Some(folded_request_max_tokens_at(model, clamped, reasoning))
+    let Some(session_id) = options.session_id.clone() else {
+        return;
+    };
+    let headers = options
+        .headers
+        .get_or_insert_with(std::collections::HashMap::new);
+    // Providers dedupe header names case-insensitively, so a caller entry in any casing is the
+    // same header as the injected one: its value always wins instead of racing the injected
+    // entry in the provider's header merging.
+    if headers
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case(SESSION_ID_HEADER))
+    {
+        return;
+    }
+    headers.insert(SESSION_ID_HEADER.to_string(), session_id);
 }
 
 /// Start streaming a completion for `model` using provider-native options.
@@ -166,6 +153,7 @@ pub fn stream(
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
     clamp_output_budget(model, context, options.as_mut());
+    declare_session_identity(options.as_mut());
     Ok(provider.stream(model, context, options.as_ref()))
 }
 
@@ -202,6 +190,7 @@ pub fn stream_simple(
     // materialized default builds the same request otherwise.
     let simple = options.get_or_insert_with(SimpleStreamOptions::default);
     clamp_output_budget(model, context, Some(&mut simple.base));
+    declare_session_identity(Some(&mut simple.base));
     Ok(provider.stream_simple(model, context, options.as_ref()))
 }
 
@@ -249,57 +238,6 @@ mod tests {
             })],
             tools: None,
         }
-    }
-
-    #[test]
-    fn simple_request_max_tokens_names_the_wire_budget() {
-        // The refine child's Length failure must name the budget the wire
-        // request actually carries: the pinned default clamped against the
-        // estimated input (the facade guard), never the pre-facade number.
-        let model = test_model(10_000, 8_192);
-        let context = text_context(20_000); // ~5_000 estimated input tokens
-        let options = SimpleStreamOptions::from_base(StreamOptions {
-            max_tokens: Some(8_192),
-            ..Default::default()
-        });
-        assert_eq!(
-            simple_request_max_tokens(&model, &context, Some(&options)),
-            Some(5_000)
-        );
-        // No pinned budget: the model's default clamps the same way.
-        assert_eq!(
-            simple_request_max_tokens(&model, &context, None),
-            Some(5_000)
-        );
-        // A model with no default budget (providers that default
-        // server-side) has no wire number to name.
-        let bare = test_model(10_000, 0);
-        assert_eq!(simple_request_max_tokens(&bare, &context, None), None);
-        // An unknown combined ceiling leaves the request alone.
-        let unknown = test_model(0, 8_192);
-        assert_eq!(
-            simple_request_max_tokens(&unknown, &context, None),
-            Some(8_192)
-        );
-        // The budget-folding providers' thinking fold rides on the clamped
-        // base: a non-adaptive Anthropic model at medium reasoning adds its
-        // 8_192-token thinking budget.
-        let anthropic: Model = serde_json::from_value(serde_json::json!({
-            "id": "claude-sonnet-4-5", "name": "Claude", "api": "anthropic",
-            "provider": "p", "baseUrl": "http://localhost", "reasoning": true,
-            "input": ["text"], "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": 10_000, "maxTokens": 65_536,
-        }))
-        .expect("test model");
-        let mut options = SimpleStreamOptions::from_base(StreamOptions {
-            max_tokens: Some(8_192),
-            ..Default::default()
-        });
-        options.reasoning = Some(crate::types::ModelThinkingLevel::Medium);
-        assert_eq!(
-            simple_request_max_tokens(&anthropic, &context, Some(&options)),
-            Some(5_000 + 8_192)
-        );
     }
 
     #[test]
@@ -446,6 +384,105 @@ mod tests {
         let mut options = StreamOptions::default();
         clamp_output_budget(&model, &text_context(4_200), Some(&mut options));
         assert_eq!(options.max_tokens, None);
+    }
+
+    /// The facade is the seam every model request crosses, so the session identity rides it as a
+    /// caller header: a session-scoped call declares `X-PI-Session-Id`, an explicit caller value
+    /// wins, and a session-less call fabricates nothing.
+    #[tokio::test]
+    async fn session_scoped_calls_declare_their_session_identity_header() {
+        type Headers = Option<std::collections::HashMap<String, String>>;
+        let received: std::sync::Arc<std::sync::Mutex<Vec<Headers>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let factory =
+            crate::faux::FauxResponseStep::Factory(std::sync::Arc::new(move |_, options, _, _| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(options.and_then(|options| options.headers.clone()));
+                Ok(crate::faux::faux_assistant_text_message(
+                    "ok",
+                    crate::faux::FauxAssistantMessageOptions::default(),
+                ))
+            }));
+        let registration =
+            crate::faux::register_faux_provider(crate::faux::RegisterFauxProviderOptions {
+                api: Some("session-identity-test".to_string()),
+                ..Default::default()
+            });
+        registration.set_responses((0..5).map(|_| factory.clone()).collect());
+        let model = registration.get_model();
+        let context = Context::default();
+        let header = |name: &str, value: &str| {
+            std::collections::HashMap::from([(name.to_string(), value.to_string())])
+        };
+
+        // A session-scoped call carries the session id the harness persists.
+        complete_simple(
+            &model,
+            &context,
+            Some(crate::types::SimpleStreamOptions::from_base(
+                crate::types::StreamOptions {
+                    session_id: Some("session-1".into()),
+                    ..Default::default()
+                },
+            )),
+        )
+        .await
+        .expect("stream settles");
+        // An explicit caller header keeps its own value, whatever casing it carries: providers
+        // dedupe header names case-insensitively, so a differently-cased entry must never race
+        // the injected one.
+        for (name, value) in [
+            ("X-PI-Session-Id", "explicit"),
+            ("x-pi-session-id", "explicit-lower"),
+            ("X-Pi-Session-Id", "explicit-mixed"),
+        ] {
+            complete_simple(
+                &model,
+                &context,
+                Some(crate::types::SimpleStreamOptions::from_base(
+                    crate::types::StreamOptions {
+                        session_id: Some("session-1".into()),
+                        headers: Some(header(name, value)),
+                        ..Default::default()
+                    },
+                )),
+            )
+            .await
+            .expect("stream settles");
+        }
+        // A session-less call adds no header.
+        complete_simple(
+            &model,
+            &context,
+            Some(crate::types::SimpleStreamOptions::from_base(
+                crate::types::StreamOptions::default(),
+            )),
+        )
+        .await
+        .expect("stream settles");
+
+        let mut received = received.lock().unwrap();
+        assert_eq!(received.pop().flatten(), None);
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("X-Pi-Session-Id", "explicit-mixed"))
+        );
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("x-pi-session-id", "explicit-lower"))
+        );
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("X-PI-Session-Id", "explicit"))
+        );
+        assert_eq!(
+            received.pop().flatten(),
+            Some(header("X-PI-Session-Id", "session-1"))
+        );
+        registration.unregister();
     }
 
     #[test]

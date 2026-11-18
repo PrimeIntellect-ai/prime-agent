@@ -8,17 +8,18 @@
     clippy::cast_possible_wrap
 )]
 
+mod support;
+
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{options, serve_connection, write_json, Request};
 
 const TAIL: usize = 300;
 /// The window's page size and resident chunk count (the bound under test).
@@ -73,31 +74,9 @@ struct MockSupervisor {
 impl MockSupervisor {
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let mut writer = stream.try_clone().expect("clone mock socket");
-        let mut reader = BufReader::new(stream);
-        write_json(
-            &mut writer,
-            &json!({
-                "type": "daemon_hello",
-                "protocol": { "name": "prime-agent.daemon", "version": 7 },
-                "serverCapabilities": [], "clientId": "mock",
-            }),
-        );
-        let mut line = String::new();
         let mut reloaded = false;
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope["id"].as_str().unwrap_or_default().to_string();
-            let command = envelope["command"].clone();
-            let kind = command["type"].as_str().unwrap_or_default().to_string();
-            let data = match kind.as_str() {
+        serve_connection(stream, &[], |writer, Request { id, kind, command }| {
+            let data = match kind {
                 "attach" => attach_data(),
                 "reload" => {
                     reloaded = true;
@@ -108,10 +87,10 @@ impl MockSupervisor {
                     self.pages.lock().unwrap().push(page.clone());
                     let paging = self.paging;
                     if paging.hold_newer && page["from"] == "start" && page.get("after").is_some() {
-                        continue;
+                        return true;
                     }
                     if paging.hold_older && page["from"] == "end" && page.get("before").is_some() {
-                        continue;
+                        return true;
                     }
                     if reloaded {
                         std::thread::sleep(std::time::Duration::from_millis(
@@ -121,10 +100,10 @@ impl MockSupervisor {
                             && command.get("historyLeafId").is_some()
                         {
                             write_json(
-                                &mut writer,
+                                writer,
                                 &json!({ "type": "response", "id": id, "command": kind, "success": false, "error": "History branch changed" }),
                             );
-                            continue;
+                            return true;
                         }
                     }
                     page_data(&page)
@@ -132,13 +111,14 @@ impl MockSupervisor {
                 "get_session_stats" => json!({
                     "contextUsage": { "tokens": 1200, "contextWindow": 200_000 }, "cost": 0.01,
                 }),
-                _ => json!({}),
+                _ => return false,
             };
             write_json(
-                &mut writer,
+                writer,
                 &json!({ "type": "response", "id": id, "command": kind, "success": true, "data": data }),
             );
-        }
+            true
+        });
     }
 }
 
@@ -189,51 +169,6 @@ fn page_data(page: &Value) -> Value {
     })
 }
 
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
-}
-
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::Attach("s1".to_string()),
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
-}
-
 fn run(paging: Paging, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -255,7 +190,13 @@ fn run(paging: Paging, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
         height: HEIGHT,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            InteractiveOptions {
+                session: SessionSelection::Attach("s1".to_string()),
+                ..options(socket)
+            },
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     let pages = pages.lock().unwrap().clone();

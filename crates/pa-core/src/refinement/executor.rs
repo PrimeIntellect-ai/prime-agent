@@ -580,5 +580,30 @@ mod tests {
                 .to_string(),
             super::super::planner::TRUNCATED_JSON_ERROR
         );
+
+    fn test_model() -> pa_types::ai::Model {
+        pa_types::ai::Model {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![],
+            cost: pa_types::ai::ModelCost {
+                input: 0.0.into(),
+                output: 0.0.into(),
+                cache_read: 0.0.into(),
+                cache_write: 0.0.into(),
+            },
+            context_window: 100_000,
+            max_tokens: 8_000,
+            max_tokens_explicit: false,
+            featured: None,
+            serving: None,
+            headers: None,
+            compat: None,
+        }
     }
 }

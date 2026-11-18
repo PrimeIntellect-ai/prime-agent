@@ -1,0 +1,23 @@
+Third-party notices for prime-agent
+
+The prime-agent binary is built from the Rust crates below. The prime-agent
+crates (pa-*) are covered by the LICENSE file shipped beside this one; the
+other crates are covered by the license texts that follow, each listed with
+the crates that use it.
+
+Overview:
+{{#each overview}}
+  {{{name}}} ({{id}}): {{count}}
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

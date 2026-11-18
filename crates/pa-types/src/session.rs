@@ -86,6 +86,14 @@ pub struct BashExecutionMessage {
     pub exclude_from_context: Option<bool>,
 }
 
+/// The missing-clock fill for [`CustomMessage::timestamp`].
+#[allow(clippy::cast_possible_truncation)] // epoch millis fit u64 for ~584M years
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
 /// `role: "custom"`: bookkeeping message with a `customType` tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,7 +103,11 @@ pub struct CustomMessage {
     pub display: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
-    /// Unix timestamp in milliseconds.
+    /// Unix timestamp in milliseconds. An injected row from an external
+    /// client may omit it: the default fills the clock at parse. Field
+    /// defaults apply through the internally tagged enum and the
+    /// `flatten` catch-all.
+    #[serde(default = "now_millis")]
     pub timestamp: u64,
     #[serde(flatten)]
     pub rest: JsonMap,
@@ -756,6 +768,43 @@ mod tests {
     #[test]
     fn non_object_entry_is_rejected() {
         assert!(serde_json::from_str::<FileEntry>(r#""not an entry""#).is_err());
+    }
+
+    /// A custom row without a `timestamp` fills the clock through the
+    /// internally tagged enum: the missing-field default applies on both
+    /// parse paths the daemon uses (`from_value` at the injected-row seam,
+    /// `from_str` for journal-shaped input).
+    #[test]
+    fn custom_rows_without_a_timestamp_fill_the_default_clock() {
+        let row = serde_json::json!({
+            "role": "custom",
+            "customType": "heartbeat_prompt",
+            "content": "[heartbeat] nudge",
+            "display": true,
+            "details": { "kind": "fire" },
+        });
+        let parses = [
+            serde_json::from_value::<AgentMessage>(row.clone()),
+            serde_json::from_str::<AgentMessage>(&row.to_string()),
+        ];
+        for parse in parses {
+            let AgentMessage::Custom(custom) = parse.expect("the missing clock fills") else {
+                panic!("the row parses as its custom variant");
+            };
+            assert!(custom.timestamp > 0, "the clock filled from now");
+            assert_eq!(custom.custom_type, "heartbeat_prompt");
+        }
+        // A present clock survives parse and round trip untouched.
+        let mut present = row;
+        present["timestamp"] = serde_json::json!(1_700_000_000_123u64);
+        let AgentMessage::Custom(custom) =
+            serde_json::from_value::<AgentMessage>(present.clone()).expect("parses")
+        else {
+            panic!("the row parses as its custom variant");
+        };
+        assert_eq!(custom.timestamp, 1_700_000_000_123);
+        let serialized = serde_json::to_value(AgentMessage::Custom(custom)).expect("serializes");
+        assert_eq!(serialized, present, "the round trip is lossless");
     }
 
     #[test]

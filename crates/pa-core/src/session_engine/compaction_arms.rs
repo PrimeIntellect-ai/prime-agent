@@ -1,11 +1,18 @@
 use super::compact_session::CompactOutcome;
 use super::{
-    compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages,
+    compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages, refine,
     session_message_to_loop, standard_message, AgentMessage, AgentSession, FileEntry,
     SessionAgentMessage, TrailingAssistantFilter,
 };
 
 impl AgentSession {
+    pub(crate) fn refinement_signal(&self) -> pa_agent::abort::AbortSignal {
+        self.refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .signal()
+    }
+
     pub async fn latest_compaction_timestamp(&self) -> Option<u64> {
         let state = self.agent.state().await;
         state
@@ -192,11 +199,11 @@ impl AgentSession {
         };
         // The flight spans the attempts, the rebuilt-context replace, and
         // the kernel-state notice: every path here REPLACES the live loop
-        // context, and the other replacers — the refine child's reply
-        // push and `record_compaction_outcome`'s failure row — take the
-        // same flight. A row pushed onto the context must not interleave
-        // with the replace: it would duplicate in the rebuilt view or
-        // vanish under it while staying durable either way.
+        // context, and the other replacers — `commit_refinement`'s
+        // outcome push and `record_compaction_outcome`'s failure row —
+        // take the same flight. A row pushed onto the context must not
+        // interleave with the replace: it would duplicate in the rebuilt
+        // view or vanish under it while staying durable either way.
         let _flight = self.compaction_flight.lock().await;
         let mut outcome = self.compaction_attempts(&options, started_at).await?;
         if matches!(outcome, CompactOutcome::Skipped(_)) {
@@ -406,6 +413,77 @@ impl AgentSession {
             .set_messages(rebuilt_loop_messages(rebuilt))
             .await;
         Ok(())
+    }
+
+    /// Start ephemeral background refinement; awaiting the returned task is
+    /// optional for hosts that deliver completion through their event stream.
+    /// Planning never reserves a user turn. Committed rows append at full-run idle.
+    pub fn start_refinement(
+        &self,
+        options: refine::RefineOptions,
+        source: refine::RefinementSource,
+        model: pa_types::ai::Model,
+        api_key: Option<String>,
+    ) -> tokio::task::JoinHandle<anyhow::Result<refine::CommittedRefinement>> {
+        let session = self.session.clone();
+        let agent = self.agent.clone();
+        let flight = self.compaction_flight.clone();
+        let in_flight = self.refinements_in_flight.clone();
+        let cancel = self.refinement_signal();
+        let agent_dir = self.agent_dir.clone();
+        let auxiliary = self.auxiliary_model.clone();
+        let usage_store = self.usage_store.clone();
+        let Ok(stores) = self.refinement_stores() else {
+            return tokio::spawn(async { Err(refine::refinement_stores_missing_error()) });
+        };
+        tokio::spawn(async move {
+            let session_id = session.lock().await.get_session_id().to_string();
+            let refiner =
+                refine::session_refiner_call(auxiliary, &model, api_key, session_id).await?;
+            let refiner =
+                refine::recorded_refiner_call(refiner, "refine", session.clone(), usage_store);
+            refine::run_refinement(
+                session, agent, flight, in_flight, cancel, agent_dir, options, source, model,
+                refiner, stores,
+            )
+            .await
+        })
+    }
+
+    /// One awaited refinement run with an injected refiner call: the seam the
+    /// parity tests use to drive the refinement without a provider. The
+    /// stores derive from the session exactly as the production entry
+    /// points derive them, so the seam cannot drift from the paths the
+    /// kernel and the digest read.
+    #[cfg(test)]
+    pub(crate) async fn refine_with_refiner(
+        &self,
+        options: &refine::RefineOptions,
+        source: refine::RefinementSource,
+        model: &pa_types::ai::Model,
+        refine_call: crate::refinement::executor::RefinerFn,
+    ) -> anyhow::Result<crate::refinement::RefinementResult> {
+        let stores = self.refinement_stores()?;
+        refine::run_refinement(
+            self.session.clone(),
+            self.agent.clone(),
+            self.compaction_flight.clone(),
+            self.refinements_in_flight.clone(),
+            self.refinement_signal(),
+            self.agent_dir.clone(),
+            options.clone(),
+            source,
+            model.clone(),
+            refine::recorded_refiner_call(
+                refine_call,
+                "refine",
+                self.session.clone(),
+                self.usage_store.clone(),
+            ),
+            stores,
+        )
+        .await
+        .map(|committed| committed.result)
     }
 }
 

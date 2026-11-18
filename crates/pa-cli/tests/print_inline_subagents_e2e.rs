@@ -15,6 +15,8 @@
 //! full in-process tree — spawn, child reply turns, the #2270 quiescence
 //! wait, the depth gate, and the exit disposal.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// One isolated print run: a hermetic HOME + agent dir, the faux script
@@ -68,24 +70,48 @@ impl PrintLane {
         env_extra: &[(&str, &str)],
     ) -> (String, String, i32) {
         let bin = env!("CARGO_BIN_EXE_prime-agent");
-        // An explicitly selected kernel bypasses skill installation. Exercise
-        // the checkout's messaging and goal skills even in a fresh kernel venv.
+        // This test explicitly selects its interpreter, which supplies the
+        // checkout's skills without relying on the product's inherited env.
         let skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
-        let mut python_paths = vec![skills.join("agent-message/src"), skills.join("goal/src")];
-        if let Some(existing) = std::env::var_os("PYTHONPATH") {
-            python_paths.extend(std::env::split_paths(&existing));
-        }
+        let python_paths = [skills.join("agent-message/src"), skills.join("goal/src")];
+        let python_path = std::env::join_paths(python_paths).expect("skill import paths");
+        #[cfg(unix)]
+        let wrapper = {
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+            let wrapper = self.home.path().join("kernel-python-with-skills");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nexport PYTHONPATH={}\nexec {} \"$@\"\n",
+                    quote(&python_path.to_string_lossy()),
+                    quote(&kernel_python.to_string_lossy())
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            wrapper
+        };
+        #[cfg(windows)]
+        let wrapper = {
+            let wrapper = self.home.path().join("kernel-python-with-skills.cmd");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "@echo off\r\nset \"PYTHONPATH={}\"\r\n\"{}\" %*\r\n",
+                    python_path.to_string_lossy().replace('%', "%%"),
+                    kernel_python.to_string_lossy().replace('%', "%%")
+                ),
+            )
+            .unwrap();
+            wrapper
+        };
         let mut command = std::process::Command::new(bin);
         command
             .args(args)
             .env("HOME", self.home.path())
             .env("PRIME_AGENT_CODING_AGENT_DIR", &self.agent_dir)
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
-            .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
-            .env(
-                "PYTHONPATH",
-                std::env::join_paths(python_paths).expect("skill import paths"),
-            )
+            .env("PRIME_AGENT_KERNEL_PYTHON", &wrapper)
             .env_remove("RLM_DEPTH")
             .env_remove("RLM_MAX_DEPTH")
             .env_remove("PRIME_AGENT_SESSION_DIR")

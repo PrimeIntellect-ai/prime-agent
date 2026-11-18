@@ -7,9 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
 use crate::models::calculate_cost;
-use crate::providers::google_shared::{
-    is_thinking_part, map_google_stop_reason, retain_thought_signature,
-};
+use crate::providers::google_shared::{is_thinking_part, map_google_stop_reason};
 use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, ThinkingContent, ToolCall,
     Usage, UsageCost,
@@ -92,14 +90,26 @@ impl GoogleStreamState {
                 for part in parts {
                     if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
                         let is_thinking = is_thinking_part(part);
-                        let matches_kind = match &self.current_kind {
-                            Some(kind) => {
-                                (is_thinking && *kind == "thinking")
-                                    || (!is_thinking && *kind == "text")
-                            }
-                            None => false,
-                        };
-                        if !matches_kind {
+                        let signature = part
+                            .get("thoughtSignature")
+                            .and_then(Value::as_str)
+                            .filter(|signature| !signature.is_empty());
+                        // A signed part must keep its own boundary, even when its text is empty.
+                        let can_merge = signature.is_none()
+                            && match output.content.last() {
+                                Some(AssistantContent::Thinking(thinking)) => {
+                                    self.current_kind == Some("thinking")
+                                        && is_thinking
+                                        && thinking.thinking_signature.is_none()
+                                }
+                                Some(AssistantContent::Text(text)) => {
+                                    self.current_kind == Some("text")
+                                        && !is_thinking
+                                        && text.text_signature.is_none()
+                                }
+                                Some(AssistantContent::ToolCall(_)) | None => false,
+                            };
+                        if !can_merge {
                             self.close_current_block(output, writer);
                             if is_thinking {
                                 output
@@ -129,18 +139,12 @@ impl GoogleStreamState {
                             }
                         }
                         let index = output.content.len() - 1;
-                        let signature = part
-                            .get("thoughtSignature")
-                            .and_then(|value| value.as_str());
                         if is_thinking {
                             if let Some(AssistantContent::Thinking(thinking)) =
                                 output.content.get_mut(index)
                             {
                                 thinking.thinking.push_str(text);
-                                thinking.thinking_signature = retain_thought_signature(
-                                    thinking.thinking_signature.as_deref(),
-                                    signature,
-                                );
+                                thinking.thinking_signature = signature.map(str::to_string);
                             }
                             writer.push(AssistantMessageEvent::ThinkingDelta {
                                 content_index: index as u64,
@@ -152,10 +156,7 @@ impl GoogleStreamState {
                                 output.content.get_mut(index)
                             {
                                 text_block.text.push_str(text);
-                                text_block.text_signature = retain_thought_signature(
-                                    text_block.text_signature.as_deref(),
-                                    signature,
-                                );
+                                text_block.text_signature = signature.map(str::to_string);
                             }
                             writer.push(AssistantMessageEvent::TextDelta {
                                 content_index: index as u64,
@@ -283,5 +284,64 @@ impl GoogleStreamState {
 impl Default for GoogleStreamState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event_stream::{create_assistant_message_event_stream, initial_assistant_message};
+    use crate::providers::google_shared::convert_messages;
+    use crate::types::{Context, Message};
+    use serde_json::json;
+
+    #[test]
+    fn signed_parts_survive_replay_without_merging() {
+        for (provider, api) in [
+            ("google", "google-generative-ai"),
+            ("google-vertex", "google-vertex"),
+        ] {
+            let model: Model = serde_json::from_value(json!({
+                "id": "gemini-3-pro-preview", "name": "Gemini", "provider": provider, "api": api,
+                "baseUrl": "https://unused.invalid", "reasoning": true, "input": ["text"],
+                "contextWindow": 10000, "maxTokens": 100,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+            }))
+            .unwrap();
+            let parts = vec![
+                json!({"text": "First.", "thoughtSignature": "c2lnQQ=="}),
+                json!({"text": "Second.", "thoughtSignature": "c2lnQg=="}),
+                json!({"text": "Unsigned."}),
+                json!({"text": "", "thoughtSignature": "c2lnQw=="}),
+                json!({"thought": true, "text": "", "thoughtSignature": "c2lnRA=="}),
+            ];
+            let mut state = GoogleStreamState::new();
+            let mut output = initial_assistant_message(api, provider, &model.id);
+            let (writer, _stream) = create_assistant_message_event_stream();
+            for part in &parts {
+                state
+                    .handle_chunk(
+                        &json!({"candidates": [{"content": {"parts": [part]}}]}),
+                        &model,
+                        &mut output,
+                        &writer,
+                    )
+                    .unwrap();
+            }
+            state.finish(&output, &writer);
+            let replay = convert_messages(
+                &model,
+                &Context {
+                    system_prompt: None,
+                    messages: vec![Message::Assistant(output)],
+                    tools: None,
+                },
+            );
+            assert_eq!(
+                replay,
+                vec![json!({"role": "model", "parts": parts})],
+                "{provider}"
+            );
+        }
     }
 }

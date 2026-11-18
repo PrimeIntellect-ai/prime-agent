@@ -142,7 +142,7 @@ pub struct PythonSkillRuntimeInfo {
 pub fn get_python_skill_runtime_info(skills: &[Skill]) -> Vec<PythonSkillRuntimeInfo> {
     skills
         .iter()
-        .filter(|skill| skill.is_python())
+        .filter(|skill| skill.is_python() && skill.source_info.scope != SourceScope::Project)
         .map(|skill| {
             let python = skill.python.as_ref().expect("python skill has metadata");
             PythonSkillRuntimeInfo {
@@ -204,7 +204,7 @@ pub(crate) use validate_description as validate_skill_description;
 pub(crate) use validate_name as validate_skill_name;
 
 /// Format skills for a system prompt (Agent Skills XML standard); skills
-/// with disableModelInvocation are excluded.
+/// with `disable-model-invocation` are excluded.
 #[must_use]
 pub fn format_skills_for_prompt(skills: &[Skill]) -> String {
     let visible: Vec<&Skill> = skills
@@ -255,37 +255,68 @@ pub(crate) fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Expand skill commands (`/skill:<name> [args]`) into the `<skill ...>` message block: a non-skill
-/// input, an unknown skill name (the surfaces show their own unknown-command notice), and a skill
-/// file that fails to read all pass through. Returns the skill the expansion used.
-#[must_use]
-pub fn expand_skill_command<'a>(text: &str, skills: &'a [Skill]) -> (String, Option<&'a Skill>) {
-    let Some((name, args)) = parse_slash_command(text) else {
-        return (text.to_string(), None);
-    };
-    let Some(skill_name) = name.strip_prefix("skill:") else {
-        return (text.to_string(), None);
-    };
-    let Some(skill) = skills.iter().find(|skill| skill.name == skill_name) else {
-        return (text.to_string(), None);
-    };
-    let Ok(content) = std::fs::read_to_string(&skill.file_path) else {
-        return (text.to_string(), None);
-    };
+/// The `<skill ...>` message block for a skill: its file's body,
+/// frontmatter stripped. `None` when the file cannot be read.
+fn skill_block(skill: &Skill) -> Option<String> {
+    let content = std::fs::read_to_string(&skill.file_path).ok()?;
     let body = frontmatter::strip_frontmatter(&content).trim().to_string();
-    let block = format!(
+    Some(format!(
         "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
         skill.name,
         skill.file_path.display(),
         skill.base_dir.display(),
         body
-    );
-    let expanded = if args.is_empty() {
-        block
-    } else {
-        format!("{block}\n\n{args}")
+    ))
+}
+
+/// Expand the `/skill:<name>` references of a message into `<skill ...>`
+/// blocks, each skill once (hidden skills included). A message that starts
+/// with a known `/skill:<name>` becomes its block followed by the rest of
+/// the message after a blank line; references elsewhere (standalone words
+/// outside code, see [`pa_types::skill_blocks::skill_references`]) prepend
+/// their blocks and leave the user's text as written. Unknown names, an
+/// unreadable skill file, and an already-expanded message pass through.
+/// Returns the skills the expansion used.
+#[must_use]
+pub fn expand_skill_command<'a>(text: &str, skills: &'a [Skill]) -> (String, Vec<&'a Skill>) {
+    if pa_types::skill_blocks::parse_skill_block(text).is_some() {
+        return (text.to_string(), Vec::new());
+    }
+    let find = |name: &str| skills.iter().find(|skill| skill.name == name);
+    let leading = parse_slash_command(text).and_then(|(name, args)| {
+        let skill = find(name.strip_prefix("skill:")?)?;
+        Some((skill, args))
+    });
+    let mut used: Vec<&Skill> = leading.iter().map(|(skill, _)| *skill).collect();
+    for name in pa_types::skill_blocks::skill_references(text) {
+        if let Some(skill) = find(name) {
+            if !used.iter().any(|known| known.name == skill.name) {
+                used.push(skill);
+            }
+        }
+    }
+    let mut blocks: Vec<String> = Vec::new();
+    used.retain(|skill| match skill_block(skill) {
+        Some(block) => {
+            blocks.push(block);
+            true
+        }
+        None => false,
+    });
+    let leading_used = leading
+        .as_ref()
+        .is_some_and(|(leading, _)| used.first().is_some_and(|first| first.name == leading.name));
+    let message = match leading {
+        Some((_, args)) if leading_used => args,
+        _ => text.to_string(),
     };
-    (expanded, Some(skill))
+    if blocks.is_empty() {
+        return (text.to_string(), used);
+    }
+    if !message.is_empty() {
+        blocks.push(message);
+    }
+    (blocks.join("\n\n"), used)
 }
 
 #[cfg(test)]
@@ -339,7 +370,7 @@ mod tests {
         let skill = temp_skill("web-search", dir.path());
         let skills = [skill];
         let (expanded, used) = expand_skill_command("/skill:web-search", &skills);
-        assert_eq!(used.map(|skill| skill.name.as_str()), Some("web-search"));
+        assert_eq!(used, vec![&skills[0]]);
         let parsed = pa_types::skill_blocks::parse_skill_block(&expanded).expect("parses");
         assert_eq!(parsed.name, "web-search");
         // TS block shape: the references note rides inside the body,
@@ -355,7 +386,7 @@ mod tests {
         assert!(parsed.location.ends_with("SKILL.md"));
 
         let (expanded, used) = expand_skill_command("/skill:web-search find rust tuis", &skills);
-        assert_eq!(used.map(|skill| skill.name.as_str()), Some("web-search"));
+        assert_eq!(used, vec![&skills[0]]);
         let parsed = pa_types::skill_blocks::parse_skill_block(&expanded).expect("parses");
         assert_eq!(
             parsed.user_message.as_deref(),
@@ -378,6 +409,32 @@ mod tests {
             |d| matches!(d, crate::skills::ResourceDiagnostic::Warning { message, .. }
                 if message == "description is required")
         ));
+    }
+
+    #[test]
+    fn invalid_yaml_frontmatter_reports_the_parse_error() {
+        // An unquoted `: ` inside a plain scalar (the shipped factory skill's
+        // old description) is invalid YAML: the warning carries the parser's
+        // error instead of a misleading missing-description complaint.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join("colon");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let yaml = "name: colon\ndescription: Run workflows: store and resume them";
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\n{yaml}\n---\nbody"),
+        )
+        .expect("write");
+        let yaml_error = serde_yaml::from_str::<serde_yaml::Value>(yaml).unwrap_err();
+        let result = crate::skills::load_skills_from_dir(dir.path(), "user");
+        assert!(result.skills.is_empty());
+        assert_eq!(
+            result.diagnostics,
+            vec![crate::skills::ResourceDiagnostic::Warning {
+                message: format!("invalid YAML frontmatter: {yaml_error}"),
+                path: Some(skill_dir.join("SKILL.md").display().to_string()),
+            }]
+        );
     }
 
     #[test]
@@ -411,11 +468,42 @@ mod tests {
             "/compact",
             "/skill:missing do something",
             "/skill:",
+            "see `/skill:web-search` inline",
+            "```\n/skill:web-search\n```",
+            "read /skill:web-search/SKILL.md",
         ] {
             let (expanded, used) = expand_skill_command(text, &skills);
             assert_eq!(expanded, text, "{text} must pass through");
-            assert!(used.is_none(), "{text} must not report a skill");
+            assert!(used.is_empty(), "{text} must not report a skill");
         }
+    }
+
+    #[test]
+    fn hidden_skills_expand_at_the_start_and_anywhere_in_the_message() {
+        let hidden_dir = tempfile::tempdir().expect("tempdir");
+        let other_dir = tempfile::tempdir().expect("tempdir");
+        let mut hidden = temp_skill("hidden-one", hidden_dir.path());
+        hidden.disable_model_invocation = true;
+        let skills = [hidden, temp_skill("other", other_dir.path())];
+        let block = |skill: &Skill| skill_block(skill).expect("readable");
+
+        let (expanded, used) = expand_skill_command("/skill:hidden-one go", &skills);
+        assert_eq!(expanded, format!("{}\n\ngo", block(&skills[0])));
+        assert_eq!(used, vec![&skills[0]]);
+
+        let text = "use /skill:other, then /skill:hidden-one\nand /skill:other again";
+        let (expanded, used) = expand_skill_command(text, &skills);
+        assert_eq!(
+            expanded,
+            format!("{}\n\n{}\n\n{text}", block(&skills[0]), block(&skills[1])),
+            "each referenced skill's block once, in first-use order, before the text"
+        );
+        assert_eq!(used, vec![&skills[0], &skills[1]]);
+        assert_eq!(
+            expand_skill_command(&expanded, &skills),
+            (expanded.clone(), Vec::new()),
+            "an expanded message passes through"
+        );
     }
 
     #[test]
@@ -427,7 +515,7 @@ mod tests {
         let skills = [skill];
         let (expanded, used) = expand_skill_command("/skill:gone", &skills);
         assert_eq!(expanded, "/skill:gone");
-        assert!(used.is_none());
+        assert!(used.is_empty());
     }
 
     #[test]

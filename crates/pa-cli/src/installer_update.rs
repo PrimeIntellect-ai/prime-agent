@@ -144,7 +144,7 @@ pub fn run(options: &UpdateOptions) -> i32 {
     // not use.
     let channel = requested_installer_channel(options.channel);
     println!(
-        "Updating to the latest Rust build — fetching the installer from {}:",
+        "Updating to the latest version — fetching the installer from {}:",
         installer::installer_script_url(Some(channel))
     );
     match runtime.block_on(installer::run_installer(

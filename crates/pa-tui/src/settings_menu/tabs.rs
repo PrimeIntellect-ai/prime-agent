@@ -48,6 +48,7 @@ const TAB_LAYOUT: &[TabLayout] = &[
             "editor-padding",
             "autocomplete-max-visible",
             "show-hardware-cursor",
+            "emoji-shortcodes",
         ],
     },
     TabLayout {
@@ -58,6 +59,7 @@ const TAB_LAYOUT: &[TabLayout] = &[
             "idle-eviction-minutes",
             "tree-filter-mode",
             "harness-refinements",
+            "web-search-provider",
         ],
     },
 ];

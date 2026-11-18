@@ -104,6 +104,9 @@ fn failover_rebinds_model_facts_before_the_backup_can_restore_primary() {
         })
         .unwrap(),
     );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let model = engine.resolve_model().unwrap();
     engine.ensure_core_session(&model).unwrap();
     let core = engine.session.blocking_lock().as_ref().unwrap().clone();

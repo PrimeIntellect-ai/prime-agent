@@ -564,6 +564,9 @@ pub enum AgentEvent {
     /// Last event of a run; carries all messages produced by the run.
     AgentEnd {
         messages: Vec<AgentMessage>,
+        /// Whether this run ended through a cancellation path. Captured
+        /// before dispatch, so later abort requests cannot relabel it.
+        aborted: bool,
     },
     TurnStart,
     TurnEnd {
@@ -626,7 +629,7 @@ pub struct AfterToolCallResult {
     pub details: Option<serde_json::Value>,
     pub is_error: Option<bool>,
     /// Hint that the agent should stop after the current tool batch. Early
-    /// termination only happens when every finalized tool result in the batch
+    /// termination happens when any finalized tool result in the batch
     /// sets this to true.
     pub terminate: Option<bool>,
 }

@@ -104,10 +104,10 @@ impl RequestTimingLog {
             std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
             // Best-effort rotation: keep appending when the rotate fails.
             let _ = self.rotate_if_needed();
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            crate::platform::perms::set_private_mode(&mut options);
+            let mut file = options.open(&self.path)?;
             file.write_all(line.as_bytes())?;
             file.flush()
         };
@@ -391,18 +391,51 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
                     hook(response, model);
                 }
             }));
+            // The inner call can park past a poll — the live-auth seam
+            // resolves auth off the executor — and the agent loop races it
+            // with an unbiased abort select that DROPS this future before
+            // the call returns. The timed request still needs its summary
+            // there (TS settles the raced call and summarizes it): the
+            // guard emits the aborted summary on drop; from the call's
+            // return on, the `TimingStream` owns the summary and the guard
+            // disarms.
+            let mut pending = PendingTimingGuard {
+                timing: Arc::clone(&timing),
+                armed: true,
+            };
             match stream_fn(model, context, options).await {
                 Err(error) => {
+                    pending.armed = false;
                     timing.emit_summary(Outcome::Failed);
                     Err(error)
                 }
-                Ok(stream) => Ok(Box::new(TimingStream {
-                    inner: stream,
-                    timing,
-                }) as Box<dyn ModelStream>),
+                Ok(stream) => {
+                    pending.armed = false;
+                    Ok(Box::new(TimingStream {
+                        inner: stream,
+                        timing,
+                    }) as Box<dyn ModelStream>)
+                }
             }
         })
     })
+}
+
+/// Emits the aborted summary when the wrapped call's future is dropped
+/// before the call returns (a turn abort mid-resolution); disarmed once
+/// the call returns and the stream owns the summary (a fired summary is a
+/// no-op, so the handover never double-emits).
+struct PendingTimingGuard {
+    timing: Arc<RequestTiming>,
+    armed: bool,
+}
+
+impl Drop for PendingTimingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.timing.emit_summary(Outcome::Aborted);
+        }
+    }
 }
 
 /// Wraps the provider stream to time first-byte (fallback via the start event),

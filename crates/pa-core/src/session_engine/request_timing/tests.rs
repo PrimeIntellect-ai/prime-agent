@@ -648,6 +648,85 @@ async fn reports_early_termination_as_aborted() {
     assert_eq!(summary.get("outcome"), Some(&json!("aborted")));
 }
 
+/// A timed call dropped before the inner call returns — a turn abort
+/// while the live-auth resolution is in flight, what the agent loop's
+/// unbiased abort select does — still writes its summary, an aborted
+/// one, like the dropped unsettled stream does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_dropped_mid_resolution_gets_a_timing_summary() {
+    use std::time::Duration;
+
+    use crate::models::ResolvedRequestAuth;
+    use crate::session_engine::provider_adapter::{
+        switchable_stream_fn_with_live_auth, LiveAuthResolver, ProviderTarget,
+    };
+
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("timing-dropped-call-test".to_owned()),
+            ..Default::default()
+        });
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "ok",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("agent.jsonl");
+    // A resolver that blocks until released: the timed call parks on the
+    // live-auth resolution.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = Mutex::new(entered_tx);
+    let release_rx = Mutex::new(release_rx);
+    let resolver: LiveAuthResolver = Arc::new(move |_model| {
+        let _ = entered_tx.lock().unwrap().send(());
+        let _ = release_rx.lock().unwrap().recv();
+        ResolvedRequestAuth::default()
+    });
+    let stream_fn = instrument_stream_fn(
+        timing_on(&log_path),
+        switchable_stream_fn_with_live_auth(
+            Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+                api_key: Some("captured-key".to_string()),
+                model: registration.get_model(),
+                service_tier: None,
+                headers: None,
+            }))),
+            resolver,
+        ),
+    );
+    let mut call = stream_fn(
+        test_model(),
+        LlmContext::default(),
+        StreamRequestOptions::default(),
+    );
+    let pending = futures::poll!(&mut call).is_pending();
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the resolution entered");
+    drop(call);
+    release_tx.send(()).expect("the release channel is open");
+    registration.unregister();
+    assert!(pending, "the timed call parks on the resolution");
+    let summaries: Vec<Value> = timing_entries(&log_path)
+        .into_iter()
+        .filter(|entry| entry.get("outcome").is_some())
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "the dropped timed request is summarized"
+    );
+    assert_eq!(
+        summaries[0].get("outcome"),
+        Some(&json!("aborted")),
+        "the summary reports the abort, not silence"
+    );
+}
+
 #[test]
 fn truthy_env_flag_follows_the_offline_convention() {
     for on in ["1", "true", "yes", "TRUE", "Yes"] {

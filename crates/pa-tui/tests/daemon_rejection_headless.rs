@@ -5,17 +5,19 @@
 #![cfg(unix)]
 #![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Write};
+mod support;
+
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{attach_response, write_json, write_session_event};
 
 /// The real worker admission refusal (`QUEUED_INPUT_SUSPENDED`), the stand-in for every daemon-side
 /// "alive but refusing THIS request".
@@ -128,6 +130,8 @@ impl SharedAnswers {
         reason = "mock daemon request loop: one match arm per scripted request method"
     )]
     fn serve_connection(self: std::sync::Arc<Self>, stream: UnixStream) {
+        // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+        stream.set_nonblocking(false).expect("blocking mock stream");
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 
@@ -239,7 +243,7 @@ impl SharedAnswers {
                     );
                 }
                 "attach" => {
-                    let mut data = attach_data(id);
+                    let mut data = attach_response(id, "rejection session");
                     if self.rebind_before_close && !self.prompt_requests.lock().unwrap().is_empty()
                     {
                         data["data"]["activeSessionId"] = json!("s2");
@@ -357,6 +361,7 @@ impl SharedAnswers {
                             }),
                         );
                         write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                        write_session_event(&mut writer, &json!({ "type": "agent_end" }));
                     } else {
                         let mut delayed = writer.try_clone().expect("clone delayed writer");
                         let delay = self.hold_turn_ms;
@@ -376,6 +381,7 @@ impl SharedAnswers {
                                 }),
                             );
                             write_session_event(&mut delayed, &json!({ "type": "turn_end" }));
+                            write_session_event(&mut delayed, &json!({ "type": "agent_end" }));
                         });
                     }
                 }
@@ -393,96 +399,6 @@ impl SharedAnswers {
                 }
             }
         }
-    }
-}
-
-fn write_session_event(writer: &mut UnixStream, event: &Value) {
-    write_json(
-        writer,
-        &json!({
-            "type": "session_event",
-            "activeSessionId": "s1",
-            "event": event,
-        }),
-    );
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
-}
-
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "rejection session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
-}
-
-fn options_with_session(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
     }
 }
 
@@ -556,7 +472,11 @@ fn run_plan(
         width: 100,
         height: 40,
     };
-    let options = options_with_session(socket, selection);
+    let options = InteractiveOptions {
+        session: selection,
+        fullscreen_mouse: false,
+        ..support::options(socket)
+    };
     let outcome = runtime.block_on(async {
         if agents_view_open {
             Box::pin(pa_tui::interactive::run_interactive_agents_view_open(

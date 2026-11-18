@@ -60,8 +60,13 @@ pub fn telemetry_switch(settings: &SettingsManager) -> TelemetrySwitch {
     )
 }
 
+/// The environment variables that decide the switch (see [`TelemetrySwitch`]).
+pub const TELEMETRY_SWITCH_VARS: [&str; 3] =
+    ["PI_OFFLINE", "DO_NOT_TRACK", "PRIME_AGENT_TELEMETRY"];
+
 fn switch_from(env: impl Fn(&str) -> Option<String>, setting: Option<bool>) -> TelemetrySwitch {
-    for var in ["PI_OFFLINE", "DO_NOT_TRACK"] {
+    let [offline, do_not_track, forced] = TELEMETRY_SWITCH_VARS;
+    for var in [offline, do_not_track] {
         if parse_bool_override(env(var).as_deref()) == Some(true) {
             return TelemetrySwitch::Env {
                 var,
@@ -69,9 +74,9 @@ fn switch_from(env: impl Fn(&str) -> Option<String>, setting: Option<bool>) -> T
             };
         }
     }
-    if let Some(enabled) = parse_bool_override(env("PRIME_AGENT_TELEMETRY").as_deref()) {
+    if let Some(enabled) = parse_bool_override(env(forced).as_deref()) {
         return TelemetrySwitch::Env {
-            var: "PRIME_AGENT_TELEMETRY",
+            var: forced,
             enabled,
         };
     }

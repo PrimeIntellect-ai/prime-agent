@@ -13,7 +13,6 @@ pub enum DaemonWorkerLifecycle {
     Starting,
     Ready,
     Recovering,
-    Stopping,
     Failed,
 }
 

@@ -190,11 +190,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The panel consumes Ctrl+C (cancel the mounted input, not the app);
-        // report it so the force-quit guard stays in sync.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
             panel.handle_key(&id, kb, &mut self.osc_sink);
@@ -425,11 +420,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The view consumes Ctrl+C (close, not exit); report it so the force-quit
-        // guard can disarm.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let action = view
             .mcp_view
             .as_mut()

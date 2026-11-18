@@ -86,12 +86,7 @@ async fn compact_suspends_and_resume_queue_clears() {
 
 /// The interrupt aborts the run AND delivers the parked queue right after the turn settles.
 #[tokio::test]
-// the faux registry is process-global: the guard must span the async flow
-#[allow(clippy::await_holding_lock)]
 async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-abort-send-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -273,11 +268,7 @@ async fn abort_and_send_queued_with_an_empty_queue_is_a_plain_abort() {
 
 /// The sanctioned divergence: the OLDEST queued follow-up starts the next turn after the settle.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("pa-worker-abort-fu-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {
@@ -722,8 +713,7 @@ impl pa_ai::Provider for RequestProbe {
 /// The faux-script worker for the abort-and-send probes: a fresh created
 /// session whose first response holds for 60s (the streaming turn the
 /// abort cuts) and whose next turn answers `reply`, plus the signal for
-/// each provider request. The faux registry is process-global: hold
-/// `FAUX_TEST_LOCK` across the flow.
+/// each provider request.
 async fn held_turn_worker(
     active_session_id: &str,
     name: &str,
@@ -848,12 +838,7 @@ async fn agent_message_transcript(worker: &Worker) -> (Option<Value>, Vec<String
 /// the aborted turn settles, then the parked row delivers as the next turn
 /// (TS's ctrl+c must never strand agent mail behind the suspension).
 #[tokio::test]
-// the faux registry is process-global: the guard must span the async flow
-#[allow(clippy::await_holding_lock)]
 async fn abort_and_send_queued_delivers_the_parked_agent_message() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (worker, dir, requested) =
         held_turn_worker("abort-am-session", "abort-am", "agent message reply").await;
     let mut subscription = worker.events.subscribe();
@@ -928,12 +913,7 @@ async fn abort_and_send_queued_delivers_the_parked_agent_message() {
 /// abort clears the suspension, the pump holds the delivery while the pause
 /// stands, and the pause release delivers the parked agent message.
 #[tokio::test]
-// the faux registry is process-global: the guard must span the async flow
-#[allow(clippy::await_holding_lock)]
 async fn abort_and_send_queued_under_a_held_pause_delivers_on_the_release() {
-    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (worker, dir, requested) =
         held_turn_worker("abort-pause-session", "abort-pause", "agent message reply").await;
     start_in_flight_held_turn(

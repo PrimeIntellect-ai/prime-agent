@@ -42,9 +42,8 @@ use runtime_source::collect_python_files;
 pub(super) use runtime_source::{hash_runtime_source, require_runtime_source_dir};
 pub(super) use runtime_source::{package_dir, packaged_runtime_dir};
 #[cfg(test)]
-use skills::{
-    file_content_hash, read_python_skill_dependency_names, read_python_skill_project_name,
-};
+use skills::{file_content_hash, read_python_skill_dependency_names};
+use skills::{normalize_project_name, read_python_skill_project_name};
 pub(crate) use skills::{normalize_python_skills, BootstrapPythonSkill};
 pub(crate) use uv::ensure_uv;
 #[cfg(test)]
@@ -58,6 +57,10 @@ use version::{
 use version::{recorded_skills_cover, BOOTSTRAP_SCHEMA};
 
 const PYTHON_VERSION: &str = "3.11";
+pub(crate) struct UvCommand<'a> {
+    pub(super) executable: &'a str,
+    pub(super) project: Option<&'a Path>,
+}
 pub(crate) const BOOTSTRAP_LOCK_NAME: &str = ".bootstrap.lock";
 pub(crate) const BOOTSTRAP_LOCK_RETRY_MS: u64 = 100;
 pub(crate) const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS: u64 = 30_000;
@@ -74,13 +77,19 @@ pub(crate) struct BootstrapVersion {
     python_skills: Option<Vec<BootstrapPythonSkill>>,
 }
 
-async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
+async fn run_async(command: &str, args: &[String], project: Option<&Path>) -> anyhow::Result<()> {
     // Run on a blocking thread: the bootstrap is an IO-bound child process.
     let command = command.to_string();
     let args = args.to_vec();
+    let project = project.map(Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new(&command);
-        child.args(&args).stdin(Stdio::null());
+        // uv otherwise discovers uv.toml/pyproject.toml from the process cwd,
+        // which may be the repository opened before the first prompt.
+        child.arg("--no-config").args(&args).stdin(Stdio::null());
+        let mut env = crate::kernel::python_env::inherited_python_env();
+        crate::kernel::python_env::sanitize_uv_path(&mut env, project.as_deref());
+        child.env_clear().envs(env);
         // Hidden window on Windows (TS `spawnHidden`).
         crate::platform::process::set_no_window(&mut child);
         // CPython must read UTF-8 .pth files even under a Windows legacy
@@ -112,9 +121,14 @@ pub(crate) async fn bootstrap_venv(
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
     options: &EnsureKernelPythonOptions,
+    project: Option<&Path>,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(venv.parent().unwrap_or(Path::new("/")))?;
-    let uv = ensure_uv()?;
+    let uv = ensure_uv(project)?;
+    let uv_command = UvCommand {
+        executable: &uv,
+        project,
+    };
     let python = kernel_venv_python(venv);
 
     let venv_str = venv.to_string_lossy().to_string();
@@ -132,28 +146,33 @@ pub(crate) async fn bootstrap_venv(
     }
 
     run_async(
-        &uv,
+        uv_command.executable,
         &[
             "python".to_string(),
             "install".to_string(),
             PYTHON_VERSION.to_string(),
         ],
+        uv_command.project,
     )
     .await?;
     run_async(
-        &uv,
+        uv_command.executable,
         &[
             "venv".to_string(),
             venv_str,
             "--python".to_string(),
             PYTHON_VERSION.to_string(),
+            // The preceding `uv python install` provisions this runtime.
+            // Avoid querying Python executables found on the caller's PATH.
+            "--managed-python".to_string(),
             "--seed".to_string(),
         ],
+        uv_command.project,
     )
     .await?;
-    run_async(&uv, &install_args).await?;
+    run_async(uv_command.executable, &install_args, uv_command.project).await?;
     sync_python_skills(
-        &uv,
+        &uv_command,
         venv,
         &python,
         source_dir,
@@ -164,10 +183,22 @@ pub(crate) async fn bootstrap_venv(
     .await
 }
 
+/// True when installing `skill` displaces `existing`'s install. uv replaces
+/// distributions by project name and leaves different-named distributions
+/// installed side by side, so another package path is displaced in two
+/// ways: the same import name stays installed and shadows this skill on
+/// sys.path, and the same project name has its code replaced outright.
+fn displaces_install(existing: &BootstrapPythonSkill, skill: &BootstrapPythonSkill) -> bool {
+    existing.package_path != skill.package_path
+        && (existing.import_name == skill.import_name
+            || normalize_project_name(&read_python_skill_project_name(existing))
+                == normalize_project_name(&read_python_skill_project_name(skill)))
+}
+
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
 /// changed are installed. Per-skill failures warn and continue.
 pub(crate) async fn sync_python_skills(
-    uv: &str,
+    uv: &UvCommand<'_>,
     venv: &Path,
     python: &Path,
     source_dir: &Path,
@@ -200,6 +231,44 @@ pub(crate) async fn sync_python_skills(
         missing.push(skill);
     }
     if !missing.is_empty() {
+        // Installing a skill can displace another source's install (see
+        // [`displaces_install`]). Drop the displaced records before
+        // installing: uv swaps distributions by project name, so a displaced
+        // record may describe code this sync replaces, and a record dropped
+        // while its code is still installed only costs one redundant
+        // reinstall. The same-import distributions from other package paths
+        // are NOT replaced by the install, so uninstall them first or their
+        // editable install shadows the skill this session selected.
+        let mut shadowing: Vec<String> = Vec::new();
+        for skill in &missing {
+            let skill_project = normalize_project_name(&read_python_skill_project_name(skill));
+            installed.retain(|_, existing| {
+                if !displaces_install(existing, skill) {
+                    return true;
+                }
+                let existing_project = read_python_skill_project_name(existing);
+                if normalize_project_name(&existing_project) != skill_project
+                    && !shadowing.contains(&existing_project)
+                {
+                    shadowing.push(existing_project);
+                }
+                false
+            });
+        }
+        if !shadowing.is_empty() {
+            let mut uninstall_args = vec![
+                "pip".to_string(),
+                "uninstall".to_string(),
+                "--python".to_string(),
+                python_str.clone(),
+            ];
+            uninstall_args.extend(shadowing.iter().cloned());
+            if let Err(error) = run_async(uv.executable, &uninstall_args, uv.project).await {
+                options.report(&format!(
+                    "Warning: failed to uninstall the Python skill distributions this sync replaces ({shadowing:?}): {error}"
+                ));
+            }
+        }
         // One uv invocation installs the whole batch of missing skills: a fresh bootstrap otherwise
         // pays one process plus build-backend startup per install. A batch failure falls back to
         // the per-skill loop.
@@ -216,7 +285,10 @@ pub(crate) async fn sync_python_skills(
             install_args.push("--editable".to_string());
             install_args.push(skill.package_path.clone());
         }
-        if run_async(uv, &install_args).await.is_ok() {
+        if run_async(uv.executable, &install_args, uv.project)
+            .await
+            .is_ok()
+        {
             // A changed pyproject (hash moved) replaces the stale record.
             for skill in &missing {
                 installed.insert(bootstrap_skill_key(skill), (*skill).clone());
@@ -224,7 +296,7 @@ pub(crate) async fn sync_python_skills(
         } else {
             for skill in &missing {
                 let result = run_async(
-                    uv,
+                    uv.executable,
                     &[
                         "pip".to_string(),
                         "install".to_string(),
@@ -234,6 +306,7 @@ pub(crate) async fn sync_python_skills(
                         "--editable".to_string(),
                         skill.package_path.clone(),
                     ],
+                    uv.project,
                 )
                 .await;
                 match result {

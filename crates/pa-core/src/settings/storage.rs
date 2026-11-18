@@ -3,13 +3,16 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
+
+/// Upper bound on a project settings document, which comes from the checkout.
+const MAX_PROJECT_SETTINGS_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsScope {
@@ -54,6 +57,7 @@ pub trait SettingsStorage: Send + Sync {
 pub struct FileSettingsStorage {
     global_path: PathBuf,
     project_path: PathBuf,
+    project_root: PathBuf,
 }
 
 use crate::platform::lock_dir::LockDir as LockGuard;
@@ -64,17 +68,32 @@ const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 impl FileSettingsStorage {
     pub fn new(cwd: impl Into<PathBuf>, agent_dir: impl Into<PathBuf>) -> Self {
         let agent_dir: PathBuf = agent_dir.into();
+        let project_root: PathBuf = cwd.into();
         FileSettingsStorage {
             global_path: agent_dir.join("settings.json"),
-            project_path: cwd.into().join(CONFIG_DIR_NAME).join("settings.json"),
+            project_path: project_root.join(CONFIG_DIR_NAME).join("settings.json"),
+            project_root,
         }
     }
 
-    fn path(&self, scope: SettingsScope) -> &Path {
-        match scope {
-            SettingsScope::Global => &self.global_path,
-            SettingsScope::Project => &self.project_path,
+    /// The file to lock, read, and write for `scope`. Project settings come
+    /// from the checkout: they may link to another file inside the project
+    /// (writes then go to that file), but not outside it, where a save would
+    /// copy the outside file's content into the project.
+    fn target(&self, scope: SettingsScope) -> Result<PathBuf> {
+        if scope == SettingsScope::Global {
+            return Ok(self.global_path.clone());
         }
+        let root = resolve_with_missing(&self.project_root)?;
+        let target = resolve_with_missing(&self.project_path)?;
+        if !target.starts_with(&root) {
+            bail!(
+                "Project settings path {} resolves outside the project root {}",
+                self.project_path.display(),
+                root.display()
+            );
+        }
+        Ok(target)
     }
 
     fn acquire_lock(path: &Path) -> Result<LockGuard> {
@@ -98,6 +117,52 @@ impl FileSettingsStorage {
             last_error.map_or_else(|| "busy".into(), |e| e.to_string())
         ))
     }
+}
+
+/// `path` made absolute with links resolved; a missing tail (no settings file
+/// or directory yet, or a deleted working directory) is kept as written.
+fn resolve_with_missing(path: &Path) -> std::io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match fs::canonicalize(existing) {
+            Ok(mut resolved) => {
+                resolved.extend(missing.iter().rev());
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return Err(error);
+                };
+                missing.push(name);
+                existing = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn check_project_document_size(len: usize) -> Result<()> {
+    if len > MAX_PROJECT_SETTINGS_BYTES {
+        bail!("Project settings file exceeds {MAX_PROJECT_SETTINGS_BYTES} bytes");
+    }
+    Ok(())
+}
+
+fn read_document(scope: SettingsScope, path: &Path) -> Result<String> {
+    if scope == SettingsScope::Global {
+        return Ok(fs::read_to_string(path)?);
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_PROJECT_SETTINGS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    check_project_document_size(bytes.len())?;
+    Ok(String::from_utf8(bytes)?)
 }
 
 /// Same-process serialization for one settings document: the TS lock is
@@ -181,7 +246,7 @@ impl SettingsStorage for FileSettingsStorage {
     /// on a miss, the full locked cycle, byte-identical to `with_lock`'s read arm, which
     /// also populates the cache. The same-process mutex still orders in-process writers.
     fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
-        let path = self.path(scope);
+        let path = &self.target(scope)?;
         let _process_guard = process_lock(path);
         let now_identity = fs::metadata(path)
             .ok()
@@ -202,13 +267,13 @@ impl SettingsStorage for FileSettingsStorage {
             }
         }
         let guard = Self::acquire_lock(path)?;
-        let content = fs::read_to_string(path)?;
+        let content = read_document(scope, path)?;
         drop(guard);
         read_cache()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
-                path.to_path_buf(),
+                path.clone(),
                 CachedRead {
                     identity,
                     content: content.clone(),
@@ -222,7 +287,7 @@ impl SettingsStorage for FileSettingsStorage {
         scope: SettingsScope,
         update: &mut dyn FnMut(Option<String>) -> Option<String>,
     ) -> Result<()> {
-        let path = self.path(scope);
+        let path = &self.target(scope)?;
         let _process_guard = process_lock(path);
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
@@ -230,7 +295,7 @@ impl SettingsStorage for FileSettingsStorage {
             held = Some(Self::acquire_lock(path)?);
         }
         let current = if file_exists {
-            Some(fs::read_to_string(path)?)
+            Some(read_document(scope, path)?)
         } else {
             None
         };
@@ -245,10 +310,13 @@ impl SettingsStorage for FileSettingsStorage {
                 held = Some(Self::acquire_lock(path)?);
                 // A racing first writer may have landed since the unlocked read.
                 if path.exists() {
-                    next = update(Some(fs::read_to_string(path)?));
+                    next = update(Some(read_document(scope, path)?));
                 }
             }
             if let Some(content) = next {
+                if scope == SettingsScope::Project {
+                    check_project_document_size(content.len())?;
+                }
                 atomic_write_with(path, &content, AtomicWriteOptions { fsync: true })?;
             }
         }
@@ -277,16 +345,11 @@ pub(crate) fn opt_in_fsync_calls() -> usize {
     OPT_IN_FSYNC.with(std::cell::Cell::get)
 }
 
-/// Atomic write: temp file + rename, private mode like `writeFileAtomicSync`.
-/// TS default durability: NO fsync (opt-in) — a hard crash leaves either the
-/// previous file or the new file. Sites needing the pre-rename fsync opt in
-/// through [`atomic_write_with`]; the audit is per call site, never blanket.
-pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    atomic_write_with(path, content, AtomicWriteOptions::default())
-}
-
-/// [`atomic_write`] with explicit [`AtomicWriteOptions`]: the TS
-/// `writeFileAtomicSync(path, data, options)` shape.
+/// Atomic write: temp file + rename, private mode like `writeFileAtomicSync`,
+/// with explicit [`AtomicWriteOptions`] (the TS
+/// `writeFileAtomicSync(path, data, options)` shape). TS default durability:
+/// NO fsync (opt-in) — a hard crash leaves either the previous file or the
+/// new file; the audit is per call site, never blanket.
 pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions) -> Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {
@@ -337,6 +400,57 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
+    fn project_settings_link_inside_the_project_writes_its_target_under_its_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings = project.join(CONFIG_DIR_NAME).join("settings.json");
+        let shared = project.join(".prime/shared.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&shared, r#"{"theme":"prime"}"#).unwrap();
+        std::os::unix::fs::symlink("../shared.json", &settings).unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        assert_eq!(
+            storage.read(SettingsScope::Project).unwrap().as_deref(),
+            Some(r#"{"theme":"prime"}"#)
+        );
+        let target_lock = LockGuard::acquire(&shared, STALE_AFTER).unwrap();
+        assert!(storage
+            .with_lock(SettingsScope::Project, &mut |_| Some("{}".into()))
+            .is_err());
+        drop(target_lock);
+        storage
+            .with_lock(SettingsScope::Project, &mut |_| {
+                Some(r#"{"theme":"dark"}"#.into())
+            })
+            .unwrap();
+        assert!(fs::symlink_metadata(&settings)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&shared).unwrap(), r#"{"theme":"dark"}"#);
+    }
+
+    #[test]
+    fn oversized_project_settings_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let settings = project.join(CONFIG_DIR_NAME).join("settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let oversized = " ".repeat(MAX_PROJECT_SETTINGS_BYTES + 1);
+        fs::write(&settings, &oversized).unwrap();
+        let storage = FileSettingsStorage::new(&project, root.path().join("agent"));
+
+        assert!(storage.read(SettingsScope::Project).is_err());
+        fs::write(&settings, "{}").unwrap();
+        assert!(storage
+            .with_lock(SettingsScope::Project, &mut |_| Some(oversized.clone()))
+            .is_err());
+        assert_eq!(fs::read_to_string(&settings).unwrap(), "{}");
+    }
+
+    #[test]
     fn in_memory_round_trip() {
         let storage = InMemorySettingsStorage::default();
         storage
@@ -377,7 +491,7 @@ mod tests {
         let path = dir.path().join("state.json");
 
         let before = opt_in_fsync_calls();
-        atomic_write(&path, "default bytes\n").unwrap();
+        atomic_write_with(&path, "default bytes\n", AtomicWriteOptions::default()).unwrap();
         assert_eq!(
             opt_in_fsync_calls(),
             before,

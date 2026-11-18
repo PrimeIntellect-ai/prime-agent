@@ -110,13 +110,13 @@ fn skill_md(dir: &Path, name: &str, description: &str) -> PathBuf {
 fn is_enabled(resources: &[ResolvedResource], suffix: &str) -> bool {
     resources
         .iter()
-        .any(|r| r.path.to_string_lossy().ends_with(suffix) && r.enabled)
+        .any(|r| r.path.to_string_lossy().ends_with(suffix) && r.enabled())
 }
 
 fn is_disabled(resources: &[ResolvedResource], suffix: &str) -> bool {
     resources
         .iter()
-        .any(|r| r.path.to_string_lossy().ends_with(suffix) && !r.enabled)
+        .any(|r| r.path.to_string_lossy().ends_with(suffix) && !r.enabled())
 }
 
 fn has_path(resources: &[ResolvedResource], suffix: &str) -> bool {
@@ -137,6 +137,25 @@ fn resolve_without_configured_sources_returns_only_auto_resources() {
 }
 
 #[test]
+fn repository_package_settings_cannot_load_a_session_resource() {
+    let mut fixture = Fixture::new();
+    let pkg_dir = fixture.temp_dir.join("attacker-package");
+    skill_md(
+        &pkg_dir.join("skills"),
+        "attacker-skill",
+        "Project-supplied skill",
+    );
+    fixture.set_project_array(
+        "packages",
+        serde_json::json!([pkg_dir.display().to_string()]),
+    );
+
+    let resolved = fixture.manager.resolve().unwrap();
+    assert!(!has_path(&resolved.skills, "attacker-skill/SKILL.md"));
+    assert!(fixture.manager.list_configured_packages().is_empty());
+}
+
+#[test]
 fn resolve_skill_paths_from_settings() {
     let mut fixture = Fixture::new();
     let skill_file = skill_md(
@@ -150,7 +169,7 @@ fn resolve_skill_paths_from_settings() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path == skill_file && r.enabled));
+        .any(|r| r.path == skill_file && r.enabled()));
 }
 
 #[test]
@@ -166,7 +185,7 @@ fn auto_discovers_root_markdown_skills() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path == skill_file && r.enabled));
+        .any(|r| r.path == skill_file && r.enabled()));
 }
 
 #[test]
@@ -181,7 +200,7 @@ fn resolves_project_paths_relative_to_project_config_dir() {
     assert!(result
         .prompts
         .iter()
-        .any(|r| r.path == prompt_path && r.enabled));
+        .any(|r| r.path == prompt_path && r.enabled()));
 }
 
 #[test]
@@ -195,7 +214,7 @@ fn auto_discovers_user_prompts_with_overrides() {
     assert!(result
         .prompts
         .iter()
-        .any(|r| r.path == prompt_path && !r.enabled));
+        .any(|r| r.path == prompt_path && !r.enabled()));
 }
 
 #[test]
@@ -210,7 +229,7 @@ fn auto_discovers_project_prompts_with_overrides() {
     assert!(result
         .prompts
         .iter()
-        .any(|r| r.path == prompt_path && !r.enabled));
+        .any(|r| r.path == prompt_path && !r.enabled()));
 }
 
 /// Unix symlink layout; Windows needs `symlink_dir` and a privileged
@@ -281,8 +300,11 @@ fn agents_skills_scan_stops_at_git_repo_root() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path == repo_root_skill && r.enabled));
-    assert!(result.skills.iter().any(|r| r.path == nested && r.enabled));
+        .any(|r| r.path == repo_root_skill && r.enabled()));
+    assert!(result
+        .skills
+        .iter()
+        .any(|r| r.path == nested && r.enabled()));
     assert!(!result.skills.iter().any(|r| r.path == above_repo));
 }
 
@@ -309,11 +331,11 @@ fn agents_skills_scan_goes_to_fs_root_without_a_repo() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path == root_skill && r.enabled));
+        .any(|r| r.path == root_skill && r.enabled()));
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path == middle_skill && r.enabled));
+        .any(|r| r.path == middle_skill && r.enabled()));
 }
 
 #[test]
@@ -329,7 +351,10 @@ fn agents_skills_ignores_root_markdown_files() {
 
     let result = fixture.manager.resolve().unwrap();
     assert!(!result.skills.iter().any(|r| r.path == root_file));
-    assert!(result.skills.iter().any(|r| r.path == nested && r.enabled));
+    assert!(result
+        .skills
+        .iter()
+        .any(|r| r.path == nested && r.enabled()));
 }
 
 #[test]
@@ -359,7 +384,7 @@ fn home_agents_skills_stays_user_scoped_when_cwd_is_under_home() {
         .filter(|r| r.path == home_skill)
         .collect();
     assert_eq!(matching.len(), 1);
-    assert!(matching[0].enabled);
+    assert!(matching[0].enabled());
     assert_eq!(matching[0].metadata.scope, SourceScope::User);
     assert_eq!(matching[0].metadata.source, MetadataSource::Auto);
 
@@ -410,8 +435,8 @@ fn skill_directories_respect_gitignore() {
     fixture.set_user_array("skills", serde_json::json!(["skills"]));
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(result.skills.iter().any(|r| r.path == good && r.enabled));
-    assert!(!result.skills.iter().any(|r| r.path == bad && r.enabled));
+    assert!(result.skills.iter().any(|r| r.path == good && r.enabled()));
+    assert!(!result.skills.iter().any(|r| r.path == bad && r.enabled()));
 }
 
 #[test]
@@ -426,7 +451,7 @@ fn parent_gitignore_does_not_apply_to_auto_discovery() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path == skill_path && r.enabled));
+        .any(|r| r.path == skill_path && r.enabled()));
 }
 
 #[test]
@@ -469,11 +494,11 @@ fn top_level_filters_skills_with_exclusion_pattern() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("good-skill") && r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("good-skill") && r.enabled()));
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("bad-skill") && !r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("bad-skill") && !r.enabled()));
 }
 
 #[test]
@@ -492,7 +517,7 @@ fn manifest_supports_glob_patterns_for_skills() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("good-skill") && r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("good-skill") && r.enabled()));
     assert!(!result
         .skills
         .iter()
@@ -526,12 +551,12 @@ fn manifest_expands_positive_glob_entries_before_collecting_skills() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("pdf-to-markdown") && r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("pdf-to-markdown") && r.enabled()));
     assert!(result.skills.iter().any(|r| r
         .path
         .to_string_lossy()
         .contains("document-processor-api")
-        && r.enabled));
+        && r.enabled()));
 }
 
 #[test]
@@ -652,15 +677,15 @@ fn force_include_multiple_resources() {
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("skill-a") && r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("skill-a") && r.enabled()));
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("skill-b") && !r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("skill-b") && !r.enabled()));
     assert!(result
         .skills
         .iter()
-        .any(|r| r.path.to_string_lossy().contains("skill-c") && r.enabled));
+        .any(|r| r.path.to_string_lossy().contains("skill-c") && r.enabled()));
 }
 
 #[test]
@@ -769,7 +794,7 @@ fn force_exclude_in_package_filters() {
 }
 
 #[test]
-fn same_local_package_in_both_scopes_resolves_once_with_project_scope() {
+fn project_package_cannot_shadow_a_user_package() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("shared-pkg");
     skill_md(&pkg_dir.join("skills"), "shared-skill", "Shared skill");
@@ -791,11 +816,11 @@ fn same_local_package_in_both_scopes_resolves_once_with_project_scope() {
         .filter(|r| r.path.to_string_lossy().contains("shared-pkg"))
         .collect();
     assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].metadata.scope, SourceScope::Project);
+    assert_eq!(shared[0].metadata.scope, SourceScope::User);
 }
 
 #[test]
-fn different_packages_in_both_scopes_both_resolve() {
+fn project_package_cannot_add_resources_beside_a_user_package() {
     let mut fixture = Fixture::new();
     let pkg1 = fixture.temp_dir.join("pkg1");
     let pkg2 = fixture.temp_dir.join("pkg2");
@@ -817,7 +842,7 @@ fn different_packages_in_both_scopes_both_resolve() {
         .prompts
         .iter()
         .any(|r| r.path.to_string_lossy().contains("pkg1")));
-    assert!(result
+    assert!(!result
         .prompts
         .iter()
         .any(|r| r.path.to_string_lossy().contains("pkg2")));
@@ -915,7 +940,8 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
     // a machine carrying an ambient key rides with it.
     let ambient_key = std::env::var("SERPER_API_KEY").is_ok_and(|value| !value.trim().is_empty());
     assert_eq!(
-        websearch.enabled, ambient_key,
+        websearch.enabled(),
+        ambient_key,
         "unset settings ride with the serper credential"
     );
     assert_eq!(websearch.metadata.source, MetadataSource::Builtin);
@@ -924,13 +950,17 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         .iter()
         .find(|r| r.path.to_string_lossy().contains("other-skill"))
         .expect("other collected");
-    assert!(!other.enabled, "extra builtin overrides apply");
+    assert_eq!(
+        other.disabled_by,
+        Some(crate::packages::DisabledBy::McpLogin),
+        "extra builtin overrides apply"
+    );
     if !ambient_key {
         assert!(
             !result
                 .skills
                 .iter()
-                .filter(|r| r.enabled)
+                .filter(|r| r.enabled())
                 .any(|r| r.path.to_string_lossy().contains("websearch")),
             "websearch is absent from the enabled skill list on a keyless install"
         );
@@ -949,7 +979,7 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
             .find(|r| r.path.to_string_lossy().contains("websearch"))
             .expect("websearch still collected");
         assert!(
-            websearch.enabled,
+            websearch.enabled(),
             "a stored serper key enables the skill with no settings entry"
         );
     }
@@ -967,7 +997,7 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         .find(|r| r.path.to_string_lossy().contains("websearch"))
         .expect("websearch still collected");
     assert!(
-        websearch.enabled,
+        websearch.enabled(),
         "websearch resolves when explicitly enabled"
     );
     assert_eq!(websearch.metadata.source, MetadataSource::Builtin);
@@ -987,7 +1017,7 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         .find(|r| r.path.to_string_lossy().contains("websearch"))
         .expect("websearch still collected");
     assert!(
-        !websearch.enabled,
+        !websearch.enabled(),
         "explicit false overrides a stored credential"
     );
 }

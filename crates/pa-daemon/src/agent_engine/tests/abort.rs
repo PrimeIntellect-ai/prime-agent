@@ -1,14 +1,12 @@
 //! The abort tests (the in-flight cancel, settled-turn payloads, retries, the live-kernel cancel).
 use super::*;
+use crate::test_support::{live_kernel_python, KernelEnvOverride};
 
 /// The eager turn abort: an abort landing mid-provider-wait cancels the
 /// in-flight fetch immediately; the aborted row carries `EMPTY_USAGE`,
 /// never the goal accounting.
 #[test]
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -22,7 +20,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         json!({
             "providers": {
                 "faux": {
-                    "api": "faux",
+                    "api": registration.api,
                     "baseUrl": "http://localhost:0",
                     "apiKey": "sk-faux",
                     "models": [{
@@ -63,6 +61,9 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let turn_engine = std::sync::Arc::clone(&engine);
     let turn_events = std::sync::Arc::clone(&events);
@@ -155,9 +156,10 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         turn_end_index < agent_end_index && agent_end_index < done_index,
         "agent_end sits between the turn_end and the DoneAborted settle: {events:?}"
     );
-    let EngineEvent::AgentEnd { messages } = &events[agent_end_index] else {
+    let EngineEvent::AgentEnd { messages, aborted } = &events[agent_end_index] else {
         unreachable!();
     };
+    assert!(*aborted, "the producer outcome reaches the engine channel");
     assert!(
         messages
             .iter()
@@ -172,9 +174,6 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
 /// untouched (the next delivery serves it).
 #[test]
 fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": ["raced reply", "next reply"] }),
         1,
@@ -237,9 +236,6 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
 
 #[test]
 fn settled_turn_emits_the_terminal_turn_end_payload() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -280,9 +276,6 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
 
 #[test]
 fn settled_turn_emits_the_run_agent_end_payload() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -305,9 +298,10 @@ fn settled_turn_emits_the_run_agent_end_payload() {
         turn_end_index < agent_end_index && agent_end_index < done_index,
         "agent_end sits between the turn_end and the Done: {events:?}"
     );
-    let EngineEvent::AgentEnd { messages } = &events[agent_end_index] else {
+    let EngineEvent::AgentEnd { messages, aborted } = &events[agent_end_index] else {
         unreachable!();
     };
+    assert!(!aborted, "the normally completed run is not cancelled");
     let roles = messages
         .iter()
         .map(|message| message["role"].as_str().unwrap_or_default())
@@ -345,9 +339,6 @@ fn settled_turn_emits_the_run_agent_end_payload() {
 /// failed row left the loop context first), and its opening frames forward.
 #[test]
 fn retried_run_restarts_with_its_own_agent_frames() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("agent")).unwrap();
     std::fs::write(
@@ -383,6 +374,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "retried turn".to_string(), &mut events);
     let agent_end_indexes = events
@@ -396,7 +391,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         2,
         "one agent_end per run: {events:?}"
     );
-    let EngineEvent::AgentEnd { messages: first } = &events[agent_end_indexes[0]] else {
+    let EngineEvent::AgentEnd {
+        messages: first, ..
+    } = &events[agent_end_indexes[0]]
+    else {
         unreachable!();
     };
     let roles = first
@@ -413,7 +411,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         json!("error"),
         "the failed run ends on the error row"
     );
-    let EngineEvent::AgentEnd { messages: second } = &events[agent_end_indexes[1]] else {
+    let EngineEvent::AgentEnd {
+        messages: second, ..
+    } = &events[agent_end_indexes[1]]
+    else {
         unreachable!();
     };
     let roles = second
@@ -458,57 +459,6 @@ fn retried_run_restarts_with_its_own_agent_frames() {
     );
 }
 
-/// Scoped process-env overrides for the live-kernel tests: applied on
-/// construction, restored on drop. Serialized by the faux lock, so
-/// nothing races.
-#[cfg(test)]
-struct KernelEnvOverride {
-    saved: Vec<(String, Option<String>)>,
-}
-
-#[cfg(test)]
-impl KernelEnvOverride {
-    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
-        let saved = pairs
-            .iter()
-            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
-            .collect();
-        for (key, value) in pairs {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        KernelEnvOverride { saved }
-    }
-}
-
-#[cfg(test)]
-impl Drop for KernelEnvOverride {
-    fn drop(&mut self) {
-        for (key, value) in &self.saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
-
-/// The kernel python for the live-kernel abort test (skipped without one).
-#[cfg(test)]
-fn live_kernel_python() -> Option<std::path::PathBuf> {
-    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
-        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
-    ));
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
-    None
-}
-
 /// The abort wedge repro (dogfood P0): a turn executing a long kernel cell
 /// must unwind at `abort_in_flight_turn` (the kernel interrupt +
 /// force-abort path settles the tool race) - not keep the turn alive while
@@ -527,9 +477,6 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),

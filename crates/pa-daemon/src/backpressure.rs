@@ -99,7 +99,9 @@ mod tests {
     ) {
         let (cmd_tx, cmd_rx) =
             tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
-        *resident.cmd_tx.lock().await = Some(cmd_tx.clone());
+        resident
+            .install_command_channel(resident.begin_connection(), cmd_tx.clone())
+            .await;
         (cmd_tx, cmd_rx)
     }
 
@@ -297,7 +299,7 @@ mod tests {
         let supervisor = supervisor(dir.path());
         let resident = resident("w-retired");
         let (_cmd_tx, mut cmd_rx) = wedged_worker(&resident).await;
-        resident.note_retired();
+        resident.transition(crate::registry::WorkerTransition::GiveUp);
         let error = supervisor
             .route_command_typed(
                 &resident,

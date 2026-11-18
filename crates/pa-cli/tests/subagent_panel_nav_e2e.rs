@@ -246,7 +246,10 @@ fn session_options(
 
 #[tokio::test]
 async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    // The daemon reports canonical session paths; macOS temp dirs sit behind
+    // the /var -> /private/var symlink.
+    let dir = tempfile::TempDir::new_in(std::env::temp_dir().canonicalize().expect("temp root"))
+        .expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
@@ -432,7 +435,10 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
 /// spend: the parent's own $1.00 plus the child's $0.30.
 #[tokio::test]
 async fn the_title_bills_a_passive_subagents_spend() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    // The daemon reports canonical session paths; macOS temp dirs sit behind
+    // the /var -> /private/var symlink.
+    let dir = tempfile::TempDir::new_in(std::env::temp_dir().canonicalize().expect("temp root"))
+        .expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
@@ -518,7 +524,10 @@ async fn the_title_bills_a_passive_subagents_spend() {
 /// `compute_rollups`, so it bills the same number.
 #[tokio::test]
 async fn the_title_bills_a_deleted_subagents_spend() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    // The daemon reports canonical session paths; macOS temp dirs sit behind
+    // the /var -> /private/var symlink.
+    let dir = tempfile::TempDir::new_in(std::env::temp_dir().canonicalize().expect("temp root"))
+        .expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");

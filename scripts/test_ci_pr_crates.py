@@ -5,11 +5,17 @@ The contracts, pinned on real pulls/files-API shapes (the `filename` +
 `previous_filename` rows — the API's own field names, so a field-name
 regression fails safe instead of silently narrowing to nothing):
   - a crate-only PR maps to those crates and their transitive dependents;
-  - ANY non-crate path - and a rename's removed side too - fails safe to
-    the full selection;
+  - guaranteed-metadata paths (.changes/ fragments) are skipped and logged,
+    and never narrow alone: a crate PR plus a fragment still narrows (to
+    the crate's wave, not the union), a fragment-only PR keeps the full
+    selection;
+  - ANY other non-crate path - and a rename's removed side too - fails
+    safe to the full selection;
   - an undecidable list (empty input, an empty filename row, the API's
     3000-file ceiling) fails safe to the full selection, never to an empty
-    selection: a narrowed wave that runs nothing would masquerade as green.
+    selection: a narrowed wave that runs nothing would masquerade as green;
+  - WORKSPACE_DEPS covers every crates/*/Cargo.toml package with all its
+    direct workspace deps, plus only the listed intended over-selection.
 
 Run: python3 scripts/test_ci_pr_crates.py  (or: make shard-gates)
 """
@@ -21,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -30,6 +37,29 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import ci_pr_crates  # noqa: E402  (the tool under test)
 
 MAPPER = SCRIPTS_DIR / "ci_pr_crates.py"
+REPO_ROOT = SCRIPTS_DIR.parent
+
+# Deliberate conservative edges with no Cargo.toml link (over-selecting is safe).
+INTENDED_OVER_SELECTION = {
+    "pa-agent": {"pa-ai", "pa-types"},
+    "pa-tui": {"pa-core"},
+    "pa-cli": {"pa-models"},
+}
+
+
+def manifest_direct_workspace_deps(manifest: dict) -> set[str]:
+    """The workspace crates a manifest depends on directly: `path = ...`
+    deps and `workspace = true` deps the root declares with a path."""
+    root = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    workspace_paths = {name for name, spec in root["workspace"]["dependencies"].items()
+                       if isinstance(spec, dict) and "path" in spec}
+    tables = [manifest, *manifest.get("target", {}).values()]
+    return {name
+            for table in tables
+            for kind in ("dependencies", "dev-dependencies", "build-dependencies")
+            for name, spec in table.get(kind, {}).items()
+            if isinstance(spec, dict)
+            and ("path" in spec or (spec.get("workspace") and name in workspace_paths))}
 
 
 def run_mapper(rows: list[str]) -> tuple[int, str, dict[str, str]]:
@@ -49,6 +79,20 @@ def run_mapper(rows: list[str]) -> tuple[int, str, dict[str, str]]:
 
 class TheMappingTestCase(unittest.TestCase):
 
+    def test_workspace_deps_matches_the_crate_manifests(self):
+        manifests = {}
+        for path in sorted((REPO_ROOT / "crates").glob("*/Cargo.toml")):
+            manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+            manifests[manifest["package"]["name"]] = manifest
+        self.assertEqual(set(ci_pr_crates.WORKSPACE_DEPS), set(manifests))
+        for crate, manifest in manifests.items():
+            expected = (manifest_direct_workspace_deps(manifest)
+                        | INTENDED_OVER_SELECTION.get(crate, set()))
+            actual = ci_pr_crates.WORKSPACE_DEPS[crate]
+            self.assertEqual(actual, expected,
+                             f"{crate}: missing {sorted(expected - actual)}, "
+                             f"extra {sorted(actual - expected)}")
+
     def test_a_crate_only_pr_narrows_to_those_crates(self):
         rc, out, outputs = run_mapper([
             "crates/pa-daemon/src/main.rs",
@@ -56,8 +100,8 @@ class TheMappingTestCase(unittest.TestCase):
             "crates/pa-tui/src/view/runs.rs",
         ])
         self.assertEqual(rc, 0, out)
-        self.assertEqual(outputs["crates"], "pa-cli,pa-daemon,pa-tui")
-        self.assertIn("crates (3: pa-cli, pa-daemon, pa-tui)", outputs["scope"])
+        self.assertEqual(outputs["crates"], "pa-cli,pa-daemon,pa-perf,pa-tui")
+        self.assertIn("crates (4: pa-cli, pa-daemon, pa-perf, pa-tui)", outputs["scope"])
 
     def test_any_non_crate_path_fails_safe_to_the_full_selection(self):
         rc, out, outputs = run_mapper([
@@ -68,6 +112,72 @@ class TheMappingTestCase(unittest.TestCase):
         self.assertEqual(outputs["crates"], "")
         self.assertEqual(outputs["scope"], "all")
         self.assertIn("non-crate path .github/workflows/ci.yml", out)
+
+    def test_a_changes_fragment_never_defeats_the_narrowing(self):
+        # Every shipped PR carries a `.changes/` fragment: the
+        # changelog-fragment job requires one whenever a shipped path
+        # changes. The fragment is guaranteed metadata (skipped, logged),
+        # so the crate's own wave - units + reverse deps, NOT the union -
+        # still runs.
+        rc, out, outputs = run_mapper([
+            "crates/pa-daemon/src/main.rs",
+            ".changes/daemon-fix.md",
+        ])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "pa-cli,pa-daemon,pa-perf")
+        self.assertIn("guaranteed-metadata path .changes/daemon-fix.md", out)
+
+    def test_a_fragment_only_pr_keeps_the_full_selection(self):
+        # Metadata never narrows on its own: with no crate path in the
+        # list the full selection runs (an empty selection would run no
+        # units and masquerade as green).
+        rc, out, outputs = run_mapper([".changes/fix.md"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "")
+        self.assertEqual(outputs["scope"], "all")
+        self.assertIn("no crate paths in the change list", out)
+
+    def test_a_lookalike_prefix_is_not_the_metadata_class(self):
+        # The class key is the `.changes/` DIRECTORY (the trailing
+        # slash), not any name that starts with `.changes`: a sibling
+        # path still fails safe to the full selection.
+        rc, out, outputs = run_mapper([
+            "crates/pa-core/src/lib.rs",
+            ".changes-archive/old.md",
+        ])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "")
+        self.assertIn("non-crate path .changes-archive/old.md", out)
+
+    def test_a_metadata_crate_rename_counts_the_crate_side(self):
+        # A rename between the metadata class and a crate: the crate side
+        # selects, the fragment side is skipped (it can add nothing).
+        rc, out, outputs = run_mapper([
+            "crates/pa-tui/src/moved.rs\t.changes/old-fragment.md",
+        ])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "pa-cli,pa-tui")
+
+    def test_the_infrastructural_classes_still_fail_safe(self):
+        # The fail-safe classes the metadata skip must never absorb: the
+        # workflows, CI tooling, vendor/ (the patched crossterm), the
+        # runtime sidecar, workspace-level Cargo files, install scripts.
+        for path in [
+            ".github/workflows/ci.yml",
+            "scripts/ci_test_shard.py",
+            "vendor/crossterm/src/lib.rs",
+            "prime-agent-runtime/src/rlm/repl.py",
+            "Cargo.toml",
+            "install-rust.sh",
+        ]:
+            with self.subTest(path=path):
+                rc, out, outputs = run_mapper([
+                    "crates/pa-core/src/lib.rs",
+                    path,
+                ])
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(outputs["crates"], "", out)
+                self.assertIn(f"non-crate path {path}", out)
 
     def test_a_renames_removed_side_counts_too(self):
         # A rename from a non-crate path INTO a crate: the PR removed the
@@ -100,7 +210,7 @@ class TheMappingTestCase(unittest.TestCase):
         rc, out, outputs = run_mapper(["crates/pa-telemetry/src/lib.rs"])
         self.assertEqual(rc, 0, out)
         self.assertEqual(outputs["crates"],
-                         "pa-cli,pa-core,pa-daemon,pa-telemetry,pa-tui")
+                         "pa-cli,pa-core,pa-daemon,pa-perf,pa-telemetry,pa-tui")
 
     def test_an_unknown_crate_fails_safe(self):
         rc, out, outputs = run_mapper(["crates/pa-future/src/lib.rs"])

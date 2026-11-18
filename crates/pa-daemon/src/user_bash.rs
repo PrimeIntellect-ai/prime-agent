@@ -823,7 +823,10 @@ impl OutputSpill {
             "{SPILL_PREFIX}-{}.log",
             uuid::Uuid::new_v4().simple()
         ));
-        let Ok(mut file) = std::fs::File::create(&path) else {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        pa_core::platform::perms::set_private_mode(&mut options);
+        let Ok(mut file) = options.open(&path) else {
             self.failed = true;
             return;
         };

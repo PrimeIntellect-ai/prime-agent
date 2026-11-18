@@ -303,11 +303,6 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The picker consumes Ctrl+C (close, not exit); report it so the force-quit
-        // guard can disarm.
-        if id == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         let action = view
             .choice_picker
             .as_mut()
@@ -335,9 +330,15 @@ impl SessionUi {
         view: &mut AgentView,
         running: &mut bool,
     ) -> Result<()> {
+        let id = key_event_to_id(&key);
+        // Every key that reaches the session is handled, whichever surface consumes it (the
+        // force-quit guard counts the Ctrl+C presses; an exit re-arms it from the loop's break).
+        if let Some(id) = &id {
+            self.exit_guard.note_key_handled(id);
+        }
         // Any non-Escape key re-arms the double-Esc tree shortcut (one shot per input chain);
         // Escape itself never resets, so repeated Escape converges to the inert empty state.
-        if key_event_to_id(&key).is_some_and(|id| id != "escape") {
+        if id.is_some_and(|id| id != "escape") {
             self.escape_tree_shortcut_spent = false;
         }
         // The `/model` picker owns the frame while open: its keys go before the
@@ -565,11 +566,6 @@ impl SessionUi {
         // second-press exit is ctrl+c's alone.
         let interrupt = view.editor.keybindings().matches(&id, "app.interrupt");
         if interrupt || view.editor.keybindings().matches(&id, "app.clear") {
-            // One handled Ctrl+C press: the force-quit guard disarms once every
-            // observed press of the pair was handled without an exit.
-            if id == "ctrl+c" {
-                self.exit_guard.note_ctrl_c_handled();
-            }
             if view.editor.is_showing_autocomplete() {
                 view.editor.cancel_autocomplete();
                 self.clear_ctrl_c_hint();

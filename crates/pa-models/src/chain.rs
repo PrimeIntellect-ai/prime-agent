@@ -62,10 +62,6 @@ pub struct ModelCatalog {
     bundled: BundledAssets,
     templates: PinnedTemplates,
     compiled: Arc<Vec<Model>>,
-    /// The Prime Inference API base: the private-authorization fetch (the
-    /// entitlements lane in pa-core) targets the same endpoint as the
-    /// public catalog fetch and reads it from the shared catalog.
-    pi_base_url: Arc<str>,
     /// Guards [`ModelCatalog::spawn_hourly_refresh`]: one loop per instance.
     hourly_loop: OnceLock<()>,
     /// The Prime Inference credential scope the last catalog request in this process observed:
@@ -130,14 +126,9 @@ impl ModelCatalog {
                 .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
             templates,
             compiled,
-            pi_base_url: Arc::from(pi_base_url),
             hourly_loop: OnceLock::new(),
             pi_scope_seen: Mutex::new(None),
         }
-    }
-
-    pub fn prime_inference_base_url(&self) -> &str {
-        &self.pi_base_url
     }
 
     /// Whether the live Prime Inference credential scope changed since the last catalog request

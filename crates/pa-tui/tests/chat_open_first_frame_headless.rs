@@ -5,159 +5,94 @@
 #![cfg(unix)]
 #![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+mod support;
 
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, SessionSelection, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{
+    attach_response, options, serve_connection, session_stats_response, write_json, MockSupervisor,
+    Request,
+};
 
 /// The loaded-daemon stand-in: the dock's data requests answer this late, far past the first
 /// frame's render — late enough that a fire-and-forget open-time fetch (the layout-shift bug)
 /// always paints a first frame without the dock, short enough to sit inside the attach's waits.
 const DOCK_DATA_DELAY_MS: u64 = 300;
 
-struct MockSupervisor {
-    listener: UnixListener,
-}
-
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
-        MockSupervisor {
-            listener: UnixListener::bind(socket).expect("bind mock socket"),
-        }
-    }
-
     /// Serve one connection: attach, subscribe the roster, and answer the dock data requests after
     /// the delay.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "mock daemon request loop: one match arm per scripted request method"
-    )]
     fn serve(self, with_content: bool) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": ["kernel_bash_activity"],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "attach" => {
-                    write_json(&mut writer, &attach_data(id, with_content));
-                }
-                "heartbeats_list" => {
-                    std::thread::sleep(std::time::Duration::from_millis(DOCK_DATA_DELAY_MS));
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "heartbeats_list",
-                            "success": true,
-                            "data": {
-                                "heartbeats": [
-                                    {
-                                        "job": {
-                                            "id": "hb-1",
-                                            "status": "active",
-                                            "source": "heartbeat",
-                                            "activeSessionId": "s1",
-                                            "sessionId": "sess-1",
-                                            "schedule": {"kind": "interval", "expression": "every 30m"},
+        serve_connection(
+            stream,
+            &["kernel_bash_activity"],
+            |writer, Request { id, kind, .. }| {
+                match kind {
+                    "attach" => {
+                        write_json(writer, &attach_data(id, with_content));
+                    }
+                    "heartbeats_list" => {
+                        std::thread::sleep(std::time::Duration::from_millis(DOCK_DATA_DELAY_MS));
+                        write_json(
+                            writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "heartbeats_list",
+                                "success": true,
+                                "data": {
+                                    "heartbeats": [
+                                        {
+                                            "job": {
+                                                "id": "hb-1",
+                                                "status": "active",
+                                                "source": "heartbeat",
+                                                "activeSessionId": "s1",
+                                                "sessionId": "sess-1",
+                                                "schedule": {"kind": "interval", "expression": "every 30m"},
+                                            },
+                                            "sessionName": "layout probe",
                                         },
-                                        "sessionName": "layout probe",
-                                    },
-                                ],
-                            },
-                        }),
-                    );
+                                    ],
+                                },
+                            }),
+                        );
+                    }
+                    "list_kernel_bash" => {
+                        std::thread::sleep(std::time::Duration::from_millis(DOCK_DATA_DELAY_MS));
+                        write_json(
+                            writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "list_kernel_bash",
+                                "success": true,
+                                "data": {
+                                    "activities": [
+                                        {
+                                            "id": "run-1",
+                                            "command": "echo settled",
+                                            "status": "finished",
+                                            "exitCode": 0,
+                                        },
+                                    ],
+                                },
+                            }),
+                        );
+                    }
+                    "get_session_stats" => {
+                        write_json(writer, &session_stats_response(id));
+                    }
+                    _ => return false,
                 }
-                "list_kernel_bash" => {
-                    std::thread::sleep(std::time::Duration::from_millis(DOCK_DATA_DELAY_MS));
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "list_kernel_bash",
-                            "success": true,
-                            "data": {
-                                "activities": [
-                                    {
-                                        "id": "run-1",
-                                        "command": "echo settled",
-                                        "status": "finished",
-                                        "exitCode": 0,
-                                    },
-                                ],
-                            },
-                        }),
-                    );
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
-            }
-        }
+                true
+            },
+        );
     }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
 }
 
 /// The attach result: one live session whose transcript either carries a settled exchange or is
@@ -171,74 +106,10 @@ fn attach_data(id: &str, with_content: bool) -> Value {
     } else {
         json!([])
     };
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "layout probe",
-                    "model": "faux-1",
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": messages,
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
-}
-
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::Attach("s1".to_string()),
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
+    let mut response = attach_response(id, "layout probe");
+    response["data"]["snapshot"]["state"]["model"] = json!("faux-1");
+    response["data"]["snapshot"]["messages"] = messages;
+    response
 }
 
 /// The attach snapshot's transcript shape the open drives.
@@ -271,7 +142,13 @@ fn run_open(transcript: &OpeningTranscript) -> Vec<String> {
         height: 30,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            InteractiveOptions {
+                session: SessionSelection::Attach("s1".to_string()),
+                ..options(socket)
+            },
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     outcome.frames

@@ -70,11 +70,17 @@ from native_compat import stage_native_compat
 # build ships `prime-agent.exe`), so the list names the binary slot via
 # the placeholder resolved in `main`/`stage_tree`.
 BINARY_PLACEHOLDER = "prime-agent"
+# The licenses of every crate linked into the binary (`write_third_party_notices`).
+THIRD_PARTY_NOTICES = "THIRD-PARTY-NOTICES.txt"
+# Terminal control characters (C0 except tab and newline, DEL, C1): crate
+# license texts must not reach the terminal of whoever prints the notices.
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 STAGED_ENTRIES = [
     BINARY_PLACEHOLDER,
     "prime-agent-runtime",
     "skills",
     "LICENSE",
+    THIRD_PARTY_NOTICES,
     "README.md",
     # The bundled catalog assets (spec §3.2 layer 2): staged at the tarball
     # root beside the binary — the runtime resolves <packageDir>/<name> (the
@@ -270,6 +276,54 @@ def copy_runtime_tree(source: Path, target: Path) -> None:
     shutil.copytree(source, target, ignore=ignore)
 
 
+def deny_allowed_licenses(deny_toml: Path) -> list[str]:
+    """The `[licenses] allow` list of deny.toml, the one license allowlist.
+
+    Read with a minimal parser: the release build hosts run Python 3.9/3.10,
+    which have no tomllib, and the list is a flat array of strings.
+    """
+    text = "\n".join(line.split("#", 1)[0] for line in deny_toml.read_text().splitlines())
+    section = re.search(r"^\[licenses\]$(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
+    array = section and re.search(r"^allow\s*=\s*\[(.*?)\]", section.group(1),
+                                  re.MULTILINE | re.DOTALL)
+    if not array:
+        fail(f"no [licenses] allow list in {deny_toml}")
+    return re.findall(r'"([^"]+)"', array.group(1))
+
+
+def write_third_party_notices(repo_root: Path, target: str, out: Path) -> None:
+    """Render the licenses of every crate the shipped binary links for
+    `target` (cargo-about over pa-cli's normal dependency graph) to `out`.
+
+    cargo-about accepts exactly the licenses deny.toml allows, so a crate
+    under any other license fails the release here as it fails cargo-deny.
+    """
+    accepted = deny_allowed_licenses(repo_root / "deny.toml")
+    template = Path(__file__).resolve().parent / "third-party-notices.hbs"
+    with tempfile.TemporaryDirectory(prefix="prime-agent-about-") as tmp:
+        config = Path(tmp) / "about.toml"
+        config.write_text(
+            f"accepted = {json.dumps(accepted)}\n"
+            f"targets = {json.dumps([target])}\n"
+            "ignore-build-dependencies = true\n"
+            "ignore-dev-dependencies = true\n"
+        )
+        command = [
+            "cargo-about", "generate", "--locked", "--fail",
+            "--config", str(config),
+            "--manifest-path", str(repo_root / "crates" / "pa-cli" / "Cargo.toml"),
+            "--output-file", str(out), str(template),
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True)
+        except FileNotFoundError:
+            fail("cargo-about not found on PATH (install the version "
+                 ".github/actions/install-cargo-about pins)")
+    if result.returncode != 0:
+        fail(f"cargo-about failed for {target}:\n{result.stderr.strip()}")
+    text = out.read_bytes().decode("utf-8")
+    out.write_bytes(CONTROL_CHARACTERS.sub("", text).encode("utf-8"))
+
 
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
     """Copy the tarball payload into the staging dir; return per-entry facts.
@@ -315,6 +369,7 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
                 shutil.copytree(source, target_path)
         else:
             shutil.copy2(source, target_path)
+    write_third_party_notices(args.repo_root, args.target, staging / THIRD_PARTY_NOTICES)
     # `chmod` is a no-op beyond the read-only bit on Windows hosts (the
     # exec bit the tar member filter re-pins below); on POSIX it makes the
     # staged binary executable for the `--version` probes.

@@ -256,11 +256,13 @@ impl AgentView {
             return true;
         }
         // The input-less frame owners (the key dispatch's same set): the
-        // heartbeats picker, the bash view, the read-only goal and info
-        // panels, the fork selector, the pending confirm, the share
-        // loader, the reload box, and the auth panel (its own channel
-        // drives it). None of them leaves a paste to the editor behind.
-        if self.heartbeats_picker.is_some()
+        // factory page, the heartbeats picker, the bash view, the
+        // read-only goal and info panels, the fork selector, the pending
+        // confirm, the share loader, the reload box, and the auth panel
+        // (its own channel drives it). None of them leaves a paste to the
+        // editor behind.
+        if self.factory_view.is_some()
+            || self.heartbeats_picker.is_some()
             || self.bash_view.is_some()
             || self.goal_panel.is_some()
             || self.info_panel.is_some()

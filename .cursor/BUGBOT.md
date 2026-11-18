@@ -45,7 +45,7 @@ either changes.
 - Flag scripts and tools that no CI workflow, Makefile target, or other code runs, such as one-off review, parity, evidence, or reproduction scripts (for example a 520-line TS-vs-Rust shutdown comparison script added in a feature PR). Nothing keeps them working; their results belong in the PR body, not in the repo.
 - Flag test files that nothing runs. Before flagging, check the globs, loops, and paths built at run time in `.github/workflows/` and the Makefile (for example, ci.yml runs `scripts/test_check_<scenario>.py` through a path built inside its loop over `scripts/check_*.py`). A file name that appears nowhere can still run. Flag only when no runner, glob, or loop reaches the file; such a test only looks like coverage.
 - Flag committed artifacts that no code or test reads: evidence logs, reports, generated outputs, and local venvs or caches.
-- Flag a PR body that presents a script or run that CI does not run as lasting proof (for example "covered by `scripts/foo.py`"). One-off evidence such as parity-diff evidence belongs in the body, but it must read as a one-off run with its command and result, not as coverage.
+- Flag a PR body that presents a script or run that CI does not run as lasting proof (for example "covered by `scripts/foo.py`"). One-off evidence belongs in the body, but it must read as a one-off run with its command and result, not as coverage.
 
 ## Tests
 
@@ -63,5 +63,5 @@ either changes.
 
 ## Generated files
 
-- The model catalog is hand-maintained data: `crates/pa-ai/src/models_generated.rs` mirrors the TS `packages/ai/src/models.generated.ts` object literal (no generator, no generated JSON — edit it by hand exactly like its TS source), and the parity fixture `crates/pa-models/tests/fixtures/catalog.v1.json` refreshes with `scripts/generate-catalog-fixture.py` from the real `PrimeIntellect-ai/prime-agent-catalog` snapshot. Flag edits that would reintroduce a generator or hand-tweak the fixture rows.
+- The model catalog is hand-maintained data: `crates/pa-ai/src/models_generated.rs` is hand-written Rust (no generator, no generated JSON — edit it by hand), and the catalog fixture `crates/pa-models/tests/fixtures/catalog.v1.json` refreshes with `scripts/generate-catalog-fixture.py` from the real `PrimeIntellect-ai/prime-agent-catalog` snapshot. Flag edits that would reintroduce a generator or hand-tweak the fixture rows.
 - Bulk data files are exempt from the size guidance; the exemption's reason is that the file mirrors an upstream data source.

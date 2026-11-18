@@ -20,7 +20,7 @@ import time
 
 from check_restore_notice import invoke, probe_from, texts
 from check_kernel_env import KernelClient
-from lifecycle_lib import OwnedProcesses, TAG, digest, finish, skill_pythonpath
+from lifecycle_lib import OwnedProcesses, TAG, digest, finish, use_skill_python
 
 MARKER = 'MINIMUM_REASONING_RESULT='
 
@@ -153,8 +153,8 @@ def run_case(binary, scenario, root, observation):
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
-               XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'),
-               PYTHONPATH=skill_pythonpath())
+               XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'))
+    use_skill_python(root, env)
     env[TAG] = str(root)
     server = Server(scenario)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

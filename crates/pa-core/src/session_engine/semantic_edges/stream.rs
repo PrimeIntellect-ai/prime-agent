@@ -29,20 +29,54 @@ pub(crate) fn wrap_stream_fn(recorder: Arc<SemanticEdgeRecorder>, inner: StreamF
             };
             let headers = options.headers.get_or_insert_with(BTreeMap::new);
             headers.extend(model_request_headers(&request_id));
+            // The inner call can park past a poll — the live-auth seam
+            // resolves auth off the executor — and the agent loop races it
+            // with an unbiased abort select that DROPS this future before
+            // the call returns. The started request still needs its
+            // terminal event there (TS observes the raced call's rejection
+            // as a failure): the guard fails it on drop; from the call's
+            // return on, the `SemanticStream` owns the terminal event and
+            // the guard disarms.
+            let mut pending = PendingRequestGuard {
+                recorder: Arc::clone(&recorder),
+                request_id: request_id.clone(),
+                armed: true,
+            };
             match inner(model, context, options).await {
                 Err(error) => {
+                    pending.armed = false;
                     recorder.fail_request(&request_id);
                     Err(error)
                 }
-                Ok(stream) => Ok(Box::new(SemanticStream {
-                    inner: stream,
-                    recorder,
-                    request_id,
-                    settled: false,
-                }) as Box<dyn ModelStream>),
+                Ok(stream) => {
+                    pending.armed = false;
+                    Ok(Box::new(SemanticStream {
+                        inner: stream,
+                        recorder,
+                        request_id,
+                        settled: false,
+                    }) as Box<dyn ModelStream>)
+                }
             }
         })
     })
+}
+
+/// Fails the started request when the wrapped call's future is dropped
+/// before the call returns (a turn abort mid-resolution); disarmed once
+/// the call returns and the stream owns the terminal event.
+struct PendingRequestGuard {
+    recorder: Arc<SemanticEdgeRecorder>,
+    request_id: String,
+    armed: bool,
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.recorder.fail_request(&self.request_id);
+        }
+    }
 }
 
 /// A provider stream observed by the recorder: `result()` settles the

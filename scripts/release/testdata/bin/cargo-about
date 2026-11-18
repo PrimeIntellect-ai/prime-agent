@@ -1,0 +1,9 @@
+#!/bin/sh
+# Stand-in for cargo-about in the release-script tests, whose synthetic repo
+# trees have no Cargo workspace: writes a placeholder to --output-file.
+while [ "$#" -gt 1 ]; do
+    if [ "$1" = "--output-file" ]; then
+        printf 'third-party notices (test fixture)\n' > "$2"
+    fi
+    shift
+done

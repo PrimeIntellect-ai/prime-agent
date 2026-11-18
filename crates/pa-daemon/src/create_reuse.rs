@@ -190,7 +190,7 @@ impl Supervisor {
             let mut candidates = ReuseCandidates::default();
             for resident in residents {
                 let state = resident.route_state();
-                if self.is_stopping(&resident) || state.retired {
+                if self.is_stopping(&resident) || state.retired() {
                     candidates.stopping.get_or_insert(resident);
                 } else if state.connected && state.session_ready {
                     candidates.ready.get_or_insert(resident);
@@ -319,7 +319,7 @@ impl Supervisor {
     /// TS `effectiveWorkerState` for a reuse answer (the peer-tickets
     /// definition stays the one source).
     async fn effective_reuse_state(&self, resident: &Arc<ResidentWorker>) -> &'static str {
-        let connected = resident.cmd_tx.lock().await.is_some();
+        let connected = resident.route_state().connected;
         let lifecycle = resident.descriptor.lock().await.lifecycle;
         crate::peer_tickets::effective_worker_state(
             connected,

@@ -363,7 +363,7 @@ fn print_package_command_help(command: PackageCommand) {
     let usage = command.usage();
     match command {
         PackageCommand::Install => println!(
-            "Usage:\n  {usage}\n\nInstall a package and add it to settings.\n\nOptions:\n  --local    Install project-locally ({CONFIG_DIR_NAME}/settings.json)\n\nExamples:\n  {APP_NAME} package install npm:@foo/bar\n  {APP_NAME} package install git:github.com/user/repo\n  {APP_NAME} package install git:git@github.com:user/repo\n  {APP_NAME} package install https://github.com/user/repo\n  {APP_NAME} package install ssh://git@github.com/user/repo\n  {APP_NAME} package install ./local/path\n"
+            "Usage:\n  {usage}\n\nInstall a package and add it to user settings.\n\nOptions:\n  --local    Unsupported: repository settings cannot activate packages\n\nExamples:\n  {APP_NAME} package install npm:@foo/bar\n  {APP_NAME} package install git:github.com/user/repo\n  {APP_NAME} package install git:git@github.com:user/repo\n  {APP_NAME} package install https://github.com/user/repo\n  {APP_NAME} package install ssh://git@github.com/user/repo\n  {APP_NAME} package install ./local/path\n"
         ),
         PackageCommand::Remove => println!(
             "Usage:\n  {usage}\n\nRemove a package and its source from settings.\n\nOptions:\n  --local    Remove from project settings ({CONFIG_DIR_NAME}/settings.json)\n\nExamples:\n  {APP_NAME} package remove npm:@foo/bar\n"
@@ -372,7 +372,7 @@ fn print_package_command_help(command: PackageCommand) {
             "Usage:\n  {usage}\n\nUpdate {APP_NAME} or installed packages.\n\nOptions:\n  --self                  Update {APP_NAME} only\n  --extensions            Update installed packages only\n  --extension <source>    Update one package only\n  --force                 Reinstall {APP_NAME} even if the current version is latest\n  --rollback              Restore the previous compiled release\n  --nightly               Switch updates to the nightly channel (unreleased builds, may be broken)\n  --stable                Return updates to the stable channel\n  --daemon-socket <path>  Restart the daemon listening on this exact socket\n\nCommands:\n  {APP_NAME} update                Update {APP_NAME}\n  {APP_NAME} package update        Update installed packages\n  {APP_NAME} package update <source> Update one package\n"
         ),
         PackageCommand::List => println!(
-            "Usage:\n  {usage}\n\nList installed packages from user and project settings.\n"
+            "Usage:\n  {usage}\n\nList active packages from user settings.\n"
         ),
     }
 }
@@ -482,6 +482,13 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         return fail(
             &format!("Missing {command_name} source."),
             Some(&format!("Usage: {}", command.usage())),
+        );
+    }
+
+    if command == PackageCommand::Install && options.local {
+        return fail(
+            "Project packages are not activated from repository settings. Install without --local to use your user settings.",
+            None,
         );
     }
 

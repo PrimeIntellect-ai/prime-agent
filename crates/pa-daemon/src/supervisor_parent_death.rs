@@ -108,9 +108,7 @@ impl Supervisor {
                 // tombstone's durability: the exit must read as intentional BEFORE the
                 // cleanup, or a failed tombstone persist would look like a crash — the
                 // monitor would relaunch the orphan.
-                child
-                    .intentional_stop
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                child.transition(crate::registry::WorkerTransition::RequestStop);
                 if let Err(error) = self.stop_worker(child).await {
                     self.log_line(&format!(
                         "parent-death stop of RLM child worker {} failed: {error:#}; the routed kill owns the rest",

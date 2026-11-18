@@ -123,7 +123,7 @@ impl Supervisor {
         // retire-then-release order of the idle passivation fence): the
         // check runs after admission, so a route that passed readiness
         // before the retire cannot enqueue behind it.
-        if matches!(admission, RouteAdmission::ClientRequest) && resident.route_state().retired {
+        if matches!(admission, RouteAdmission::ClientRequest) && resident.route_state().retired() {
             return Err(anyhow!(WORKER_NOT_CONNECTED));
         }
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -221,7 +221,7 @@ impl Supervisor {
                 // waiting for the replacement and sending again cannot duplicate it.
                 Err(error) if error.to_string() == WORKER_NOT_CONNECTED => {
                     if tokio::time::Instant::now() >= deadline
-                        || resident.route_state().retired
+                        || resident.route_state().retired()
                         || self.is_stopping(resident)
                     {
                         return Err(error);
@@ -296,7 +296,7 @@ impl Supervisor {
             if current.connected && current.session_ready {
                 return Ok(());
             }
-            if current.retired || self.is_stopping(resident) {
+            if current.retired() || self.is_stopping(resident) {
                 bail!(WORKER_NOT_CONNECTED);
             }
             let now = tokio::time::Instant::now();

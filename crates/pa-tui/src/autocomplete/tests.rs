@@ -157,11 +157,11 @@ fn tier_argument_completions_list_filter_and_mark_current() {
 fn slash_completion_applies_separator_by_argument() {
     let provider = provider("/tmp");
     // Argument-taking command: completes into the parameter position.
-    let result = provider.apply_completion(&["/goa".to_string()], 0, 4, &item("goal"), "/goa");
+    let result = provider.apply_completion(&["/goa".to_string()], 0, 4, &item("goal"));
     assert_eq!(result.lines[0], "/goal ");
     assert_eq!(result.cursor_col, 6);
     // Bare command: no trailing separator.
-    let result = provider.apply_completion(&["/refi".to_string()], 0, 5, &item("refine"), "/refi");
+    let result = provider.apply_completion(&["/refi".to_string()], 0, 5, &item("refine"));
     assert_eq!(result.lines[0], "/refine");
     assert_eq!(result.cursor_col, 7);
 }
@@ -277,7 +277,7 @@ fn at_prefix_lists_nested_fuzzy_matches() {
         argument_hint: None,
         source_tag: None,
     };
-    let result = provider.apply_completion(&["see @partial".to_string()], 0, 12, &item, "@partial");
+    let result = provider.apply_completion(&["see @partial".to_string()], 0, 12, &item);
     assert_eq!(result.lines[0], "see @src/deep/partial_match.rs ");
     assert_eq!(result.cursor_col, 31);
 }
@@ -304,12 +304,7 @@ fn render_uses_the_menu_panel_grammar() {
             source_tag: None,
         })
         .collect();
-    let state = AutocompleteState::new(
-        items,
-        5,
-        "/".to_string(),
-        Some(SuggestionKind::SlashCommand),
-    );
+    let state = AutocompleteState::new(items, 5, Some(SuggestionKind::SlashCommand));
     let lines = state.render(&theme(), 60);
     let text = |line: &Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
     let rendered: Vec<String> = lines.iter().map(text).collect();
@@ -325,7 +320,7 @@ fn render_uses_the_menu_panel_grammar() {
 
 #[test]
 fn empty_items_render_the_shared_no_match_row() {
-    let state = AutocompleteState::new(Vec::new(), 5, String::new(), None);
+    let state = AutocompleteState::new(Vec::new(), 5, None);
     let lines = state.render(&theme(), 40);
     let text: String = lines[0].iter().map(|s| s.content.as_str()).collect();
     assert_eq!(text, "  No matching commands");
@@ -340,12 +335,7 @@ fn narrow_renders_never_exceed_the_frame_width() {
         .chain((1..7).map(|index| item(&format!("cmd{index}"))))
         .collect();
     for width in [4usize, 6, 9, 40] {
-        let state = AutocompleteState::new(
-            items.clone(),
-            5,
-            "/".to_string(),
-            Some(SuggestionKind::SlashCommand),
-        );
+        let state = AutocompleteState::new(items.clone(), 5, Some(SuggestionKind::SlashCommand));
         for line in &state.render(&theme(), width) {
             assert!(
                 crate::width::spans_width(line) <= width,
@@ -353,7 +343,7 @@ fn narrow_renders_never_exceed_the_frame_width() {
             );
         }
     }
-    let empty = AutocompleteState::new(Vec::new(), 5, String::new(), None);
+    let empty = AutocompleteState::new(Vec::new(), 5, None);
     for line in &empty.render(&theme(), 6) {
         assert!(
             crate::width::spans_width(line) <= 6,
@@ -367,7 +357,6 @@ fn best_match_prefers_exact_then_prefix() {
     let state = AutocompleteState::new(
         vec![item("help"), item("hello")],
         5,
-        "/hel".to_string(),
         Some(SuggestionKind::SlashCommand),
     );
     assert_eq!(state.best_match_index("hel"), Some(0));
@@ -466,8 +455,7 @@ fn skill_completions_apply_through_the_slash_path() {
     // submission (the file path would drop it).
     let provider = provider_with_skill("/tmp");
     let item = item("skill:brainstorm");
-    let result =
-        provider.apply_completion(&["/skill:brain".to_string()], 0, 12, &item, "/skill:brain");
+    let result = provider.apply_completion(&["/skill:brain".to_string()], 0, 12, &item);
     assert_eq!(result.lines[0], "/skill:brainstorm ");
     assert_eq!(result.cursor_col, "/skill:brainstorm ".chars().count());
 }
@@ -566,12 +554,7 @@ fn render_shows_the_source_tag_as_a_trailing_segment() {
     let mut described = item("skill:web-search");
     described.description = Some("Search Google".to_string());
     described.source_tag = Some("#user".to_string());
-    let state = AutocompleteState::new(
-        vec![described],
-        5,
-        "/skill:web".to_string(),
-        Some(SuggestionKind::SlashCommand),
-    );
+    let state = AutocompleteState::new(vec![described], 5, Some(SuggestionKind::SlashCommand));
     let rendered = state.render(&theme(), 80);
     let all: String = rendered
         .iter()

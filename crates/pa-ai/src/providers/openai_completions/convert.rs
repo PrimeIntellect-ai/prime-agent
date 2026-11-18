@@ -251,7 +251,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                 {
                     assistant_msg.insert("content".into(), json!(""));
                 }
-                // Skip assistant messages that have no content and no tool calls.
+                // Reasoning-only turns can hit the output limit before any answer or tool call.
                 let content_value = assistant_msg.get("content");
                 let has_content = match content_value {
                     Some(Value::Null) | None => false,
@@ -262,6 +262,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                 if !has_content
                     && !assistant_msg.contains_key("tool_calls")
                     && replay_reasoning_details.is_empty()
+                    && non_empty_thinking_blocks.is_empty()
                 {
                     index += 1;
                     continue;
@@ -551,6 +552,41 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
+            serving: None,
+        }
+    }
+
+    #[test]
+    fn reasoning_only_turn_survives_replay() {
+        let model = model("prime-inference", 0.0, 0.0);
+        for field in crate::providers::openai_completions::REASONING_FIELDS {
+            let mut output = crate::event_stream::initial_assistant_message(
+                &model.api,
+                &model.provider,
+                &model.id,
+            );
+            output.content = vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: "Unfinished reasoning.".into(),
+                thinking_signature: Some(field.into()),
+                redacted: None,
+                rest: Map::default(),
+            })];
+            output.stop_reason = StopReason::Length;
+            let replay = convert_messages(
+                &model,
+                &Context {
+                    system_prompt: None,
+                    messages: vec![crate::types::Message::Assistant(output)],
+                    tools: None,
+                },
+                &crate::providers::openai_completions::get_compat(&model),
+            );
+            assert_eq!(
+                replay,
+                vec![json!({
+                    "role": "assistant", "content": null, field: "Unfinished reasoning."
+                })]
+            );
         }
     }
 

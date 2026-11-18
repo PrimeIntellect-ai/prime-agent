@@ -3,12 +3,24 @@
 //! at `{file}.lock`; harness-state locks add an owner file for safe stale reclaim.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Minimum staleness threshold, like proper-lockfile's floor.
 const MIN_STALE: Duration = Duration::from_secs(2);
+
+/// Upper bound on an owner record (`{pid} {token}.{uuid}` is about 85 bytes).
+const MAX_OWNER_BYTES: u64 = 256;
+
+/// The identity of a lock directory: its mtime. Every lock is created with a
+/// fresh probe mtime and is reclaimable only once that mtime is at least
+/// [`MIN_STALE`] old, so a successor never shares the identity of the stale
+/// lock it replaced. Device and inode numbers do not work here: filesystems
+/// hand a removed directory's inode to the next mkdir.
+fn lock_identity(metadata: &fs::Metadata) -> io::Result<SystemTime> {
+    metadata.modified()
+}
 
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
 /// second plus 5ms, so a millisecond-precision filesystem records a time
@@ -171,6 +183,8 @@ mod win32 {
 pub struct LockDir {
     path: PathBuf,
     owner: Option<String>,
+    /// [`lock_identity`] of the directory this guard created.
+    created: SystemTime,
 }
 
 impl LockDir {
@@ -202,7 +216,11 @@ impl LockDir {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path, owner.as_deref()) {
-            Ok(()) => Ok(LockDir { path, owner }),
+            Ok(created) => Ok(LockDir {
+                path,
+                owner,
+                created,
+            }),
             // Only an existing path is a lock collision; other failures
             // (missing parent, permissions) are real errors, never contention.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -210,7 +228,11 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path, owner.as_deref()) {
-                    Ok(()) => Ok(LockDir { path, owner }),
+                    Ok(created) => Ok(LockDir {
+                        path,
+                        owner,
+                        created,
+                    }),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -306,7 +328,19 @@ impl LockDir {
     }
 
     fn owner_matches(path: &Path, owner: &str) -> bool {
-        fs::read_to_string(path.join("owner")).is_ok_and(|recorded| recorded.trim() == owner)
+        Self::read_owner(path).is_some_and(|recorded| recorded.trim() == owner)
+    }
+
+    /// The lock's owner record; `None` when it is missing, unreadable, or
+    /// larger than [`MAX_OWNER_BYTES`].
+    fn read_owner(path: &Path) -> Option<String> {
+        let mut recorded = String::new();
+        fs::File::open(path.join("owner"))
+            .ok()?
+            .take(MAX_OWNER_BYTES + 1)
+            .read_to_string(&mut recorded)
+            .ok()?;
+        (recorded.len() as u64 <= MAX_OWNER_BYTES).then_some(recorded)
     }
 
     fn owner_dead(recorded: &str) -> bool {
@@ -341,8 +375,9 @@ impl LockDir {
     }
 
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
+    /// Returns the created lock's [`lock_identity`].
     #[cfg(any(unix, windows))]
-    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<SystemTime> {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         fs::create_dir(path)?;
@@ -357,7 +392,8 @@ impl LockDir {
                 fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
             }
             let (sec, nanos) = probe_mtime();
-            set_mtime(path, sec, nanos)
+            set_mtime(path, sec, nanos)?;
+            lock_identity(&fs::symlink_metadata(path)?)
         })();
         if result.is_err() {
             let _ = fs::remove_file(path.join("owner"));
@@ -367,7 +403,7 @@ impl LockDir {
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<SystemTime> {
         fs::create_dir(path)?;
         if let Some(owner) = owner {
             if let Err(error) = fs::write(path.join("owner"), format!("{owner}\n")) {
@@ -375,7 +411,7 @@ impl LockDir {
                 return Err(error);
             }
         }
-        Ok(())
+        lock_identity(&fs::symlink_metadata(path)?)
     }
 
     /// Decide the fate of an incumbent at `path`. Returns only when the
@@ -414,29 +450,13 @@ impl LockDir {
                 .duration_since(modified)
                 .unwrap_or_default();
             if age > stale_after {
-                let owner_path = path.join("owner");
-                let recorded = fs::read_to_string(&owner_path).ok();
-                if recorded
-                    .as_deref()
-                    .is_some_and(|owner| !Self::owner_dead(owner))
-                {
+                if Self::read_owner(path).is_some_and(|owner| !Self::owner_dead(&owner)) {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
-                match fs::remove_file(&owner_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-                // Stale: remove and let the caller retry.
-                match fs::remove_dir(path) {
-                    Ok(()) => return Ok(()),
-                    // A racing holder released it first.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-                    Err(error) => return Err(error),
-                }
+                return Self::reclaim(path, lock_identity(&metadata)?);
             }
         }
         // Live lock: contention.
@@ -444,6 +464,36 @@ impl LockDir {
             io::ErrorKind::WouldBlock,
             format!("Lock file is already being held: {}", path.display()),
         ))
+    }
+
+    /// Remove the stale lock judged as `observed`, unless a rival reclaimed
+    /// it and created a successor at `path` meanwhile. The identity is
+    /// compared once, right before the removals: removing `owner` bumps the
+    /// directory's mtime, which also fails any rival's pending compare. A
+    /// rival can still slip in between this compare and the `remove_dir`.
+    fn reclaim(path: &Path, observed: SystemTime) -> io::Result<()> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if lock_identity(&metadata)? == observed => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ));
+            }
+            // A racing holder released it first.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        match fs::remove_file(path.join("owner")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// True while another process holds the pre-compat flock on a legacy
@@ -463,6 +513,18 @@ impl LockDir {
     /// else already reclaimed it (the TS release tolerates ENOENT); other
     /// failures go to the trace log (`Drop` cannot propagate).
     pub fn release(&self) {
+        // A guard whose stale lock was reclaimed must not remove the
+        // successor's lock. Compare before removing `owner` (which bumps the mtime).
+        match fs::symlink_metadata(&self.path).and_then(|metadata| lock_identity(&metadata)) {
+            Ok(identity) if identity == self.created => {}
+            Ok(_) => return,
+            Err(error) => {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                }
+                return;
+            }
+        }
         if let Some(owner) = &self.owner {
             if !Self::owner_matches(&self.path, owner) {
                 return;
@@ -499,15 +561,20 @@ pub fn lock_exclusive(file: &std::fs::File) -> io::Result<()> {
     file.lock()
 }
 
-/// Nonblocking [`lock_exclusive`]: any held lock (fresh contention or I/O
-/// failure) surfaces as an error carrying the platform's try-lock error.
+/// Nonblocking [`lock_exclusive`]: contention surfaces as
+/// [`io::ErrorKind::WouldBlock`] (the wall's contention signal), any other
+/// I/O failure as the platform reports it.
 ///
 /// # Errors
 ///
-/// The platform's [`std::fs::TryLockError`] (contention included) wrapped in
-/// an I/O error; nothing is returned on success.
+/// [`io::ErrorKind::WouldBlock`] while a live lock holds the file; the
+/// underlying OS error otherwise; nothing is returned on success.
 pub fn try_lock_exclusive(file: &std::fs::File) -> io::Result<()> {
-    file.try_lock().map_err(io::Error::other)
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// Release an OS file lock without waiting for duplicated or inherited handles
@@ -640,6 +707,59 @@ mod tests {
         let next =
             LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         next.ensure_owned().unwrap();
+    }
+
+    #[test]
+    fn oversized_owner_record_does_not_keep_a_stale_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let path = LockDir::path_for(&file);
+        fs::create_dir(&path).unwrap();
+        // A live pid, padded past the cap.
+        let padded = format!(
+            "{} token{}",
+            std::process::id(),
+            " ".repeat(MAX_OWNER_BYTES as usize)
+        );
+        fs::write(path.join("owner"), padded).unwrap();
+        set_mtime(&path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        next.ensure_owned().unwrap();
+    }
+
+    #[test]
+    fn reclaim_keeps_a_successor_created_after_the_stale_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        let path = lock_of(&file);
+        fs::create_dir(&path).unwrap();
+        set_mtime(&path, 1, 0).unwrap();
+        let observed = lock_identity(&fs::symlink_metadata(&path).unwrap()).unwrap();
+        // A rival reclaims the stale lock first and now holds a fresh one.
+        fs::remove_dir(&path).unwrap();
+        let successor = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let error = LockDir::reclaim(&path, observed).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(path.is_dir(), "the successor's lock survives");
+        drop(successor);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn displaced_guard_keeps_the_successors_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        let mut displaced = LockDir::acquire(&file, MIN_STALE).unwrap();
+        // The holder stalled past the staleness threshold, as if it had
+        // created the lock long ago.
+        set_mtime(&displaced.path, 1, 0).unwrap();
+        displaced.created = lock_identity(&fs::symlink_metadata(&displaced.path).unwrap()).unwrap();
+        let successor = LockDir::acquire(&file, MIN_STALE).unwrap();
+        drop(displaced);
+        assert!(lock_of(&file).is_dir(), "the successor's lock survives");
+        drop(successor);
+        assert!(!lock_of(&file).exists());
     }
 
     #[test]

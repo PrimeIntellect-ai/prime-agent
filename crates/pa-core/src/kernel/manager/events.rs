@@ -50,7 +50,11 @@ impl Inner {
                 self.dispatch_display(id.as_deref(), data);
             }
             Event::Ready { protocol } => {
-                if let Some(tx) = lock(&self.guarded).ready_tx.take() {
+                let ready_tx = lock(&self.guarded)
+                    .lifecycle
+                    .starting_mut()
+                    .and_then(|starting| starting.ready_tx.take());
+                if let Some(tx) = ready_tx {
                     let _ = tx.send(Ok(protocol));
                 }
             }

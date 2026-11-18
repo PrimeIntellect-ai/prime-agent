@@ -8,10 +8,6 @@ use serde_json::json;
 /// subtract it from the window alongside the headroom.
 const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
-/// The faux provider registers process-globally; one test at a time
-/// keeps the queued responses deterministic.
-static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// The TS overflow error shape: an Anthropic token-overflow message. The
 /// retry-turn `delayMs` puts its settled timestamp strictly after the
 /// compaction entry's.
@@ -135,6 +131,7 @@ async fn faux_engine_with_telemetry(
         factory_child: false,
         daemonless: true,
         model_info: Some(model.clone()),
+        kernel_ready_gate: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
         bash_notice_wake: None,
@@ -183,7 +180,11 @@ async fn admit(
         .await
         .expect("the prompt admits");
     engine.session.agent().wait_for_idle().await;
-    boundary.run_at_settled_turn(engine, model, None).await
+    boundary.run_at_settled_turn(engine, model, None).await?;
+    // Existing outcome tests observe background completion explicitly. The
+    // held-planner regression below exercises admission before this wait.
+    boundary.wait_for_refinement_reports().await;
+    Ok(())
 }
 
 /// The mid-turn-request shape: a `compact.run` scheduled DURING a turn
@@ -201,7 +202,9 @@ async fn admit_turn_with_scheduled_request(
         .await
         .expect("the prompt admits");
     engine.session.agent().wait_for_idle().await;
-    boundary.run_at_settled_turn(engine, model, None).await
+    boundary.run_at_settled_turn(engine, model, None).await?;
+    boundary.wait_for_refinement_reports().await;
+    Ok(())
 }
 
 async fn outcome_rows(engine: &SessionEngine) -> Vec<pa_types::session::CustomMessageEntry> {
@@ -259,7 +262,6 @@ async fn last_assistant(engine: &SessionEngine) -> Option<pa_types::ai::Assistan
 
 #[tokio::test]
 async fn overflow_compacts_retries_once_then_reports_the_failure() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -311,7 +313,6 @@ async fn overflow_compacts_retries_once_then_reports_the_failure() {
 
 #[tokio::test]
 async fn overflow_retry_succeeds_on_the_compacted_context() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -361,8 +362,6 @@ async fn overflow_retry_succeeds_on_the_compacted_context() {
 
 #[tokio::test]
 async fn overflow_recovery_skip_surfaces_the_warning_row() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
-
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -414,7 +413,6 @@ async fn overflow_recovery_skip_surfaces_the_warning_row() {
 
 #[tokio::test]
 async fn stale_overflow_error_recovers_before_the_next_prompt_after_a_resume() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine_a, dir_a, model_a) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed reply"}, overflow_error(0)] }),
         json!({
@@ -500,7 +498,6 @@ async fn stale_overflow_error_recovers_before_the_next_prompt_after_a_resume() {
 
 #[tokio::test]
 async fn autonomous_continuation_turns_cross_the_boundary_arms() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (built, dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -618,7 +615,6 @@ async fn refine_rows(engine: &SessionEngine) -> Vec<pa_types::session::CustomMes
 
 #[tokio::test]
 async fn requested_compaction_streams_the_ts_event_pair() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -698,7 +694,6 @@ async fn requested_compaction_streams_the_ts_event_pair() {
 
 #[tokio::test]
 async fn requested_compaction_skip_streams_the_warning_row_and_end_event() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     // `keepRecentTokens` beyond the whole session: nothing to
     // summarize.
     let (engine, _dir, model) = faux_engine_with_settings(
@@ -745,7 +740,6 @@ async fn requested_compaction_skip_streams_the_warning_row_and_end_event() {
 
 #[tokio::test]
 async fn requested_compaction_counts_into_the_run_telemetry() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model, mock) = faux_engine_with_mock_telemetry(
         json!({
             "responses": [
@@ -792,7 +786,6 @@ async fn requested_compaction_counts_into_the_run_telemetry() {
 
 #[tokio::test]
 async fn threshold_compaction_counts_into_the_run_telemetry() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (probe, _dir, probe_model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed reply"}] }),
         compactable_settings(),
@@ -867,7 +860,6 @@ async fn threshold_compaction_counts_into_the_run_telemetry() {
 
 #[tokio::test]
 async fn multi_compaction_run_counts_every_arm() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (probe, _dir, probe_model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed reply"}] }),
         compactable_settings(),
@@ -955,7 +947,6 @@ async fn multi_compaction_run_counts_every_arm() {
 
 #[tokio::test]
 async fn threshold_compaction_streams_the_ts_event_pair() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (probe, _probe_dir, probe_model) = faux_engine_with_settings(
         json!({ "responses": [{"text": "seed reply"}] }),
         compactable_settings(),
@@ -1043,7 +1034,6 @@ async fn threshold_compaction_streams_the_ts_event_pair() {
 
 #[tokio::test]
 async fn pre_turn_check_consumes_a_pending_request_before_the_prompt() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -1136,7 +1126,6 @@ async fn pre_turn_check_consumes_a_pending_request_before_the_prompt() {
 
 #[tokio::test]
 async fn pre_turn_threshold_arm_compacts_a_resumed_session_before_the_prompt() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     // Run one: compaction disabled, the crossing turn settles above
     // the headroom.
     let (engine_a, dir_a, model_a) = faux_engine_with_settings(
@@ -1226,7 +1215,6 @@ async fn pre_turn_threshold_arm_compacts_a_resumed_session_before_the_prompt() {
 
 #[tokio::test]
 async fn pre_turn_abort_arm_drops_pending_requests_and_continues() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -1276,10 +1264,11 @@ async fn pre_turn_abort_arm_drops_pending_requests_and_continues() {
 }
 
 #[tokio::test]
-async fn a_requested_refinement_refuses_without_the_daemon() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
+async fn requested_refinement_failure_emits_the_refine_failed_event() {
+    // The refiner consumes the next faux response; a non-JSON reply fails the
+    // plan parse.
     let (engine, _dir, model) = faux_engine_with_settings(
-        json!({ "responses": [{"text": "seed reply"}] }),
+        json!({ "responses": [{"text": "seed reply"}, {"text": "not a plan"}] }),
         compactable_settings(),
         None,
     )
@@ -1297,43 +1286,395 @@ async fn a_requested_refinement_refuses_without_the_daemon() {
         .await
         .unwrap();
     let events = events.lock().unwrap().clone();
-    // The planning refinement is the refinement child's: a headless
-    // session has no child runtime, so the request refuses with the
-    // daemon-required failure — visibly, never a silent drop.
     let failed = events
         .iter()
         .find(|event| event["type"] == "refine_failed")
         .expect("the refine_failed event");
     let error = failed["error"].as_str().unwrap_or_default();
-    assert!(
-        error.contains("daemon-backed"),
-        "the refusal names the gate: {error}"
-    );
+    assert!(!error.is_empty(), "the failure message rides the event");
     assert!(
         events
             .iter()
             .all(|event| event["type"] != "compaction_start"),
         "no compaction ran"
     );
+}
+
+#[tokio::test]
+async fn requested_refinement_streams_rows_and_refine_complete() {
+    let plan = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    let (engine, _dir, model) = faux_engine_with_settings(
+        json!({ "responses": [{"text": "seed reply"}, {"text": plan}] }),
+        compactable_settings(),
+        None,
+    )
+    .await;
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    engine
+        .turn_boundary
+        .schedule_refine(pa_core::session_engine::turn_boundary::PendingRefine {
+            instructions: None,
+            global: true,
+        })
+        .await;
+    admit(&mut boundary, &engine, &model, "seed turn".to_string())
+        .await
+        .unwrap();
+    let events = events.lock().unwrap().clone();
+    let outcome_at = events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_start"
+                && event["message"]["customType"] == "refinement_outcome"
+        })
+        .expect("the outcome row pair");
+    let notice_at = events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_start"
+                && event["message"]["customType"] == "refinement_notice"
+        })
+        .expect("the notice row pair");
+    assert!(outcome_at < notice_at);
+    assert_eq!(events[outcome_at]["message"]["display"], true);
+    assert_eq!(events[notice_at]["message"]["display"], false);
+    let complete_at = events
+        .iter()
+        .position(|event| event["type"] == "refine_complete")
+        .expect("the refine_complete event");
+    assert!(notice_at < complete_at);
+    assert_eq!(events[complete_at]["result"]["summary"], "note it");
+    assert_eq!(events[complete_at]["result"]["appliedEdits"][0]["id"], "m1");
+    let rows = refine_rows(&engine).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].custom_type, "refinement_outcome");
+    assert_eq!(rows[1].custom_type, "refinement_notice");
+}
+
+#[tokio::test]
+async fn compact_trigger_auto_refine_streams_at_the_next_boundary() {
+    let review = r#"{"shouldRefine": true, "rationale": "the crossing turn shows a reusable tactic", "instructions": "record the tactic"}"#;
+    let plan = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    let (engine, _dir, model) = faux_engine_with_settings(
+        json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "second reply"},
+                {"text": "the summary"},
+                {"text": "third reply"},
+                {"text": review},
+                {"text": plan},
+            ]
+        }),
+        compactable_settings(),
+        None,
+    )
+    .await;
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    admit(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("seed turn {}", "x".repeat(48_000)),
+    )
+    .await
+    .unwrap();
+    // A requested compaction: the trigger is scheduled with no further
+    // turn to consume it here.
+    engine.turn_boundary.schedule_compaction(None).await;
+    admit_turn_with_scheduled_request(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("second turn {}", "x".repeat(2_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");
     assert!(
-        !engine.turn_boundary.refine_pending().await,
-        "the refusal consumed the pending request"
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event["type"] != "refine_complete"),
+        "no auto-refine before the next boundary"
     );
+    admit(&mut boundary, &engine, &model, "third turn".to_string())
+        .await
+        .unwrap();
+    let events = events.lock().unwrap().clone();
+    let outcome_at = events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_start"
+                && event["message"]["customType"] == "refinement_outcome"
+        })
+        .expect("the outcome row pair");
+    let notice_at = events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_start"
+                && event["message"]["customType"] == "refinement_notice"
+        })
+        .expect("the notice row pair");
+    let complete_at = events
+        .iter()
+        .position(|event| event["type"] == "refine_complete")
+        .expect("the refine_complete event");
+    assert!(outcome_at < notice_at && notice_at < complete_at);
+    assert_eq!(events[complete_at]["result"]["summary"], "note it");
+    assert_eq!(events[notice_at]["message"]["details"]["source"], "auto");
+    let rows = refine_rows(&engine).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].custom_type, "refinement_outcome");
+    assert_eq!(rows[1].custom_type, "refinement_notice");
+}
+
+#[tokio::test]
+async fn overflow_retry_compact_trigger_streams_the_ts_surface() {
+    let review = r#"{"shouldRefine": true, "rationale": "the overflow recovery is reusable"}"#;
+    let plan = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    let (engine, _dir, model) = faux_engine_with_settings(
+        json!({
+            "responses": [
+                {"text": "seed reply"},
+                overflow_error(0),
+                {"text": "the summary"},
+                {"text": "recovered reply"},
+                {"text": review},
+                {"text": plan},
+            ]
+        }),
+        compactable_settings(),
+        None,
+    )
+    .await;
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    admit(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("seed turn {}", "x".repeat(48_000)),
+    )
+    .await
+    .unwrap();
+    admit(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("overflow probe {}", "x".repeat(48_000)),
+    )
+    .await
+    .unwrap();
+    let events = events.lock().unwrap().clone();
+    let end_at = events
+        .iter()
+        .position(|event| event["type"] == "compaction_end")
+        .expect("the compaction_end event");
+    assert_eq!(events[end_at]["willRetry"], true);
+    let outcome_at = events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_start"
+                && event["message"]["customType"] == "refinement_outcome"
+        })
+        .expect("the outcome row pair");
+    let complete_at = events
+        .iter()
+        .position(|event| event["type"] == "refine_complete")
+        .expect("the refine_complete event");
+    assert!(end_at < outcome_at && outcome_at < complete_at);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "compaction_start")
+            .count(),
+        1,
+        "exactly one compaction"
+    );
+    assert_eq!(refine_rows(&engine).await.len(), 2);
+}
+
+#[tokio::test]
+async fn compact_trigger_drains_at_disposal_off_the_stream() {
+    let review = r#"{"shouldRefine": true, "rationale": "the seed turn shows a reusable tactic"}"#;
+    let plan = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    let (engine, _dir, model) = faux_engine_with_settings(
+        json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "second reply"},
+                {"text": "the summary"},
+                {"text": review},
+                {"text": plan},
+            ]
+        }),
+        compactable_settings(),
+        None,
+    )
+    .await;
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    admit(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("seed turn {}", "x".repeat(48_000)),
+    )
+    .await
+    .unwrap();
+    engine.turn_boundary.schedule_compaction(None).await;
+    admit_turn_with_scheduled_request(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("second turn {}", "x".repeat(2_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compaction_count(&engine).await, 1);
     assert!(
-        refine_rows(&engine).await.is_empty(),
-        "no refinement rows persisted"
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event["type"] != "refine_complete"),
+        "no auto-refine before disposal"
     );
+    // The print runtime's disposal order: the subscription is gone, so
+    // the drain runs the round silently.
+    boundary
+        .drain_compact_auto_refine_at_disposal(&engine, &model, None)
+        .await;
+    boundary.wait_for_refinement_reports().await;
+    let rows = refine_rows(&engine).await;
+    assert_eq!(rows.len(), 2, "the durable rows persisted");
+    assert_eq!(rows[0].custom_type, "refinement_outcome");
+    assert_eq!(rows[1].custom_type, "refinement_notice");
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event["type"] != "refine_complete"),
+        "the drain stays off the event stream"
+    );
+}
+
+#[tokio::test]
+async fn auto_refine_review_decline_surfaces_nothing() {
+    let review = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
+    let (engine, _dir, model) = faux_engine_with_settings(
+        json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "second reply"},
+                {"text": "the summary"},
+                {"text": "third reply"},
+                {"text": review},
+            ]
+        }),
+        compactable_settings(),
+        None,
+    )
+    .await;
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    admit(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("seed turn {}", "x".repeat(48_000)),
+    )
+    .await
+    .unwrap();
+    engine.turn_boundary.schedule_compaction(None).await;
+    admit_turn_with_scheduled_request(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("second turn {}", "x".repeat(2_000)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");
+    admit(&mut boundary, &engine, &model, "third turn".to_string())
+        .await
+        .unwrap();
+    assert!(refine_rows(&engine).await.is_empty(), "no refinement ran");
+    let events = events.lock().unwrap().clone();
     assert!(
         events
             .iter()
-            .all(|event| event["type"] != "refine_complete"),
-        "no completion event for a refusal"
+            .all(|event| event["type"] != "refine_complete" && event["type"] != "refine_failed"),
+        "the decline surfaces nothing"
+    );
+    // The unconsumed review response stays queued.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "compaction_start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn auto_refine_disabled_settings_drop_the_trigger() {
+    let (engine, _dir, model) = faux_engine_with_settings(
+        json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "second reply"},
+                {"text": "the summary"},
+                {"text": "third reply"},
+            ]
+        }),
+        json!({
+            "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 10 },
+            "autoRefine": { "enabled": false }
+        }),
+        None,
+    )
+    .await;
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    admit(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("seed turn {}", "x".repeat(48_000)),
+    )
+    .await
+    .unwrap();
+    engine.turn_boundary.schedule_compaction(None).await;
+    admit_turn_with_scheduled_request(
+        &mut boundary,
+        &engine,
+        &model,
+        format!("second turn {}", "x".repeat(2_000)),
+    )
+    .await
+    .unwrap();
+    admit(&mut boundary, &engine, &model, "third turn".to_string())
+        .await
+        .unwrap();
+    assert_eq!(compaction_count(&engine).await, 1, "the compaction ran");
+    assert!(refine_rows(&engine).await.is_empty(), "no refinement ran");
+    let events = events.lock().unwrap().clone();
+    assert!(
+        events
+            .iter()
+            .all(|event| event["type"] != "refine_complete" && event["type"] != "refine_failed"),
+        "the disabled trigger surfaces nothing"
     );
 }
 
 #[tokio::test]
 async fn non_overflow_error_never_triggers_the_arm() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -1362,7 +1703,6 @@ async fn non_overflow_error_never_triggers_the_arm() {
 
 #[tokio::test]
 async fn overflow_error_with_compaction_disabled_ends_without_recovery() {
-    let _faux = FAUX_TEST_LOCK.lock().await;
     let (engine, _dir, model) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -1391,3 +1731,5 @@ async fn overflow_error_with_compaction_disabled_ends_without_recovery() {
         .expect("the settled error turn");
     assert_eq!(last.error_message.as_deref(), Some(OVERFLOW_ERROR));
 }
+
+mod refinement_nonblocking;

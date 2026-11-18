@@ -163,7 +163,7 @@ impl TerminalMcpAuth {
     /// The api-key credential flow (the `/mcp` view's key rows): prompt
     /// for the ONE key the credential collects (the masked field never
     /// renders the secret) and store it in the credential's auth slot —
-    /// the exact contract the runtime reads (auth.json's `serper` key,
+    /// the exact contract the runtime reads (e.g. auth.json's `serper` key,
     /// the `AuthCredential::ApiKey` form).
     async fn api_key_inner(
         &self,

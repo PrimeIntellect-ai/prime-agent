@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Kernel-side runtime shim for Prime Agent recursion"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=2,<3",
+  "mcp>=2.2,<3",
+  # Transitive via mcp; direct floors because the release bootstrap installs without uv.lock.
+  "pyjwt>=2.15,<3",
+  "opentelemetry-api>=1.45.1,<2",
   "tyro",
 ]
 

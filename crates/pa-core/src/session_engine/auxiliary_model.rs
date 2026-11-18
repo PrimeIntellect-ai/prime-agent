@@ -91,7 +91,6 @@ pub fn resolve_auxiliary_model(
     let auth = crate::auth::AuthStorage::create(&context.agent_dir);
     let mut registry =
         crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
     let model = registry
         .get_rlm_searchable_models()
         .into_iter()

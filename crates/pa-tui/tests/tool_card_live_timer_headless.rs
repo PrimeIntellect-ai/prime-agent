@@ -156,6 +156,7 @@ impl MockSupervisor {
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 tool_end(&mut w, "call_1", "bash", "ok");
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "agent_end" }));
                             }
                             Scenario::Queued => {
                                 event(
@@ -174,6 +175,7 @@ impl MockSupervisor {
                                     }),
                                 );
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "agent_end" }));
                                 drain_barrier(&mut w);
                             }
                             Scenario::CompletedRestream => {
@@ -200,6 +202,7 @@ impl MockSupervisor {
                                     }),
                                 );
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "agent_end" }));
                                 drain_barrier(&mut w);
                             }
                             Scenario::Straggler => {
@@ -213,6 +216,7 @@ impl MockSupervisor {
                                 // The end frame is dropped: the turn
                                 // settles with a still-running card.
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "agent_end" }));
                                 // The probes, after the turn: a late end
                                 // (the resurrection probe — the aborted
                                 // stamp must keep it landing on nothing)
@@ -257,6 +261,7 @@ impl MockSupervisor {
                                 );
                                 std::thread::sleep(std::time::Duration::from_millis(TOOL_RUN_MS));
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "agent_end" }));
                                 drain_barrier(&mut w);
                             }
                             Scenario::LostTurn => {
@@ -298,6 +303,7 @@ impl MockSupervisor {
                                 std::thread::sleep(std::time::Duration::from_millis(300));
                                 tool_end(&mut w, "call_2", "bash", "turn two output");
                                 event(&mut w, &json!({ "type": "turn_end" }));
+                                event(&mut w, &json!({ "type": "agent_end" }));
                                 drain_barrier(&mut w);
                             }
                         }

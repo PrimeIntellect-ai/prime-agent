@@ -203,16 +203,14 @@ fn ctrl_g_hands_the_terminal_to_the_external_editor() {
 
     // The first content frame is the readiness marker (earlier keystrokes race the kitty probe).
     harness.wait_from_start(" >  ", "the first frame's prompt row rendered");
-    let prompt_row = harness.wait_caret_row_from(0, 5, "the first frame's empty editor rendered");
 
-    // Each typed key paints its own cell: the draft's arrival is the caret's park.
+    // Each typed key paints its own cell: the draft's arrival is the caret's park, and
+    // that park gives the prompt row (startup can paint a transient caret at column 5
+    // on another row, e.g. on macOS before the first full-height frame).
     let mark_draft = harness.mark();
     harness.write(b"draft");
-    harness.wait_from(
-        mark_draft,
-        &format!("\x1b[{prompt_row};10H"),
-        "the draft rendered in the editor",
-    );
+    let prompt_row =
+        harness.wait_caret_row_from(mark_draft, 10, "the draft rendered in the editor");
 
     let mark_edit = harness.mark();
     harness.write(&[0x07]);

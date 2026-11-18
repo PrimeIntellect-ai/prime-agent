@@ -103,7 +103,7 @@ fn create_config_flags_reach_the_engine_model_resolution() {
     // The registry resolves the models.json apiKey (the provider name has
     // no env-key mapping), so the engine can authenticate without env.
     assert_eq!(
-        engine.resolve_request_api_key(&model).as_deref(),
+        engine.resolve_request_auth(&model).api_key.as_deref(),
         Some("sk-battery")
     );
 }
@@ -380,12 +380,22 @@ fn the_startup_chain_refuses_models_outside_the_allowlist() {
 /// The create-config key override pins the KEY, never the headers: a
 /// request target with an explicit key still ships the registry's
 /// merged headers (Macroscope PR #2755: `switch_model` dropped the
-/// stored provider headers whenever an override was configured).
+/// stored provider headers whenever an override was configured). The
+/// stored login's team is not one of them: it rides only with the
+/// stored key.
 #[tokio::test]
-async fn an_api_key_override_keeps_the_merged_team_headers() {
+async fn an_api_key_override_keeps_the_merged_headers_but_not_the_stored_team() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     write_prime_auth(&agent_dir);
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": { "prime-inference": { "headers": { "X-Probe": "merged" } } }
+        })
+        .to_string(),
+    )
+    .unwrap();
     let engine = restore_test_engine(dir.path(), Some("prime-inference"), None);
     engine.configure_model(EngineModelSelection {
         provider: None,
@@ -395,13 +405,16 @@ async fn an_api_key_override_keeps_the_merged_team_headers() {
     });
     let model = engine.resolve_registry_model().expect("resolved model");
     assert_eq!(model.provider, "prime-inference");
-    let (api_key, headers) = engine.resolve_request_key_and_headers(&model);
-    assert_eq!(api_key.as_deref(), Some("explicit-override"));
-    let headers = headers.expect("the override keeps the merged headers");
+    let resolved = engine.resolve_request_auth(&model);
+    assert_eq!(resolved.api_key.as_deref(), Some("explicit-override"));
+    let headers = resolved
+        .headers
+        .expect("the override keeps the merged headers");
+    assert_eq!(headers.get("X-Probe").map(String::as_str), Some("merged"));
     assert_eq!(
-        headers.get("X-Prime-Team-ID").map(String::as_str),
-        Some("team-1"),
-        "an explicit key override never orphans the stored team"
+        headers.get("X-Prime-Team-ID"),
+        None,
+        "the stored team rides only with the stored key"
     );
 }
 
@@ -417,9 +430,9 @@ async fn request_auth_carries_the_stored_team_header() {
     let engine = restore_test_engine(dir.path(), Some("prime-inference"), None);
     let model = engine.resolve_registry_model().expect("resolved model");
     assert_eq!(model.provider, "prime-inference");
-    let (api_key, headers) = engine.resolve_request_key_and_headers(&model);
-    assert_eq!(api_key.as_deref(), Some("test-key"));
-    let headers = headers.expect("merged request headers");
+    let resolved = engine.resolve_request_auth(&model);
+    assert_eq!(resolved.api_key.as_deref(), Some("test-key"));
+    let headers = resolved.headers.expect("merged request headers");
     assert_eq!(
         headers.get("X-Prime-Team-ID").map(String::as_str),
         Some("team-1"),
@@ -949,7 +962,7 @@ fn configure_model_merges_only_present_fields() {
     let model = engine.resolve_registry_model().expect("resolved model");
     assert_eq!(model.provider, "battery");
     assert_eq!(
-        engine.resolve_request_api_key(&model).as_deref(),
+        engine.resolve_request_auth(&model).api_key.as_deref(),
         Some("flag-key")
     );
 }

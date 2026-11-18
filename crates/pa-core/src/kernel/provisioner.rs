@@ -69,6 +69,9 @@ where
     boot().await
 }
 
+/// Resolves once another kernel sharing the snapshot dir has flushed its final snapshot.
+pub type KernelReadyGate = Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// Publishes the restore outcome once the kernel is usable.
 pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 
@@ -123,7 +126,7 @@ pub struct IpythonKernelProvisionerOptions {
     /// the stderr log live there. `None` for ephemeral sessions.
     pub snapshot_dir: Option<PathBuf>,
     /// Await (e.g. a previous provisioner's dispose) before reading the snapshot.
-    pub ready_gate: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
+    pub ready_gate: Option<KernelReadyGate>,
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
     /// Fires when the kernel's last live background `bash()` handle
@@ -1365,13 +1368,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_settings_reach_the_kernel_shell() {
+    async fn project_settings_cannot_replace_the_kernel_shell() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
-        // Project settings override the global setting before the session captures it.
+        // A repository cannot choose the executable that wraps every shell command.
         let global = executable_shell(dir.path(), "global-bash");
         let project = executable_shell(dir.path(), "project-bash");
         std::fs::write(
@@ -1386,7 +1389,7 @@ mod tests {
         )
         .unwrap();
         let engine = shell_test_session(cwd, agent_dir).await.unwrap();
-        assert_eq!(engine.provisioner.inner.options.shell_path, Some(project));
+        assert_eq!(engine.provisioner.inner.options.shell_path, Some(global));
     }
 
     #[tokio::test]
@@ -1399,6 +1402,11 @@ mod tests {
         std::fs::write(
             agent_dir.join("settings.json"),
             serde_json::json!({ "shellCommandPrefix": "shopt -s expand_aliases" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({ "shellCommandPrefix": "attacker-command" }).to_string(),
         )
         .unwrap();
         let engine = shell_test_session(cwd, agent_dir).await.unwrap();
@@ -1435,6 +1443,43 @@ mod tests {
         } else {
             assert_eq!(injected, Some("key-from-cmd"));
         }
+    }
+
+    #[tokio::test]
+    async fn a_stored_eco_key_reaches_the_kernel_env_when_eco_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "webSearchProvider": "eco" }).to_string(),
+        )
+        .unwrap();
+        // Only an eco key: the skill gate and the key both follow the selected provider.
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            r#"{ "eco": { "type": "api_key", "key": "!printf eco-key-from-cmd" } }"#,
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        let websearch_env: std::collections::BTreeMap<&str, &str> = engine
+            .provisioner
+            .inner
+            .options
+            .env
+            .iter()
+            .filter(|(key, _)| key.contains("WEBSEARCH") || key.ends_with("_API_KEY"))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let mut expected =
+            std::collections::BTreeMap::from([("PRIME_AGENT_WEBSEARCH_PROVIDER", "eco")]);
+        // A nonblank ambient YOU_API_KEY wins, like SERPER_API_KEY.
+        if !std::env::var("YOU_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+            expected.insert("YOU_API_KEY", "eco-key-from-cmd");
+        }
+        assert_eq!(websearch_env, expected);
     }
 
     #[tokio::test]
@@ -1496,7 +1541,7 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         let missing = cwd.join("no-such-shell");
         std::fs::write(
-            cwd.join(".prime/agent/settings.json"),
+            agent_dir.join("settings.json"),
             serde_json::json!({ "shellPath": missing.to_string_lossy() }).to_string(),
         )
         .unwrap();

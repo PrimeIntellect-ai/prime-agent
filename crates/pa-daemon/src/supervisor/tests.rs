@@ -196,7 +196,7 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     resident
         .consecutive_failures
         .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
-    resident.intentional_stop.store(true, Ordering::SeqCst);
+    resident.transition(crate::registry::WorkerTransition::RequestStop);
     supervisor.registry.insert(Arc::clone(&resident)).await;
     tokio::time::timeout(
         Duration::from_secs(60),
@@ -256,7 +256,7 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
             futures::poll!(watch.as_mut()).is_pending(),
             "a live adopted worker keeps the watch parked"
         );
-        resident.intentional_stop.store(true, Ordering::SeqCst);
+        resident.transition(crate::registry::WorkerTransition::RequestStop);
         worker.kill().expect("kill sleep");
         worker.wait().expect("reap sleep");
         watch.await;
@@ -723,7 +723,9 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
     // the exit wait); the refuser never answers inside the budget.
     let stopped = abandon_update_resident(dir.path(), "w-abandon-stopped");
     let (stopped_tx, mut stopped_rx) = mpsc::channel::<WorkerRequest>(1);
-    *stopped.cmd_tx.lock().await = Some(stopped_tx);
+    stopped
+        .install_command_channel(stopped.begin_connection(), stopped_tx)
+        .await;
     let pump_resident = Arc::clone(&stopped);
     tokio::spawn(async move {
         let request = stopped_rx.recv().await.expect("the stop routes a shutdown");
@@ -738,16 +740,16 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         )));
     });
     supervisor.registry.insert(Arc::clone(&stopped)).await;
-    stopped.note_connection_live();
     let refused = abandon_update_resident(dir.path(), "w-abandon-refused");
     let (refused_tx, mut refused_rx) = mpsc::channel::<WorkerRequest>(1);
-    *refused.cmd_tx.lock().await = Some(refused_tx);
+    refused
+        .install_command_channel(refused.begin_connection(), refused_tx)
+        .await;
     tokio::spawn(async move {
         // The refuser never answers: the shutdown request runs out of budget.
         let _ = refused_rx.recv().await;
     });
     supervisor.registry.insert(Arc::clone(&refused)).await;
-    refused.note_connection_live();
 
     // Reach the committed stop window without the prepare machinery's
     // snapshot phase: the update state machine is driven directly.
@@ -1218,7 +1220,7 @@ async fn worker_probe_fails_at_the_deadline_and_names_the_worker() {
 
 #[tokio::test]
 async fn worker_probe_accepts_a_live_socket() {
-    let dir = std::env::temp_dir().join(format!("pa-probe-{}", uuid::Uuid::new_v4()));
+    let dir = Path::new("/tmp").join(format!("pa-probe-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("live.sock");
     let listener = pa_types::platform::transport::bind_transport(&socket)
@@ -1535,7 +1537,7 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
         "the stop completed: the worker left the registry"
     );
     assert!(
-        resident.intentional_stop.load(Ordering::SeqCst),
+        resident.route_state().stop_requested(),
         "the stop is intentional"
     );
 }
@@ -1578,7 +1580,9 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     // The fake worker connection: the routed `shutdown` reply is the flush barrier, held
     // until the test releases the settle. One channel slot is plenty.
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
-    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    resident
+        .install_command_channel(resident.begin_connection(), cmd_tx)
+        .await;
     let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
     let (turn_settled_tx, turn_settled_rx) = oneshot::channel::<()>();
     let (settle_release_tx, settle_release_rx) = oneshot::channel::<()>();
@@ -1722,7 +1726,9 @@ async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
     // The fake worker holds the turn for a virtual hour — past the old
     // ten-minute cap, inside the 24 h worker-request budget.
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
-    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    resident
+        .install_command_channel(resident.begin_connection(), cmd_tx)
+        .await;
     let pump_resident = Arc::clone(&resident);
     tokio::spawn(async move {
         let request = cmd_rx.recv().await.expect("the route lands the prompt");
@@ -1740,8 +1746,7 @@ async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
         )));
     });
     supervisor.registry.insert(Arc::clone(&resident)).await;
-    resident.note_connection_live();
-    resident.note_session_ready();
+    resident.transition(crate::registry::WorkerTransition::SessionReady);
     let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(16);
     let attached = subscribers::ClientSubscriptions::new("c".to_string(), targeted_tx);
     let command: DaemonCommand = serde_json::from_value(serde_json::json!({
@@ -2412,7 +2417,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
 #[tokio::test]
 async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id() {
     let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
+    let agent_dir = dir.path().canonicalize().unwrap().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
@@ -2708,7 +2713,7 @@ proptest! {
             let resident = ResidentWorker::new(active.clone(), descriptor, PathBuf::from("none"));
             supervisor.registry.insert(resident.clone()).await;
             // Retired: a forward past the ladder fails fast with WORKER_NOT_CONNECTED.
-            resident.note_retired();
+            resident.transition(crate::registry::WorkerTransition::GiveUp);
             let pre_key = pre_reserved.then(|| {
                 let scope = supervisor
                     .live_session_name_scope(&active, trimmed.into())

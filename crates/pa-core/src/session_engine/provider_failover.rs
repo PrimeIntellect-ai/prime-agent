@@ -9,13 +9,15 @@ use pa_agent::abort::AbortSignal;
 use pa_agent::types::{AssistantMessage, StopReason};
 use pa_types::ai::Model;
 
-use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
+use super::auto_retry::{
+    end_turn_on_auth_rejection, run_turn_with_auto_retry, AuthRecoveryCallback, AutoRetryEvent,
+    RetryStartReason,
+};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -80,7 +82,7 @@ pub fn failover_retry_delay(
 /// is exactly [`run_turn_with_auto_retry`] under `quick_policy`; otherwise each provider gets
 /// `failover.max_retries` quick retries, and a spent budget switches to the next candidate
 /// immediately. `switch` re-binds the session to a provider; `restore` hands the primary back and
-/// returns its `"provider/model-id"`.
+/// returns its `"provider/model-id"`; `auth_recovery` is the auth-retry seam.
 ///
 /// # Errors
 ///
@@ -100,6 +102,7 @@ pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     mut switch: S,
     mut restore: R,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -124,6 +127,7 @@ where
             emit,
             wait,
             park,
+            auth_recovery,
         )
         .await;
     }
@@ -137,6 +141,7 @@ where
             if switched {
                 let restored_model = restore().await?;
                 emit(AutoRetryEvent::End {
+                    aborted: message.stop_reason == StopReason::Aborted,
                     success: true,
                     attempt: total_retries,
                     final_error: None,
@@ -145,6 +150,7 @@ where
                 .await?;
             } else if total_retries > 0 {
                 emit(AutoRetryEvent::End {
+                    aborted: message.stop_reason == StopReason::Aborted,
                     success: true,
                     attempt: total_retries,
                     final_error: None,
@@ -158,12 +164,19 @@ where
             if switched {
                 let _ = restore().await?;
             }
+            emit(AutoRetryEvent::End {
+                aborted: true,
+                success: false,
+                attempt: total_retries,
+                final_error: Some("Retry cancelled".to_string()),
+                restored_model: None,
+            })
+            .await?;
             return Ok(with_stop_reason_aborted(message));
         }
         // Permanent and deterministic failures never walk the chain: a
         // rejected request fails the same way on every provider.
         let non_retryable = is_agent_lifecycle_failure(&message)
-            || is_faux_provider_queue_exhausted(&message)
             // A context overflow fails identically on every provider (TS
             // `_isRetryableError`): the recovery owns it.
             || is_context_overflow_failure(&message, context_window)
@@ -180,12 +193,13 @@ where
             // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling):
             // a first-attempt provider failure still discloses at
             // attempt 0; the self-managed arms (overflow recovery,
-            // lifecycle, faux) stay silent.
+            // lifecycle) stay silent.
             if total_retries > 0
                 || (has_provider_stream_failure(&message)
                     && !is_context_overflow_failure(&message, context_window))
             {
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: total_retries,
                     final_error: Some(final_error_of(&message)),
@@ -193,6 +207,17 @@ where
                 })
                 .await?;
             }
+            return Ok(message);
+        }
+        if let Some(message) = end_turn_on_auth_rejection(&message, auth_recovery.as_mut()).await {
+            emit(AutoRetryEvent::End {
+                aborted: false,
+                success: false,
+                attempt: total_retries,
+                final_error: Some(final_error_of(&message)),
+                restored_model: None,
+            })
+            .await?;
             return Ok(message);
         }
         total_retries += 1;
@@ -204,6 +229,7 @@ where
                 let _ = restore().await?;
             }
             emit(AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: total_retries - 1,
                 final_error: Some(final_error_of(&message)),
@@ -218,6 +244,7 @@ where
                     let _ = restore().await?;
                 }
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: total_retries,
                     final_error: Some(final_error_of(&message)),
@@ -286,6 +313,7 @@ where
                     ),
                 };
                 emit(AutoRetryEvent::End {
+                    aborted: false,
                     success: false,
                     attempt: total_retries - 1,
                     final_error: Some(final_error),
@@ -308,6 +336,7 @@ where
                 let _ = restore().await?;
             }
             emit(AutoRetryEvent::End {
+                aborted: true,
                 success: false,
                 attempt: total_retries,
                 final_error: Some("Retry cancelled".to_string()),
@@ -506,6 +535,7 @@ mod tests {
                 }
             },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -549,6 +579,83 @@ mod tests {
                 retry_after_ms: 60001
             }
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_a_failed_attempt_is_reported_without_reading_error_text() {
+        for switched in [false, true] {
+            let controller = pa_agent::abort::AbortController::new();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut calls = 0;
+            let cancel_call = if switched { 4 } else { 1 };
+            let message = run_turn_with_provider_failover(
+                &quick_policy(),
+                &fast_failover(),
+                &[model("backup")],
+                0,
+                Some(&controller.signal()),
+                || {
+                    calls += 1;
+                    if calls == cancel_call {
+                        controller.abort();
+                    }
+                    async {
+                        Ok(error_message(
+                            Some("server_error"),
+                            Some(500),
+                            "ordinary failure",
+                        ))
+                    }
+                },
+                |event| {
+                    events.lock().unwrap().push(event);
+                    async { Ok(()) }
+                },
+                |_| async { true },
+                |_| async { Ok(()) },
+                || async { Ok(None) },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(calls, cancel_call);
+            assert_eq!(message.stop_reason, StopReason::Aborted);
+            assert_eq!(
+                events.lock().unwrap().last(),
+                Some(&AutoRetryEvent::End {
+                    aborted: true,
+                    success: false,
+                    attempt: if switched { 3 } else { 0 },
+                    final_error: Some("Retry cancelled".to_string()),
+                    restored_model: None,
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_aborted_retry_keeps_its_cancellation_outcome_after_provider_failover() {
+        for switched in [false, true] {
+            let attempts = if switched { 3 } else { 1 };
+            let candidates = vec![model("backup")];
+            let mut script =
+                vec![error_message(Some("server_error"), Some(500), "retry"); attempts];
+            let mut aborted = ok_message("cancelled");
+            aborted.stop_reason = StopReason::Aborted;
+            script.push(aborted);
+            let harness = drive(&fast_failover(), &candidates, script).await;
+            assert_eq!(
+                harness.events.last(),
+                Some(&AutoRetryEvent::End {
+                    aborted: true,
+                    success: true,
+                    attempt: if switched { 3 } else { 1 },
+                    final_error: None,
+                    restored_model: switched.then(|| "primary/glm-5.3".to_string()),
+                })
+            );
+        }
     }
 
     #[tokio::test]
@@ -616,6 +723,7 @@ mod tests {
                     },
                 },
                 AutoRetryEvent::End {
+                    aborted: false,
                     success: true,
                     attempt: 3,
                     final_error: None,
@@ -655,6 +763,7 @@ mod tests {
         assert_eq!(
             end,
             &AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: MAX_TOTAL_PROVIDER_RETRIES,
                 final_error: Some("down 8".to_string()),
@@ -692,6 +801,7 @@ mod tests {
         assert_eq!(
             end,
             &AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: MAX_TOTAL_PROVIDER_RETRIES,
                 final_error: Some("down 8".to_string()),
@@ -729,6 +839,7 @@ mod tests {
         assert_eq!(
             harness.events.as_slice(),
             &[AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 0,
                 final_error: Some("bad request".to_string()),
@@ -753,12 +864,65 @@ mod tests {
         assert_eq!(
             harness.events.as_slice(),
             &[AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 0,
                 final_error: Some(
                     "404 No endpoints found that support tool use. Try disabling \"ipython\"."
                         .to_string(),
                 ),
+                restored_model: None,
+            }]
+        );
+    }
+
+    /// A credential rejection whose recovery ends the turn never retries
+    /// and never walks the candidate chain.
+    #[tokio::test]
+    async fn an_auth_rejection_whose_recovery_ends_the_turn_never_walks_the_chain() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let switches = std::sync::atomic::AtomicUsize::new(0);
+        let events: Mutex<Vec<AutoRetryEvent>> = Mutex::new(Vec::new());
+        let mut recovery = |_: &AssistantMessage| {
+            Box::pin(async {
+                super::super::auto_retry::AuthRecovery::EndTurn("sign in again".to_string())
+            }) as super::super::auto_retry::AuthRecoveryFuture
+        };
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &[model("backup-a")],
+            0,
+            None,
+            || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(error_message(Some("auth"), Some(401), "invalid token")) }
+            },
+            |event| {
+                events.lock().unwrap().push(event);
+                async { Ok(()) }
+            },
+            |_| async { true },
+            |_: &Model| {
+                switches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(()) }
+            },
+            || async { Ok(None) },
+            None,
+            Some(&mut recovery),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(switches.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(message.error_message.as_deref(), Some("sign in again"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![AutoRetryEvent::End {
+                aborted: false,
+                success: false,
+                attempt: 0,
+                final_error: Some("sign in again".to_string()),
                 restored_model: None,
             }]
         );
@@ -791,6 +955,7 @@ mod tests {
         assert_eq!(
             end,
             &AutoRetryEvent::End {
+                aborted: false,
                 success: false,
                 attempt: 3,
                 final_error: Some("down 3".to_string()),

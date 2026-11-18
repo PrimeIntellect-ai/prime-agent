@@ -87,6 +87,7 @@ async fn switch_session(state: &Arc<RpcState>, payload: &Value) -> Result<Respon
         .replace(RpcEngineRequest::Open {
             session_path: std::path::PathBuf::from(session_path),
             reuse_lease: false,
+            ready_gate: None,
         })
         .await;
     if let Err(error) = outcome {
@@ -195,6 +196,7 @@ async fn fork_at(
         // Settle any streaming turn before the rebuild: a turn still
         // appending would land its later messages on the new branch.
         engine.session.agent().wait_for_idle().await;
+        engine.session.discard_compact_auto_refine();
         engine
             .session
             .rebuild_branch_context(branch_entries)
@@ -250,6 +252,7 @@ async fn fork_at(
         .replace_locked(RpcEngineRequest::Open {
             session_path: forked_path,
             reuse_lease: false,
+            ready_gate: None,
         })
         .await;
     drop(lease);

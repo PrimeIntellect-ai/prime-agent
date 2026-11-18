@@ -499,8 +499,6 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
             .and_then(Value::as_str)
             .map(str::to_string),
     };
-    // The handle guard stays held through the refinement: no replacement
-    // or `set_model` interleaves before the file writes.
     let handle = state.session.handle().await;
     let engine = handle.engine.clone();
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);

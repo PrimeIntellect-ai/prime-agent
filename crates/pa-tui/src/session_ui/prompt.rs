@@ -440,6 +440,23 @@ impl SessionUi {
         if text.starts_with('/') {
             return self.handle_slash(text, behavior, view).await;
         }
+        // A `/skill:<name>` mid-message the session does not know stays plain
+        // text; say so (nothing is flagged before the command catalog loads).
+        if !self.skill_commands_cache.is_empty() {
+            let unknown: Vec<String> = pa_types::skill_blocks::skill_references(text)
+                .into_iter()
+                .filter(|name| {
+                    !self
+                        .skill_commands_cache
+                        .iter()
+                        .any(|entry| entry.name.strip_prefix("skill:") == Some(*name))
+                })
+                .map(|name| format!("/skill:{name}"))
+                .collect();
+            if !unknown.is_empty() {
+                self.note(&format!("Unknown skill: {}", unknown.join(", ")), view);
+            }
+        }
         self.send_prompt(text, behavior, view)
     }
 
@@ -647,9 +664,12 @@ impl SessionUi {
     ) -> Result<()> {
         // A new prompt settles the held bash cards into the transcript first.
         Self::flush_pending_bash(view);
-        if let Some(error) = self.reconnection_failed.clone() {
+        if let crate::interactive::reconnect::Connection::SessionPlaneFailed(error) =
+            &self.connection
+        {
             // The re-attach window expired: the connection is closed, nothing dispatches.
-            self.error_row(&format!("Daemon reconnection failed: {error}"), view);
+            let row = format!("Daemon reconnection failed: {error}");
+            self.error_row(&row, view);
             view.editor.set_text(text);
             return Ok(());
         }

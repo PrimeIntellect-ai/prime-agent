@@ -13,8 +13,9 @@
 //! The termios + process-tree exit audit (companion to the kitty fix and the
 //! terminal-state differential): the Ctrl+S output stop is RUNTIME state, not
 //! termios (`tcsetattr` never clears it), so a stop armed on a cooked tty must
-//! not outlive the TUI. Reuses the differential's pty harness.
-#![cfg(unix)]
+//! not outlive the TUI. Reuses the differential's pty harness. Linux-only:
+//! the pty audit walks `/proc`.
+#![cfg(target_os = "linux")]
 
 // This binary's routes use a subset of the shared module's surface,
 // so the rest is deliberately dead here.
@@ -44,6 +45,9 @@ const KITTY_FLAGS_PUSH: &[u8] = b"\x1b[>7u";
 const KITTY_QUERY: &[u8] = b"\x1b[?u";
 /// The harness's kitty answer: flags supported, then the primary DA.
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
+/// The shared harness's OSC 7501 detection constants (unused by these routes).
+const PROGRAM_STATUS_QUERY: &[u8] = b"\x1b]7501;?\x1b\\";
+const PROGRAM_STATUS_ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
 /// The child-mode env: which surface the re-executed binary runs.
 const CHILD_MODE_ENV: &str = "PA_TERMIOS_CHILD_MODE";
 /// The mock-supervisor socket for the chat/view surfaces.
@@ -386,7 +390,7 @@ impl SuspendCycleHarness {
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind mock socket");
         let server = std::thread::spawn({
             let listener = listener.try_clone().expect("clone mock listener");
-            move || harness::MockSupervisor::serve(&listener, &[])
+            move || harness::MockSupervisor::serve(&listener, &[], None)
         });
         drop(listener);
 

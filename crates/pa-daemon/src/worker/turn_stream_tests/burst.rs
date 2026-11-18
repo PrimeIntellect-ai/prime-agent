@@ -161,14 +161,10 @@ async fn a_provider_burst_broadcasts_one_coalesced_update_per_tick_not_per_delta
 /// The streamed-turn pipeline end to end, timed on the turn wall clock.
 /// The faux splitter randomizes chunk sizes, so runs vary; compare
 /// medians, not single runs.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 #[ignore = "run with cargo test -p pa-daemon --release streamed_turn_pipeline_benchmark -- --ignored --nocapture"]
 async fn streamed_turn_pipeline_benchmark() {
     for text_kb in [64usize, 256, 512] {
-        let _faux = crate::agent_engine::FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let word = "benchmark word ";
         let text = word.repeat(text_kb * 1024 / word.len());
@@ -178,24 +174,29 @@ async fn streamed_turn_pipeline_benchmark() {
             "contextWindow": 4_000_000,
             "maxTokens": 4_000_000,
         });
-        let engine = AgentSessionEngine::new(AgentEngineConfig {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: dir.path().join("agent"),
-            provider: None,
-            model: None,
-            api_key: None,
-            thinking: None,
-            session_dir: None,
-            session_file: None,
-            faux_script: Some(script.to_string()),
-            supervisor_link: None,
-            telemetry_disabled: Some(true),
-            cron_store: None,
-            queued_steering_probe: None,
-        })
-        .unwrap();
+        let engine = std::sync::Arc::new(
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: dir.path().join("agent"),
+                provider: None,
+                model: None,
+                api_key: None,
+                thinking: None,
+                session_dir: None,
+                session_file: None,
+                faux_script: Some(script.to_string()),
+                supervisor_link: None,
+                telemetry_disabled: Some(true),
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap(),
+        );
+        // The worker registers the engine's own arc: the live-auth
+        // resolver upgrades it per provider call.
+        engine.register_arc();
         let started = std::time::Instant::now();
-        let events = turn_session_events(std::sync::Arc::new(engine)).await;
+        let events = turn_session_events(engine).await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         let updates = events
             .iter()
@@ -212,32 +213,33 @@ async fn streamed_turn_pipeline_benchmark() {
 
 /// The parked loop snapshot reaches the wire intact: the last flushed
 /// `text_delta` update before `message_end` carries the final content.
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn the_last_parked_update_carries_the_final_content() {
-    let _faux = crate::agent_engine::FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let text = "pin word ".repeat(512);
     let script = json!({ "engine": "faux", "responses": [{ "content": [{ "type": "text", "text": text }] }] });
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
-        cwd: dir.path().to_path_buf(),
-        agent_dir: dir.path().join("agent"),
-        provider: None,
-        model: None,
-        api_key: None,
-        thinking: None,
-        session_dir: None,
-        session_file: None,
-        faux_script: Some(script.to_string()),
-        supervisor_link: None,
-        telemetry_disabled: Some(true),
-        cron_store: None,
-        queued_steering_probe: None,
-    })
-    .unwrap();
-    let events = turn_session_events(Arc::new(engine)).await;
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(script.to_string()),
+            supervisor_link: None,
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    // The worker registers the engine's own arc: the live-auth resolver
+    // upgrades it per provider call.
+    engine.register_arc();
+    let events = turn_session_events(engine).await;
     let end = *positions_of(&events, "message_end")
         .last()
         .expect("message_end");

@@ -22,7 +22,7 @@ impl Supervisor {
             return false;
         }
         let lifecycle = resident.descriptor.lock().await.lifecycle;
-        lifecycle == DaemonWorkerLifecycle::Ready && resident.cmd_tx.lock().await.is_some()
+        lifecycle == DaemonWorkerLifecycle::Ready && resident.route_state().connected
     }
 
     /// The live connected residents in creation order (TS walks its insertion-ordered map).

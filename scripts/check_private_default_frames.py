@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Actual fresh-startup model and warning captures, without inference.
 
-Uses the shared fingerprinted authorization-cache format with synthetic key/team
+Seeds the account's scoped Prime Inference snapshot for a synthetic key/team
 and disables all external networking in a hosted-only network namespace. This
 measures fresh process startup from controlled cache states, not live catalog
 fetch timing. The current scoped-selection policy is characterized, not approved.
@@ -47,23 +47,28 @@ def private_item():
                       'modalities': {'input': ['text'], 'output': ['text']}}}
 
 
-def cache_document(authorized):
-    fingerprint = hmac.new(KEY.encode(),
+def snapshot_document(binary, env, authorized):
+    # The offline catalog's public routes keep the snapshot above the coverage gate.
+    listed = subprocess.run([str(binary), 'model', 'list'], env=env, capture_output=True,
+                            text=True, check=True).stdout
+    public = [cells[1] for cells in map(str.split, listed.splitlines())
+              if cells[:1] == ['prime-inference']]
+    data = [{'id': model, 'pricing': {'input_usd_per_mtok': 1, 'output_usd_per_mtok': 1}}
+            for model in public]
+    scope = hmac.new(KEY.encode(),
         b'prime-agent:private-prime-authorization:v1\0' + TEAM.encode(), hashlib.sha256).hexdigest()
-    return {'fingerprint': fingerprint, 'refreshedAt': int(time.time() * 1000),
-            'data': [private_item()] if authorized else []}
+    return {'url': 'https://api.pinference.ai/api/v1/models', 'scope': scope,
+            'fetchedAt': int(time.time() * 1000),
+            'payload': {'data': data + [private_item()] if authorized else data}}
 
 
-def prepare(root, scenario):
+def prepare(binary, root, scenario):
     for name in ('home', 'agent', 'sessions', 'work', 'tmp', 'xdg'):
         (root / name).mkdir(parents=True)
     agent = root / 'agent'
     (agent / 'auth.json').write_text(json.dumps({'prime-inference': {
         'type': 'api_key', 'key': KEY, 'primeTeam': {'teamId': TEAM, 'name': 'Synthetic team'}}}))
     (agent / 'auth.json').chmod(0o600)
-    (agent / 'prime-inference-private-models.json').write_text(
-        json.dumps(cache_document(scenario != 'unavailable')))
-    (agent / 'prime-inference-private-models.json').chmod(0o600)
     scope = [PUBLIC] if scenario == 'excluded' else [PUBLIC, PRIVATE]
     (agent / 'settings.json').write_text(json.dumps({
         'defaultProvider': 'prime-inference', 'defaultModel': PRIVATE,
@@ -84,6 +89,9 @@ def prepare(root, scenario):
                PI_SESSION_DIR=str(root / 'sessions'), PRIME_AGENT_SESSION_DIR=str(root / 'sessions'),
                PI_OFFLINE='1', DO_NOT_TRACK='1')
     env[TAG] = str(root)
+    (agent / 'models').mkdir()
+    (agent / 'models' / 'prime-inference-models-cache.json').write_text(
+        json.dumps(snapshot_document(binary, env, scenario != 'unavailable')))
     return env
 
 
@@ -221,7 +229,7 @@ def validate_observation(scenario, observed):
 
 
 def capture(binary, scenario, root, directory, observed):
-    env = prepare(root, scenario)
+    env = prepare(binary, root, scenario)
     socket_path = root / 'd.sock'
     scope = OwnedProcesses(binary, root, socket_path)
     process = client = terminal = None
@@ -306,7 +314,7 @@ def run(args):
     assert not routes and not routes_v6, 'capture namespace must have no external route'
     result = {'validation_passed': False, 'runs': {}, 'network_default_route': routes,
         'network_ipv6_default_route': routes_v6,
-        'scope': 'Actual fresh TUI startup against owned daemons, matched PTY dimensions, signed synthetic authorization-cache states; no inference or external networking.',
+        'scope': 'Actual fresh TUI startup against owned daemons, matched PTY dimensions, synthetic scoped-snapshot states; no inference or external networking.',
         'limits': 'Does not exercise live catalog fetch timing or OS terminal font/pixel fidelity. SVGs render captured cells; raw ANSI preserves original attributes.',
         'source': {key: os.environ.get(key) for key in ('GITHUB_RUN_ID', 'GITHUB_SHA')}}
     try:

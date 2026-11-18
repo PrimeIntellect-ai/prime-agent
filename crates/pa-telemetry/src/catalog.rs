@@ -1241,11 +1241,22 @@ const HARNESS_REFINEMENTS_CHANGED: EventRule = EventRule {
     properties: &[("enabled", required(boolean()))],
 };
 
+/// Adoption of the web search provider setting: the chosen provider's id only.
+const WEB_SEARCH_PROVIDER_CHANGED: EventRule = EventRule {
+    name: "web search provider changed",
+    since: 2,
+    properties: &[(
+        "provider",
+        required(enum_rule(&["serper", "eco"], "serper")),
+    )],
+};
+
 /// Every catalogued event, flattened.
 #[must_use]
 pub fn catalog() -> Vec<&'static EventRule> {
     let mut all: Vec<&'static EventRule> = vec![
         &HARNESS_REFINEMENTS_CHANGED,
+        &WEB_SEARCH_PROVIDER_CHANGED,
         &AGENT_STARTED,
         &AGENT_RUN_COMPLETED,
         &AGENT_SESSION_ENDED,

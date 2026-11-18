@@ -5,18 +5,21 @@
 #![cfg(unix)]
 #![warn(clippy::allow_attributes_without_reason)]
 
-use std::io::{BufRead, BufReader, Write};
+mod support;
+
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
+    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, UiMode,
 };
 use serde_json::{json, Value};
+
+use support::{attach_response, create_response, write_json, write_session_event};
 
 /// The wait for the recovered banner: the recovery's fixed poll finds the successor well inside
 /// this bound.
@@ -43,10 +46,6 @@ impl FirstGeneration {
     }
 
     /// Serve until the closing batch, then free the socket path for the successor.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "mock daemon request loop: one match arm per scripted request method"
-    )]
     fn serve(self, socket: &Path) {
         let stream = accept(&self.listener, "the first daemon never saw the client");
         let mut writer = stream.try_clone().expect("clone first daemon socket");
@@ -73,24 +72,10 @@ impl FirstGeneration {
                 .to_string();
             match command_type.as_str() {
                 "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+                    write_json(&mut writer, &create_response(id));
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(&mut writer, &attach_response(id, "restart session"));
                 }
                 "prompt" => {
                     write_json(&mut writer, &success_response(id, "prompt"));
@@ -150,6 +135,7 @@ impl FirstGeneration {
                         }),
                     );
                     write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                    write_session_event(&mut writer, &json!({ "type": "agent_end" }));
                     write_json(
                         &mut writer,
                         &json!({ "type": "daemon_closing", "reason": "shutdown" }),
@@ -220,7 +206,7 @@ impl SuccessorDaemon {
             match command_type.as_str() {
                 "attach" => {
                     self.attach_requests.lock().unwrap().push(command);
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(&mut writer, &attach_response(id, "restart session"));
                 }
                 _ => write_json(&mut writer, &success_response(id, &command_type)),
             }
@@ -234,7 +220,11 @@ fn accept(listener: &UnixListener, what: &str) -> UnixStream {
     let deadline = std::time::Instant::now() + Duration::from_millis(ACCEPT_WAIT_MS);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // macOS inherits O_NONBLOCK from the listener on accept; the request loop blocks.
+                stream.set_nonblocking(false).expect("blocking mock stream");
+                return stream;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -272,101 +262,9 @@ fn success_response(id: &str, command: &str) -> Value {
     })
 }
 
-/// One streamed session event, routed like the daemon's event pump routes it (the `session_event`
-/// envelope keyed by the active session).
-fn write_session_event(writer: &mut UnixStream, event: &Value) {
-    write_json(
-        writer,
-        &json!({
-            "type": "session_event",
-            "activeSessionId": "s1",
-            "event": event,
-        }),
-    );
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
-}
-
-/// The slim attach result with an empty transcript.
-fn attach_data(id: &str) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": "restart session",
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
-}
-
 /// One plain Enter key event.
 fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
-}
-
-fn options_with_session(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: false,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: None,
-    }
 }
 
 /// A turn settling as the daemon dies must not stall the recovery (the post-turn refresh on the
@@ -411,7 +309,10 @@ fn a_turn_settling_with_the_shutdown_does_not_stall_the_recovery() {
         width: 100,
         height: 40,
     };
-    let options = options_with_session(socket, SessionSelection::New);
+    let options = InteractiveOptions {
+        fullscreen_mouse: false,
+        ..support::options(socket)
+    };
     let outcome = runtime.block_on(run_interactive(options, UiMode::Headless(plan)));
     handle
         .join()

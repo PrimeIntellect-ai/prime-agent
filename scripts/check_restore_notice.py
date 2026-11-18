@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from lifecycle_lib import digest, skill_pythonpath
+from lifecycle_lib import digest, use_skill_python
 
 RESET = ("The working directory and environment variables were reset to the session defaults; "
          "re-apply any os.chdir(...) or os.environ[...] changes you still need.")
@@ -173,8 +173,8 @@ def run_case(binary, root, observation):
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
-               XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'),
-               PYTHONPATH=skill_pythonpath())
+               XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'))
+    use_skill_python(root, env)
     server = Server(root)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

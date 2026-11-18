@@ -669,6 +669,17 @@ pub enum ModelInput {
     Text,
     Image,
 }
+
+/// How a Prime Inference route is served (the live `/models` `serving`
+/// field): `hosted` runs on Prime's own clusters, `gateway` is routed
+/// through the Prime gateway. Absent for every other provider and for
+/// entries the live catalog has not yet labeled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelServing {
+    Hosted,
+    Gateway,
+}
 mod compat;
 pub use compat::{
     AnthropicMessagesCompat, CacheControlFormat, CompatKind, MaxTokensField, ModelCompat,
@@ -716,6 +727,11 @@ pub struct Model {
     /// Flagship model surfaced above non-featured models of the same provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub featured: Option<bool>,
+    /// Prime Inference serving class: `Some(Hosted)` on Prime's clusters,
+    /// `Some(Gateway)` through the Prime gateway, `None` for every other
+    /// provider and unlabeled entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving: Option<ModelServing>,
     /// Extra request headers. Ordered (`BTreeMap`): serializes into wire JSON (the model catalog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,

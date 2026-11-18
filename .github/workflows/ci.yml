@@ -114,8 +114,10 @@ env:
 jobs:
   # The touched-crate path filter (the PR smoke's selection). Push and queue
   # runs use the full selection; PR runs select crates plus reverse deps,
-  # failing safe to the full selection on any non-crate path. The output
-  # feeds test shards' --crates; empty means "the full union".
+  # skipping the guaranteed-metadata paths (.changes/ fragments - no test
+  # unit reads them) and failing safe to the full selection on any other
+  # non-crate path. The output feeds test shards' --crates; empty means
+  # "the full union".
   changes:
     name: touched crates (PR) / full selection (push + queue)
     needs: trust
@@ -146,10 +148,13 @@ jobs:
           # semantics, renames carrying both sides), fully paginated —
           # `gh pr view --json files` caps at 100 rows and would silently
           # under-map a large PR, and its field names differ from the REST
-          # rows (`path` vs `filename`). The mapping itself is fail-safe
-          # by construction (scripts/ci_pr_crates.py + its battery): any
-          # non-crate path, a rename's removed side, an empty column, or
-          # the API's 3000-file ceiling means the FULL selection runs.
+          # rows (`path` vs `filename`). The mapping is fail-safe by
+          # construction (scripts/ci_pr_crates.py + its battery): a crate
+          # path narrows to its wave; `.changes/` fragments are skipped
+          # (no test unit reads them, and a fragment-only PR keeps the
+          # FULL selection); any OTHER non-crate path, a rename's removed
+          # side, an empty column, or the API's 3000-file ceiling means
+          # the FULL selection runs.
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
             --paginate --jq '.[] | [.filename, .previous_filename // ""] | @tsv' \
             > "${RUNNER_TEMP}/pr-files.tsv"
@@ -336,7 +341,9 @@ jobs:
       # behavior is unchanged.
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
         if: steps.selection.outputs.units != '0'
-        run: cargo build --locked --workspace --bins
+        # --examples pulls in dev-dependencies, so the bins build with the same
+        # feature set as the test units below (CI-only; release jobs unaffected).
+        run: cargo build --locked --workspace --bins --examples
       # The kernel e2e suites resolve the ambient kernel venv; left to
       # bootstrap lazily, the first session prewarm starts it mid-shard and
       # the next kernel unit fails against the half-built venv (run
@@ -344,21 +351,6 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
-      - name: Prepare pinned TS frame comparison binary
-        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check_link_frames.py', 'scripts/check_ipython_diff_frames.py') != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          reference="${RUNNER_TEMP}/frame-ts-reference"
-          mkdir -p "${reference}/package"
-          gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
-            --pattern prime-agent-0.9.8-linux-x64.tar.gz --dir "${reference}"
-          archive="${reference}/prime-agent-0.9.8-linux-x64.tar.gz"
-          echo "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76235e2  ${archive}" | sha256sum --check
-          tar -xzf "${archive}" -C "${reference}/package"
-          echo "PA_TS_ARCHIVE=${archive}" >> "${GITHUB_ENV}"
-          echo "PA_TS_BINARY=${reference}/package/prime-agent" >> "${GITHUB_ENV}"
       # The real-binary lifecycle checks drive the debug binary through owned
       # daemons, PTYs and loopback providers only. One leg is enough.
       - name: Run the rust lifecycle checks

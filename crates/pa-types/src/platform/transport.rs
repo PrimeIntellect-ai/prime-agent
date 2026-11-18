@@ -162,7 +162,65 @@ pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
 pub async fn connect_transport(path: &Path) -> Result<Box<dyn TransportStream>> {
     let address = UnixSocketAddress::new(path)?;
     let stream = tokio::net::UnixStream::connect(address.effective()).await?;
+    ensure_same_user_peer(std::os::fd::AsFd::as_fd(&stream), path)?;
     Ok(Box::new(stream))
+}
+
+/// Refuse a socket served by another user's process: whoever controls the
+/// socket's directory could otherwise answer as the daemon.
+#[cfg(unix)]
+fn ensure_same_user_peer(fd: std::os::fd::BorrowedFd<'_>, path: &Path) -> std::io::Result<()> {
+    let peer_uid = peer_uid(fd)?;
+    // SAFETY: geteuid only reads this process's effective uid.
+    let uid = unsafe { libc::geteuid() };
+    if peer_uid != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "Socket {} is served by uid {peer_uid}, not the current user (uid {uid})",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<libc::uid_t> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    // `ucred` is 12 bytes.
+    #[allow(clippy::cast_possible_truncation)]
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: SO_PEERCRED writes at most `len` bytes into `cred`.
+    let status = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn peer_uid(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<libc::uid_t> {
+    use std::os::fd::AsRawFd;
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: getpeereid writes the peer's ids into the two locals.
+    if unsafe { libc::getpeereid(fd.as_raw_fd(), &raw mut uid, &raw mut gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid)
 }
 
 /// Definitive nonblocking Unix listener refusal, used by the exit cleanup.
@@ -350,6 +408,7 @@ impl BlockingTransportStream for std::os::unix::net::UnixStream {
 pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTransportStream>> {
     let address = UnixSocketAddress::new(path).map_err(std::io::Error::other)?;
     let stream = std::os::unix::net::UnixStream::connect(address.effective())?;
+    ensure_same_user_peer(std::os::fd::AsFd::as_fd(&stream), path)?;
     Ok(Box::new(stream))
 }
 

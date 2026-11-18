@@ -232,7 +232,9 @@ fn worker_stderr_lands_in_the_per_worker_log_and_prunes_retention() {
 
 #[test]
 fn never_ready_worker_failure_carries_the_captured_stderr_tail() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    // Under /tmp: a TMPDIR too long for a socket path (macOS's default) makes
+    // the socket dir fall back to the real /tmp/prime-agent-<uid>, which exists.
+    let dir = tempfile::TempDir::new_in("/tmp").expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");

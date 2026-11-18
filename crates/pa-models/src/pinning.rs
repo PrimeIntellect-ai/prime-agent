@@ -131,6 +131,7 @@ mod tests {
                 max_tokens: 1,
                 max_tokens_explicit: false,
                 featured: None,
+                serving: None,
                 headers,
                 compat: None,
             }

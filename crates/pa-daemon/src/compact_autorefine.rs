@@ -11,6 +11,28 @@ use crate::agent_engine::AgentSessionEngine;
 use crate::engine::SessionEngine as _;
 
 impl AgentSessionEngine {
+    pub(crate) fn report_background_refinement(
+        &self,
+        pending: tokio::task::JoinHandle<
+            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+        >,
+    ) {
+        let sink = self.refinement_completion_sink.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            sink(pending);
+        } else {
+            // Non-worker hosts can omit the stream sink; durable core rows still
+            // persist. Observe errors instead of silently discarding the task.
+            self.runtime.spawn(async move {
+                match pending.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => eprintln!("pa-daemon: refinement failed: {error:#}"),
+                    Err(error) => eprintln!("pa-daemon: refinement task failed: {error}"),
+                }
+            });
+        }
+    }
+
     /// Whether a compaction armed the compact-trigger round on the built
     /// session (TS `_compactAutoRefinePending`).
     pub(crate) fn compact_auto_refine_pending(&self) -> bool {
@@ -116,8 +138,7 @@ impl AgentSessionEngine {
 #[cfg(test)]
 mod tests {
     use crate::agent_engine::tests::{admit, faux_engine_with_settings};
-    use crate::agent_engine::AgentSessionEngine;
-    use crate::agent_engine::FAUX_TEST_LOCK;
+    use crate::agent_engine::{AgentSessionEngine, FAUX_TEST_LOCK};
     use crate::engine::SessionEngine;
     use crate::engine::{CompactionOutcome, CompactionRequest, EngineEvent};
     use serde_json::json;
@@ -132,7 +153,7 @@ mod tests {
         script: &serde_json::Value,
         reserve_tokens: u64,
         with_session_file: bool,
-    ) -> (AgentSessionEngine, tempfile::TempDir) {
+    ) -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
         let (engine, dir) = faux_engine_with_settings(script, reserve_tokens);
         if with_session_file {
             let sessions = dir.path().join("sessions");
@@ -419,9 +440,6 @@ mod tests {
 
     #[test]
     fn manual_compaction_arms_and_consumes_the_round() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = trigger_engine(
             &json!({
                 "responses": [

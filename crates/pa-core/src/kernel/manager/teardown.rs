@@ -2,7 +2,7 @@
 
 use super::{
     json, live_kernels, lock, oneshot, orphan_journal, Arc, Duration, Inner, KernelShutdownOptions,
-    KernelState, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
+    Lifecycle, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
 };
 
 impl Inner {
@@ -23,10 +23,8 @@ impl Inner {
             *memo = Some(slot.clone());
             slot
         };
-        lock(&self.guarded).teardown_in_flight += 1;
         self.supersede_protocol_repair();
         let performed = self.perform_shutdown(opts).await;
-        lock(&self.guarded).teardown_in_flight -= 1;
         slot.finish(None);
         {
             let mut memo = lock(&self.shutdown_memo);
@@ -38,13 +36,9 @@ impl Inner {
     }
 
     pub(crate) async fn perform_shutdown(self: &Arc<Self>, opts: KernelShutdownOptions) -> bool {
-        if lock(&self.guarded).state == KernelState::Shutdown {
+        if lock(&self.guarded).lifecycle.is_shut_down() {
             live_kernels::remove(self);
-            // Scoped read: re-locking inside the comparison self-deadlocks.
-            let graceful_in_flight = {
-                let g = lock(&self.guarded);
-                g.graceful_shutdown_generation == Some(g.start_generation)
-            };
+            let graceful_in_flight = lock(&self.guarded).lifecycle.graceful_shutdown_in_flight();
             if graceful_in_flight {
                 return false;
             }
@@ -52,7 +46,7 @@ impl Inner {
             return true;
         }
         // Captured before any await: teardowns and newer starts bump the counter.
-        let generation = lock(&self.guarded).start_generation;
+        let generation = lock(&self.guarded).lifecycle.generation();
         if opts.snapshot {
             self.flush_snapshot_for_dispose().await;
             if self.start_stale(generation) {
@@ -61,12 +55,10 @@ impl Inner {
         }
         // Protocol shutdown first: the runtime closes MCP servers and kills
         // live bash() process groups a bare hard-kill would leak.
-        let protocol_shutdown_available = lock(&self.guarded).state == KernelState::Running;
-        {
-            let mut g = lock(&self.guarded);
-            g.state = KernelState::Shutdown;
-            g.graceful_shutdown_generation = Some(generation);
-        }
+        let protocol_shutdown_available = lock(&self.guarded).lifecycle.is_running();
+        lock(&self.guarded)
+            .lifecycle
+            .transition(Lifecycle::ShuttingDown { generation });
         live_kernels::remove(self);
 
         let mut performed_cleanup = false;
@@ -140,8 +132,16 @@ impl Inner {
         }
         {
             let mut g = lock(&self.guarded);
-            if g.graceful_shutdown_generation == Some(generation) {
-                g.graceful_shutdown_generation = None;
+            let owns_grace = match g.lifecycle.current() {
+                Lifecycle::ShuttingDown { generation: owner } => *owner == generation,
+                Lifecycle::Idle
+                | Lifecycle::Starting(_)
+                | Lifecycle::Running
+                | Lifecycle::Discarding
+                | Lifecycle::Defunct => false,
+            };
+            if owns_grace {
+                g.lifecycle.transition(Lifecycle::Defunct);
             }
         }
         if !self.start_stale(generation) {
@@ -156,8 +156,7 @@ impl Inner {
     pub(crate) fn cleanup_resources(&self, kill_signal: Signal) {
         let had_background_work = {
             let mut g = lock(&self.guarded);
-            // Any teardown invalidates in-flight starts.
-            g.start_generation += 1;
+            g.lifecycle.invalidate_starts();
             if let Some(timer) = lock(&self.snapshot_timer).take() {
                 timer.abort();
             }
@@ -182,7 +181,6 @@ impl Inner {
         self.reject_active_execution("Kernel has been shut down");
         *lock(&self.stderr_log) = None;
         let child = lock(&self.child).take();
-        lock(&self.guarded).ready_tx.take();
         if let Some(child) = child {
             // Dropping the write pipe signals EOF to the child's stdin reader;
             // closing stdin is equivalent to a shutdown request.
@@ -201,7 +199,6 @@ impl Inner {
                 orphan_journal::reap_kernel_orphan_processes(pid);
             }
         }
-        *lock(&self.start_memo) = None;
     }
 }
 

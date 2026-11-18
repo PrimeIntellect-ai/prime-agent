@@ -114,7 +114,7 @@ impl Supervisor {
         }
         // Only a connected resident rebinds: one mid-teardown would answer the
         // not-connected error instead of the unknown-session failure the client can act on.
-        if resident.cmd_tx.lock().await.is_none() {
+        if !resident.route_state().connected {
             return None;
         }
         // Only a session-ready resident rebinds: a replacement's command channel exists
@@ -995,14 +995,18 @@ mod tests {
     ) -> tokio::sync::mpsc::Receiver<WorkerRequest> {
         let (cmd_tx, cmd_rx) =
             tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        resident
+            .install_command_channel(resident.begin_connection(), cmd_tx)
+            .await;
         cmd_rx
     }
 
     async fn responsive_worker(resident: &Arc<ResidentWorker>, state: Value) {
         let (cmd_tx, mut cmd_rx) =
             tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        resident
+            .install_command_channel(resident.begin_connection(), cmd_tx)
+            .await;
         let responder = Arc::clone(resident);
         tokio::spawn(async move {
             while let Some(request) = cmd_rx.recv().await {

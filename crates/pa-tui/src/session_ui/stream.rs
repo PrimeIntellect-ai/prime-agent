@@ -233,7 +233,10 @@ mod streaming_tray_hint_tests {
         let kb = KeybindingsManager::new();
         assert_eq!(
             streaming_tray_hint(&kb, true, "a draft in the editor"),
-            Some("Alt+Enter to queue message".to_string()),
+            Some(format!(
+                "{}+Enter to queue message",
+                crate::keybindings::format_key_text("alt")
+            )),
             "the default binding renders the TS sentence"
         );
     }

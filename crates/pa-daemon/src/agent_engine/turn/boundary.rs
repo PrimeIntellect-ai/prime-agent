@@ -60,7 +60,7 @@ impl AgentSessionEngine {
                 return BoundaryRun::Proceed;
             }
         };
-        let api_key = self.resolve_request_api_key(&model);
+        let (model, api_key) = self.resolve_request_target(model);
         // The start event goes out before the summarizer runs, carrying the
         // pending instructions.
         let scheduled = {
@@ -94,8 +94,8 @@ impl AgentSessionEngine {
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
         let consumption = {
-            let guard = self.session.blocking_lock();
-            let Some(engine) = guard.as_deref() else {
+            let engine = self.session.blocking_lock().clone();
+            let Some(engine) = engine else {
                 self.clear_auto_compaction_abort(&controller);
                 return BoundaryRun::Proceed;
             };
@@ -141,7 +141,7 @@ impl AgentSessionEngine {
         }
         let mut stopped_for_compaction = false;
         let mut compacted = false;
-        match consumption.compaction {
+        match consumption {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the settled end;
                 // its pair precedes `compaction_end`.
@@ -221,6 +221,7 @@ impl AgentSessionEngine {
             }
             None => {}
         }
+
         if stopped_for_compaction {
             BoundaryRun::StoppedForCompaction { compacted }
         } else {
@@ -232,8 +233,10 @@ impl AgentSessionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
+    use crate::agent_engine::tests::{admit, write_compaction_settings};
     use crate::agent_engine::FAUX_TEST_LOCK;
+    use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
+    use pa_core::session_engine::refine::CommittedRefinement;
     use pa_core::session_engine::turn_boundary::PendingRefine;
     use serde_json::json;
 
@@ -255,15 +258,16 @@ mod tests {
             engine
                 .runtime
                 .block_on(session.turn_boundary.schedule_refine(PendingRefine {
-                    instructions: Some("Verify the completed outcome".to_string()),
-                    global: false,
+                    instructions: Some(instructions.to_string()),
+                    global,
                 }));
         }
-        let mut events = Vec::new();
-        let boundary = engine.run_turn_boundary(&mut |event| {
-            events.push(event);
-            true
-        });
+        let (send, receive) = std::sync::mpsc::channel();
+        *engine.refinement_completion_sink.lock().unwrap() =
+            Some(std::sync::Arc::new(move |pending| {
+                send.send(pending).unwrap();
+            }));
+        let boundary = engine.run_turn_boundary(&mut |_| true);
         assert!(matches!(boundary, BoundaryRun::Proceed));
         let failure = events
             .iter()

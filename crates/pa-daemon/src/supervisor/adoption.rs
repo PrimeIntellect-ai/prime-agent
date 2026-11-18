@@ -7,7 +7,7 @@ use super::{
     anyhow, json, load_descriptors, response_failure, response_success, socket,
     worker_connect_deadline, Context, DaemonCommand, DaemonResponse, DaemonWorkerLifecycle,
     Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor, Value,
-    WorkerRegistration,
+    WorkerRegistration, WorkerTransition,
 };
 
 /// An unobservable start identity does not prove that a live pid was recycled.
@@ -286,7 +286,7 @@ impl Supervisor {
                 }
                 // The adopted worker's session already exists (its create ran before the
                 // supervisor restart): routed client commands may reach it immediately.
-                resident.note_session_ready();
+                resident.transition(WorkerTransition::SessionReady);
             }
             (adopted, None)
         } else {
@@ -697,7 +697,7 @@ impl Supervisor {
         }
         // The self-registered worker's session already exists: routed
         // client commands may reach it immediately.
-        resident.note_session_ready();
+        resident.transition(WorkerTransition::SessionReady);
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(
             Arc::clone(&resident),

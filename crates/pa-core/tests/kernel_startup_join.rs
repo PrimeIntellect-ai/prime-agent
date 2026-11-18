@@ -1,11 +1,12 @@
 //! TS provisioner parity: all first-touch callers join one in-flight boot.
-// Unix-only: the permission bits the provisioner stamps are unix mode
-// bits (std::os::unix::fs::PermissionsExt).
+// Unix-only: the fixture interpreters are sh scripts.
 #![cfg(unix)]
+
+mod script;
 
 use pa_core::kernel::cancellation::AbortSignal;
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
-use std::os::unix::fs::PermissionsExt;
+use script::write_executable;
 use std::time::Duration;
 
 fn failing_kernel() -> (
@@ -16,15 +17,13 @@ fn failing_kernel() -> (
     let dir = tempfile::TempDir::new().unwrap();
     let count = dir.path().join("starts");
     let python = dir.path().join("slow-python");
-    std::fs::write(
+    write_executable(
         &python,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nexit 37\n",
             count.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {

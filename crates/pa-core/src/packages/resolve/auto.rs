@@ -11,8 +11,8 @@ use super::discovery::{
 };
 use super::patterns::is_enabled_by_overrides;
 use super::{
-    resource_type_dir_name, settings_array, MetadataSource, PathMetadata, ResourceAccumulator,
-    ResourceOrigin, ResourceType, RESOURCE_TYPES,
+    resource_type_dir_name, settings_array, DisabledBy, MetadataSource, PathMetadata,
+    ResourceAccumulator, ResourceOrigin, ResourceType, RESOURCE_TYPES,
 };
 use crate::settings::Settings;
 use crate::skills::diagnostics::ResourceDiagnostic;
@@ -65,10 +65,11 @@ impl PackageManager {
                              overrides: &[String],
                              base_dir: &Path| {
             for path in paths {
-                let enabled = is_enabled_by_overrides(&path, overrides, base_dir);
+                let disabled_by = (!is_enabled_by_overrides(&path, overrides, base_dir))
+                    .then_some(DisabledBy::Settings);
                 accumulator
                     .map(resource_type)
-                    .add(&path, metadata.clone(), enabled);
+                    .add(&path, metadata.clone(), disabled_by);
             }
         };
 
@@ -140,23 +141,37 @@ impl PackageManager {
                         path: Some(bundled_dir.display().to_string()),
                     });
                 }
-                let mut builtin_skill_overrides = user_overrides[0].clone();
-                if !self.bundled_websearch_enabled() {
-                    // No Serper credential on the machine (and no explicit
-                    // settings override): web search stays off so the prompt
-                    // never advertises a tool that errors on use.
-                    builtin_skill_overrides.push("-websearch/SKILL.md".to_string());
+                // No key for the selected web search provider on the machine
+                // (and no explicit settings override): web search stays off
+                // so the prompt never advertises a tool that errors on use.
+                let websearch_gate = if self.bundled_websearch_enabled() {
+                    Vec::new()
+                } else {
+                    vec!["-websearch/SKILL.md".to_string()]
+                };
+                // The user's settings, then the gates: each list applies on
+                // its own so the listing can name the one that disabled a
+                // skill (the gates hold only `-` force-excludes, which win
+                // over any settings entry either way).
+                for path in builtin_entries {
+                    let disabled_by =
+                        if !is_enabled_by_overrides(&path, &user_overrides[0], bundled_dir) {
+                            Some(DisabledBy::Settings)
+                        } else if !is_enabled_by_overrides(&path, &websearch_gate, bundled_dir) {
+                            Some(DisabledBy::WebSearchOff)
+                        } else if !is_enabled_by_overrides(
+                            &path,
+                            self.extra_builtin_skill_overrides(),
+                            bundled_dir,
+                        ) {
+                            Some(DisabledBy::McpLogin)
+                        } else {
+                            None
+                        };
+                    accumulator
+                        .skills
+                        .add(&path, builtin_metadata.clone(), disabled_by);
                 }
-                builtin_skill_overrides
-                    .extend(self.extra_builtin_skill_overrides().iter().cloned());
-                add_resources(
-                    accumulator,
-                    ResourceType::Skills,
-                    builtin_entries,
-                    &builtin_metadata,
-                    &builtin_skill_overrides,
-                    bundled_dir,
-                );
             }
         }
 

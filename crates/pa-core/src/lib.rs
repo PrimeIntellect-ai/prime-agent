@@ -38,9 +38,8 @@ pub use tools::render_utils::{get_image_dimensions_prefix, IMAGE_DIMENSIONS_PREF
 // ipython tool: definition + kernel lifecycle seam (RLM bootstrap included).
 pub use tools::ipython::{
     create_ipython_tool_definition, sent_agent_message_json, ExecuteResult, ExecuteStatus,
-    IpythonKernelProvisioner, IpythonToolOptions, IpythonToolUi, KernelAttachment,
-    KernelBusyAfterInterruptError, KernelErrorInfo, KernelExecError, KernelExecutor,
-    LateSentAgentMessageHandler,
+    IpythonKernelProvisioner, IpythonToolOptions, KernelAttachment, KernelErrorInfo,
+    KernelExecutor, LateSentAgentMessageHandler,
 };
 // RLM kernel subsystem: persistent IPython kernel lifecycle.
 pub mod agent_traces;
@@ -63,5 +62,4 @@ pub mod settings;
 pub mod skills;
 pub mod slash_command_args;
 pub mod update;
-pub mod workspace_snapshot;
 pub use kernel::ReplKernelManager;

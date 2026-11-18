@@ -5,7 +5,9 @@ use crate::session_engine::messages::{
 };
 use pa_agent::agent::{AgentInitialState, AgentOptions};
 use pa_agent::scripted::ScriptedProvider;
+use pa_agent::types::{AgentTool, AgentToolResult};
 use pa_types::ai::AssistantMessage;
+use std::future::Future;
 
 fn test_model() -> pa_agent::types::Model {
     serde_json::from_value(serde_json::json!({
@@ -280,48 +282,101 @@ fn refine_assistant_row(error: bool) -> SessionAgentMessage {
     })
 }
 
-async fn run_child_refine(
-    session: &AgentSession,
-    reply: &'static str,
-    global_dir: &std::path::Path,
-) -> anyhow::Result<crate::refinement::RefinementResult> {
-    // The two halves of the child flow driven directly: the parent-side
-    // prepare (the baseline capture), then the wake-side apply over the
-    // child's proposal reply.
-    let (prepared, _) = session
-        .prepare_refinement(
-            &refine::RefineOptions::default(),
-            &session_ai_model(),
-            global_dir,
-        )
-        .await?;
-    session
-        .apply_child_refinement(prepared, reply, refine::RefinementSource::User, global_dir)
-        .await
+/// The refiner seam's reply: one assistant row carrying the plan text.
+fn plan_reply(plan: &str) -> AssistantMessage {
+    AssistantMessage {
+        content: vec![pa_types::ai::AssistantContentBlock::Text(
+            pa_types::ai::TextContent {
+                text: plan.to_string(),
+                text_signature: None,
+                rest: serde_json::Map::default(),
+            },
+        )],
+        api: "openai-completions".to_string(),
+        provider: "test".to_string(),
+        model: "m".to_string(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: pa_types::ai::Usage::default(),
+        stop_reason: pa_types::ai::StopReason::Stop,
+        stop_reason_raw: None,
+        error_message: None,
+        timestamp: 0,
+        rest: serde_json::Map::default(),
+    }
 }
+
+fn refine_plan_call(plan: &'static str) -> crate::refinement::executor::RefinerFn {
+    Box::new(move |_model, _system, _prompt| {
+        let reply = plan_reply(plan);
+        Box::pin(async move { Ok(reply) })
+    })
+}
+
+/// [`refine_plan_call`] over a seam that records the prompt it was handed,
+/// so a test can assert on what the planner read.
+fn refine_plan_call_capturing(
+    plan: &'static str,
+    captured: Arc<std::sync::Mutex<Vec<String>>>,
+) -> crate::refinement::executor::RefinerFn {
+    Box::new(move |_model, _system, prompt| {
+        captured.lock().unwrap().push(prompt);
+        let reply = plan_reply(plan);
+        Box::pin(async move { Ok(reply) })
+    })
+}
+
+/// Seed one local memory entry into a harness store dir, the shape a
+/// prior refinement wrote.
+fn seed_local_memory(dir: &std::path::Path, id: &str, title: &str) {
+    let mut state = crate::refinement::empty_harness_state();
+    state
+        .entries
+        .get_mut(&crate::refinement::RefinementKind::Memory)
+        .unwrap()
+        .insert(
+            id.to_string(),
+            crate::refinement::HarnessEntry {
+                id: id.to_string(),
+                kind: crate::refinement::RefinementKind::Memory,
+                title: title.to_string(),
+                content: format!("Seeded local entry {id}"),
+                path: "general".to_string(),
+                scope: Some(crate::refinement::HarnessScope::Local),
+                reference: serde_json::Map::default(),
+                arguments: serde_json::Map::default(),
+                metadata: serde_json::Map::default(),
+                source: "agent".to_string(),
+                created_at: "2026-11-16T00:00:00Z".to_string(),
+                updated_at: "2026-11-16T00:00:00Z".to_string(),
+                version: 1,
+            },
+        );
+    crate::refinement::save_harness_state(dir, &state).unwrap();
+}
+
 const APPLIED_PLAN: &str = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
 const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
 
 /// A persisted session over two seeded rows, with the live loop context
 /// built the way the resume path builds it (one rebuild).
 async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
-    refine_test_session_built(true).await
+    refine_test_session_with(Arc::new(ScriptedProvider::new(test_model())), Vec::new()).await
 }
 
-/// `refine_test_session`'s unpersisted twin: the daemon's engine session
-/// (in-memory, no materialized session file), for the pins that care
-/// about the parent's file-less shape.
-async fn refine_test_session_unpersisted() -> (AgentSession, tempfile::TempDir) {
-    refine_test_session_built(false).await
-}
-
-async fn refine_test_session_built(persisted: bool) -> (AgentSession, tempfile::TempDir) {
-    let provider = Arc::new(ScriptedProvider::new(test_model()));
+/// [`refine_test_session`] over a caller-owned provider and tool set.
+async fn refine_test_session_with(
+    provider: Arc<ScriptedProvider>,
+    tools: Vec<Arc<dyn AgentTool>>,
+) -> (AgentSession, tempfile::TempDir) {
     let options = AgentOptions {
         initial_state: AgentInitialState {
             model: Some(test_model()),
+            tools: Some(tools),
             ..Default::default()
         },
+        convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
         stream_fn: Some(provider.stream_fn()),
         ..Default::default()
     };
@@ -329,13 +384,8 @@ async fn refine_test_session_built(persisted: bool) -> (AgentSession, tempfile::
     let tmp = tempfile::tempdir().unwrap();
     let session_dir = tmp.path().join("session");
     std::fs::create_dir_all(&session_dir).unwrap();
-    let mut manager = if persisted {
-        let mut manager = SessionManager::in_memory(tmp.path());
-        manager.materialize_session_file(Some(session_dir.clone()));
-        manager
-    } else {
-        SessionManager::in_memory_in_session_dir(tmp.path(), &session_dir)
-    };
+    let mut manager = SessionManager::in_memory(tmp.path());
+    manager.materialize_session_file(Some(session_dir));
     manager
         .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text("do a thing twice".to_string()),
@@ -344,9 +394,28 @@ async fn refine_test_session_built(persisted: bool) -> (AgentSession, tempfile::
         }))
         .unwrap();
     manager.append_message(refine_assistant_row(false)).unwrap();
-    let session = AgentSession::new(Arc::new(agent), manager, vec![])
-        .await
-        .unwrap();
+    // The digest context `create_session` wires for this session: the
+    // global store under the (fixture) agent dir's harness path, the
+    // local store the session's own artifact dir implies — the same
+    // derivation the engine uses, so the parity seam derives the same
+    // stores the kernel and the digest read.
+    let local_harness_dir = crate::refinement::get_local_harness_state_dir(
+        manager.get_session_artifact_dir().as_deref(),
+    );
+    let session = AgentSession::from_session_arc(
+        Arc::new(agent),
+        Arc::new(tokio::sync::Mutex::new(manager)),
+        vec![],
+        Some(super::harness_digest::HarnessDigestContext {
+            global_dir: tmp.path().join("harness"),
+            local_dir: local_harness_dir,
+            include_ipython: false,
+            include_shell_examples: false,
+            include_refine: false,
+        }),
+    )
+    .await
+    .unwrap();
     let live = {
         let persistence = session.shared_persistence();
         let manager = persistence.lock().await;
@@ -356,6 +425,161 @@ async fn refine_test_session_built(persisted: bool) -> (AgentSession, tempfile::
     };
     session.agent().set_messages(live).await;
     (session, tmp)
+}
+
+/// A daemon-shaped local refinement writes the session's own artifact
+/// harness store, the one the kernel and the digest read.
+#[tokio::test]
+async fn daemon_shaped_local_refinement_writes_the_sessions_own_harness_store() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // The daemon engine session's shape: a non-persisted manager pinned to
+    // the sessions root, a durable id, and the artifact tree the
+    // conversation log implies.
+    let sessions_root = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions_root).unwrap();
+    let mut manager = SessionManager::in_memory_in_session_dir(dir.path(), &sessions_root);
+    let session_id = manager.get_session_id().to_string();
+    manager
+        .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("do a thing twice".to_string()),
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        }))
+        .unwrap();
+    manager.append_message(refine_assistant_row(false)).unwrap();
+    let conversation_log = sessions_root.join(format!("{session_id}.jsonl"));
+    let agent_dir = dir.path().join("agent");
+    // The digest context the daemon's `create_session` wires: the global
+    // store under the agent dir's harness path, the local store the
+    // conversation log implies.
+    let harness_digest = super::harness_digest::HarnessDigestContext {
+        global_dir: crate::refinement::get_global_harness_state_dir(&agent_dir),
+        local_dir: super::harness_digest::local_harness_dir_for_log(&conversation_log),
+        include_ipython: false,
+        include_shell_examples: false,
+        include_refine: false,
+    };
+    // One entry a prior refinement wrote into the session's own local
+    // store: the planner must read it back from that store.
+    let seeded_local_dir = harness_digest.local_dir.clone().unwrap();
+    seed_local_memory(&seeded_local_dir, "seed", "Seeded local tactic");
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let agent = Agent::new(AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    });
+    let session = AgentSession::from_session_arc(
+        Arc::new(agent),
+        Arc::new(tokio::sync::Mutex::new(manager)),
+        vec![],
+        Some(harness_digest),
+    )
+    .await
+    .unwrap();
+    let live = {
+        let persistence = session.shared_persistence();
+        let manager = persistence.lock().await;
+        rebuilt_loop_messages(
+            crate::session_engine::compact_session::rebuilt_context_after_compaction(&manager),
+        )
+    };
+    session.agent().set_messages(live).await;
+    let plan = r#"{"summary":"bench","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    let planner_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let result = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call_capturing(plan, Arc::clone(&planner_prompts)),
+        )
+        .await
+        .unwrap();
+    assert!(result.applied_edits.iter().all(|edit| edit.applied));
+    // The planner read the session's own local store: the pre-seeded
+    // entry appears in the `<current_harness_state>` it planned against.
+    let planner_prompt = planner_prompts
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the local refinement planned once");
+    assert!(
+        planner_prompt.contains("<current_harness_state>"),
+        "the planner prompt carries the harness state: {planner_prompt}"
+    );
+    assert!(
+        planner_prompt.contains("local:seed] Seeded local tactic"),
+        "the planner reads the session's own local store: {planner_prompt}"
+    );
+    // The write lands in the session's own artifact store: the exact
+    // directory the digest context carries, which the kernel and the
+    // digest read.
+    let local_dir = session
+        .harness_digest
+        .as_ref()
+        .expect("the daemon-shaped session carries its digest context")
+        .local_dir
+        .clone()
+        .expect("the conversation log implies the artifact store");
+    assert_eq!(
+        std::path::Path::new(&result.harness_state_path),
+        crate::refinement::get_harness_state_path(&local_dir),
+        "the local refinement wrote the digest context's local store"
+    );
+    let state =
+        crate::refinement::load_harness_state(&local_dir, crate::refinement::HarnessScope::Local);
+    assert!(
+        state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "the local edit lands in the session's own harness store"
+    );
+    // A global refinement on the same session writes the agent dir's
+    // harness store.
+    let global_plan = r#"{"summary":"bench","edits":[{"action":"create","kind":"memory","id":"g1","title":"Global tactic","content":"Prefer the shared seam"}]}"#;
+    let global_result = session
+        .refine_with_refiner(
+            &refine::RefineOptions {
+                global: true,
+                ..Default::default()
+            },
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(global_plan),
+        )
+        .await
+        .unwrap();
+    let global_dir = crate::refinement::get_global_harness_state_dir(&agent_dir);
+    assert_eq!(
+        std::path::Path::new(&global_result.harness_state_path),
+        crate::refinement::get_harness_state_path(&global_dir),
+        "the global refinement wrote the agent dir's harness store"
+    );
+    let global_state =
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global);
+    assert!(
+        global_state.entries[&crate::refinement::RefinementKind::Memory].contains_key("g1"),
+        "the global edit lands in the agent dir's harness store"
+    );
+    // The digest sees both: the rendered harness digest — the same render
+    // the cold-boundary delivery sends the model — carries the local and
+    // the global entry from the context's store pair.
+    let digest = super::harness_digest::harness_digest_text(
+        session.harness_digest.as_ref().unwrap(),
+        crate::refinement::ranking::HarnessQueryTerms::default(),
+    );
+    assert!(
+        digest.contains("local:m1]"),
+        "the digest shows the local entry: {digest}"
+    );
+    assert!(
+        digest.contains("global:g1]"),
+        "the digest shows the global entry: {digest}"
+    );
 }
 
 /// The pre-change mechanism, verbatim: the full active-context rebuild
@@ -392,9 +616,14 @@ fn custom_types(messages: &[AgentMessage]) -> Vec<String> {
 
 #[tokio::test]
 async fn refine_pushed_live_context_matches_a_full_rebuild_byte_for_byte() {
-    let (session, tmp) = refine_test_session().await;
-    let global_dir = tmp.path().join("harness");
-    let result = run_child_refine(&session, APPLIED_PLAN, &global_dir)
+    let (session, _tmp) = refine_test_session().await;
+    let result = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(APPLIED_PLAN),
+        )
         .await
         .unwrap();
     assert!(result.applied_edits.iter().any(|edit| edit.applied));
@@ -417,9 +646,14 @@ async fn refine_pushed_live_context_matches_a_full_rebuild_byte_for_byte() {
 
 #[tokio::test]
 async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
-    let (session, tmp) = refine_test_session().await;
-    let global_dir = tmp.path().join("harness");
-    let result = run_child_refine(&session, EMPTY_PLAN, &global_dir)
+    let (session, _tmp) = refine_test_session().await;
+    let result = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(EMPTY_PLAN),
+        )
         .await
         .unwrap();
     assert!(result.applied_edits.iter().all(|edit| !edit.applied));
@@ -438,18 +672,74 @@ async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
     );
 }
 
+/// The planning call bills the session: its usage lands on a durable row
+/// whether or not the plan edits anything.
+#[tokio::test]
+async fn refine_records_the_planning_call_usage() {
+    let (session, _tmp) = refine_test_session().await;
+    let usage = pa_types::ai::Usage {
+        input: 1_200,
+        output: 80,
+        total_tokens: 1_280,
+        cost: pa_types::ai::UsageCost {
+            total: pa_types::JsNumber(0.004),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let billed_plan: crate::refinement::executor::RefinerFn =
+        Box::new(move |model, system, prompt| {
+            let reply = refine_plan_call(EMPTY_PLAN)(model, system, prompt);
+            Box::pin(async move {
+                let mut reply = reply.await?;
+                reply.usage = usage;
+                Ok(reply)
+            })
+        });
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            billed_plan,
+        )
+        .await
+        .unwrap();
+    let rows = session.shared_persistence().lock().await.get_entries();
+    let billed: Vec<serde_json::Value> = rows
+        .iter()
+        .filter_map(|entry| match entry {
+            pa_types::session::FileEntry::Custom { payload, .. } => payload.data.clone(),
+            _ => None,
+        })
+        .filter_map(|data| data.get("usage").cloned())
+        .collect();
+    assert_eq!(billed, vec![serde_json::to_value(usage).unwrap()]);
+}
+
 #[tokio::test]
 async fn sequential_refines_push_exactly_their_own_rows() {
     // The second run must select exactly its own rows (by id), never
     // the first run's.
-    let (session, tmp) = refine_test_session().await;
-    let global_dir = tmp.path().join("harness");
+    let (session, _tmp) = refine_test_session().await;
     let first = r#"{"summary":"one","edits":[{"action":"create","kind":"memory","id":"m1","title":"A","content":"a"}]}"#;
     let second = r#"{"summary":"two","edits":[{"action":"create","kind":"memory","id":"m2","title":"B","content":"b"}]}"#;
-    run_child_refine(&session, first, &global_dir)
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(first),
+        )
         .await
         .unwrap();
-    run_child_refine(&session, second, &global_dir)
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(second),
+        )
         .await
         .unwrap();
     let candidate = session.agent().state().await.messages;
@@ -484,8 +774,13 @@ async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
     // setting off), the factory create refuses with the one exact
     // disabled message; opted in, the same proposal applies.
     let (mut session, tmp) = refine_test_session().await;
-    let global_dir = tmp.path().join("harness");
-    let refused = run_child_refine(&session, FACTORY_PLAN, &global_dir)
+    let refused = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(FACTORY_PLAN),
+        )
         .await
         .unwrap();
     assert!(!refused.applied_edits[0].applied);
@@ -502,7 +797,13 @@ async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
     )
     .unwrap();
     session.set_agent_dir(agent_dir);
-    let applied = run_child_refine(&session, FACTORY_PLAN, &global_dir)
+    let applied = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(FACTORY_PLAN),
+        )
         .await
         .unwrap();
     assert!(applied.applied_edits[0].applied);
@@ -511,7 +812,7 @@ async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
 
 #[tokio::test]
 async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
-    let (session, tmp) = refine_test_session().await;
+    let (session, _tmp) = refine_test_session().await;
     // The retry arm's sanctioned live/durable divergence: the failed turn's
     // error assistant row is durable, then dropped from the live context.
     {
@@ -537,8 +838,13 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
         2,
         "the error row is dropped from the live context"
     );
-    let global_dir = tmp.path().join("harness");
-    run_child_refine(&session, APPLIED_PLAN, &global_dir)
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(APPLIED_PLAN),
+        )
         .await
         .unwrap();
     // The push preserves the live list: the dropped error row stays
@@ -564,122 +870,1019 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
 }
 
 #[tokio::test]
-async fn a_kernel_write_between_prepare_and_apply_rejects_the_stale_edit() {
-    // The apply freshness: the wake-side apply re-reads the target
-    // harness state from disk; an entry the kernel rewrote while the
-    // child planned is rejected against the prepare-time baseline,
-    // never clobbered.
-    let (session, tmp) = refine_test_session().await;
-    let global_dir = tmp.path().join("harness");
-    let (prepared, _) = session
-        .prepare_refinement(
-            &refine::RefineOptions::default(),
-            &session_ai_model(),
-            &global_dir,
-        )
-        .await
-        .unwrap();
-    // The concurrent kernel write: the session's local harness store
-    // gains the entry the child's proposal then edits.
-    let local_dir = refine::local_harness_state_dir(&*session.session.lock().await);
-    crate::refinement::update_harness_state(
-        &local_dir,
-        crate::refinement::HarnessScope::Local,
-        |state| {
-            state
-                .entries
-                .get_mut(&crate::refinement::RefinementKind::Memory)
-                .unwrap()
-                .insert(
-                    "m1".to_string(),
-                    crate::refinement::HarnessEntry {
-                        id: "m1".to_string(),
-                        kind: crate::refinement::RefinementKind::Memory,
-                        title: "Kernel's own".to_string(),
-                        content: "the kernel wrote this while the child planned".to_string(),
-                        path: "/m/m1".to_string(),
-                        scope: Some(crate::refinement::HarnessScope::Local),
-                        reference: serde_json::Map::default(),
-                        arguments: serde_json::Map::default(),
-                        metadata: serde_json::Map::default(),
-                        source: "kernel".to_string(),
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                        version: 3,
-                    },
-                );
-        },
+async fn refinement_and_auto_review_send_the_session_request_identity() {
+    let (mut session, tmp) = refine_test_session().await;
+    std::fs::write(
+        tmp.path().join("auth.json"),
+        serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "test-key",
+                "primeTeam": { "teamId": "team-1", "name": "Test Team" }
+            }
+        })
+        .to_string(),
     )
     .unwrap();
-    // The child's reply updates the entry the kernel wrote: the
-    // freshly re-read state no longer matches the prepare-time baseline,
-    // so the edit rejects instead of clobbering the kernel's version.
-    let stale = session
-        .apply_child_refinement(
-            prepared,
-            r#"{"summary":"s","rationale":"r","edits":[{"action":"update","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#,
+    session.set_auxiliary_model_context(
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd: tmp.path().to_path_buf(),
+            agent_dir: tmp.path().to_path_buf(),
+        },
+    );
+    let expected = session.session_id().await;
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            provider: Some("prime-inference".to_string()),
+            ..Default::default()
+        });
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let step = |text: &'static str| {
+        let observed = Arc::clone(&observed);
+        pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, _| {
+            observed.lock().unwrap().push((
+                options.and_then(|o| o.session_id.clone()),
+                options.and_then(|o| o.transport),
+                options
+                    .and_then(|o| o.headers.as_ref())
+                    .and_then(|headers| headers.get("X-Prime-Team-ID").cloned()),
+            ));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                text,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }))
+    };
+    registration.set_responses(vec![
+        step(EMPTY_PLAN),
+        step(r#"{"shouldRefine":false,"rationale":"fixture"}"#),
+    ]);
+    let model = registration.get_model();
+    session
+        .start_refinement(
+            refine::RefineOptions::default(),
             refine::RefinementSource::User,
-            &global_dir,
+            model.clone(),
+            None,
         )
         .await
+        .expect("the refinement task joined")
+        .unwrap();
+    session
+        .review_compact_auto_refine(&model, None, 5, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![
+            (
+                Some(expected),
+                Some(pa_ai::types::Transport::Sse),
+                Some("team-1".to_string())
+            );
+            2
+        ]
+    );
+}
+
+/// The compact-review prompt reads the session's real local store: an
+/// entry pre-seeded into the session's own artifact harness dir — the
+/// dir `create_session` wires — appears in the review's
+/// `<current_harness_state>`.
+#[tokio::test]
+async fn the_compact_review_prompt_reads_the_sessions_local_store() {
+    let (session, _tmp) = refine_test_session().await;
+    // Seed one local entry where the engine wires the local store: the
+    // session's own artifact harness dir, derived independently of the
+    // fixture's digest context.
+    let local_dir = {
+        let persistence = session.shared_persistence();
+        let manager = persistence.lock().await;
+        crate::refinement::get_local_harness_state_dir(
+            manager.get_session_artifact_dir().as_deref(),
+        )
+        .expect("a materialized session always has an artifact dir")
+    };
+    seed_local_memory(&local_dir, "seed", "Seeded local tactic");
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions::default());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let step = |text: &'static str| {
+        let observed = Arc::clone(&observed);
+        pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |context, _, _, _| {
+            let prompt = match context.messages.first() {
+                Some(pa_types::ai::Message::User(user)) => match &user.content {
+                    pa_types::ai::UserContent::Text(text) => text.clone(),
+                    pa_types::ai::UserContent::Blocks(_) => String::new(),
+                },
+                _ => String::new(),
+            };
+            observed.lock().unwrap().push(prompt);
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                text,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }))
+    };
+    registration.set_responses(vec![step(
+        r#"{"shouldRefine":false,"rationale":"fixture"}"#,
+    )]);
+    let model = registration.get_model();
+    session
+        .review_compact_auto_refine(&model, None, 5, 0)
+        .await
+        .unwrap();
+    let prompt = observed
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the review made one model call");
+    assert!(
+        prompt.contains("<current_harness_state>"),
+        "the review prompt carries the harness state: {prompt}"
+    );
+    assert!(
+        prompt.contains("local:seed] Seeded local tactic"),
+        "the review reads the session's own local store: {prompt}"
+    );
+}
+
+/// A tool that signals its start, then waits for one release: the turn that
+/// calls it stays mid-tool across the refinement's commit window.
+struct HeldTool {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+}
+
+impl AgentTool for HeldTool {
+    fn name(&self) -> &'static str {
+        "held"
+    }
+
+    fn description(&self) -> &'static str {
+        "Signals its start, then waits for one release."
+    }
+
+    fn parameters(&self) -> &serde_json::Value {
+        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({ "type": "object", "properties": {} }))
+    }
+
+    fn execute(
+        self: Arc<Self>,
+        _tool_call_id: String,
+        _params: serde_json::Value,
+        _signal: pa_agent::abort::AbortSignal,
+        _on_update: pa_agent::types::AgentToolUpdateCallback,
+    ) -> pa_agent::BoxFut<'static, anyhow::Result<AgentToolResult>> {
+        Box::pin(async move {
+            let _ = self.started.send(());
+            let _ = self.release.lock().await.recv().await;
+            Ok(AgentToolResult::text("released"))
+        })
+    }
+}
+
+/// The plan runs with no session lock (a read and a write complete
+/// mid-plan), and the rows commit only after a turn that is mid-tool when
+/// the plan resolves has settled — the outcome row lands after the tool
+/// result in both the durable entries and the live loop context.
+#[tokio::test]
+async fn refine_plans_without_the_session_lock_and_commits_after_a_running_turn_settles() {
+    let (tool_started, mut tool_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tool_release, tool_release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let held_tool = Arc::new(HeldTool {
+        started: tool_started,
+        release: Arc::new(tokio::sync::Mutex::new(tool_release_rx)),
+    });
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        Some("calling the tool"),
+        vec![("call-1", "held", serde_json::json!({}))],
+    );
+    provider.push_text_turn("done");
+    let (session, _tmp) = refine_test_session_with(provider, vec![held_tool]).await;
+    let engine = Arc::new(session);
+
+    let (refine_started, mut refine_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (refine_release, mut refine_release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let held_refiner: crate::refinement::executor::RefinerFn =
+        Box::new(move |_model, _system, _prompt| {
+            let _ = refine_started.send(());
+            Box::pin(async move {
+                let _ = refine_release_rx.recv().await;
+                Ok(plan_reply(EMPTY_PLAN))
+            })
+        });
+    let mut refine = {
+        let engine = Arc::clone(&engine);
+        let model = session_ai_model();
+        tokio::spawn(async move {
+            engine
+                .refine_with_refiner(
+                    &refine::RefineOptions::default(),
+                    refine::RefinementSource::User,
+                    &model,
+                    held_refiner,
+                )
+                .await
+        })
+    };
+    let window = std::time::Duration::from_secs(3);
+    let Ok(started) = tokio::time::timeout(window, refine_started_rx.recv()).await else {
+        panic!("the refiner request never started in the window");
+    };
+    started.expect("the refiner request started");
+
+    let read_entries = tokio::time::timeout(window, engine.entries())
+        .await
+        .expect(
+            "the session read completes while the refiner request is in flight; the window bounds this test's red failure, it is not a wait",
+        );
+    assert!(
+        !read_entries.is_empty(),
+        "the mid-request read sees the session's rows"
+    );
+    let (_, write_error) = tokio::time::timeout(window, async {
+        let persistence = engine.shared_persistence();
+        let mut session = persistence.lock().await;
+        session.append_message_retained(SessionAgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("mid-request row".to_string()),
+            timestamp: 0,
+            rest: pa_types::JsonMap::default(),
+        }))
+    })
+    .await
+    .expect(
+        "the session write completes while the refiner request is in flight; the window bounds this test's red failure, it is not a wait",
+    );
+    assert!(write_error.is_none(), "the mid-request row is durable");
+
+    let turn = {
+        let agent = Arc::clone(engine.agent());
+        tokio::spawn(async move { agent.prompt("run the tool").await })
+    };
+    let Ok(tool_running) = tokio::time::timeout(window, tool_started_rx.recv()).await else {
+        panic!("the tool call never started in the window");
+    };
+    tool_running.expect("the tool call started");
+
+    refine_release.send(()).expect("the refiner released");
+    let committed_mid_tool = tokio::time::timeout(window, &mut refine).await.is_ok();
+    assert!(
+        !committed_mid_tool,
+        "the refinement committed while the tool call was still running"
+    );
+    tool_release.send(()).expect("the tool released");
+    turn.await
+        .expect("the turn task joined")
+        .expect("the turn ran");
+    let result = refine
+        .await
+        .expect("the refine task joined")
+        .expect("the refinement ran");
+    assert!(
+        result.applied_edits.is_empty(),
+        "the empty plan applied nothing"
+    );
+
+    let entries = engine.entries().await;
+    let tool_result_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                FileEntry::Message {
+                    message: SessionAgentMessage::ToolResult(_),
+                    ..
+                }
+            )
+        })
+        .expect("the tool result row is in the entries");
+    let outcome_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry, FileEntry::CustomMessage { payload, .. }
+                if payload.custom_type == "refinement_outcome")
+        })
+        .expect("the refinement outcome row is in the entries");
+    assert!(
+        tool_result_index < outcome_index,
+        "the refinement's rows land after the running turn settled"
+    );
+    let state = engine.agent().state().await;
+    let live_tool_result = state
+        .messages
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                AgentMessage::Standard(pa_agent::types::Message::ToolResult(_))
+            )
+        })
+        .expect("the tool result message is in the live context");
+    let live_outcome = state
+        .messages
+        .iter()
+        .position(|message| {
+            matches!(message, AgentMessage::Custom(custom)
+                if custom.payload.get("customType").and_then(serde_json::Value::as_str)
+                    == Some("refinement_outcome"))
+        })
+        .expect("the refinement outcome message is in the live context");
+    assert!(
+        live_tool_result < live_outcome,
+        "the live context carries the refinement's rows after the turn's tool result"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum RacingTurnEnd {
+    Complete,
+    Abort,
+}
+
+/// Park the actual refinement at its final persistence lock while idle,
+/// then admit a run before releasing that lock. No timing window or test
+/// hook is needed: the refiner hands back the competing persistence guard
+/// before the prepared plan tries to reserve its commit boundary.
+async fn refinement_rechecks_a_run_admitted_during_commit_lock_wait(end: RacingTurnEnd) {
+    let (tool_started, mut tool_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tool_release, tool_release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(None, vec![("racing-call", "held", serde_json::json!({}))]);
+    provider.push_text_turn("settled");
+    let (engine, _tmp) = refine_test_session_with(
+        provider,
+        vec![Arc::new(HeldTool {
+            started: tool_started,
+            release: Arc::new(tokio::sync::Mutex::new(tool_release_rx)),
+        })],
+    )
+    .await;
+    let persistence = engine.shared_persistence();
+    let (guard_tx, mut guard_rx) = tokio::sync::mpsc::unbounded_channel();
+    let refiner: crate::refinement::executor::RefinerFn = Box::new(move |_, _, _| {
+        Box::pin(async move {
+            assert!(guard_tx.send(persistence.lock_owned().await).is_ok());
+            Ok(plan_reply(EMPTY_PLAN))
+        })
+    });
+
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let model = session_ai_model();
+    let mut refinement = Box::pin(engine.refine_with_refiner(
+        &options,
+        refine::RefinementSource::User,
+        &model,
+        refiner,
+    ));
+    let window = std::time::Duration::from_secs(3);
+    let guard = tokio::time::timeout(
+        window,
+        std::future::poll_fn(|cx| {
+            assert!(refinement.as_mut().poll(cx).is_pending());
+            guard_rx.poll_recv(cx)
+        }),
+    )
+    .await
+    .expect("refinement prepared its plan while the persistence lock is held")
+    .unwrap();
+    assert!(engine.agent().signal().is_none());
+    engine
+        .agent()
+        .prompt_until_accepted("race the commit")
+        .await
+        .unwrap();
+    assert!(engine.agent().signal().is_some());
+    drop(guard);
+
+    // A single poll now acquires the persistence lock. Without the active
+    // run recheck, the entire refinement returns Ready and commits early.
+    std::future::poll_fn(|cx| {
+        assert!(
+            refinement.as_mut().poll(cx).is_pending(),
+            "refinement committed into an active turn"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(engine.entries().await.iter().all(|entry| !matches!(entry,
+        FileEntry::CustomMessage { payload, .. } if payload.custom_type == "refinement_outcome")));
+    tokio::time::timeout(window, tool_started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    if matches!(end, RacingTurnEnd::Abort) {
+        engine.agent().abort();
+    }
+    tool_release.send(()).unwrap();
+    tokio::time::timeout(window, engine.agent().wait_for_idle())
+        .await
+        .unwrap();
+    tokio::time::timeout(window, refinement)
+        .await
+        .unwrap()
+        .unwrap();
+    let entries = engine.entries().await;
+    let outcome = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry,
+        FileEntry::CustomMessage { payload, .. } if payload.custom_type == "refinement_outcome")
+        })
+        .unwrap();
+    let tool_result = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                FileEntry::Message {
+                    message: SessionAgentMessage::ToolResult(_),
+                    ..
+                }
+            )
+        })
         .unwrap();
     assert!(
-        !stale.applied_edits[0].applied,
-        "the stale edit applied: {stale:?}"
+        tool_result < outcome,
+        "outcome follows the settled turn, including cancellation"
     );
     assert_eq!(
-        stale.applied_edits[0].error.as_deref(),
-        Some("entry changed during refinement planning"),
-        "the stale rejection names the contract: {stale:?}"
-    );
-    let reloaded =
-        crate::refinement::load_harness_state(&local_dir, crate::refinement::HarnessScope::Local);
-    assert_eq!(
-        reloaded.entries[&crate::refinement::RefinementKind::Memory]["m1"].title,
-        "Kernel's own",
-        "the kernel's concurrent write survived, never clobbered"
+        entries
+            .iter()
+            .filter(|entry| matches!(entry,
+        FileEntry::CustomMessage { payload, .. } if payload.custom_type == "refinement_outcome"))
+            .count(),
+        1
     );
 }
 
 #[tokio::test]
-async fn the_spawn_prompt_carries_the_in_session_refinement_history() {
-    // The daemon's engine session is in-memory — its audit rows have no
-    // session file for the child to read — so the in-session refinement
-    // history can only reach the child's planner through the envelope
-    // (the pre-PR planner merged it with the global history). Red when
-    // the envelope drops back to a session-file path: the unpersisted
-    // parent's history never leaves the session.
-    let (session, tmp) = refine_test_session_unpersisted().await;
+async fn refine_rechecks_a_turn_admitted_while_waiting_for_the_commit_lock() {
+    refinement_rechecks_a_run_admitted_during_commit_lock_wait(RacingTurnEnd::Complete).await;
+}
+
+#[tokio::test]
+async fn refine_commits_once_after_a_racing_turn_is_aborted() {
+    refinement_rechecks_a_run_admitted_during_commit_lock_wait(RacingTurnEnd::Abort).await;
+}
+
+#[tokio::test]
+async fn refinement_preserves_provider_prefix_and_completed_state_across_resume() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_text_turn("before refinement");
+    provider.push_text_turn("after refinement");
+    let (session, tmp) = refine_test_session_with(provider.clone(), Vec::new()).await;
+    session.agent().prompt("first request").await.unwrap();
+    let before = provider.calls().pop().unwrap();
     let global_dir = tmp.path().join("harness");
-    let result = crate::refinement::RefinementResult {
-        id: "refine_hist_1".to_string(),
-        summary: "pin the history handoff".to_string(),
-        rationale: "repeated".to_string(),
-        expected_outcome: "recall".to_string(),
-        applied_edits: vec![],
-        harness_state_path: String::new(),
-        rollback_of: None,
-        scope: None,
-    };
-    {
-        let mut manager = session.session.lock().await;
-        manager.append_custom_entry_retained(
-            refine::REFINEMENT_AUDIT_CUSTOM_TYPE,
-            Some(serde_json::to_value(&result).unwrap()),
-        );
-    }
-    let (_, prompt) = session
-        .prepare_refinement(
-            &refine::RefineOptions::default(),
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions {
+                global: true,
+                ..Default::default()
+            },
+            refine::RefinementSource::User,
             &session_ai_model(),
-            &global_dir,
+            refine_plan_call(APPLIED_PLAN),
         )
         .await
         .unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&prompt).unwrap();
-    assert_eq!(parsed["type"], "refinement.request");
+    session.agent().prompt("second request").await.unwrap();
+    let mut after = provider.calls().pop().unwrap();
+    assert!(after.messages.len() > before.messages.len());
+    assert!(serde_json::to_string(&after.messages)
+        .unwrap()
+        .contains("Use tactic A"));
+    after.messages.truncate(before.messages.len());
     assert_eq!(
-        parsed["refinementHistory"][0]["summary"], "pin the history handoff",
-        "the in-session audit rows ride the envelope: {parsed}"
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(before).unwrap()
     );
+    let committed =
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global);
+    assert_eq!(committed.refinements.len(), 1);
+    let harness = super::harness_digest::HarnessDigestContext {
+        global_dir: global_dir.clone(),
+        local_dir: None,
+        include_ipython: false,
+        include_shell_examples: false,
+        include_refine: false,
+    };
+    let resumed =
+        super::tests::resumed_digest_session(session.entries().await, harness.clone()).await;
+    let once = resumed.entries().await;
+    let resumed_again = super::tests::resumed_digest_session(once.clone(), harness).await;
+    assert_eq!(
+        serde_json::to_value(resumed_again.entries().await).unwrap(),
+        serde_json::to_value(once).unwrap()
+    );
+    assert_eq!(
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global),
+        committed
+    );
+}
+
+#[tokio::test]
+async fn closing_session_cancels_background_planning_without_committing() {
+    let (session, tmp) = refine_test_session().await;
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let refiner: crate::refinement::executor::RefinerFn = Box::new(move |_, _, _| {
+        Box::pin(async move {
+            started.send(()).unwrap();
+            std::future::pending().await
+        })
+    });
+    let global_dir = tmp.path().join("harness");
+    let job = tokio::spawn(refine::run_refinement(
+        session.session.clone(),
+        session.agent.clone(),
+        session.compaction_flight.clone(),
+        session.refinements_in_flight.clone(),
+        session.refinement_signal(),
+        None,
+        refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        },
+        refine::RefinementSource::User,
+        session_ai_model(),
+        refiner,
+        session.refinement_stores().unwrap(),
+    ));
+    started_rx.recv().await.unwrap();
+    assert!(
+        session.compaction_flight.try_lock().is_ok(),
+        "planning cannot reserve compaction"
+    );
+    drop(session);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(3), job)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(pa_agent::abort::is_abort_error(&error));
+    assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+}
+
+/// The background funnel (the auto-refine and requested-refinement paths)
+/// refuses before planning when the settings disable refinements: the gate
+/// lives in the shared prepare step, not only the foreground executor.
+#[tokio::test]
+async fn disabled_background_refinement_refuses_before_planning() {
+    let (session, tmp) = refine_test_session().await;
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"harnessRefinements":false}"#,
+    )
+    .unwrap();
+    let global_dir = tmp.path().join("harness");
+    let error = refine::run_refinement(
+        session.session.clone(),
+        session.agent.clone(),
+        session.compaction_flight.clone(),
+        session.refinements_in_flight.clone(),
+        session.refinement_signal(),
+        Some(agent_dir),
+        refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        },
+        refine::RefinementSource::User,
+        session_ai_model(),
+        Box::new(|_, _, _| panic!("disabled refinement must not call the planner")),
+        session.refinement_stores().unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("disabled"));
+    assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+}
+
+#[tokio::test]
+async fn prepared_refinement_cannot_change_harness_during_an_active_run() {
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(None, vec![("boundary-call", "held", serde_json::json!({}))]);
+    provider.push_text_turn("finished");
+    let (session, tmp) = refine_test_session_with(
+        provider,
+        vec![Arc::new(HeldTool {
+            started,
+            release: Arc::new(tokio::sync::Mutex::new(release_rx)),
+        })],
+    )
+    .await;
+    session
+        .agent()
+        .prompt_until_accepted("hold the run")
+        .await
+        .unwrap();
+    started_rx.recv().await.unwrap();
+    let global_dir = tmp.path().join("harness");
+    let state_path = crate::refinement::get_harness_state_path(&global_dir);
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let model = session_ai_model();
+    let ready = refine::prepare_refinement(
+        &session.session,
+        None,
+        refine::RefinementTranscript {
+            messages: &[],
+            refinement_history: &[],
+        },
+        &session.refinement_stores().unwrap(),
+        &model,
+        &options,
+        refine_plan_call(APPLIED_PLAN),
+    )
+    .await
+    .unwrap();
+    let cancel = pa_agent::abort::AbortSignal::never();
+    let mut commit = Box::pin(refine::commit_refinement(
+        &session.session,
+        session.agent(),
+        ready,
+        refine::RefinementSource::User,
+        None,
+        Some(&session.compaction_flight),
+        &cancel,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(commit.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(
+        !state_path.exists(),
+        "no harness mutation is allowed mid-run"
+    );
+    assert!(session.agent().prompt("competing prompt").await.is_err());
+    assert!(session.agent().continue_run().await.is_err());
+    release.send(()).unwrap();
+    session.agent().wait_for_idle().await;
+    commit.await.unwrap();
+    assert!(state_path.exists());
+}
+
+#[tokio::test]
+async fn contended_harness_lock_does_not_reserve_the_next_provider_run() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_text_turn("new user work");
+    let (session, tmp) = refine_test_session_with(provider.clone(), Vec::new()).await;
+    let global_dir = tmp.path().join("harness");
+    std::fs::create_dir_all(&global_dir).unwrap();
+    let state_path = crate::refinement::get_harness_state_path(&global_dir);
+    let lock = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
+        &state_path,
+        std::time::Duration::from_secs(10),
+        1,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let ready = refine::prepare_refinement(
+        &session.session,
+        None,
+        refine::RefinementTranscript {
+            messages: &[],
+            refinement_history: &[],
+        },
+        &session.refinement_stores().unwrap(),
+        &session_ai_model(),
+        &options,
+        refine_plan_call(APPLIED_PLAN),
+    )
+    .await
+    .unwrap();
+    let cancel = pa_agent::abort::AbortSignal::never();
+    let mut commit = Box::pin(refine::commit_refinement(
+        &session.session,
+        session.agent(),
+        ready,
+        refine::RefinementSource::User,
+        None,
+        Some(&session.compaction_flight),
+        &cancel,
+    ));
+    let mut prompt = Box::pin(session.agent().prompt("arriving input"));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        std::future::poll_fn(|cx| {
+            assert!(
+                commit.as_mut().poll(cx).is_pending(),
+                "contended commit must defer"
+            );
+            prompt.as_mut().poll(cx)
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(provider.calls().len(), 1);
+    assert!(!state_path.exists());
+    drop(lock);
+    commit.await.unwrap();
+    assert!(state_path.exists());
+}
+
+/// The kernel's writer locks `realpath(state).lock` (`harness.py`'s
+/// `_locked`); the refine side locks the state path as given. Through a
+/// symlinked store directory those two path strings differ, but the
+/// `mkdir` the lock protocol uses resolves symlinked parents at the OS
+/// level, so both writers still name one lock directory and contend.
+/// This pins that sharing — the one scenario where the two writers could
+/// have silently missed each other.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_store_shares_the_kernels_lock_dir() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let (session, tmp) = refine_test_session_with(provider, Vec::new()).await;
+    // The global store behind a symlink, the macOS `$TMPDIR` shape: the
+    // session's digest context names the link; the real directory is
+    // elsewhere.
+    let real = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(real.path(), tmp.path().join("harness")).unwrap();
+    let linked_store = tmp.path().join("harness");
+    let state_path = crate::refinement::get_harness_state_path(&linked_store);
+    // Hold the lock the way the kernel does: an empty directory at
+    // `realpath(state).lock`, derived from the real directory's own
+    // resolved path, fresh enough to read as a live holder.
+    let kernel_lock = std::fs::canonicalize(real.path())
+        .unwrap()
+        .join("harness_state.json.lock");
+    std::fs::create_dir(&kernel_lock).unwrap();
+    let commit_once = || async {
+        let options = refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        };
+        let ready = refine::prepare_refinement(
+            &session.session,
+            None,
+            refine::RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &session.refinement_stores().unwrap(),
+            &session_ai_model(),
+            &options,
+            refine_plan_call(APPLIED_PLAN),
+        )
+        .await
+        .unwrap();
+        refine::commit_refinement(
+            &session.session,
+            session.agent(),
+            ready,
+            refine::RefinementSource::User,
+            None,
+            Some(&session.compaction_flight),
+            &pa_agent::abort::AbortSignal::never(),
+        )
+        .await
+    };
+    // While the kernel holds the lock, the commit exhausts its retry
+    // budget and fails without touching the store.
+    tokio::time::timeout(std::time::Duration::from_secs(5), commit_once())
+        .await
+        .expect("the contended commit fails within its retry budget")
+        .unwrap_err();
+    assert!(
+        !state_path.exists(),
+        "no harness mutation while the kernel holds the lock"
+    );
+    std::fs::remove_dir(&kernel_lock).unwrap();
+    // Once the lock frees, the commit lands through the link in the real
+    // store: one file, the one both writers name.
+    commit_once().await.unwrap();
+    let state = crate::refinement::load_harness_state(
+        &linked_store,
+        crate::refinement::HarnessScope::Global,
+    );
+    assert!(
+        state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "the edit lands in the symlinked store's real file"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&state_path).unwrap(),
+        std::fs::canonicalize(real.path().join("harness_state.json")).unwrap(),
+        "the link and the real directory name one state file"
+    );
+}
+
+/// The kernel's writer locks and replaces the REAL file behind a state
+/// symlink (`harness.py` resolves `realpath(state)` for both); the refine
+/// side must resolve the same way. Locking the alias would miss the
+/// kernel's lock entirely — two writers on two files — and the atomic
+/// rename would replace the link itself. The symlinked-directory case is
+/// pinned above; this is the file-symlink case.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_state_file_symlink_shares_the_kernels_lock_and_survives_the_commit() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    let (session, tmp) = refine_test_session_with(provider, Vec::new()).await;
+    // The global store's state file is a link: the real file lives in
+    // another directory, seeded the way a prior kernel save left it.
+    let real = tempfile::tempdir().unwrap();
+    crate::refinement::save_harness_state(real.path(), &crate::refinement::empty_harness_state())
+        .unwrap();
+    let linked_store = tmp.path().join("harness");
+    std::fs::create_dir(&linked_store).unwrap();
+    let alias = crate::refinement::get_harness_state_path(&linked_store);
+    let real_state = real.path().join("harness_state.json");
+    std::os::unix::fs::symlink(&real_state, &alias).unwrap();
+    // Hold the lock the way the kernel does: an owner directory at
+    // `realpath(state).lock` naming a live pid.
+    let kernel_lock = real.path().join("harness_state.json.lock");
+    std::fs::create_dir(&kernel_lock).unwrap();
+    std::fs::write(
+        kernel_lock.join("owner"),
+        format!("{} kernel-style-token\n", std::process::id()),
+    )
+    .unwrap();
+    let commit_once = || async {
+        let options = refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        };
+        let ready = refine::prepare_refinement(
+            &session.session,
+            None,
+            refine::RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &session.refinement_stores().unwrap(),
+            &session_ai_model(),
+            &options,
+            refine_plan_call(APPLIED_PLAN),
+        )
+        .await
+        .unwrap();
+        refine::commit_refinement(
+            &session.session,
+            session.agent(),
+            ready,
+            refine::RefinementSource::User,
+            None,
+            Some(&session.compaction_flight),
+            &pa_agent::abort::AbortSignal::never(),
+        )
+        .await
+    };
+    // While the kernel holds the real file's lock, the commit contends
+    // and exhausts its retry budget without touching either file.
+    tokio::time::timeout(std::time::Duration::from_secs(5), commit_once())
+        .await
+        .expect("the contended commit fails within its retry budget")
+        .unwrap_err();
+    assert!(
+        std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the refused commit leaves the alias a link"
+    );
+    let untouched = crate::refinement::load_harness_state(
+        &linked_store,
+        crate::refinement::HarnessScope::Global,
+    );
+    assert!(
+        !untouched.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "no harness mutation while the kernel holds the lock"
+    );
+    std::fs::remove_file(kernel_lock.join("owner")).unwrap();
+    std::fs::remove_dir(&kernel_lock).unwrap();
+    // Once the lock frees, the commit writes the real file behind the
+    // link: one file, the one both writers name, and the link survives.
+    commit_once().await.unwrap();
+    let state = crate::refinement::load_harness_state(
+        &linked_store,
+        crate::refinement::HarnessScope::Global,
+    );
+    assert!(
+        state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+        "the edit lands in the real file behind the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the commit that wrote through the link leaves the alias a link"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&alias).unwrap(),
+        std::fs::canonicalize(&real_state).unwrap(),
+        "the link and the real file name one state file"
+    );
+}
+
+#[tokio::test]
+async fn idle_reservation_excludes_both_direct_prompt_and_continue_admission() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_text_turn("admitted after commit");
+    let (session, _tmp) = refine_test_session_with(provider.clone(), Vec::new()).await;
+    let reservation = session.agent().reserve_idle().await;
+    let mut prompt = Box::pin(session.agent().prompt("new run"));
+    std::future::poll_fn(|cx| {
+        assert!(prompt.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(provider.calls().is_empty());
+    drop(reservation);
+    prompt.await.unwrap();
+    session
+        .agent()
+        .append_messages(vec![AgentMessage::Standard(
+            pa_agent::types::Message::User(pa_agent::types::UserMessage {
+                content: pa_agent::types::UserContent::Text("continue".into()),
+                timestamp: 1,
+            }),
+        )])
+        .await;
+    provider.push_text_turn("continued after commit");
+    let reservation = session.agent().reserve_idle().await;
+    let mut continuation = Box::pin(session.agent().continue_run());
+    std::future::poll_fn(|cx| {
+        assert!(continuation.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(provider.calls().len(), 1);
+    drop(reservation);
+    continuation.await.unwrap();
+    assert_eq!(provider.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn branch_change_discards_prepared_plan_but_allows_new_refinements() {
+    let (session, tmp) = refine_test_session().await;
+    let global_dir = tmp.path().join("harness");
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let ready = refine::prepare_refinement(
+        &session.session,
+        None,
+        refine::RefinementTranscript {
+            messages: &[],
+            refinement_history: &[],
+        },
+        &session.refinement_stores().unwrap(),
+        &session_ai_model(),
+        &options,
+        refine_plan_call(APPLIED_PLAN),
+    )
+    .await
+    .unwrap();
+    let signal = session.refinement_signal();
+    let guard = session.session.lock().await;
+    let mut commit = Box::pin(refine::commit_refinement(
+        &session.session,
+        session.agent(),
+        ready,
+        refine::RefinementSource::User,
+        None,
+        Some(&session.compaction_flight),
+        &signal,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(commit.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    session.discard_compact_auto_refine();
+    let error = commit.await.unwrap_err();
+    assert!(pa_agent::abort::is_abort_error(&error));
+    assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+    drop(guard);
+    session
+        .refine_with_refiner(
+            &options,
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(APPLIED_PLAN),
+        )
+        .await
+        .unwrap();
+    let state =
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global);
+    assert_eq!(state.refinements.len(), 1);
 }

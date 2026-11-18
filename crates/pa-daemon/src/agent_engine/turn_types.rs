@@ -129,11 +129,13 @@ pub(crate) fn retry_event_to_engine_event(
             reason,
         },
         AutoRetryEvent::End {
+            aborted,
             success,
             attempt,
             final_error,
             restored_model,
         } => EngineEvent::AutoRetryEnd {
+            aborted,
             success,
             attempt,
             final_error,

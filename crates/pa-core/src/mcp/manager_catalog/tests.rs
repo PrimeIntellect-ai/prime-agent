@@ -657,16 +657,23 @@ fn api_key_credential_views_read_the_shared_store() {
         probe_override: None,
     });
     manager.refresh();
-    // The web-search credential's row renders, honestly unconfigured.
+    // The web-search credentials' rows render, honestly unconfigured.
     let views = manager.api_key_credential_views();
     assert_eq!(
         views,
-        vec![McpCredentialView {
-            id: "serper".to_string(),
-            label: "Serper (web search)".to_string(),
-            configured: false,
-        }],
-        "the api-key credential catalog serves the web-search entry"
+        vec![
+            McpCredentialView {
+                id: "serper".to_string(),
+                label: "Serper (web search)".to_string(),
+                configured: false,
+            },
+            McpCredentialView {
+                id: "eco".to_string(),
+                label: "You.com Eco (web search)".to_string(),
+                configured: false,
+            },
+        ],
+        "the api-key credential catalog serves the web-search entries"
     );
     // A stored API key at the slot marks the row configured.
     {

@@ -468,10 +468,11 @@ impl TurnRunner {
             .collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
-        // Whether the engine surfaced any `agent_end` this run (the
-        // trailing synthesized frame is only a fallback).
-        let engine_agent_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let engine_agent_end_seen = Arc::clone(&engine_agent_end);
+        // Whether the last `agent_start` on the wire is still unclosed: the
+        // delivery's own opens it, an engine `agent_start` that passes the
+        // abort gate re-opens it, an engine `agent_end` that passes closes it.
+        let run_open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let run_open_seen = Arc::clone(&run_open);
         // The pane reporter's settle hold: a run that FAILED without the
         // engine's `agent_end` (a provider error before any terminal
         // assistant row) still parks its error here, so the settle's
@@ -480,21 +481,10 @@ impl TurnRunner {
         let herdr_settle_error = Arc::new(std::sync::Mutex::new(None::<String>));
         let herdr_settle_error_seen = Arc::clone(&herdr_settle_error);
         // Whether the PANE REPORTER already received this run's end —
-        // set only where `run_ended` is actually called (the engine
-        // `agent_end` flag above is set on SIGHT, before the abort gate
-        // can drop the event, so a swallowed `agent_end` must not make
-        // the settle's pane fallback skip and strand the pane working).
+        // set only where `run_ended` is actually called (a later run of the
+        // same turn re-opens it, so it is not the wire flag above).
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
-        // Whether the abort gate ever observed the delivery's cancel flag
-        // DURING this turn (the per-event read below): the fallback
-        // `agent_end` keys its silence on THIS association — an abort
-        // landing after the turn's last emitted event (a late abort
-        // racing the settle) never armed the gate and must not suppress
-        // the completed run's fallback (the macroscope finding: the
-        // post-join flag read raced `handle_abort`).
-        let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
         let batch_len = items.len();
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -515,6 +505,8 @@ impl TurnRunner {
             // success too: one row replaces TS's per-attempt error rows
             // (operator ruling 2026-09-23).
             let mut last_retry_error: Option<String> = None;
+            // A failed run's `agent_end` frame, held for the frame after it.
+            let mut held_run_end: Option<Value> = None;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
@@ -522,9 +514,6 @@ impl TurnRunner {
                 // forever).
                 if matches!(event, EngineEvent::TurnEnd { .. }) {
                     engine_turn_ended = true;
-                }
-                if matches!(event, EngineEvent::AgentEnd { .. }) {
-                    engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 let aborted_row = matches!(
                     &event,
@@ -543,10 +532,13 @@ impl TurnRunner {
                         )
                 ) || matches!(
                     &event,
-                    EngineEvent::AgentEnd { messages }
+                    EngineEvent::AgentEnd { messages, .. }
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
+                ) || matches!(
+                    &event,
+                    EngineEvent::AutoRetryEnd { aborted: true, .. }
                 );
                 let abort_settle = matches!(
                     &event,
@@ -579,17 +571,20 @@ impl TurnRunner {
                 }
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
-                if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
-                    // The sighting arms the fallback's silence only when
-                    // load-bearing: a sighting on a run that completed on its own
-                    // cancels nothing.
-                    if core.suppress_aborted_row || !(abort_settle || aborted_row) {
-                        abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
-                        return false;
+                if core.abort_requested
+                    && !matches!(&event, EngineEvent::ModelChange(_))
+                    && (core.suppress_aborted_row || !(abort_settle || aborted_row))
+                {
+                    return false;
+                }
+                match &event {
+                    EngineEvent::AgentStart => {
+                        run_open_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
-                    if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
-                        abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    EngineEvent::AgentEnd { .. } => {
+                        run_open_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
+                    _ => {}
                 }
                 // The pane reporter's engine boundaries (the TS
                 // `agent_start` / `agent_end` hooks and the auto-retry
@@ -611,7 +606,7 @@ impl TurnRunner {
                         // pane working.
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
-                    EngineEvent::AgentEnd { messages } => {
+                    EngineEvent::AgentEnd { messages, .. } => {
                         herdr
                             .lock()
                             .unwrap()
@@ -791,6 +786,16 @@ impl TurnRunner {
                     EngineEvent::DoneAborted => Some(TurnSettle::Aborted),
                     _ => None,
                 };
+                // The retry loop decides only after a failed run ended, so
+                // that run's `agent_end` goes out after the next event's
+                // frames (or at the join): a client sees the pending retry
+                // (`auto_retry_start`) before the end of the attempt it
+                // retries.
+                let failed_run_end = matches!(
+                    &event,
+                    EngineEvent::AgentEnd { messages, aborted: false }
+                        if crate::herdr::error_hold_message(messages).is_some()
+                );
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
                 let mut frames: Vec<Value> = match event {
@@ -926,12 +931,22 @@ impl TurnRunner {
                     // `agent_end` (one frame per agent run — retried and
                     // continued runs included); the rows themselves
                     // already went out through their own events, so no
-                    // persist here.
+                    // persist here. A run ending under an abort carries the
+                    // marker: between steps and tools the abort keeps the
+                    // original `toolUse` turn_end, so the marker is the one
+                    // wire fact that separates the aborted settle from a
+                    // normal one.
                     EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
-                    EngineEvent::AgentEnd { messages } => vec![json!({
-                        "type": "agent_end",
-                        "messages": messages,
-                    })],
+                    EngineEvent::AgentEnd { messages, aborted } => {
+                        let mut frame = json!({
+                            "type": "agent_end",
+                            "messages": messages,
+                        });
+                        if aborted {
+                            frame["aborted"] = json!(true);
+                        }
+                        vec![frame]
+                    }
                     // Turn-boundary frames: the terminal message and tool
                     // results ride `turn_end`; no persist here.
                     EngineEvent::TurnStart => vec![json!({ "type": "turn_start" })],
@@ -958,6 +973,7 @@ impl TurnRunner {
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
+                        "aborted": true,
                     })],
                     EngineEvent::ModelChange(_)
                     | EngineEvent::Done(Ok(()) | Err(_))
@@ -989,6 +1005,7 @@ impl TurnRunner {
                         vec![event]
                     }
                     EngineEvent::AutoRetryEnd {
+                        aborted,
                         success,
                         attempt,
                         final_error,
@@ -999,6 +1016,9 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
+                        if aborted {
+                            event["aborted"] = json!(true);
+                        }
                         if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }
@@ -1045,6 +1065,15 @@ impl TurnRunner {
                             "actions": snapshot,
                         }));
                     }
+                }
+                if !frames.is_empty() {
+                    frames.extend(held_run_end.take());
+                }
+                if failed_run_end {
+                    held_run_end = frames
+                        .iter()
+                        .position(|frame| frame["type"] == "agent_end")
+                        .map(|index| frames.remove(index));
                 }
                 // Verification seam: dump the emitted session events for
                 // harness debugging (PA_DAEMON_EVENT_LOG=<path>).
@@ -1131,15 +1160,18 @@ impl TurnRunner {
                 engine.set_prompt_context_boundary(prompt_context_leaf);
             }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
+            held_run_end
         });
-        let _ = turn.await;
+        let held_run_end = turn.await.ok().flatten();
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
         flusher.abort();
+        if let Some(frame) = held_run_end {
+            self.emit_turn_event(frame);
+        }
 
-        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
         let more_queued = {
             let mut core = self.core.lock().unwrap();
             // A shutdown never loses admitted input: the batch items whose
@@ -1170,25 +1202,15 @@ impl TurnRunner {
             more_queued
         };
         self.push_roster_delta();
-        // The fallback `agent_end` for runs that ended without a model
-        // turn (session commands, pre-model failures): the engine's own
-        // per-run frames (one per agent run, retried and continued runs
-        // included — the TS `agent_end` `messages` payload) are the real
-        // frames, and a run whose `agent_end` the abort gate swallowed
-        // stays silent exactly like TS (the compact path's detached run).
-        // An ABORTED settle keeps the same silence: the admission
-        // consult's pre-run abort ends the turn with NO engine
-        // `agent_end` at all (no run registered — the
-        // compact-interrupt probe's suppressed-run wire shape, which the
-        // fallback would otherwise break with a synthesized frame). The
-        // association is the abort GATE's own observation during the
-        // turn (the per-event flag read), never a post-join re-read of
-        // the flag: an abort landing after the turn's last emitted event
-        // cancels nothing of this run and must not suppress its fallback
-        // (the flag stays armed until the next pickup — a settle-time
-        // re-read would race `handle_abort` and silence a completed
-        // session-command or pre-model-failure run).
-        if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
+        // The fallback `agent_end` closes the last `agent_start` on the wire
+        // when no engine `agent_end` did: session commands, pre-model
+        // failures, the admission consult's pre-run abort (no run
+        // registered), and a run a compaction or tree move detached (its
+        // frames were swallowed above) — also a later retried or continued
+        // run of the same delivery. The engine's per-run frames (one per
+        // agent run — the TS `agent_end` `messages` payload) are the real
+        // frames.
+        if run_open.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {

@@ -4429,6 +4429,7 @@ fn model_from_raw(raw: &RawModel) -> Model {
         featured: raw.featured,
         headers,
         compat: raw.compat.as_ref().map(compat_from_raw),
+        serving: None,
     }
 }
 

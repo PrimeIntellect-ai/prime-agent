@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import pty
 import re
+import shlex
 import select
 import signal
 import socket
@@ -67,11 +68,21 @@ def env_for(root):
 
 
 def skill_pythonpath():
-    """The repo's bundled skill sources for kernel cells that import skills. With a
-    PRIME_AGENT_KERNEL_PYTHON override the product installs no bundled skills into
-    that venv (it disables them), so these checks put the sources on PYTHONPATH."""
+    """The bundled skill sources used by a test-selected kernel interpreter."""
     skills = Path(__file__).resolve().parent.parent / "skills"
     return os.pathsep.join(sorted(str(path) for path in skills.glob("*/src")))
+
+
+def use_skill_python(root, env):
+    """Give a selected test interpreter the bundled skills without changing product startup."""
+    python = env.get("PRIME_AGENT_KERNEL_PYTHON")
+    if python:
+        wrapper = root / "kernel-python-with-skills"
+        wrapper.write_text("#!/bin/sh\nexport PYTHONPATH=" + shlex.quote(skill_pythonpath())
+                           + "\nexec " + shlex.quote(python) + " \"$@\"\n")
+        wrapper.chmod(0o700)
+        env["PRIME_AGENT_KERNEL_PYTHON"] = str(wrapper)
+    return env
 
 
 def actual_hello(binary, root, env):
@@ -650,7 +661,7 @@ class DockScreen:
                     if end is None:
                         break
                     sequence = self.pending[:2 + end.end()]
-                    # OSC titles/hyperlinks do not move terminal cells. DCS,
+                    # OSC titles/hyperlinks/program status (7501) do not move terminal cells. DCS,
                     # APC and PM can carry graphics or sixel: never silently
                     # accept their unknown effect on the captured frame.
                     payload = self.pending[2:2 + end.start()]
@@ -660,7 +671,7 @@ class DockScreen:
                     # do not paint or set a color; a legacy PTY may stay silent.
                     # Color-setting variants remain unsupported and fail closed.
                     color_query = payload in ('10;?', '11;?')
-                    if self.pending[1] != ']' or (not color_query and osc_kind not in ('0', '1', '2', '7', '8', '52', '133')):
+                    if self.pending[1] != ']' or (not color_query and osc_kind not in ('0', '1', '2', '7', '8', '52', '133', '7501')):
                         self.unsupported_terminal.append(sequence)
                     self.pending = self.pending[2 + end.end():]
                     continue
@@ -737,10 +748,6 @@ class DockScreen:
                     elif command == "n" and nums[0] == 6:
                         replies.append(f"\x1b[{self.row + 1};{self.col + 1}R".encode())
                     elif command == "c": replies.append(b"\x1b[?1;2c")
-                    elif command == 't' and nums == [16]:
-                        # Fixed fixture cell geometry: TS asks for this in
-                        # image-capable terminals (CSI 16 t -> CSI 6;h;w t).
-                        replies.append(b'\x1b[6;16;8t')
                     elif command in 'hl' and params.startswith('?'):
                         for mode in nums:
                             if mode == 7:

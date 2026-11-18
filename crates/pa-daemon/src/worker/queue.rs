@@ -636,12 +636,32 @@ fn is_bash_completion_notice_for(
     let Some(row) = item.custom_message.as_ref() else {
         return false;
     };
-    if row.get("customType").and_then(Value::as_str)
-        != Some(pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_CUSTOM_TYPE)
-    {
+    if !is_bash_completion_row(row) {
         return false;
     }
     let details = row.get("details").unwrap_or(&Value::Null);
     details.get("pid").and_then(Value::as_u64) == Some(u64::from(notice.pid))
         && details.get("command").and_then(Value::as_str) == Some(notice.command.as_str())
+}
+
+/// Whether one queued row is an admitted `[bash-done]` notice: completed
+/// bash work whose wake is still pending delivery.
+fn is_bash_completion_row(row: &Value) -> bool {
+    row.get("customType").and_then(Value::as_str)
+        == Some(pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_CUSTOM_TYPE)
+}
+
+/// The `[bash-done]` notices still queued for delivery across the
+/// steering and follow-up lanes: completed bash work the bash lane will
+/// still wake the session for.
+pub(crate) fn queued_bash_completion_notices(core: &SessionCore) -> usize {
+    core.steering
+        .iter()
+        .chain(core.follow_up.iter())
+        .filter(|item| {
+            item.custom_message
+                .as_ref()
+                .is_some_and(is_bash_completion_row)
+        })
+        .count()
 }

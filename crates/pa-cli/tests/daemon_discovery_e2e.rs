@@ -45,6 +45,15 @@ fn cli_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"))
 }
 
+/// A canonical fixture root short enough for every socket the product makes
+/// under it. macOS's `$TMPDIR` is too long: the product socket dir then falls
+/// back to the shared `/tmp/prime-agent-<uid>`, where the user's real daemon
+/// listens. Canonical so the paths the product reports compare equal.
+fn fixture_dir() -> tempfile::TempDir {
+    tempfile::tempdir_in(Path::new("/tmp").canonicalize().expect("canonical /tmp"))
+        .expect("fixture dir")
+}
+
 /// A spawned supervisor, killed on drop so a failed test never leaks a
 /// daemon into the machine.
 struct Daemon {
@@ -131,7 +140,7 @@ fn run_cli(root: &Path, args: &[&str]) -> Output {
 fn interactive_launcher_detaches_supervisor_from_client_session() {
     use std::io::{BufRead as _, BufReader};
 
-    let fixture = tempfile::tempdir().expect("fixture");
+    let fixture = fixture_dir();
     let agent_dir = fixture.path().join("agent");
     let tmp_dir = fixture.path().join("tmp");
     let socket = fixture.path().join("launched.sock");
@@ -318,7 +327,7 @@ fn reported_socket_paths(report: &Value) -> Vec<String> {
 
 #[test]
 fn doctor_lists_and_then_reaps_an_idle_root_owned_daemon() {
-    let fixture = tempfile::tempdir().expect("fixture");
+    let fixture = fixture_dir();
     let agent_dir = fixture.path().join("agent");
     let socket = agent_dir.join("daemon.sock"); // non-default: not <socket-dir>/daemon.sock
     let mut daemon = spawn_daemon(&socket, &agent_dir, &fixture.path().join("tmp"));
@@ -381,7 +390,7 @@ fn doctor_lists_and_then_reaps_an_idle_root_owned_daemon() {
 
 #[test]
 fn shutdown_without_force_requires_confirmation_and_harms_nothing() {
-    let fixture = tempfile::tempdir().expect("fixture");
+    let fixture = fixture_dir();
     let agent_dir = fixture.path().join("agent");
     let socket = agent_dir.join("daemon.sock");
     let mut daemon = spawn_daemon(&socket, &agent_dir, &fixture.path().join("tmp"));
@@ -434,8 +443,8 @@ fn shutdown_without_force_requires_confirmation_and_harms_nothing() {
 fn discovery_and_shutdown_from_another_root_leave_a_foreign_daemon_alive() {
     // Fixture A holds a live supervisor; fixture B is a completely different
     // state root. Everything run from B must leave A untouched.
-    let fixture_a = tempfile::tempdir().expect("fixture A");
-    let fixture_b = tempfile::tempdir().expect("fixture B");
+    let fixture_a = fixture_dir();
+    let fixture_b = fixture_dir();
     let agent_a = fixture_a.path().join("agent");
     // The socket must sit inside A's state root (the agent dir) so root-A
     // discovery is expected to own it; anything at the fixture root itself
@@ -725,10 +734,10 @@ fn tracked_worker_pid(agent_dir: &Path, supervisor_socket: &Path) -> u32 {
 /// another daemon's workers.
 #[test]
 fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
-    let shared_tmp = tempfile::tempdir().expect("shared tmpdir");
-    let fixture_a = tempfile::tempdir().expect("fixture A");
-    let fixture_b = tempfile::tempdir().expect("fixture B");
-    let fixture_c = tempfile::tempdir().expect("fixture C");
+    let shared_tmp = fixture_dir();
+    let fixture_a = fixture_dir();
+    let fixture_b = fixture_dir();
+    let fixture_c = fixture_dir();
     // SAFETY: getuid is a pure identity query.
     let socket_dir = shared_tmp
         .path()
@@ -904,9 +913,9 @@ fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
 /// supervisors' workers from both discovery and the force residual sweep.
 #[test]
 fn a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers() {
-    let shared_tmp = tempfile::tempdir().expect("shared worker tmpdir");
-    let pins = tempfile::tempdir().expect("supervisor pins outside agent dir");
-    let foreign_fixture = tempfile::tempdir().expect("foreign agent dir");
+    let shared_tmp = fixture_dir();
+    let pins = fixture_dir();
+    let foreign_fixture = fixture_dir();
     let own_socket = pins.path().join("own.sock");
     let foreign_socket = pins.path().join("foreign.sock");
     // Every worker socket is below shared_tmp, which is also this root's
@@ -972,7 +981,7 @@ fn a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers() {
 /// worker of the live supervisor the inherited env points at.
 #[test]
 fn a_daemon_launched_with_an_inherited_worker_env_comes_up_as_a_supervisor() {
-    let fixture = tempfile::tempdir().expect("fixture");
+    let fixture = fixture_dir();
     let agent_dir = fixture.path().join("agent");
     let tmp_dir = fixture.path().join("tmp");
     let socket = fixture.path().join("daemon.sock");

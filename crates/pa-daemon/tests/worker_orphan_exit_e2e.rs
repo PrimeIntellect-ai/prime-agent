@@ -110,7 +110,9 @@ fn orphaned_worker_exits_when_the_supervisor_socket_never_answers() {
         "the orphaned worker exited on the supervisor-lost window"
     );
     // The TS graceful exit owns its socket file: the orphan exit removes
-    // it, so a respawn does not wait out the stale-socket path.
+    // it, so a respawn does not wait out the stale-socket path. Off Linux
+    // the closed-listener probe never confirms closure, so the file stays.
+    #[cfg(target_os = "linux")]
     assert!(
         !dir.path().join("worker.sock").exists(),
         "the exited worker removed its socket file"

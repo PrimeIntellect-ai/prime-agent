@@ -1,1 +1,0 @@
-- `rlm.session.messages(start, limit, role=..., agent=...)` and `rlm.session.count()` read the session's own transcript, or a family member's, from the Python REPL, including the messages compaction summarized away.
