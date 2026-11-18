@@ -358,7 +358,7 @@ pub(crate) fn build_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::clamp_thinking_level;
+    use crate::models::{clamp_thinking_level, get_supported_thinking_levels};
     use crate::models_generated;
     use crate::types::{Message, StreamOptions, UserMessage, UserMessageContent};
 
@@ -664,22 +664,36 @@ mod tests {
     }
 
     /// The `deepseek/deepseek-v4-flash-0731` route takes low, high, and max and does not make
-    /// reasoning mandatory: offline, thinking off disables thinking and low sends `low`.
+    /// reasoning mandatory: offline, the entry offers exactly off, low, high, and max, and each
+    /// level sends what the route accepts.
     #[test]
-    fn compiled_deepseek_v4_flash_0731_keeps_thinking_off_and_sends_low() {
-        let sent = |level| {
-            let params =
-                compiled_params("prime-inference", "deepseek/deepseek-v4-flash-0731", level);
-            (
-                params.get("thinking").cloned(),
-                params.get("reasoning_effort").cloned(),
-            )
-        };
+    fn compiled_deepseek_v4_flash_0731_offers_the_route_ladder() {
+        let model =
+            models_generated::get_model("prime-inference", "deepseek/deepseek-v4-flash-0731")
+                .expect("compiled catalog carries the route");
+        let sent: Vec<_> = get_supported_thinking_levels(model)
+            .into_iter()
+            .map(|level| {
+                let params = reasoning_params_for(model, level);
+                (
+                    level,
+                    params.get("thinking").cloned(),
+                    params.get("reasoning_effort").cloned(),
+                )
+            })
+            .collect();
+        let on = Some(json!({ "type": "enabled" }));
         assert_eq!(
-            [ModelThinkingLevel::Off, ModelThinkingLevel::Low].map(sent),
+            sent,
             [
-                (Some(json!({ "type": "disabled" })), None),
-                (Some(json!({ "type": "enabled" })), Some(json!("low"))),
+                (
+                    ModelThinkingLevel::Off,
+                    Some(json!({ "type": "disabled" })),
+                    None
+                ),
+                (ModelThinkingLevel::Low, on.clone(), Some(json!("low"))),
+                (ModelThinkingLevel::High, on.clone(), Some(json!("high"))),
+                (ModelThinkingLevel::Max, on, Some(json!("max"))),
             ]
         );
     }
