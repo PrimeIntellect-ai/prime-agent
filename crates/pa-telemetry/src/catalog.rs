@@ -1028,6 +1028,7 @@ const TUI_EXIT: EventRule = EventRule {
         ("tui_scoped_models_count", optional(count())),
         ("tui_suspend_count", optional(count())),
         ("tui_agents_action_count", optional(count())),
+        ("tui_agents_content_search_count", optional(count())),
         ("tui_enhanced_keys_kitty", optional(boolean())),
         ("tui_enhanced_keys_modify_other_keys", optional(boolean())),
         ("tui_hyperlinks_enabled", optional(boolean())),
