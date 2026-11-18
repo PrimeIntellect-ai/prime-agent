@@ -1084,6 +1084,13 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
 
 #[test]
 fn a_goal_change_made_under_a_held_driver_lock_reaches_the_turn_end_update() {
+    // `DoneAborted`: a turn cancelled at admission.
+    assert_turn_end_publishes_a_held_goal_change("cancelled at admission", true);
+    // `Done`: a session command turn, the terminal path of `/goal pause`.
+    assert_turn_end_publishes_a_held_goal_change("/autonomous status", false);
+}
+
+fn assert_turn_end_publishes_a_held_goal_change(message: &str, aborted: bool) {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -1123,6 +1130,7 @@ fn a_goal_change_made_under_a_held_driver_lock_reaches_the_turn_end_update() {
     }
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let turn_engine = std::sync::Arc::clone(&engine);
+    let message = message.to_string();
     let turn = std::thread::spawn(move || {
         let mut events: Vec<EngineEvent> = Vec::new();
         turn_engine.run_prompt(
@@ -1130,12 +1138,12 @@ fn a_goal_change_made_under_a_held_driver_lock_reaches_the_turn_end_update() {
             PromptRequest {
                 batch: Vec::new(),
                 images: Vec::new(),
-                message: "cancelled at admission".to_string(),
+                message,
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
             },
-            &|| true,
+            &|| aborted,
             &mut |event| {
                 if matches!(event, EngineEvent::Done(_) | EngineEvent::DoneAborted) {
                     done_tx.send(()).unwrap();
