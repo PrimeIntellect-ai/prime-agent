@@ -196,7 +196,8 @@ fn displaces_install(existing: &BootstrapPythonSkill, skill: &BootstrapPythonSki
 }
 
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
-/// changed are installed. Per-skill failures warn and continue.
+/// changed are installed. Per-skill failures warn and continue. A failed uninstall of a shadowing
+/// distribution fails the sync so the next session retries it.
 pub(crate) async fn sync_python_skills(
     uv: &UvCommand<'_>,
     venv: &Path,
@@ -263,9 +264,15 @@ pub(crate) async fn sync_python_skills(
                 python_str.clone(),
             ];
             uninstall_args.extend(shadowing.iter().cloned());
+            // A distribution that survived the uninstall keeps shadowing the
+            // skill this sync selects on sys.path, so the install must not
+            // record success. Fail with the version file untouched: the
+            // displaced records survive, so the next session's kernel_ready
+            // re-runs this uninstall instead of short-circuiting on a record
+            // describing code the shadowed import never reaches.
             if let Err(error) = run_async(uv.executable, &uninstall_args, uv.project).await {
-                options.report(&format!(
-                    "Warning: failed to uninstall the Python skill distributions this sync replaces ({shadowing:?}): {error}"
+                return Err(anyhow!(
+                    "failed to uninstall the Python skill distributions this sync replaces ({shadowing:?}): {error:#}"
                 ));
             }
         }

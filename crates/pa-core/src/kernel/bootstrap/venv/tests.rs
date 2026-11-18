@@ -1213,6 +1213,73 @@ async fn switching_a_skill_between_sources_replaces_the_other_install() {
     );
 }
 
+/// A failed uninstall of the distribution shadowing the selected skill
+/// must fail the sync with the version file untouched. Recording the
+/// selected skill anyway would short-circuit `kernel_ready` on a record
+/// whose import keeps resolving to the surviving shadowing distribution,
+/// and dropping the displaced record would hide the uninstall requirement
+/// from every later sync.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_shadowing_uninstall_fails_the_sync_and_preserves_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$*\" in *uninstall*) exit 1;; esac\nexit 0\n",
+            dir.path().join("uv.log").display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let packaged_path = dir.path().join("payload/skills/goal");
+    let user_path = dir.path().join("home/skills/goal");
+    write_skill_pyproject(&packaged_path, "goal");
+    write_skill_pyproject(&user_path, "user-goal");
+    let packaged_skill = skill("goal", packaged_path.to_str().unwrap(), "packaged-hash");
+    let user_skill = skill("goal", user_path.to_str().unwrap(), "user-hash");
+    // A previous session recorded the packaged goal; this session selects
+    // the user override, whose shadowing distribution must go first.
+    write_bootstrap_version(&venv, "sha256:rt", std::slice::from_ref(&packaged_skill)).unwrap();
+    let result = sync_python_skills(
+        &UvCommand {
+            executable: uv.to_str().unwrap(),
+            project: None,
+        },
+        &venv,
+        dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
+        "sha256:rt",
+        std::slice::from_ref(&user_skill),
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await;
+    assert!(result.is_err(), "the sync must fail, not record success");
+    let recorded = read_bootstrap_version(&venv)
+        .expect("version written")
+        .python_skills
+        .expect("skills recorded");
+    assert_eq!(
+        recorded,
+        vec![packaged_skill.clone()],
+        "the displaced record survives so the next sync retries the uninstall"
+    );
+    assert!(
+        !recorded_skills_cover(Some(&recorded), std::slice::from_ref(&user_skill)),
+        "kernel_ready must not short-circuit on the uninstalled skill"
+    );
+    let calls = uv_invocations(dir.path());
+    assert_eq!(
+        calls.len(),
+        1,
+        "no install runs after the failed uninstall: {calls:?}"
+    );
+    assert!(
+        calls[0].contains("uninstall"),
+        "the uninstall was attempted: {calls:?}"
+    );
+}
+
 /// uv replaces distributions by project name, so an install can displace a
 /// record with a DIFFERENT import name: a user skill importing `user_goal`
 /// from a distribution named `goal` (the bundled goal's project name) has
