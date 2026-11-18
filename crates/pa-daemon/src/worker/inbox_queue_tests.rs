@@ -1966,7 +1966,7 @@ async fn a_minted_child_notice_routes_into_the_inbox() {
             "sub-9", "lane", "boom", 1_000,
         ),
     );
-    let nonce = crate::child_status_notices::mint();
+    let nonce = crate::child_status_notices::mint(&worker.config.agent_dir);
     let delivered = worker
         .dispatch(
             "follow_up",
@@ -2053,7 +2053,7 @@ async fn the_inbox_kill_switch_keeps_the_child_notice_row_direct() {
             2_000,
         ),
     );
-    let nonce = crate::child_status_notices::mint();
+    let nonce = crate::child_status_notices::mint(&worker.config.agent_dir);
     let delivered = worker
         .dispatch(
             "follow_up",

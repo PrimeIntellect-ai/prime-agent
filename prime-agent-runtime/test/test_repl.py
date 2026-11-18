@@ -4358,6 +4358,26 @@ class WaitingKeepaliveTest(unittest.TestCase):
         done = wait_for_host_request_of_type(repl, "bash.completed")
         reply_ok(repl, done)
 
+    def test_the_first_notice_waits_one_window_of_parked_work(self):
+        # The window is seeded at the loop's own start, never at the
+        # monotonic clock's origin (typically boot): a long-uptime host must
+        # not fire the first notice on its first tick, and a young host must
+        # not wait for host uptime to cross the window.
+        repl = self.kept_repl("0.5")
+        started = time.monotonic()
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 3; echo done')\nprint('launched', h.pid)",
+        )
+        waiting = wait_for_host_request_of_type(repl, "bash.waiting")
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(
+            elapsed,
+            0.4,
+            f"the first notice fired {elapsed:.3f}s after the launch, before one 0.5s window of parked work",
+        )
+        reply_ok(repl, waiting)
+
     def test_an_error_reply_disables_the_keepalive(self):
         # A host without the handler (an older daemon, the TS daemon) answers
         # with an error reply instead: the keepalive disables itself rather

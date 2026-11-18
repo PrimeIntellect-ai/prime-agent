@@ -185,7 +185,11 @@ async def _waiting_keepalive_loop() -> None:
     from . import repl
 
     tick = min(_WAITING_TICK_SECONDS, _WAITING_KEEPALIVE_SECONDS / 4.0)
-    last_sent: float | None = None
+    # Seed the window at the loop's own start: `time.monotonic()` has an
+    # unspecified origin (typically boot), so a zero seed would make the
+    # first notice wait for host uptime to cross the window instead of one
+    # window of parked work.
+    last_sent: float | None = time.monotonic()
     while True:
         await asyncio.sleep(tick)
         with _live_lock:
