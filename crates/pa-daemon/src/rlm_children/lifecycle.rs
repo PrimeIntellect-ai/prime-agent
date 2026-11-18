@@ -872,7 +872,7 @@ impl SupervisorChildSessionsInner {
         };
         let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message))
             .unwrap_or(Value::Null);
-        let nonce = crate::child_status_notices::mint();
+        let nonce = crate::child_status_notices::mint(&self.agent_dir);
         let command = DaemonCommand::FollowUp {
             id: None,
             active_session_id: self.parent_active_session_id.clone(),
