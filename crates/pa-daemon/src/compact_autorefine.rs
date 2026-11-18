@@ -60,8 +60,10 @@ impl AgentSessionEngine {
     /// pa-core round take, then the refinement child's spawn. The gates
     /// (enabled, compact, cooldown, the in-flight guard) live on the
     /// session's trigger state; the review gate is gone — the child's own
-    /// empty-edits judgment is the gate. `Ok(())` is every silent outcome;
-    /// the spawn's errors surface.
+    /// empty-edits judgment is the gate. The take and the spawn ride one
+    /// admission under the spawn lock, so a concurrent manual `/refine`
+    /// cannot consume the armed trigger between them. `Ok(())` is every
+    /// silent outcome; the spawn's errors surface.
     pub(crate) fn consume_compact_auto_refine_round(&self) -> anyhow::Result<()> {
         if !self.compact_auto_refine_pending() {
             return Ok(());
@@ -80,55 +82,65 @@ impl AgentSessionEngine {
         if busy {
             return Ok(());
         }
-        // A refinement child that died without replying releases its
-        // round before the take, so the armed trigger is never wedged
-        // behind the in-flight guard.
-        self.runtime
-            .block_on(async { self.release_dead_refine_child_round().await });
-        // A live refinement child (a manual `/refine` spawn whose reply has
-        // not landed, or whose reply is parked for the idle apply) owns
-        // the apply lane: taking the armed round now would only fail the
-        // spawn against it and surface a spurious `refine_failed`. The
-        // trigger stays armed for a later boundary.
-        if self
-            .refine_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
-            || self
-                .pending_refine_reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
-        {
-            return Ok(());
-        }
-        // The round take: the gates decide and stamp the cadence; the
-        // in-flight guard holds the trigger while the child runs.
-        let options = {
+        let children = self.children.clone();
+        let core = {
             let guard = self.session.blocking_lock();
-            match guard.as_deref() {
-                Some(engine) => self.runtime.block_on(async {
-                    engine
-                        .session
-                        .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
-                }),
-                None => None,
-            }
+            guard.clone()
         };
-        let Some(options) = options else {
+        let Some(core) = core else {
             return Ok(());
         };
-        // Fire: the spawn returns once the child is admitted; the child's
-        // proposal applies on its reply's arrival (the wake finishes the
-        // round either way). A failed spawn releases the round here — its
-        // error surfaced, so the next armed trigger is not wedged behind
-        // the in-flight guard.
-        if let Err(error) = self.spawn_refinement_child(options, RefinementSource::Auto) {
-            let guard = self.session.blocking_lock();
-            if let Some(engine) = guard.as_deref() {
-                engine.session.finish_compact_auto_refine_round();
+        // The whole admission rides ONE async section under the spawn lock:
+        // the dead-round release, the lane check, the round take, and the
+        // spawn. A concurrent manual `/refine` can no longer slip between
+        // the take and the spawn — that window consumed the armed trigger
+        // and surfaced a spurious `refine_failed`. A live refinement child
+        // (a manual spawn whose reply has not landed, or whose reply is
+        // parked for the idle apply) keeps the trigger armed for a later
+        // boundary.
+        let outcome = self.runtime.block_on(async {
+            let _spawn = self.refine_spawn_lock.lock().await;
+            self.release_dead_refine_child_round().await;
+            {
+                let flight = self
+                    .refine_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let pending = self
+                    .pending_refine_reply
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if flight.is_some() || pending.is_some() {
+                    return Ok(());
+                }
             }
+            // The round take: the gates decide and stamp the cadence; the
+            // in-flight guard holds the trigger while the child runs.
+            let options = core
+                .session
+                .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint);
+            let Some(options) = options else {
+                return Ok(());
+            };
+            // Fire: the spawn returns once the child is admitted; the
+            // child's proposal applies on its reply's arrival (the wake
+            // finishes the round either way). A standalone engine refuses
+            // visibly here, exactly as before the take moved under the
+            // lock: the taken round is released below.
+            let Some(children) = children.as_ref() else {
+                anyhow::bail!(
+                    "The refine command requires a daemon-backed session: the refinement child is a spawned session, and this session has no RLM child runtime."
+                );
+            };
+            self.spawn_refine_child_inner(children, &options, RefinementSource::Auto)
+                .await
+                .map(|_| ())
+        });
+        if let Err(error) = outcome {
+            // A failed spawn releases the round here — its error surfaced,
+            // so the next armed trigger is not wedged behind the
+            // in-flight guard.
+            core.session.finish_compact_auto_refine_round();
             return Err(error);
         }
         Ok(())
@@ -318,6 +330,47 @@ mod tests {
             engine.compact_auto_refine_pending(),
             "the trigger stays armed for the later boundary"
         );
+    }
+
+    /// The take rides the spawn lock: while a manual `/refine` admission
+    /// holds the lock, the armed round is not consumed. The old order took
+    /// the round first, so a racing manual child made the auto spawn fail
+    /// after the trigger was already gone — a lost round plus a spurious
+    /// `refine_failed`. Red when the take moves back out of the lock.
+    #[test]
+    fn the_armed_round_is_taken_only_under_the_spawn_lock() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = trigger_engine(
+            &json!({ "responses": [ {"text": "seed reply"} ] }),
+            1,
+            true,
+        );
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, "seed turn".to_string(), &mut events);
+        engine.mark_compact_auto_refine_pending();
+        // The manual admission owns the lane: the spawn lock is held.
+        let held = engine
+            .runtime
+            .block_on(async { engine.refine_spawn_lock.lock().await });
+        std::thread::scope(|scope| {
+            let consuming = scope.spawn(|| engine.consume_compact_auto_refine_round());
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert!(
+                engine.compact_auto_refine_pending(),
+                "the armed round must not be consumed while the spawn lock is held"
+            );
+            drop(held);
+            let outcome = consuming.join().expect("the consuming thread");
+            // The standalone engine still takes and refuses after the lock
+            // releases, and the refusal releases the round (the unchanged
+            // contract).
+            assert!(
+                outcome.is_err(),
+                "the standalone engine still refuses visibly: {outcome:?}"
+            );
+        });
     }
 
     /// A taken round stamps the cooldown (a failed spawn already
