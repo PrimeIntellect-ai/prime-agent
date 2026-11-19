@@ -488,6 +488,28 @@ files = ["shared.md", "user-only.md"]
     }
 
     #[test]
+    fn the_glm_layer_awaits_each_spawn() {
+        let layer = MODEL_PROMPT_FILES
+            .iter()
+            .find(|(name, _)| *name == "bash-over-subprocess.md")
+            .map(|(_, content)| *content)
+            .expect("the shipped file table names bash-over-subprocess.md");
+        // `rlm.spawn` is a coroutine: only an await admits the child.
+        let delegation = layer
+            .split("\n\n")
+            .find(|paragraph| paragraph.contains("rlm.spawn("))
+            .expect("the layer has a delegation paragraph");
+        assert!(
+            delegation.contains("`await rlm.spawn(...)`"),
+            "the delegation line must await the spawn admission"
+        );
+        assert!(
+            !delegation.contains("never awaited"),
+            "an unawaited rlm.spawn admits no child, so the layer must not teach it"
+        );
+    }
+
+    #[test]
     fn file_entries_outside_the_agent_dir_are_rejected() {
         let root = tempfile::tempdir().unwrap();
         write_file(root.path(), "outside.md", "OUTSIDE");

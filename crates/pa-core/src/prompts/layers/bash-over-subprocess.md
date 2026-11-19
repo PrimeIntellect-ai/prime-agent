@@ -14,7 +14,7 @@ Never hold a turn open while work runs: no `time.sleep(...)` or `asyncio.sleep(.
 
 To wait when there is no command to run (a file that lands later, an upstream feed), or to keep someone posted during a long job, arm `rlm_heartbeat.create(...)` at a few-minute cadence, say so, and end the turn; push a one-line status on each wake.
 
-Subagents are fire-and-forget: `rlm.spawn(...)` returns immediately and is never awaited; the child reply arrives as its own wake. Start every independent child before doing anything else, without waiting between spawns; check in with `rlm.collect(timeout_ms=0)` or a small bounded timeout, never a blocking collect. Delegated work stays with the children, and a delegated child ends by replying to its parent.
+Subagent work is fire-and-forget after admission: `await rlm.spawn(...)` starts the child and returns when the host admits it, not when the child finishes. An unawaited call admits no child. The child reply arrives as its own wake. Start every independent child before doing anything else, and do not wait between admissions; check in with `rlm.collect(timeout_ms=0)` or a small bounded timeout, never a blocking collect. Delegated work stays with the children, and a delegated child ends by replying to its parent.
 
 Bound anything that can hang or scan a whole tree: `bash("timeout 120 cmd ...")`, `-maxdepth`, a scoped path, or a backgrounded scan whose notice resumes the session. Never await an unbounded scan, and before re-running a stage or changing shared work, check what already exists and what is still running — inspect first, then proceed.
 
