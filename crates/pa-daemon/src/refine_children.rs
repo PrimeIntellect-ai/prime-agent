@@ -142,6 +142,34 @@ impl AgentSessionEngine {
         }
     }
 
+    /// A branch move or a replacement teardown abandons the conversation
+    /// the refinement child plans on: the child is cancelled first, then
+    /// its lane drops — the flight, or the reply it parked meanwhile. The
+    /// proposal never applies to the moved-to conversation, and the lane
+    /// never holds off a later `/refine`.
+    pub(crate) async fn abandon_refine_child(&self) {
+        let _spawn = self.refine_spawn_lock.lock().await;
+        let running = self
+            .refine_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|flight| flight.rlm_child_id.clone());
+        if let (Some(children), Some(rlm_child_id)) = (self.children.as_ref(), running) {
+            children.cancel_child_run(&rlm_child_id).await;
+        }
+        let mut flight = self
+            .refine_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut pending = self
+            .pending_refine_reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *flight = None;
+        *pending = None;
+    }
+
     /// The spawn body after the flight check: the prepare, the admission,
     /// and the flight's record.
     pub(crate) async fn spawn_refine_child_inner(
@@ -548,6 +576,61 @@ mod tests {
                 .block_on(async { engine.apply_pending_refine_reply().await })
                 .is_none(),
             "the apply is one-shot"
+        );
+    }
+
+    /// A branch move and a replacement teardown abandon the conversation
+    /// the refinement child planned on: the move drops the in-flight
+    /// flight, so the abandoned child's late reply never parks, and the
+    /// teardown drops a reply parked before it, so nothing applies to the
+    /// moved-to conversation. Red when either seam keeps the lane.
+    #[test]
+    fn a_branch_move_and_a_replacement_drop_the_abandoned_refine_lane() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, dir) = park_engine();
+        park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
+        let mut moved = crate::session_store::SessionFile::create("/tmp", None, 0);
+        moved.append_message(&json!({
+            "role": "user",
+            "content": "moved branch",
+            "timestamp": 1u64,
+        }));
+        engine
+            .rebuild_session_context(
+                moved.branch_file_entries(),
+                pa_core::session_engine::goal_driver::GoalBranchReload::FaithfulBranch,
+            )
+            .expect("the branch move");
+        assert!(!flight_some(&engine), "the branch move dropped the flight");
+        assert!(
+            engine
+                .park_refine_child_reply("active-1", PROPOSAL)
+                .is_none(),
+            "the abandoned child's late reply never parks"
+        );
+        park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
+        assert_eq!(
+            engine.park_refine_child_reply("active-1", PROPOSAL),
+            Some(())
+        );
+        engine.runtime.block_on(engine.teardown_for_replacement());
+        assert!(
+            !pending_some(&engine),
+            "the teardown dropped the parked reply"
+        );
+        assert!(
+            engine
+                .runtime
+                .block_on(async { engine.apply_pending_refine_reply().await })
+                .is_none(),
+            "nothing is left to apply"
+        );
+        assert_eq!(
+            local_harness_state(dir.path()),
+            serde_json::Value::Null,
+            "no abandoned proposal reached the harness store"
         );
     }
 }

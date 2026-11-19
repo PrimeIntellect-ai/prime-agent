@@ -1029,3 +1029,113 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+/// A branch move abandons the in-flight refinement child: the move cancels
+/// the child while its planning call is still open and drops its lane, so
+/// no proposal applies to the moved-to branch and no late reply reaches the
+/// parent's conversation; the next `/refine` spawns at once. Red when the
+/// move keeps the lane (the proposal applies after the move) or skips the
+/// cancel (the child's late reply lands as an agent message).
+#[test]
+fn a_branch_move_cancels_the_in_flight_refine_child() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let stderr_path = dir.path().join("daemon.stderr");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &stderr_path);
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+    prompt_and_wait(&mut client, "p1", &session_id, "second turn");
+
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    assert_eq!(response["data"]["refinementChildSpawned"], true);
+
+    // The move lands while the child's planning call is still open (the
+    // mock answers it after PLAN_DELAY_MS): back to the first reply.
+    client.send_command(
+        "t1",
+        &json!({ "type": "get_session_tree", "activeSessionId": session_id }),
+    );
+    let tree = client.read_response("t1");
+    let first_assistant_id = tree["data"]["flatNodes"]
+        .as_array()
+        .expect("flatNodes")
+        .iter()
+        .find(|node| {
+            node["entry"]["type"] == "message" && node["entry"]["message"]["role"] == "assistant"
+        })
+        .and_then(|node| node["entry"]["id"].as_str())
+        .expect("the first assistant entry")
+        .to_string();
+    client.send_command(
+        "n1",
+        &json!({
+            "type": "navigate_tree",
+            "activeSessionId": session_id,
+            "targetId": first_assistant_id,
+        }),
+    );
+    let moved = client.read_response("n1");
+    assert_eq!(moved["success"], true, "the branch move failed: {moved}");
+    // The move cancelled the child while its planning call was still open.
+    let rows = rlm_children_rows(&mut client, "g0", &session_id);
+    assert!(
+        rows.iter().all(|row| row["status"] != "running"),
+        "the abandoned refinement child still runs after the move: {rows:?}"
+    );
+
+    // Past the planning delay: nothing applied and nothing delivered.
+    std::thread::sleep(Duration::from_millis(PLAN_DELAY_MS + 2_000));
+    client.drain_events(500);
+    assert!(
+        client
+            .events
+            .iter()
+            .all(|(event, _)| event["type"] != "refine_complete"),
+        "the abandoned proposal applied after the branch move; stderr: {}",
+        daemon_stderr(&stderr_path)
+    );
+    assert!(
+        !client.events.iter().any(|(event, _)| {
+            event["type"] == "message_end" && event["message"]["customType"] == "agent_message"
+        }),
+        "the abandoned child's late reply reached the parent's conversation"
+    );
+    assert_eq!(
+        local_harness_state(&session_dir),
+        Value::Null,
+        "no abandoned proposal reached the harness store"
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let rows = rlm_children_rows(&mut client, "g1", &session_id);
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the cancelled refinement child never tore down; rows: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The lane is free: the next `/refine` spawns and applies on the
+    // moved-to branch.
+    let response = refine(&mut client, "r2", &session_id);
+    assert_eq!(
+        response["success"], true,
+        "the lane stayed held: {response}"
+    );
+    let complete = wait_for_event(
+        &mut client,
+        Duration::from_secs(20),
+        "refine_complete",
+        &stderr_path,
+    );
+    assert_eq!(complete["result"]["appliedEdits"][0]["applied"], true);
+}

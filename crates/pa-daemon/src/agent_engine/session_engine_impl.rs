@@ -213,6 +213,10 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
+            // The replaced conversation's refinement child goes with it.
+            // This runs before the retire takes the build gate: a spawn
+            // admission takes the build gate under the spawn lock.
+            self.abandon_refine_child().await;
             self.retire_session_runtime().await;
         })
     }
@@ -823,6 +827,9 @@ impl SessionEngine for AgentSessionEngine {
             return Ok(());
         }
         self.runtime.block_on(async move {
+            // The moved branch abandons the refinement child that plans on
+            // the conversation it leaves.
+            self.abandon_refine_child().await;
             let guard = self.session.lock().await;
             let Some(engine) = guard.as_deref() else {
                 return Ok(());

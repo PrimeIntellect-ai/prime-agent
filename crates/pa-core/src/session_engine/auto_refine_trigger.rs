@@ -78,6 +78,9 @@ impl AgentSession {
             .lock()
             .expect("compact auto-refine state lock");
         state.pending = false;
+        // The round in flight goes with the abandoned conversation: the
+        // daemon drops its refinement child's lane, so no reply finishes it.
+        state.in_flight = false;
         // A branch move bumps the version: a round already planning on the
         // abandoned branch drops its result instead of applying it here.
         state.branch_version += 1;
@@ -348,6 +351,34 @@ mod tests {
         assert!(session
             .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
             .is_none());
+    }
+
+    /// A branch move abandons the in-flight round with its conversation:
+    /// the next armed trigger takes a fresh round. Red when the discard
+    /// keeps the in-flight guard — no reply ever finishes the abandoned
+    /// round, so the trigger would stay silent for the session's life.
+    #[tokio::test]
+    async fn discard_releases_the_in_flight_round() {
+        let mut session = session(true).await;
+        session.set_auto_refine(
+            true,
+            AutoRefineGates {
+                cooldown_ms: 0,
+                ..Default::default()
+            },
+        );
+        session.mark_compact_auto_refine_pending();
+        assert!(session
+            .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
+            .is_some());
+        session.discard_compact_auto_refine();
+        session.mark_compact_auto_refine_pending();
+        assert!(
+            session
+                .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
+                .is_some(),
+            "the abandoned round no longer holds the trigger"
+        );
     }
 
     #[tokio::test]
