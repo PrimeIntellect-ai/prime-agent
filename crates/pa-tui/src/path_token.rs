@@ -15,9 +15,9 @@ pub(crate) enum Quoting {
 }
 
 impl Quoting {
-    /// `path` written in this quoting; an unquoted path with spaces takes double quotes.
+    /// `path` written in this quoting; an unquoted path with whitespace takes double quotes.
     pub(crate) fn render(self, path: &str) -> String {
-        if self == Quoting::Bare && !path.contains(' ') {
+        if self == Quoting::Bare && !path.contains(char::is_whitespace) {
             return path.to_string();
         }
         format!("\"{path}\"")
