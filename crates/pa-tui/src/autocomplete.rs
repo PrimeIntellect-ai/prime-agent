@@ -808,7 +808,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
     ) -> Option<SuggestionLookup> {
         let line: Vec<char> = lines.get(cursor_line)?.chars().collect();
         let before: Vec<char> = line[..cursor_col.min(line.len())].to_vec();
-        if let Some(token) = path_token::at_token_before(&before) {
+        if let Some(token) = path_token::at_token_before(&before, line.get(cursor_col)) {
             return fuzzy_file_search::lookup(&self.paths.base, &self.file_index, token);
         }
         if !force {
@@ -874,7 +874,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
     ) -> CompletionResult {
         let line: Vec<char> = lines[cursor_line].chars().collect();
         let before = &line[..cursor_col.min(line.len())];
-        if let Some(token) = path_token::at_token_before(before) {
+        if let Some(token) = path_token::at_token_before(before, line.get(cursor_col)) {
             return apply_file_completion(lines, cursor_line, cursor_col, item, &token);
         }
         // TS `applyCompletion` finds the item over its whole command list

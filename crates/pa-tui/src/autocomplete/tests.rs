@@ -901,9 +901,11 @@ fn at_index_matches_the_walk_on_random_trees() {
             let mut walks: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
             for query in random_queries(&forms, &mut rng) {
                 let at_prefix = format!("@{query}");
-                let token =
-                    crate::path_token::at_token_before(&at_prefix.chars().collect::<Vec<_>>())
-                        .expect("token");
+                let token = crate::path_token::at_token_before(
+                    &at_prefix.chars().collect::<Vec<_>>(),
+                    None,
+                )
+                .expect("token");
                 let mut matched = 0;
                 let expected =
                     fuzzy_file_search::resolve_search(&base, &token, &cancel, |search, _| {

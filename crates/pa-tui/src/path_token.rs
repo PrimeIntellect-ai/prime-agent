@@ -126,15 +126,15 @@ pub(crate) fn at_tokens(line: &[char]) -> Vec<PathToken> {
 }
 
 /// The `@` token the cursor is typing: the open token `before` (the line up to the cursor)
-/// ends with.
-pub(crate) fn at_token_before(before: &[char]) -> Option<PathToken> {
-    open_last(tokens(before, true), before.len())
+/// ends with. `next`, the char under the cursor, decides whether a quote ending `before` closes.
+pub(crate) fn at_token_before(before: &[char], next: Option<&char>) -> Option<PathToken> {
+    open_last(tokens(before, true), before.len(), next)
 }
 
 /// The path token, with or without `@`, the cursor is typing; an empty token at the cursor
 /// when `before` ends with none.
 pub(crate) fn path_token_before(before: &[char]) -> PathToken {
-    open_last(tokens(before, false), before.len()).unwrap_or(PathToken {
+    open_last(tokens(before, false), before.len(), None).unwrap_or(PathToken {
         start: before.len(),
         end: before.len(),
         text: String::new(),
@@ -159,10 +159,13 @@ pub(crate) fn bare_token(text: &str, start: usize) -> PathToken {
     }
 }
 
-fn open_last(mut tokens: Vec<PathToken>, len: usize) -> Option<PathToken> {
-    tokens
-        .pop()
-        .filter(|token| token.end == len && !token.closed)
+fn open_last(mut tokens: Vec<PathToken>, len: usize, next: Option<&char>) -> Option<PathToken> {
+    let mut token = tokens.pop().filter(|token| token.end == len)?;
+    if token.closed && !closes_quote(next, token.at) {
+        token.closed = false;
+        token.path.extend(token.quoting.quote());
+    }
+    (!token.closed).then_some(token)
 }
 
 /// The tokens of `line` left to right; `at_only` skips tokens without `@`.
@@ -297,14 +300,19 @@ mod tests {
     #[test]
     fn only_an_open_token_ending_at_the_cursor_is_typed() {
         assert_eq!(
-            at_token_before(&chars("@'a b")).map(|t| t.path),
+            at_token_before(&chars("@'a b"), None).map(|t| t.path),
             Some("a b".to_string())
         );
-        assert_eq!(at_token_before(&chars("@'a b'")), None);
-        assert_eq!(at_token_before(&chars("@a ")), None);
+        assert_eq!(at_token_before(&chars("@'a b'"), None), None);
+        // A quote before a name char under the cursor is part of the name.
+        assert_eq!(
+            at_token_before(&chars("@'it'"), Some(&'s')).map(|t| t.path),
+            Some("it'".to_string())
+        );
+        assert_eq!(at_token_before(&chars("@a "), None), None);
         if ESCAPES {
             assert_eq!(
-                at_token_before(&chars(r"@my\")).map(|t| t.path),
+                at_token_before(&chars(r"@my\"), None).map(|t| t.path),
                 Some("my".to_string())
             );
         }
