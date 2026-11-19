@@ -56,6 +56,8 @@ class ErrorHandler(http.server.BaseHTTPRequestHandler):
 
 CASES = ('length', 'provider_error', 'normal_invalid')
 
+TS_OBSERVED = {'length': 'Refinement failed: the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.', 'provider_error': 'Refinement failed: 400 fixture token budget invalid', 'normal_invalid': 'Refiner did not return a JSON object'}
+
 
 def observe(binary, root, case, receipt):
     env = env_for(root)

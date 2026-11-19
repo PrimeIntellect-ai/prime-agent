@@ -5,8 +5,11 @@
 //! consumption returns the armed options and the daemon-backed caller
 //! spawns the child; the child-reply wake finishes the round.
 
-use super::refine::{now_millis, RefineOptions, AUTO_REFINE_COMPACT_REASON};
+use super::refine::{
+    auto_refine_instructions, now_millis, RefineOptions, AUTO_REFINE_COMPACT_REASON,
+};
 use super::AgentSession;
+use crate::refinement::executor::AutoRefineReview;
 
 /// The boundary a pending trigger is serviced at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,8 +149,16 @@ impl AgentSession {
         Some(RefineOptions {
             global: false,
             // The child self-reviews: no retained review rides the round,
-            // so the instruction line is the compaction reason alone.
-            instructions: Some(AUTO_REFINE_COMPACT_REASON.to_string()),
+            // so the instruction line is the TS text for the compaction
+            // reason alone (the reviewer's detail stays empty).
+            instructions: Some(auto_refine_instructions(
+                AUTO_REFINE_COMPACT_REASON,
+                &AutoRefineReview {
+                    should_refine: true,
+                    rationale: String::new(),
+                    instructions: None,
+                },
+            )),
             rollback_id: None,
         })
     }
