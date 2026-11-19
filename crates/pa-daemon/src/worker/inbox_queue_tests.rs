@@ -109,7 +109,6 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let rows = steering_rows(&worker);
@@ -192,7 +191,6 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -207,7 +205,6 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -222,7 +219,6 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let rows = steering_rows(&worker);
@@ -257,7 +253,6 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     // The delivery: the turn runner pops the row off the lane.
@@ -275,7 +270,6 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let rows = steering_rows(&worker);
@@ -394,7 +388,6 @@ async fn a_drained_read_withdraws_its_queued_wake_rows() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     admit_inbox_reminder(
@@ -497,7 +490,6 @@ async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
         bash_done_notice(4321, "job one"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -509,7 +501,6 @@ async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
         bash_done_notice(4322, "job two"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     admit_inbox_reminder(
@@ -535,7 +526,6 @@ async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
         bash_done_notice(4323, "job three"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     // The queued reminder's twin keeps its identity across the re-render
@@ -681,7 +671,6 @@ async fn a_reminder_racing_a_drained_read_never_queues_a_dead_count() {
         bash_done_notice(4321, "detached command"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     // The reminder thread arms the gate on its own thread, then admits:
@@ -805,7 +794,6 @@ async fn a_collected_handle_drains_its_message_and_drops_the_queued_wake_rows() 
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     admit_inbox_reminder(
@@ -867,7 +855,6 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -882,7 +869,6 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     admit_inbox_reminder(
@@ -1026,7 +1012,6 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let milestone = admit_inbox_notice(
@@ -1041,7 +1026,6 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     assert!(milestone.is_ok(), "the milestone admitted");
@@ -1110,7 +1094,6 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     // The older message's row delivered; its message stays waiting.
@@ -1125,7 +1108,6 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     assert_eq!(
@@ -1208,7 +1190,6 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         Some(engine.as_ref()),
     );
     assert_eq!(
@@ -1273,7 +1254,6 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
             bash_done_notice(10_000 + i, "job a"),
             Lane::Steering,
             || false,
-            |_, _| None,
             None,
         );
         let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -1298,7 +1278,6 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
                     bash_done_notice(20_000 + i, "job b"),
                     Lane::Steering,
                     || false,
-                    |_, _| None,
                     None,
                 );
                 let _ = done_tx.send(());
@@ -1368,7 +1347,6 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let rows = steering_rows(&worker);
@@ -1414,7 +1392,6 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         bash_done_notice(4322, "sleep 2"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     assert!(
@@ -1472,7 +1449,6 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -1487,7 +1463,6 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     admit_inbox_reminder(
@@ -1559,7 +1534,6 @@ async fn a_closed_session_refuses_the_arrival() {
         ),
         Lane::Steering,
         || true,
-        |_, _| None,
         None,
     );
     assert!(
@@ -2186,45 +2160,28 @@ async fn a_clear_drops_unread_agent_messages_and_their_wake_rows() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The capacity gate refuses inside the admission's critical section:
-/// a full store of agent messages refuses the next delivery.
+/// The inbox is never capped: deliveries past the direct route's pending
+/// bound are all admitted, and every one waits in the inbox.
 #[tokio::test]
-async fn a_full_agent_message_inbox_refuses_the_next_delivery() {
+async fn inbox_agent_messages_past_the_pending_bound_are_all_admitted() {
     let (worker, inbox, dir) = faux_worker_with_inbox();
     worker.dispatch("clear_queue", &json!({})).await;
-    for index in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
-        inbox.push(
-            inbox_notice(
-                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                &format!("waiting {index}"),
-            ),
-            1_000 + index as u64,
-        );
+    worker.core.lock().unwrap().busy = true;
+    let total = DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION + 5;
+    for index in 0..total {
+        let delivered = worker
+            .dispatch(
+                "worker_deliver_message",
+                &json!({
+                    "targetActiveSessionId": "target-session",
+                    "message": format!("message {index}"),
+                    "sender": { "activeSessionId": "peer-1" },
+                }),
+            )
+            .await;
+        assert!(delivered.success, "delivery {index} admits: {delivered:?}");
     }
-    let refused = worker
-        .dispatch(
-            "worker_deliver_message",
-            &json!({
-                "targetActiveSessionId": "target-session",
-                "message": "one too many",
-                "sender": { "activeSessionId": "peer-1" },
-            }),
-        )
-        .await;
-    assert!(!refused.success, "the full store refuses: {refused:?}");
-    assert!(
-        refused
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("too many pending messages"),
-        "the TS refusal text rides: {refused:?}"
-    );
-    assert_eq!(
-        inbox.count().0,
-        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-        "nothing leaked past the cap"
-    );
+    assert_eq!(inbox.count().0, total, "every delivery waits in the inbox");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2389,7 +2346,6 @@ async fn a_replaced_inbox_refuses_the_open_sessions_append() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         Some(engine.as_ref()),
     );
     assert_eq!(
@@ -2430,7 +2386,6 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -2445,7 +2400,6 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
         ),
         Lane::FollowUp,
         || false,
-        |_, _| None,
         None,
     );
     let core = worker.core.lock().unwrap();
@@ -2489,7 +2443,6 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     // The queue strip addresses the row by its visible preview.
@@ -2527,7 +2480,6 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let rows = steering_rows(&worker);
@@ -2540,78 +2492,6 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
         rows.iter().all(|(text, _, _)| text.starts_with("[inbox ")
             && text.contains("2 new messages (1 bash-done, 1 factory-progress)")),
         "the row stays the coalesced notice, never a user instruction: {rows:?}"
-    );
-    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
-}
-
-/// A queued notice row never consumes the a2a capacity: the bound counts
-/// waiting inbox messages (and direct-route marker rows), not the one
-/// coalesced wake row per batch.
-#[tokio::test]
-async fn a_queued_notice_row_does_not_consume_the_capacity() {
-    let (worker, inbox, _dir) = faux_worker_with_inbox();
-    worker.dispatch("clear_queue", &json!({})).await;
-    worker.core.lock().unwrap().busy = true;
-    let first = worker
-        .dispatch(
-            "worker_deliver_message",
-            &json!({
-                "targetActiveSessionId": "target-session",
-                "message": "one",
-                "sender": { "activeSessionId": "peer-1" },
-            }),
-        )
-        .await;
-    assert!(first.success, "the first delivery admits: {first:?}");
-    assert_eq!(inbox.count().0, 1);
-    for index in 1..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION - 1 {
-        inbox.push(
-            inbox_notice(
-                pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                &format!("waiting {index}"),
-            ),
-            2_000 + index as u64,
-        );
-    }
-    // 19 waiting messages + the queued notice row: the 20th delivery is
-    // still admitted (the notice row is not a pending message), and the
-    // next one refuses.
-    let twentieth = worker
-        .dispatch(
-            "worker_deliver_message",
-            &json!({
-                "targetActiveSessionId": "target-session",
-                "message": "twenty",
-                "sender": { "activeSessionId": "peer-1" },
-            }),
-        )
-        .await;
-    assert!(
-        twentieth.success,
-        "the 20th delivery still admits: {twentieth:?}"
-    );
-    assert_eq!(
-        inbox.count().0,
-        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION
-    );
-    let refused = worker
-        .dispatch(
-            "worker_deliver_message",
-            &json!({
-                "targetActiveSessionId": "target-session",
-                "message": "twenty-one",
-                "sender": { "activeSessionId": "peer-1" },
-            }),
-        )
-        .await;
-    assert!(!refused.success, "the 21st refuses: {refused:?}");
-    assert!(
-        refused
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("too many pending messages"),
-        "{refused:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
@@ -2635,7 +2515,6 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -2650,7 +2529,6 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     admit_inbox_reminder(
@@ -2874,7 +2752,6 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     // The read takes the covered arrival only; the live batch trims to
@@ -2914,7 +2791,6 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
         bash_done_notice(4321, "sleep 1"),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let _ = admit_inbox_notice(
@@ -2929,7 +2805,6 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
         ),
         Lane::Steering,
         || false,
-        |_, _| None,
         None,
     );
     let initial_waiting = inbox.waiting_messages();

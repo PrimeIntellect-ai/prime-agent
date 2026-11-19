@@ -676,7 +676,6 @@ impl Worker {
                                 fields,
                                 Lane::Steering,
                                 closed,
-                                |_, _| None,
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {

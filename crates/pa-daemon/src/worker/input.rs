@@ -310,7 +310,6 @@ impl Worker {
             fields,
             lane,
             closed,
-            |_, _| None,
             Some(engine.as_ref()),
         ) {
             Ok(_queued) => {
@@ -455,64 +454,28 @@ impl Worker {
                 // A closed session takes no lane row and no wake (the
                 // notice sink drops the same way): the message stays
                 // durable in the inbox, so a reopened session reads it.
-                // The same capacity bound holds (counted under the core
-                // lock, the store push riding the documented order).
+                // The append is atomic with the retire: the slot's own
+                // mutex covers the identity re-check and the journal
+                // append, so a `clear_inbox` racing this delivery either
+                // waits for the append (the replacement's build opens
+                // the journal only after the clear, with the record
+                // already on disk) or lands first and refuses here —
+                // two stores never race the same journal across the
+                // swap.
+                if engine
+                    .push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
+                    .is_none()
                 {
-                    let core = self.core.lock().unwrap();
-                    let pending = pending_agent_messages(&inbox, &core.steering, &core.follow_up);
-                    if let Err(error) =
-                        pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
-                            pending,
-                            DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-                        )
-                    {
-                        return response_failure(
-                            None,
-                            "worker_deliver_message",
-                            &error.to_string(),
-                            None,
-                        );
-                    }
-                    // The append is atomic with the retire: the slot's own
-                    // mutex covers the identity re-check and the journal
-                    // append, so a `clear_inbox` racing this delivery either
-                    // waits for the append (the replacement's build opens
-                    // the journal only after the clear, with the record
-                    // already on disk) or lands first and refuses here —
-                    // two stores never race the same journal across the
-                    // swap.
-                    if engine
-                        .push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
-                        .is_none()
-                    {
-                        drop(core);
-                        return response_failure(
-                            None,
-                            "worker_deliver_message",
-                            "Target session is closed",
-                            None,
-                        );
-                    }
+                    return response_failure(
+                        None,
+                        "worker_deliver_message",
+                        "Target session is closed",
+                        None,
+                    );
                 }
                 let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
                 return response_success(None, "worker_deliver_message", Some(receipt));
             }
-            // The capacity bound counts waiting inbox messages too, and
-            // it is re-checked inside the admission's critical section
-            // (the lane lengths read from the locked core): concurrent
-            // deliveries can never pass one stale sample together.
-            let capacity_error = {
-                let inbox = std::sync::Arc::clone(&inbox);
-                move |steering: &std::collections::VecDeque<QueuedItem>,
-                      follow_up: &std::collections::VecDeque<QueuedItem>| {
-                    pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
-                        pending_agent_messages(&inbox, steering, follow_up),
-                        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-                    )
-                    .err()
-                    .map(|error| error.to_string())
-                }
-            };
             let closed_engine = std::sync::Arc::clone(&engine);
             // The admission answers whether ITS busy sample parked the
             // notice: the receipt's `deliveryStatus` follows that sample,
@@ -526,7 +489,6 @@ impl Worker {
                 notice,
                 lane,
                 move || closed_engine.session_is_closed(),
-                capacity_error,
                 Some(engine.as_ref()),
             ) {
                 Ok(queued) => queued,
@@ -646,28 +608,6 @@ impl Worker {
         let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
         response_success(None, "worker_deliver_message", Some(receipt))
     }
-}
-
-/// The a2a pending count: waiting inbox agent messages plus queued
-/// direct-route marker rows. The coalesced wake rows ride one notice per
-/// batch, so they never consume the cap.
-fn pending_agent_messages(
-    inbox: &pa_core::session_engine::inbox::SessionInbox,
-    steering: &std::collections::VecDeque<QueuedItem>,
-    follow_up: &std::collections::VecDeque<QueuedItem>,
-) -> usize {
-    let waiting = inbox
-        .count()
-        .2
-        .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
-        .copied()
-        .unwrap_or(0) as usize;
-    let queued = steering
-        .iter()
-        .chain(follow_up.iter())
-        .filter(|item| item.agent_message.is_some())
-        .count();
-    queued + waiting
 }
 
 /// The `worker_deliver_message` receipt for one accepted delivery (the

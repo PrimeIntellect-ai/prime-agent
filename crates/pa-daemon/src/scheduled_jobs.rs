@@ -182,7 +182,6 @@ impl QueueHooks {
                 fields,
                 lane,
                 closed,
-                |_, _| None,
                 Some(engine.as_ref()),
             )
         };
