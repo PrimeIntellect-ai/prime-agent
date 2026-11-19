@@ -211,7 +211,7 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
         ),
     )
     .await
-    .expect("the turn must not wait out the 30s sleeps")
+    .expect("the turn must not wait out the spinning cells")
     .expect("prompt");
 
     let entries = serde_json::to_value(engine.session.entries().await).expect("entries json");
