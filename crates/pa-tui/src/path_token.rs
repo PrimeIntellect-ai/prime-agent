@@ -7,8 +7,9 @@
 //! only as the first char after the `@`; it closes only when followed by whitespace or the end of
 //! the line, so any other quote is part of the name. On macOS/Linux a backslash escapes the next
 //! char of an unquoted `@` token (`my\ file`); on Windows it is the path separator. A plain
-//! token also has the quotes as delimiters; a `"` opens it quoted only as its first char, and the
-//! next `"` closes it. An unclosed quoted token runs to the end of the line.
+//! token's delimiters are space, tab, `=`, and the quotes; a `"` opens it quoted only as its first
+//! char, and the next `"` closes it. A `"` inside a word pairs with the next `"`, and no plain token
+//! starts between them. An unclosed quoted token runs to the end of the line.
 
 /// Whether a backslash escapes the next char of an unquoted token.
 const ESCAPES: bool = !cfg!(windows);
@@ -94,7 +95,11 @@ pub(crate) struct PathToken {
 
 /// The delimiters of an `@` token (`at`) or a plain path token.
 fn is_delimiter(c: char, at: bool) -> bool {
-    c.is_whitespace() || c == '=' || (!at && matches!(c, '"' | '\''))
+    if at {
+        c.is_whitespace() || c == '='
+    } else {
+        matches!(c, ' ' | '\t' | '=' | '"' | '\'')
+    }
 }
 
 /// Whether an `@` token (`at`) or a plain path token can start at `index`: the line start or
@@ -107,6 +112,12 @@ fn is_token_start(line: &[char], index: usize, at: bool) -> bool {
 /// the token, opens a quote, or (where backslashes escape) is a backslash.
 fn needs_escape(index: usize, c: char) -> bool {
     is_delimiter(c, true) || (index == 0 && matches!(c, '"' | '\'')) || (ESCAPES && c == '\\')
+}
+
+/// Whether a quote followed by `next` closes a quoted `@` token (`at`) or plain token: an `@`
+/// token's quote only before whitespace or the line end.
+pub(crate) fn closes_quote(next: Option<&char>, at: bool) -> bool {
+    !at || next.is_none_or(|next| next.is_whitespace())
 }
 
 /// The `@` tokens of `line`, left to right.
@@ -166,6 +177,11 @@ fn tokens(line: &[char], at_only: bool) -> Vec<PathToken> {
             let token = scan(line, index);
             index = token.end;
             found.push(token);
+        } else if !at_only && c == '"' {
+            index += line[index + 1..]
+                .iter()
+                .position(|&next| next == '"')
+                .map_or(1, |offset| offset + 2);
         } else {
             index += 1;
         }
@@ -188,7 +204,7 @@ fn scan(line: &[char], start: usize) -> PathToken {
         index += 1;
         while let Some(&c) = line.get(index).filter(|c| **c != '\n') {
             index += 1;
-            if c == quote && (!at || line.get(index).is_none_or(|next| next.is_whitespace())) {
+            if c == quote && closes_quote(line.get(index), at) {
                 closed = true;
                 break;
             }
@@ -291,6 +307,16 @@ mod tests {
                 at_token_before(&chars(r"@my\")).map(|t| t.path),
                 Some("my".to_string())
             );
+        }
+    }
+
+    #[test]
+    fn plain_tokens_split_at_ascii_blanks_and_skip_mid_word_quotes() {
+        for (before, path) in [
+            ("./my\u{a0}dir/fi", "./my\u{a0}dir/fi"),
+            (r#"f("a ") ./sr"#, "./sr"),
+        ] {
+            assert_eq!(path_token_before(&chars(before)).path, path, "{before}");
         }
     }
 

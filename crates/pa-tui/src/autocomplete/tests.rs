@@ -639,6 +639,10 @@ fn at_completion_keeps_the_typed_quoting() {
     // Accepting it before the typed closing quote replaces that quote too.
     let result = provider.apply_completion(&["@'it'".to_string()], 0, 4, &item("@\"it's.md\""));
     assert_eq!(result.lines[0], "@\"it's.md\" ");
+    // A quote that is a name char, not the closing quote, stays after the cursor.
+    let result =
+        provider.apply_completion(&["@'it's.md'".to_string()], 0, 4, &item("@\"it's.md\""));
+    assert_eq!(result.lines[0], "@\"it's.md\" 's.md'");
     #[cfg(not(windows))]
     assert_eq!(at_item_values(&provider, r"@my\ ta"), [r"@my\ target/"]);
 }

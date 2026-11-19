@@ -506,7 +506,12 @@ fn apply_file_completion(
     // The typed token's closing quote after the cursor belongs to the replaced token, whatever
     // quote the item renders.
     let adjusted_after_cursor = match token.quoting.quote() {
-        Some(quote) if after_cursor.starts_with(quote) => after_cursor.chars().skip(1).collect(),
+        Some(quote)
+            if after_cursor.starts_with(quote)
+                && path_token::closes_quote(line.get(cursor_col + 1), token.at) =>
+        {
+            after_cursor.chars().skip(1).collect()
+        }
         _ => after_cursor,
     };
     let is_directory = item.label.ends_with('/');
