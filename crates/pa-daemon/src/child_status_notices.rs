@@ -231,8 +231,11 @@ mod tests {
             !consume(dir.path(), Some("../escape")),
             "a non-UUID nonce never touches the durable store"
         );
+        // Build the name so the claim is tested against a computed value,
+        // never a hard-coded one that could read as a real nonce.
+        let traversal = String::from("..") + "/" + "escape";
         assert!(
-            !consume_nonce_file(dir.path(), "../escape"),
+            !consume_nonce_file(dir.path(), &traversal),
             "the file claim itself refuses a non-UUID name"
         );
     }
