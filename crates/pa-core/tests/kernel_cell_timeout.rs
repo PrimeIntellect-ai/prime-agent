@@ -138,13 +138,15 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));
+    // The async stack declines in-cell sleeps of 5s or longer: the wedge
+    // cells spin instead, and the deadline's SIGINT raises inside the loop.
     let swallow_interrupt =
-        "import time\nwhile True:\n    try:\n        time.sleep(30)\n    except KeyboardInterrupt:\n        pass";
+        "while True:\n    try:\n        while True:\n            pass\n    except KeyboardInterrupt:\n        pass";
     for (call_id, args) in [
         ("call-1", json!({ "code": "x = 41" })),
         (
             "call-2",
-            json!({ "code": "import time\nprint('before')\ntime.sleep(30)", "timeout": 2 }),
+            json!({ "code": "print('before')\nwhile True:\n    pass", "timeout": 2 }),
         ),
         ("call-3", json!({ "code": "print(x + 1)" })),
         ("call-4", json!({ "code": swallow_interrupt, "timeout": 2 })),

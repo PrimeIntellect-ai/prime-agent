@@ -81,11 +81,13 @@ impl Drop for EnvOverride {
 
 /// The wedge cell: writes the `started` marker (the test aborts strictly after it), sleeps far
 /// beyond the abort budget, then writes `finished` (must never exist after the abort settled).
-fn wedge_cell(started: &Path, finished: &Path) -> String {
+/// The wedge: a busy cell the abort must interrupt. An in-cell sleep of
+/// 5s or longer is declined by the async stack, so the cell spins and the
+/// SIGINT raises inside the loop.
+fn wedge_cell(started: &Path, _finished: &Path) -> String {
     format!(
-        "open({started:?}, \"w\").write(\"started\")\nimport time\ntime.sleep(120)\nopen({finished:?}, \"w\").write(\"finished\")\nprint(\"cell completed\")",
+        "open({started:?}, \"w\").write(\"started\")\nwhile True:\n    pass",
         started = started.display().to_string(),
-        finished = finished.display().to_string(),
     )
 }
 
