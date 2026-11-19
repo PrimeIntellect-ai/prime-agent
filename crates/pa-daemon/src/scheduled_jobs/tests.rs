@@ -106,6 +106,7 @@ async fn a_fire_at_a_killed_session_cancels_and_skips() {
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
+        inbox_seam: Mutex::new(None),
     };
     // The dead-target cancel registers the artifact partition itself (a fresh store knows
     // nothing of the session yet).
@@ -147,6 +148,7 @@ async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
+        inbox_seam: Mutex::new(None),
     });
     let steer_heartbeat = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
     let follow_up_heartbeat = heartbeat_job(
@@ -254,6 +256,7 @@ async fn settles_classify_ran_failed_or_skipped() {
             user_bash: Arc::new(crate::user_bash::UserBash::new()),
             store: Arc::new(AgentCronJobStore::for_session_artifacts()),
             recovery: Arc::new(std::sync::Mutex::new(None)),
+            inbox_seam: Mutex::new(None),
         });
         let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, session);
         let hooks_for_run = Arc::clone(&hooks);
@@ -440,4 +443,197 @@ async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
     assert_eq!(details["schedule"], "every 10s");
     assert_eq!(details["status"], "active");
     assert_eq!(details["runCount"], 0);
+}
+
+/// A heartbeat fire with the worker's inbox seam set routes its prompt
+/// into the session's durable inbox (class `heartbeat`): ONE coalesced
+/// wake row rides the delivery-mode lane instead of the full injected
+/// delivery row, the fire counts as ran (the instruction is durable at
+/// admission, so no turn-settle handshake), and a busy-window pair
+/// coalesces into one count row.
+#[tokio::test]
+async fn a_seam_set_heartbeat_fire_routes_into_the_inbox() {
+    let dir = std::env::temp_dir().join(format!("pa-sched-inbox-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = write_active_session(&dir);
+    let core = Arc::new(std::sync::Mutex::new(
+        crate::worker::SessionCore::test_core(None, "/w".to_string()),
+    ));
+    // The faux engine stands in for the worker's live engine: the seam
+    // only needs its store slot and settings gate.
+    let (engine, engine_dir) = crate::agent_engine::tests::faux_engine_with_settings(
+        &serde_json::json!({ "responses": ["ack"] }),
+        0,
+    );
+    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
+        engine_dir.path(),
+    )));
+    engine.set_inbox(Arc::clone(&inbox));
+    let hooks = Arc::new(QueueHooks {
+        core: Arc::clone(&core),
+        work_notify: Arc::new(Notify::new()),
+        user_bash: Arc::new(crate::user_bash::UserBash::new()),
+        store: Arc::new(AgentCronJobStore::for_session_artifacts()),
+        recovery: Arc::new(std::sync::Mutex::new(None)),
+        inbox_seam: Mutex::new(Some(InboxSeam {
+            engine: Arc::downgrade(&engine),
+            arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
+            agent_dir: engine_dir.path().join("agent"),
+        })),
+    });
+
+    // The steer heartbeat routes: one invisible wake row on the steering
+    // lane, no full delivery row, and the verdict counts as ran.
+    let steer = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
+    let verdict = AgentCronSchedulerHooks::run_job(&*hooks, &steer)
+        .await
+        .expect("the routed fire answers");
+    assert_eq!(verdict, None, "a routed fire counts as ran");
+    {
+        let core = core.lock().unwrap();
+        let wake = core.steering.front().expect("the wake row queued");
+        assert!(
+            wake.message.contains("1 new message (heartbeat)"),
+            "the wake counts the class: {}",
+            wake.message
+        );
+        // The notice-rows layer sets the wake row's custom twin (the
+        // attributed inbox_notice row); what must never park here is the
+        // FULL heartbeat_prompt delivery row.
+        assert!(
+            wake.custom_message.as_ref().is_some_and(|row| {
+                row.get("customType").and_then(serde_json::Value::as_str) == Some("inbox_notice")
+            }),
+            "the wake row carries its inbox-notice twin, never a full delivery row: {:?}",
+            wake.custom_message
+        );
+        assert!(
+            wake.done.is_none(),
+            "the routed fire keeps no settle handshake"
+        );
+        assert!(core.follow_up.is_empty());
+    }
+    // A second fire inside the busy window coalesces onto the queued row.
+    core.lock().unwrap().busy = true;
+    let verdict = AgentCronSchedulerHooks::run_job(&*hooks, &steer)
+        .await
+        .expect("the coalesced fire answers");
+    assert_eq!(verdict, None);
+    {
+        let mut core = core.lock().unwrap();
+        let wake = core.steering.front().expect("the coalesced wake row");
+        assert!(
+            wake.message.contains("2 new heartbeat messages"),
+            "the busy window reads as one count row: {}",
+            wake.message
+        );
+        assert_eq!(core.steering.len(), 1, "never one row per fire");
+        core.busy = false;
+        core.steering.pop_front();
+    }
+    let (count, _, classes) = inbox.count();
+    assert_eq!(count, 2, "both prompts wait in the durable store");
+    assert_eq!(classes["heartbeat"], 2);
+    let messages = inbox.drain();
+    assert_eq!(messages[0].sender.as_deref(), Some("hb-1"));
+    assert!(messages[0].text.contains("[heartbeat: every 10s run#0]"));
+    assert!(messages[0].text.contains("steer the mission"));
+    assert_eq!(messages[0].meta["jobId"], "hb-1");
+
+    // A follow-up heartbeat keeps its lane.
+    let follow_up = heartbeat_job("hb-2", "wrap up", DeliveryMode::FollowUp, &session);
+    let verdict = AgentCronSchedulerHooks::run_job(&*hooks, &follow_up)
+        .await
+        .expect("the follow-up fire answers");
+    assert_eq!(verdict, None);
+    let core = core.lock().unwrap();
+    assert!(core.steering.is_empty());
+    let wake = core
+        .follow_up
+        .front()
+        .expect("the follow-up wake row queued");
+    assert!(wake.message.contains("1 new message (heartbeat)"));
+    // The notice-rows layer's twin rides the wake row; the full
+    // heartbeat_prompt delivery row must never park here.
+    assert!(
+        wake.custom_message.as_ref().is_some_and(|row| {
+            row.get("customType").and_then(serde_json::Value::as_str) == Some("inbox_notice")
+        }),
+        "the follow-up wake carries its inbox-notice twin: {:?}",
+        wake.custom_message
+    );
+}
+
+/// A dropped queued fire withdraws its inbox-routed message too: the
+/// pause/stop/delete/rewrite mutations must not leave a durable prompt
+/// (or its coalesced wake row) for a job that no longer runs — the
+/// inbox route never takes the `heartbeat:{id}` queue key, so the
+/// direct-lane retain alone misses it. Mutation: skipping the inbox
+/// withdrawal leaves the heartbeat message waiting and its wake row
+/// queued — both pins go red.
+#[tokio::test]
+async fn a_dropped_queued_fire_withdraws_its_inbox_message_and_wake_row() {
+    let dir = std::env::temp_dir().join(format!("pa-sched-drop-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = write_active_session(&dir);
+    let core = Arc::new(std::sync::Mutex::new(
+        crate::worker::SessionCore::test_core(None, "/w".to_string()),
+    ));
+    // The faux engine stands in for the worker's live engine: the seam
+    // only needs its store slot and settings gate.
+    let (engine, engine_dir) = crate::agent_engine::tests::faux_engine_with_settings(
+        &serde_json::json!({ "responses": ["ack"] }),
+        0,
+    );
+    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
+        engine_dir.path(),
+    )));
+    engine.set_inbox(Arc::clone(&inbox));
+    let scheduled = Arc::new(ScheduledJobs::new(
+        Arc::clone(&core),
+        Arc::new(Notify::new()),
+        Arc::new(crate::user_bash::UserBash::new()),
+        Arc::new(crate::worker::EventPump::new()),
+        Arc::new(std::sync::Mutex::new(None)),
+    ));
+    scheduled.set_inbox_seam(
+        std::sync::Arc::downgrade(&engine),
+        pa_core::session_engine::inbox::InboxArrivals::default(),
+        engine_dir.path().join("agent"),
+    );
+    // The fire routes into the inbox: the durable heartbeat message and
+    // its coalesced wake row (the busy window parks the row).
+    let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
+    core.lock().unwrap().busy = true;
+    let verdict = AgentCronSchedulerHooks::run_job(&*scheduled.hooks, &job)
+        .await
+        .expect("the routed fire answers");
+    assert_eq!(verdict, None, "a routed fire counts as ran");
+    assert_eq!(inbox.count().0, 1, "the fire's message waits in the store");
+    assert!(
+        !core.lock().unwrap().steering.is_empty(),
+        "the coalesced wake row queued"
+    );
+    // The management mutation drops the queued fire.
+    scheduled.remove_queued_heartbeat_follow_up(&job);
+    assert_eq!(
+        inbox.count().0,
+        0,
+        "the dropped fire's message leaves the store"
+    );
+    {
+        let core = core.lock().unwrap();
+        assert!(
+            core.steering.is_empty() && core.follow_up.is_empty(),
+            "no wake row survives the dropped fire: {:?} {:?}",
+            core.steering
+                .iter()
+                .map(|item| item.queue_key.clone())
+                .collect::<Vec<_>>(),
+            core.follow_up
+                .iter()
+                .map(|item| item.queue_key.clone())
+                .collect::<Vec<_>>()
+        );
+    }
 }

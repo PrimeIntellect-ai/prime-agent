@@ -1,9 +1,9 @@
 //! The queued-message strip above the prompt dock (see [`render_queue`]). Sanctioned divergence
 //! (operator request Kevin 2026-09-24; directive 2026-09-25): internal prompts condense into one
-//! counted row by origin instead of preview rows; child status notices and engine-minted
-//! continuations classify by wire-typed provenance only (user-typed look-alikes stay human rows).
-//! The browse walks the user-typed items only (operator decision 2026-10-16): internal prompts are
-//! a separate channel, shown only as the condensed row.
+//! counted row by origin instead of preview rows; child status notices, inbox notices, and
+//! engine-minted continuations classify by wire-typed provenance only (user-typed look-alikes stay
+//! human rows). The browse walks the user-typed items only (operator decision 2026-10-16):
+//! internal prompts are a separate channel, shown only as the condensed row.
 
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{pad_line, truncate_line};
@@ -23,6 +23,9 @@ enum InternalPromptOrigin {
     Heartbeat,
     /// A parked RLM child status notice, classified by wire-typed provenance only.
     ChildStatus,
+    /// A parked daemon inbox notice (the arrival/reminder rows), classified
+    /// by wire-typed provenance only.
+    InboxNotice,
     Other,
 }
 
@@ -53,13 +56,14 @@ struct CondensedCounts {
     agent_messages: usize,
     heartbeats: usize,
     child_status: usize,
+    inbox_notices: usize,
     other: usize,
 }
 
 impl CondensedCounts {
     /// Every counted origin's total (zero means no condensed row).
     fn total(&self) -> usize {
-        self.agent_messages + self.heartbeats + self.child_status + self.other
+        self.agent_messages + self.heartbeats + self.child_status + self.inbox_notices + self.other
     }
 
     /// The counted row's text: each origin with queued prompts and its count, plural-correct, in
@@ -69,6 +73,7 @@ impl CondensedCounts {
             (self.agent_messages, InternalPromptOrigin::AgentMessage),
             (self.heartbeats, InternalPromptOrigin::Heartbeat),
             (self.child_status, InternalPromptOrigin::ChildStatus),
+            (self.inbox_notices, InternalPromptOrigin::InboxNotice),
             (self.other, InternalPromptOrigin::Other),
         ]
         .into_iter()
@@ -78,6 +83,7 @@ impl CondensedCounts {
                 InternalPromptOrigin::AgentMessage => "agent message",
                 InternalPromptOrigin::Heartbeat => "heartbeat",
                 InternalPromptOrigin::ChildStatus => "child status notice",
+                InternalPromptOrigin::InboxNotice => "inbox notice",
                 InternalPromptOrigin::Other => "other internal prompt",
             };
             let plural = if count == 1 { "" } else { "s" };
@@ -105,6 +111,7 @@ fn condensed_counts(queue: &QueuedMessages) -> Option<CondensedCounts> {
                 InternalPromptOrigin::AgentMessage => counts.agent_messages += 1,
                 InternalPromptOrigin::Heartbeat => counts.heartbeats += 1,
                 InternalPromptOrigin::ChildStatus => counts.child_status += 1,
+                InternalPromptOrigin::InboxNotice => counts.inbox_notices += 1,
                 InternalPromptOrigin::Other => counts.other += 1,
             }
         }
@@ -138,6 +145,9 @@ fn queued_item_origin(
 ) -> Option<InternalPromptOrigin> {
     if queue.rlm_child_status.is_marked(lane, index) {
         return Some(InternalPromptOrigin::ChildStatus);
+    }
+    if queue.inbox_notice.is_marked(lane, index) {
+        return Some(InternalPromptOrigin::InboxNotice);
     }
     if let Some(origin) = internal_prompt_origin(message) {
         return Some(origin);
@@ -173,6 +183,10 @@ pub struct QueuedMessages {
     /// Which parked items are RLM child status notices, by lane index (wire-typed
     /// provenance): folded into the condensed count.
     pub rlm_child_status: QueueLaneIndices,
+    /// Which parked items are daemon inbox notices (the arrival/reminder rows),
+    /// by lane index (the third wire-typed provenance rider); folded into the
+    /// condensed count, never a browsable user row.
+    pub inbox_notice: QueueLaneIndices,
     /// Which parked items are engine-minted internal prompts, by lane index (the second wire-typed
     /// provenance rider); folded into the condensed count.
     pub injected_prompts: QueueLaneIndices,
@@ -185,7 +199,8 @@ impl QueuedMessages {
     }
 }
 
-/// The lane-indices rider shape the typed-provenance marks share (`sessionActions.rlmChildStatus` /
+/// The lane-indices rider shape the typed-provenance marks share
+/// (`sessionActions.rlmChildStatus` / `sessionActions.inboxNotice` /
 /// `sessionActions.injectedPrompts`); the strip never classifies by preview text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueLaneIndices {
@@ -479,17 +494,19 @@ pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usiz
         lane_items.swap(index, target);
         // The typed provenance mirrors the same swap (a marked index rides its item through the
         // move), so the classification stays correct until the daemon's action update lands.
-        let (lane_child, lane_injected) = match lane {
+        let (lane_child, lane_inbox, lane_injected) = match lane {
             QueueLane::Steering => (
                 &mut queue.rlm_child_status.steering,
+                &mut queue.inbox_notice.steering,
                 &mut queue.injected_prompts.steering,
             ),
             QueueLane::FollowUp => (
                 &mut queue.rlm_child_status.follow_up,
+                &mut queue.inbox_notice.follow_up,
                 &mut queue.injected_prompts.follow_up,
             ),
         };
-        for indices in [lane_child, lane_injected] {
+        for indices in [lane_child, lane_inbox, lane_injected] {
             for marked in indices.iter_mut() {
                 if *marked == index {
                     *marked = target;
