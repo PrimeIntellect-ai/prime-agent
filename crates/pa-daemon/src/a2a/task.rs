@@ -172,6 +172,10 @@ pub struct TaskEntry {
     /// The stable agent message id of the task's reply history.
     agent_message_id: String,
     assistant_text: String,
+    /// The artifact length already reconciled against run text: the
+    /// bytes beyond it are live-streamed deltas a later run close
+    /// continues (see [`Self::continuation_run_closed`]).
+    reconciled_len: usize,
     /// The failed-turn reason, carried by the FAILED status message.
     error: Option<String>,
     updated_at: u64,
@@ -294,6 +298,7 @@ impl TaskEntry {
             }],
             agent_message_id: uuid::Uuid::new_v4().to_string(),
             assistant_text: String::new(),
+            reconciled_len: 0,
             error: None,
             updated_at: now,
             dispatch: PromptDispatch::Waiting,
@@ -658,10 +663,11 @@ impl TaskRegistry {
     /// Close one continuation run of a task whose prompt response
     /// already settled (`awaiting_completion`, the pump's `agent_end`
     /// step): the run's joined text extends the task's artifact — the
-    /// live stream already carried it when the deltas streamed (the
-    /// ends-with check publishes nothing), and the windowed text
-    /// replaces or appends when they did not (the fallback when the
-    /// deltas missed the reply). A trailing blank-line separator — the
+    /// bytes the live stream carried since the last reconciled run
+    /// text continue into the window (a fully streamed window
+    /// publishes nothing; a partial one lands only its remainder), and
+    /// a run the deltas missed appends the whole window with the
+    /// blank-line join. A trailing blank-line separator — the
     /// optimistic join the live stream appends at an assistant
     /// message's start — never doubles. A run that failed carries its
     /// reason to the final settlement (a failed continuation never
@@ -693,25 +699,37 @@ impl TaskRegistry {
         let Some(text) = run_text.filter(|text| !text.is_empty()) else {
             return;
         };
-        let current = self
+        let joined = self
             .with_task(id, |entry| {
                 if entry.state.is_terminal() || !entry.awaiting_completion {
                     return None;
                 }
-                Some(entry.assistant_text.clone())
+                let current = entry.assistant_text.clone();
+                // What the live deltas streamed since the last
+                // reconciled run text, and the tail this run's window
+                // must leave beyond it: the blank-line join plus the
+                // window's whole text. The streamed bytes are a prefix
+                // of that tail in the normal streaming case, so only
+                // the remainder lands (never the window again); anything
+                // else (the deltas missed the reply, or a replacement
+                // landed mid-run) falls back to the whole-window join.
+                let watermark = entry.reconciled_len.min(current.len());
+                let mut expected = String::new();
+                if watermark > 0 {
+                    expected.push_str("\n\n");
+                }
+                expected.push_str(text);
+                let streamed = &current[watermark..];
+                Some(if expected.starts_with(streamed) {
+                    format!("{current}{}", &expected[streamed.len()..])
+                } else if current.ends_with("\n\n") {
+                    format!("{current}{text}")
+                } else {
+                    format!("{current}\n\n{text}")
+                })
             })
             .flatten();
-        let Some(current) = current else { return };
-        if current.ends_with(text) {
-            return;
-        }
-        let joined = if current.is_empty() {
-            text.to_string()
-        } else if current.ends_with("\n\n") {
-            format!("{current}{text}")
-        } else {
-            format!("{current}\n\n{text}")
-        };
+        let Some(joined) = joined else { return };
         self.set_artifact_text(id, &joined);
     }
 
@@ -1186,6 +1204,8 @@ impl TaskRegistry {
                     entry.assistant_text.push_str(text);
                     entry.updated_at = crate::util::now_ms();
                 }
+                // The whole artifact is authoritative run text now.
+                entry.reconciled_len = entry.assistant_text.len();
                 changed
             })
             .unwrap_or(false);
@@ -1610,16 +1630,23 @@ mod tests {
         );
 
         registry.mark_awaiting_completion(&id);
-        // The streamed run (the artifact already ends with the run's
-        // text) publishes nothing.
-        registry.continuation_run_closed(&id, Some("FIRST-TURN"), None);
+        // The streamed run: its deltas already landed the whole window,
+        // so the close publishes nothing.
+        registry.append_artifact_chunk(&id, "\n\nSTREAMED");
+        registry.continuation_run_closed(&id, Some("STREAMED"), None);
+        assert_eq!(
+            registry.snapshot(&id, None).unwrap().artifacts[0].parts[0]
+                .text
+                .as_deref(),
+            Some("FIRST-TURN\n\nSTREAMED")
+        );
         // The missed-delta run appends with the blank-line join.
         registry.continuation_run_closed(&id, Some("CONTINUATION"), None);
         assert_eq!(
             registry.snapshot(&id, None).unwrap().artifacts[0].parts[0]
                 .text
                 .as_deref(),
-            Some("FIRST-TURN\n\nCONTINUATION")
+            Some("FIRST-TURN\n\nSTREAMED\n\nCONTINUATION")
         );
         // A terminal task ignores further runs.
         registry.settle(&id, TaskState::Completed, None);
@@ -1628,8 +1655,79 @@ mod tests {
             registry.snapshot(&id, None).unwrap().artifacts[0].parts[0]
                 .text
                 .as_deref(),
-            Some("FIRST-TURN\n\nCONTINUATION")
+            Some("FIRST-TURN\n\nSTREAMED\n\nCONTINUATION")
         );
+    }
+
+    /// A partially streamed continuation continues from the streamed
+    /// bytes: the window's remainder lands once, never the whole window
+    /// again (the doubled prefix the old suffix check produced).
+    #[test]
+    fn a_partially_streamed_continuation_continues_without_repeating() {
+        let (mut registry, id) = registry();
+        registry.mark_working(&id);
+        registry.set_artifact_text(&id, "FIRST-TURN");
+        registry.mark_awaiting_completion(&id);
+        // The live stream carried the join and a prefix of the window.
+        registry.append_artifact_chunk(&id, "\n\npartial");
+        registry.continuation_run_closed(&id, Some("partial window"), None);
+        assert_eq!(
+            registry.snapshot(&id, None).unwrap().artifacts[0].parts[0]
+                .text
+                .as_deref(),
+            Some("FIRST-TURN\n\npartial window")
+        );
+    }
+
+    /// An unstreamed continuation lands even when its text matches the
+    /// artifact's tail: the close keys on what the run streamed, never
+    /// on a coincidental suffix (the dropped turn the old suffix check
+    /// produced).
+    #[test]
+    fn an_unstreamed_continuation_lands_despite_matching_the_tail() {
+        let (mut registry, id) = registry();
+        registry.mark_working(&id);
+        registry.set_artifact_text(&id, "FIRST-TURN");
+        registry.mark_awaiting_completion(&id);
+        registry.continuation_run_closed(&id, Some("FIRST-TURN"), None);
+        assert_eq!(
+            registry.snapshot(&id, None).unwrap().artifacts[0].parts[0]
+                .text
+                .as_deref(),
+            Some("FIRST-TURN\n\nFIRST-TURN")
+        );
+    }
+
+    /// An absent client messageId mints once at admit: every read of
+    /// the task reports the same history id for the turn.
+    #[test]
+    fn an_absent_client_message_id_mints_once_per_turn() {
+        let mut registry = TaskRegistry::new();
+        registry.admit(
+            "t-1".into(),
+            "ctx-1".into(),
+            "s-1".into(),
+            None,
+            vec![Part::text("What is A2A?")],
+        );
+        let first = registry
+            .snapshot("t-1", None)
+            .unwrap()
+            .history
+            .first()
+            .unwrap()
+            .message_id
+            .clone();
+        let second = registry
+            .snapshot("t-1", None)
+            .unwrap()
+            .history
+            .first()
+            .unwrap()
+            .message_id
+            .clone();
+        assert!(!first.is_empty(), "the minted id is present");
+        assert_eq!(first, second, "every read reports the same id");
     }
 
     /// A later artifact text (the fallback or the pump's window claim)
