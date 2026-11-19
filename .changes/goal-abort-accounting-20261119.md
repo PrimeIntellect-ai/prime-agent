@@ -1,0 +1,1 @@
+- Aborted model turns no longer fail active goals when the agent reports cancellation as an admission error.

@@ -8,6 +8,54 @@ use super::{
     Value,
 };
 
+enum AdmissionOutcome {
+    AbortedBeforeStart,
+    Settled(Result<(), anyhow::Error>),
+}
+
+enum AdmissionState {
+    Running,
+    Aborted,
+    Settled(AdmissionOutcome),
+    SettledAborted,
+}
+
+impl AdmissionState {
+    fn observe_abort(&mut self) {
+        *self = match self {
+            Self::Running | Self::Aborted => Self::Aborted,
+            Self::Settled(_) | Self::SettledAborted => Self::SettledAborted,
+        };
+    }
+
+    fn settle(&mut self, outcome: AdmissionOutcome) {
+        *self = match self {
+            Self::Running => Self::Settled(outcome),
+            Self::Aborted | Self::SettledAborted => Self::SettledAborted,
+            Self::Settled(_) => unreachable!("admission settled twice"),
+        };
+    }
+
+    fn observe_event(&mut self, event: &EngineEvent) {
+        if matches!(event, EngineEvent::AgentEnd { aborted: true, .. }) {
+            self.observe_abort();
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Running | Self::Aborted)
+    }
+
+    fn is_aborted(&self) -> bool {
+        matches!(
+            self,
+            Self::Aborted
+                | Self::SettledAborted
+                | Self::Settled(AdmissionOutcome::AbortedBeforeStart)
+        )
+    }
+}
+
 impl AgentSessionEngine {
     pub(super) fn retry_policy(
         &self,
@@ -352,10 +400,6 @@ impl AgentSessionEngine {
         // hands each streamed event to `emit` the moment it arrives (buffering
         // made clients render a turn as one final batch).
         let prompt = prompt.clone();
-        // The same admission consult as [`Self::run_model_turn`]'s, at the
-        // admission future's head: the whole [pickup, registration] window
-        // honours the delivery's cancel flag.
-        let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
         // A parked delivery whose wait unwound on the cancel flag: the row
         // stays queued for the next run, and this attempt settles aborted.
         let queued_aborted = std::sync::atomic::AtomicBool::new(false);
@@ -366,11 +410,7 @@ impl AgentSessionEngine {
         // consults it beside the delivery's cancel flag, so a cancelled
         // turn never starts fresh model/tool work.
         let emit_cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut admitted = std::pin::pin!(async {
-            if aborted() {
-                abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
-                return Ok(());
-            }
+        let admission = async {
             if first_attempt {
                 // The session lock covers the clone only: holding it across
                 // the turn serialized every client read seam (the 2026-09-22
@@ -465,61 +505,67 @@ impl AgentSessionEngine {
             } else {
                 agent.continue_run().await
             }
+        };
+        // The same admission consult as [`Self::run_model_turn`]'s, at the
+        // admission future's head: the whole [pickup, registration] window
+        // honours the delivery's cancel flag.
+        let mut admitted = std::pin::pin!(async {
+            if aborted() {
+                return AdmissionOutcome::AbortedBeforeStart;
+            }
+            AdmissionOutcome::Settled(admission.await)
         });
-        let mut aborted = false;
-        let mut admission_error: Option<anyhow::Error> = None;
-        let mut settled = false;
+        let mut state = AdmissionState::Running;
         loop {
             tokio::select! {
                 event = rx.recv() => {
                     match event {
                         Some(event) => {
+                            state.observe_event(&event);
                             if !emit(event) {
                                 emit_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                                aborted = true;
+                                state.observe_abort();
                             }
                         }
                         None => break,
                     }
                 }
                 outcome = &mut admitted => {
-                    settled = true;
-                    match outcome {
-                        Ok(()) => {}
-                        Err(error) => admission_error = Some(error),
-                    }
+                    state.settle(outcome);
                     while let Ok(event) = rx.try_recv() {
+                        state.observe_event(&event);
                         if !emit(event) {
                             emit_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                            aborted = true;
+                            state.observe_abort();
                             break;
                         }
                     }
                 }
             }
-            if aborted || settled {
+            if !state.is_pending() {
                 break;
             }
         }
-        if aborted && !settled {
-            // The emit callback cancelled the turn: stop the still-running
-            // admission and wait out its abort path. A settled admission
-            // must not be re-polled (pinned futures panic after completion).
+        if matches!(&state, AdmissionState::Aborted) {
+            // The emitter or the agent's terminal frame cancelled the turn:
+            // stop the still-running admission and wait out its abort path.
             agent.abort();
-            let _ = (&mut admitted).await;
+            let outcome = (&mut admitted).await;
+            state.settle(outcome);
+        } else if matches!(&state, AdmissionState::Running) {
+            let outcome = (&mut admitted).await;
+            state.settle(outcome);
         }
         // The settled run's tail still holds the aborted assistant row: drain
-        // every queued event.
+        // every queued event, including AgentEnd's abort verdict.
         while let Ok(event) = rx.try_recv() {
-            let _ = emit(event);
+            state.observe_event(&event);
+            if !emit(event) {
+                state.observe_abort();
+            }
         }
         let () = subscription.unsubscribe().await;
-        if aborted {
-            return Ok(TurnOnce::Aborted);
-        }
-        // The admission consult fired: the turn never started — the aborted
-        // outcome, never an admission error the retry driver would re-issue.
-        if abort_raced_admission.load(std::sync::atomic::Ordering::SeqCst) {
+        if state.is_aborted() {
             return Ok(TurnOnce::Aborted);
         }
         // The parked delivery's wait unwound on the cancel flag: the row
@@ -535,14 +581,23 @@ impl AgentSessionEngine {
         if queued_consumed.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TurnOnce::Queued);
         }
-        if let Some(error) = admission_error {
-            // An abort that lands before the provider stream starts fails the
-            // run with the typed abort error, after the run's failure path
-            // already settled the aborted row: the turn was aborted.
-            if pa_agent::abort::is_abort_error(&error) {
-                return Ok(TurnOnce::Aborted);
+        match state {
+            AdmissionState::Settled(AdmissionOutcome::Settled(Err(error))) => {
+                // An abort that lands before the provider stream starts fails
+                // the run with the typed abort error, after the run's failure
+                // path already settled the aborted row: the turn was aborted.
+                if pa_agent::abort::is_abort_error(&error) {
+                    return Ok(TurnOnce::Aborted);
+                }
+                return Err(anyhow::anyhow!("{error:#}"));
             }
-            return Err(anyhow::anyhow!("{error:#}"));
+            AdmissionState::Settled(AdmissionOutcome::Settled(Ok(()))) => {}
+            AdmissionState::Running
+            | AdmissionState::Aborted
+            | AdmissionState::Settled(AdmissionOutcome::AbortedBeforeStart)
+            | AdmissionState::SettledAborted => {
+                unreachable!("admission settlement was handled above")
+            }
         }
         let state = agent.state().await;
         for message in state.messages.iter().rev() {
@@ -755,4 +810,22 @@ fn tool_result_wire_value(result: &pa_agent::types::AgentToolResult) -> Value {
         .map(|block| serde_json::to_value(block).unwrap_or(Value::Null))
         .collect();
     json!({ "content": content, "details": result.details })
+}
+
+#[cfg(test)]
+mod admission_state_tests {
+    use super::{AdmissionOutcome, AdmissionState, EngineEvent};
+
+    #[test]
+    fn aborted_agent_end_wins_over_its_admission_error() {
+        let mut state = AdmissionState::Running;
+        state.observe_event(&EngineEvent::AgentEnd {
+            messages: Vec::new(),
+            aborted: true,
+        });
+        state.settle(AdmissionOutcome::Settled(Err(anyhow::anyhow!(
+            "Request was aborted"
+        ))));
+        assert!(state.is_aborted());
+    }
 }
