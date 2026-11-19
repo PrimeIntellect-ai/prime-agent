@@ -738,6 +738,42 @@ class ReplTest(unittest.TestCase):
             self.assertIn("bash('...')", error["evalue"], rid)
             self.assertEqual(one(events, "done")["status"], "error", rid)
 
+    def test_discipline_screen_reads_sleep_keywords(self):
+        for rid, code in (
+            ("aio-delay", "import asyncio\nawait asyncio.sleep(delay=5)"),
+            ("time-secs", "import time\ntime.sleep(secs=30)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+        events = self.repl.execute(
+            "aio-delay-short", "import asyncio\nawait asyncio.sleep(delay=0.05)"
+        )
+        self.assertIsNone(one(events, "error"))
+
+    def test_discipline_screen_honors_shadowed_import_names(self):
+        code = (
+            "from os import system\n"
+            "def run_callback(system):\n"
+            "    return system('echo hi')\n"
+            "def local():\n"
+            "    system = print\n"
+            "    return system('local')\n"
+            "print(run_callback(lambda text: text))\n"
+            "print(local())\n"
+        )
+        events = self.repl.execute("shadow", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        output = stream_text(events, "stdout")
+        self.assertIn("echo hi", output)
+        self.assertIn("local", output)
+        # A nested call that still resolves to the import declines.
+        events = self.repl.execute(
+            "shadow-true", "from os import system\ndef nested():\n    system('ls')"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
     def test_discipline_screen_spares_mentions_bash_and_libraries(self):
         code = (
             "import os\n"

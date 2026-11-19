@@ -619,6 +619,135 @@ _SUBPROCESS_CALLS = (
     "getstatusoutput",
 )
 
+# A watched import binding: `("module", "time")` for `import time as t`,
+# `("member", "os", "system")` for `from os import system`. Any other binding
+# of the name — a parameter or an assignment — shadows it: the call is then
+# not the import, and the screen leaves it alone.
+_UNBOUND = object()
+
+_SCOPE_NODES = (
+    ast.Module,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+class _BindingCollector(ast.NodeVisitor):
+    """The names one scope body binds, without descending into nested scopes."""
+
+    def __init__(self) -> None:
+        self.imports: dict[str, tuple] = {}
+        self.shadows: set[str] = set()
+
+    def bindings(self) -> dict[str, tuple | None]:
+        table: dict[str, tuple | None] = {name: None for name in self.shadows}
+        for name, binding in self.imports.items():
+            table.setdefault(name, binding)
+        return table
+
+    def _import(self, alias: ast.alias, root: str, member: str | None) -> None:
+        name = alias.asname or member or root
+        if root in _WATCHED_MODULES:
+            self.imports[name] = ("module", root) if member is None else ("member", root, member)
+        else:
+            self.shadows.add(name)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._import(alias, alias.name.split(".")[0], None)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        root = (node.module or "").split(".")[0]
+        for alias in node.names:
+            self._import(alias, root, alias.name)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.shadows.add(node.name)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.shadows.add(node.name)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store):
+            self.shadows.add(node.id)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        pass
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        pass
+
+    visit_SetComp = visit_ListComp
+    visit_DictComp = visit_ListComp
+    visit_GeneratorExp = visit_ListComp
+
+
+def _scope_bindings(node: ast.AST) -> dict[str, tuple | None]:
+    """The bindings one scope node introduces, parameters included."""
+    collector = _BindingCollector()
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        arguments = node.args
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            arguments.vararg,
+            arguments.kwarg,
+        ):
+            if argument is not None:
+                collector.shadows.add(argument.arg)
+        statements = node.body if isinstance(node.body, list) else [node.body]
+    elif isinstance(node, (ast.Module, ast.ClassDef)):
+        statements = node.body
+    else:  # a comprehension binds its own targets
+        statements = [generator.target for generator in node.generators]
+    for statement in statements:
+        collector.visit(statement)
+    return collector.bindings()
+
+
+def _call_scopes(tree: ast.AST) -> dict[int, tuple[dict[str, tuple | None], ...]]:
+    """Each call node's enclosing scope chain, outermost first."""
+    chains: dict[int, tuple[dict[str, tuple | None], ...]] = {}
+
+    def walk(node: ast.AST, chain: tuple[dict[str, tuple | None], ...]) -> None:
+        if isinstance(node, ast.Call):
+            chains[id(node)] = chain
+        if isinstance(node, _SCOPE_NODES):
+            chain = (*chain, _scope_bindings(node))
+        for child in ast.iter_child_nodes(node):
+            walk(child, chain)
+
+    walk(tree, ())
+    return chains
+
+
+def _resolve_binding(name: str, chain: tuple[dict[str, tuple | None], ...]) -> object:
+    """The innermost binding of a name, or `_UNBOUND` when no scope binds it."""
+    for bindings in reversed(chain):
+        if name in bindings:
+            return bindings[name]
+    return _UNBOUND
+
+
+def _subprocess_import(tree: ast.AST) -> ast.AST | None:
+    """The cell's first subprocess import, wherever it sits in the tree."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name.split(".")[0] == "subprocess" for alias in node.names):
+                return node
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "subprocess":
+            return node
+    return None
+
 
 class CellDeclinedError(Exception):
     """The kernel refused to run a cell: a banned shape under the discipline
@@ -630,32 +759,17 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
 
     Import-aware where it can be (aliases bind through `import time as t` and
     `from time import sleep`), name-based where it must be (the contract's
-    `time.sleep(...)` shape is charged as written, imports or not). A cell
-    that does not parse declines nothing: the compile step reports the
-    SyntaxError.
+    `time.sleep(...)` shape is charged as written, imports or not). Bindings
+    resolve per lexical scope, so a parameter or local assignment that shadows
+    an import name is not the imported call. A cell that does not parse
+    declines nothing: the compile step reports the SyntaxError.
     """
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return None
-    module_alias: dict[str, str] = {}
-    function_alias: dict[str, tuple[str, str]] = {}
-    subprocess_import: ast.AST | None = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root = alias.name.split(".")[0]
-                if root in _WATCHED_MODULES:
-                    module_alias[alias.asname or root] = root
-                    if root == "subprocess" and subprocess_import is None:
-                        subprocess_import = node
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            root = node.module.split(".")[0]
-            if root in _WATCHED_MODULES:
-                for alias in node.names:
-                    function_alias[alias.asname or alias.name] = (root, alias.name)
-                if root == "subprocess" and subprocess_import is None:
-                    subprocess_import = node
+    call_scopes = _call_scopes(tree)
+    subprocess_import = _subprocess_import(tree)
 
     def head(node: ast.AST) -> str:
         source = ast.get_source_segment(code, node)
@@ -664,15 +778,22 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        chain = call_scopes[id(node)]
         func = node.func
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            root = module_alias.get(func.value.id) or func.value.id
+            bound = _resolve_binding(func.value.id, chain)
+            if bound is _UNBOUND:
+                root = func.value.id
+            elif bound is not None and bound[0] == "module":
+                root = bound[1]
+            else:
+                continue
             member = func.attr
         elif isinstance(func, ast.Name):
-            bound = function_alias.get(func.id)
-            if bound is None:
+            bound = _resolve_binding(func.id, chain)
+            if bound is _UNBOUND or bound is None or bound[0] != "member":
                 continue
-            root, member = bound
+            root, member = bound[1], bound[2]
         else:
             continue
         if root in ("time", "asyncio") and member == "sleep":
@@ -713,18 +834,24 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
 
 
 def _literal_seconds(call: ast.Call) -> float | None:
-    """The call's first positional argument as a number literal, else None.
+    """The call's duration as a number literal, else None.
 
-    The charged surface is literal-only: a sleep computed from a variable is
-    invisible to the screen exactly as it is to the contract's literal shape."""
-    if not call.args:
+    Positional first, then the documented keyword (`delay` for asyncio.sleep,
+    `secs` for time.sleep). The charged surface is literal-only: a sleep
+    computed from a variable is invisible to the screen exactly as it is to
+    the contract's literal shape."""
+    if call.args:
+        arg: ast.AST | None = call.args[0]
+    else:
+        arg = next(
+            (keyword.value for keyword in call.keywords if keyword.arg in ("delay", "secs")),
+            None,
+        )
+    if not isinstance(arg, ast.Constant) or not isinstance(arg.value, (int, float)):
         return None
-    arg = call.args[0]
-    if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)) and not isinstance(
-        arg.value, bool
-    ):
-        return float(arg.value)
-    return None
+    if isinstance(arg.value, bool):
+        return None
+    return float(arg.value)
 
 
 def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
