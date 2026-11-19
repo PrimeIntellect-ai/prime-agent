@@ -1554,6 +1554,29 @@ fn reminder_rows(worker: &Worker) -> usize {
         .count()
 }
 
+fn arrival_rows(worker: &Worker) -> usize {
+    let core = worker.core.lock().unwrap();
+    core.steering
+        .iter()
+        .chain(core.follow_up.iter())
+        .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+        .count()
+}
+
+/// One agent-message delivery to the faux worker's session.
+async fn deliver_agent_message(worker: &Worker, message: &str) -> DaemonResponse {
+    worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": message,
+                "sender": { "activeSessionId": "peer-1" },
+            }),
+        )
+        .await
+}
+
 /// Write the `agentInbox` settings under one agent dir (the reminder
 /// loop reads this file every cycle).
 fn write_inbox_settings(agent_dir: &std::path::Path, inbox: &Value) {
@@ -2185,53 +2208,25 @@ async fn inbox_agent_messages_past_the_pending_bound_are_all_admitted() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A closed session takes a durable push with no wake row; a retired
-/// session (no store) is refused instead of injecting a raw row.
+/// A closing session refuses inbox-routed deliveries, with or without a
+/// store: no row or wake would announce the message, so the sender sees
+/// the failure instead of a receipt.
 #[tokio::test]
-async fn a_closed_session_takes_the_durable_push_and_refuses_without_a_store() {
+async fn a_closed_session_refuses_the_delivery_with_or_without_a_store() {
     let (worker, inbox, dir) = faux_worker_with_inbox();
     worker.dispatch("clear_queue", &json!({})).await;
-    worker
-        .agent_engine
-        .as_ref()
-        .expect("the faux engine")
-        .mark_session_closed();
-    let delivered = worker
-        .dispatch(
-            "worker_deliver_message",
-            &json!({
-                "targetActiveSessionId": "target-session",
-                "message": "for the journal",
-                "sender": { "activeSessionId": "peer-1" },
-            }),
-        )
-        .await;
-    assert!(
-        delivered.success,
-        "a closed session still takes the durable push: {delivered:?}"
+    let engine = worker.agent_engine.as_ref().expect("the faux engine");
+    engine.mark_session_closed();
+    let refused = deliver_agent_message(&worker, "for the journal").await;
+    assert_eq!(
+        refused.error.as_deref(),
+        Some("Target session is closed"),
+        "{refused:?}"
     );
-    assert_eq!(inbox.count().0, 1, "the message waits in the durable store");
-    assert!(
-        steering_rows(&worker).is_empty(),
-        "no wake row for a closed session"
-    );
-    // The retired session (no store) refuses: no raw row lands.
-    worker
-        .agent_engine
-        .as_ref()
-        .expect("the faux engine")
-        .clear_inbox();
-    let refused = worker
-        .dispatch(
-            "worker_deliver_message",
-            &json!({
-                "targetActiveSessionId": "target-session",
-                "message": "into the void",
-                "sender": { "activeSessionId": "peer-1" },
-            }),
-        )
-        .await;
-    assert!(!refused.success, "the retired session refuses: {refused:?}");
+    assert_eq!(inbox.count().0, 0, "nothing lands in the store");
+    // The retired session (no store) refuses the same way.
+    engine.clear_inbox();
+    let refused = deliver_agent_message(&worker, "into the void").await;
     assert_eq!(
         refused.error.as_deref(),
         Some("Target session is closed"),
@@ -2239,85 +2234,88 @@ async fn a_closed_session_takes_the_durable_push_and_refuses_without_a_store() {
     );
     assert!(
         steering_rows(&worker).is_empty(),
-        "no raw row lands on a retiring session"
+        "no row lands on a closing session"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The closed-session append is atomic with the retire: the slot's own
-/// mutex covers the identity re-check and the journal append, so a
-/// retired store never takes an append that could race the replacement's
-/// reopen and compaction of the same journal, and the sender's retry
-/// lands in the replacement store. Mutation: dropping the identity check
-/// lets the stale store take the append (both refusal pins go red).
+/// A clear takes only the not-yet-announced batch (the records the
+/// queued arrival row covers); a pause takes no inbox record at all.
+/// Announced mail stays readable through both.
 #[tokio::test]
-async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
+async fn a_clear_takes_only_the_unannounced_batch_and_a_pause_takes_none() {
     let (worker, inbox, dir) = faux_worker_with_inbox();
-    let engine = worker.agent_engine.as_ref().expect("the faux engine");
-    // The live slot takes the closed session's durable push.
-    assert!(
-        engine
-            .push_to_live_inbox(
-                &inbox,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "first",
-                ),
-                1_000,
-            )
-            .is_some(),
-        "the live slot takes the durable push"
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    assert!(deliver_agent_message(&worker, "announced").await.success);
+    // The delivery: the turn runner pops the notice row off the lane.
+    assert!(worker.core.lock().unwrap().steering.pop_front().is_some());
+    assert!(deliver_agent_message(&worker, "unannounced").await.success);
+    let paused = worker.dispatch("agent_messages_pause", &json!({})).await;
+    assert!(paused.success, "{paused:?}");
+    assert_eq!(inbox.count().0, 2, "a pause leaves every inbox record");
+    assert_eq!(arrival_rows(&worker), 1, "the batch's notice stays queued");
+    worker.dispatch("agent_messages_resume", &json!({})).await;
+    let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
+    assert_eq!(
+        cleared.data,
+        Some(json!({ "steering": ["[agent-message from peer-1]\n\nunannounced"], "followUp": [] })),
+        "the clear takes the unannounced batch only"
     );
+    let waiting: Vec<String> = inbox
+        .waiting_messages()
+        .into_iter()
+        .map(|message| message.text)
+        .collect();
+    assert_eq!(waiting, ["[agent-message from peer-1]\n\nannounced"]);
+    assert_eq!(arrival_rows(&worker), 0, "the emptied batch drops its row");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The kill switch strands no queued notice: an arrival row admitted
+/// while the inbox was on stays queued after `agentInbox.enabled` flips
+/// to false, next to the direct row the disabled route delivers, and its
+/// message stays readable.
+#[tokio::test]
+async fn a_kill_switch_flip_keeps_the_queued_arrival_row_and_its_message() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    assert!(
+        deliver_agent_message(&worker, "before the flip")
+            .await
+            .success
+    );
+    write_inbox_settings(&worker.config.agent_dir, &json!({ "enabled": false }));
+    let direct = deliver_agent_message(&worker, "after the flip").await;
+    assert!(direct.success, "{direct:?}");
+    assert_eq!(arrival_rows(&worker), 1, "the queued notice still delivers");
+    assert_eq!(inbox.count().0, 1, "the message stays readable");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `clear_queue` keeps the arrival row while its batch waits unannounced
+/// (nothing else would wake the agent for it) and clears every other row.
+#[tokio::test]
+async fn clear_queue_keeps_the_arrival_row_of_an_unannounced_batch() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    assert!(deliver_agent_message(&worker, "waiting").await.success);
+    worker
+        .dispatch(
+            "steer",
+            &json!({ "activeSessionId": "target-session", "message": "client text" }),
+        )
+        .await;
+    let cleared = worker.dispatch("clear_queue", &json!({})).await;
+    assert_eq!(
+        cleared.data,
+        Some(json!({ "steering": ["client text"], "followUp": [] }))
+    );
+    assert_eq!(steering_rows(&worker).len(), 1, "only one row stays");
+    assert_eq!(arrival_rows(&worker), 1, "the arrival row stays");
     assert_eq!(inbox.count().0, 1);
-    // The retire clears the slot: the stale store is refused — its append
-    // would race the replacement's reopen of the same journal.
-    engine.clear_inbox();
-    assert!(
-        engine
-            .push_to_live_inbox(
-                &inbox,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "stale",
-                ),
-                2_000,
-            )
-            .is_none(),
-        "the retired store never takes an append"
-    );
-    assert_eq!(inbox.count().0, 1, "the retired store stayed untouched");
-    // The replacement store is the sender's retry target; the retired one
-    // stays refused even after the slot moved on.
-    let replacement = Arc::new(SessionInbox::open(Some(&dir.join("replacement"))));
-    engine.set_inbox(std::sync::Arc::clone(&replacement));
-    assert!(
-        engine
-            .push_to_live_inbox(
-                &inbox,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "still stale",
-                ),
-                3_000,
-            )
-            .is_none(),
-        "the replaced-away store stays refused"
-    );
-    assert!(
-        engine
-            .push_to_live_inbox(
-                &replacement,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "retried",
-                ),
-                4_000,
-            )
-            .is_some(),
-        "the replacement store takes the retry"
-    );
-    assert_eq!(replacement.count().0, 1);
-    assert_eq!(inbox.count().0, 1, "the retired store stays untouched");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
