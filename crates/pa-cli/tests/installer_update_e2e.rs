@@ -87,6 +87,9 @@ fn serve_at(path: &'static str, body: &'static str) -> String {
 /// One sandbox: a HOME with the session store the update must preserve,
 /// and the install prefix the launcher lands under.
 struct Sandbox {
+    /// Removes the sandbox (installed binaries included) when the test ends,
+    /// passing or failing.
+    _dir: tempfile::TempDir,
     root: PathBuf,
     session_file: PathBuf,
     session_bytes: Vec<u8>,
@@ -95,15 +98,13 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "pa-update-e2e-{}-{}",
-            std::process::id(),
-            uuid_probe()
-        ));
-        std::fs::create_dir_all(&root).expect("sandbox root");
+        let dir = tempfile::Builder::new()
+            .prefix("pa-update-e2e-")
+            .tempdir()
+            .expect("sandbox root");
         // The installer reports resolved paths; macOS's temp dir sits behind
         // the /var -> /private/var symlink.
-        let root = root.canonicalize().expect("canonical sandbox root");
+        let root = dir.path().canonicalize().expect("canonical sandbox root");
         let home = root.join("home");
         let session_file = home.join(".prime/agent/sessions/session.jsonl");
         std::fs::create_dir_all(session_file.parent().expect("session dir")).expect("session dir");
@@ -114,6 +115,7 @@ impl Sandbox {
         let prefix = root.join("prefix/.local");
         std::fs::create_dir_all(&prefix).expect("prefix");
         Self {
+            _dir: dir,
             root,
             session_file,
             session_bytes,
@@ -129,14 +131,6 @@ impl Sandbox {
             "the sandbox ~/.prime/agent session file is byte-identical"
         );
     }
-}
-
-/// A per-test disambiguator for the sandbox root (no uuid dependency in
-/// dev-deps: the pid plus the server port keeps concurrent runs apart).
-fn uuid_probe() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let next = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    format!("{next}")
 }
 
 fn run_prime_agent(args: &[&str], sandbox: &Sandbox, url: &str) -> std::process::Output {

@@ -32,7 +32,7 @@ h2 = { version = "0.4", features = ["stream"] }
 bytes = "1"
 regex = "1"
 rand = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
