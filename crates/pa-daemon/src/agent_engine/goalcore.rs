@@ -203,17 +203,27 @@ impl AgentSessionEngine {
 
     /// Emit the `goal_update` event when the session's goal state changed
     /// since the last emission (per-session dedupe). A session without a
-    /// goal seeds the baseline silently.
-    pub(crate) fn goal_update_if_changed(&self, emit: &mut dyn FnMut(EngineEvent) -> bool) -> bool {
-        // No session yet, or the driver is mid-mutation: a later event re-checks.
+    /// goal seeds the baseline silently. `wait_for_driver` waits out a
+    /// driver-lock holder instead of skipping the check.
+    pub(crate) fn goal_update_if_changed(
+        &self,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        wait_for_driver: bool,
+    ) -> bool {
         let Some(handles) = self.live_handles() else {
             return true;
         };
-        let Ok(driver) = handles.goal.driver.try_lock() else {
-            return true;
+        let goal = if wait_for_driver {
+            self.runtime
+                .block_on(handles.goal.driver.lock())
+                .state_with_creation_elapsed()
+        } else {
+            // The driver is mid-mutation: a later event re-checks.
+            let Ok(driver) = handles.goal.driver.try_lock() else {
+                return true;
+            };
+            driver.state_with_creation_elapsed()
         };
-        let goal = driver.state_with_creation_elapsed();
-        drop(driver);
         {
             let mut published = handles.published_goal.lock().expect("published goal lock");
             // The dedupe is age-invariant (the age ticks with the wall clock).
@@ -253,10 +263,15 @@ impl AgentSessionEngine {
         emit: &'a mut dyn FnMut(EngineEvent) -> bool,
     ) -> impl FnMut(EngineEvent) -> bool + 'a {
         move |event: EngineEvent| {
+            // The run's last event: no later event re-checks, so the check
+            // waits out a driver-lock holder. Safe here: the terminal events
+            // emit from the turn's synchronous frame, which holds no goal or
+            // session guard; mid-turn events can emit inside async contexts.
+            let terminal = matches!(event, EngineEvent::Done(_) | EngineEvent::DoneAborted);
             if !emit(event) {
                 return false;
             }
-            self.goal_update_if_changed(emit)
+            self.goal_update_if_changed(emit, terminal)
         }
     }
 }
