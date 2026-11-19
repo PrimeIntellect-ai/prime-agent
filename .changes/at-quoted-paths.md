@@ -1,0 +1,1 @@
+- `@` file references now accept single quotes (`@'my file.txt'`) like double quotes, and on macOS/Linux backslash-escaped spaces (`@my\ file.txt`); completion keeps the quoting you typed.
