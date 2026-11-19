@@ -111,6 +111,7 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
@@ -230,6 +231,7 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
+            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {

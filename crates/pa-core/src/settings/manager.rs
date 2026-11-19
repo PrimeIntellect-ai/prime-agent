@@ -677,6 +677,31 @@ impl SettingsManager {
             .unwrap_or(crate::settings::types::DEFAULT_PYTHON_CELL_TIMEOUT_MS)
     }
 
+    /// The agent-inbox kill switch (`agentInbox.enabled`, default on):
+    /// `false` restores direct notice-row steering. Global scope only, so a
+    /// project cannot flip the daemon's delivery route.
+    #[must_use]
+    pub fn get_agent_inbox_enabled(&self) -> bool {
+        self.global
+            .agent_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.enabled)
+            .unwrap_or(true)
+    }
+
+    /// The inbox reminder's repeat interval in milliseconds
+    /// (`agentInbox.reminderIntervalMs`; default 10 minutes, `0`
+    /// disables the reminder). Global scope only, so a project cannot
+    /// drive the reminder loop.
+    #[must_use]
+    pub fn get_agent_inbox_reminder_interval_ms(&self) -> u64 {
+        self.global
+            .agent_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.reminder_interval_ms)
+            .unwrap_or(crate::settings::types::DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS)
+    }
+
     /// The steering queue's delivery mode: `all` co-delivers every queued message at
     /// the next turn boundary; `one-at-a-time` delivers one per turn.
     #[must_use]
@@ -1109,6 +1134,54 @@ mod tests {
         );
         manager.reload().unwrap();
         assert_eq!(manager.get_default_model(), Some("z-ai/glm-5.3"));
+    }
+
+    /// `agentInbox.enabled` defaults ON (the kill switch is opt-out) and
+    /// `reminderIntervalMs` defaults to 10 minutes; `0` disables the
+    /// reminder.
+    #[test]
+    fn agent_inbox_settings_default_and_kill_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manager = SettingsManager::create(dir.path(), agent_dir.clone());
+        assert!(manager.get_agent_inbox_enabled(), "unset reads as enabled");
+        assert_eq!(
+            manager.get_agent_inbox_reminder_interval_ms(),
+            crate::settings::types::DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS
+        );
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"agentInbox": {"enabled": false, "reminderIntervalMs": 0}}"#,
+        )
+        .unwrap();
+        let manager = SettingsManager::create(dir.path(), agent_dir);
+        assert!(!manager.get_agent_inbox_enabled());
+        assert_eq!(manager.get_agent_inbox_reminder_interval_ms(), 0);
+    }
+
+    /// Both `agentInbox` keys read the GLOBAL scope only: a cloned repo's
+    /// project settings can neither flip the route nor set the reminder
+    /// interval.
+    #[test]
+    fn agent_inbox_settings_read_the_global_scope_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            r#"{"agentInbox": {"enabled": false, "reminderIntervalMs": 1}}"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::create(&cwd, &agent_dir);
+        assert!(manager.get_agent_inbox_enabled());
+        assert_eq!(
+            manager.get_agent_inbox_reminder_interval_ms(),
+            crate::settings::types::DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS
+        );
     }
 
     /// `factory.enabled` reads the GLOBAL scope only (the agent-dir

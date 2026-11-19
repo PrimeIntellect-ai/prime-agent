@@ -585,6 +585,308 @@ pub(crate) fn admit_kernel_notice(
     work_notify.notify_one();
 }
 
+/// The queue-strip coalescing key of the inbox arrival notice: one
+/// queued short row covers every arrival of the busy window (a later
+/// arrival replaces it instead of stacking).
+pub(crate) const INBOX_ARRIVAL_QUEUE_KEY: &str = "inbox:arrival";
+/// The coalescing key of the periodic unread reminder.
+pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
+
+/// Admit one inbox arrival (the daemon's inbox routing of a
+/// `bash.completed`, `factory.progress`, or agent-message notice): the
+/// message lands in the session's durable inbox and ONE short steering
+/// notice wakes the agent. Arrivals inside one busy window coalesce:
+/// while a notice row is still queued, a later arrival extends and
+/// replaces it (the batch the queued row covers); the delivered row
+/// leaves the queue, so the next arrival starts a fresh batch. The
+/// notice rides the lane the arrival requested (agent messages honor
+/// their delivery mode; notices ride steering), never demoting a
+/// queued steering notice to follow-up, and a replacement clears the
+/// key from both lanes first, so a batch never splits. Answers the
+/// capacity refusal when the gate rejects the arrival (the sink passes
+/// a permissive gate).
+#[allow(clippy::too_many_arguments)] // the admission's gates and seams ride as separate handles (lock-order reasons)
+pub(crate) fn admit_inbox_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    notice: pa_core::session_engine::inbox::InboxNotice,
+    lane: Lane,
+    session_is_closed: impl Fn() -> bool,
+    capacity_error: impl Fn(
+        &std::collections::VecDeque<QueuedItem>,
+        &std::collections::VecDeque<QueuedItem>,
+    ) -> Option<String>,
+    engine: Option<&crate::agent_engine::AgentSessionEngine>,
+) -> Result<bool, String> {
+    // The busy sample, the batch, and the push share ONE critical
+    // section, like the notice admission below: a turn starting between
+    // them would queue an invisible row for a busy session.
+    let mut core_guard = core.lock().unwrap();
+    // A notice that raced past the sink's first check is refused here
+    // (the close's clear wipes the lanes); its message already made the
+    // journal durable, which is honest — it did arrive.
+    if session_is_closed() {
+        return Err("Target session is closed".to_string());
+    }
+    // The capacity gate, re-sampled under this same lock with the lane
+    // lengths it reads here: concurrent arrivals can never pass one
+    // stale sample together.
+    if let Some(error) = capacity_error(&core_guard.steering, &core_guard.follow_up) {
+        return Err(error);
+    }
+    // The append is atomic with the session swap: the route-fetched store
+    // is identity-checked under the slot's own mutex (push_to_live_inbox),
+    // so a `create` replacement that retired it — or a closed-session
+    // retire that cleared it — refuses here; a delivery never succeeds
+    // against a store the replacement cannot read.
+    let message = match engine {
+        Some(engine) => {
+            match engine.push_to_live_inbox(inbox, notice, pa_core::autonomous::now_millis()) {
+                Some(message) => message,
+                None => return Err("Target session is closed".to_string()),
+            }
+        }
+        None => inbox.push(notice, pa_core::autonomous::now_millis()),
+    };
+    // The admission's own busy sample: the receipt's `deliveryStatus`
+    // follows THIS read (one critical section), never an earlier sample
+    // taken outside the lock.
+    let queued = core_guard.busy;
+    let (policy, queue_visible) = if queued {
+        (TurnPolicy::Queued, true)
+    } else {
+        (TurnPolicy::Injected, false)
+    };
+    {
+        let mut arrivals = arrivals.lock().unwrap();
+        // A queued notice row covers its arrivals until it delivers; no
+        // row means the last notice already delivered (or was cleared).
+        let coalescing = core_guard
+            .steering
+            .iter()
+            .chain(core_guard.follow_up.iter())
+            .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        if !coalescing {
+            arrivals.clear();
+        }
+        arrivals.push(message);
+        let (count, _, _) = inbox.count();
+        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&arrivals, count);
+        // A follow-up arrival never demotes a queued steering notice: the
+        // batch keeps the most urgent lane it has already ridden.
+        let queued_steering = core_guard
+            .steering
+            .iter()
+            .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        let lane = if queued_steering {
+            Lane::Steering
+        } else {
+            lane
+        };
+        // The replacement pattern the scheduler's queue keys use: the
+        // fresh row replaces the coalesced one instead of stacking.
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        let lane_queue = match lane {
+            Lane::Steering => &mut core_guard.steering,
+            Lane::FollowUp => &mut core_guard.follow_up,
+        };
+        lane_queue.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            preview: Some(preview),
+            message: text,
+            custom_message: None,
+            agent_message: None,
+            queue_key: Some(INBOX_ARRIVAL_QUEUE_KEY.to_string()),
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible,
+            policy,
+            forced_batch: false,
+        });
+    }
+    // The checkpoint re-locks the core (documented order: recovery lock
+    // first), so the admission's guard must release first.
+    drop(core_guard);
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+    Ok(queued)
+}
+
+/// Retract or re-render the queued inbox wake rows over the live store:
+/// the covered batch trims against the waiting set, an emptied batch
+/// drops the arrival row, and the reminder follows the live count.
+/// Shared by the kernel read's post-drain hook and the clear/pause sweep.
+pub(crate) fn refresh_inbox_wake_rows(
+    core: &Arc<Mutex<SessionCore>>,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) -> bool {
+    let mut core_guard = core.lock().unwrap();
+    refresh_inbox_wake_rows_locked(&mut core_guard, arrivals, inbox)
+}
+
+/// [`refresh_inbox_wake_rows`] over an already locked core: the clear
+/// sweep holds the lock across its withdrawal so a concurrent delivery
+/// either lands before the clear (and leaves) or waits for it (and
+/// stays).
+pub(crate) fn refresh_inbox_wake_rows_locked(
+    core_guard: &mut SessionCore,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) -> bool {
+    let waiting = inbox.waiting_ids();
+    let mut batch = arrivals.lock().unwrap();
+    // An arrived-empty batch is UNKNOWN (a recovered row after a restart
+    // arrives without its batch); a batch emptied by the retain below was
+    // live and its covered messages are gone — older unread mail keeps
+    // its reminder only.
+    let recovered = batch.is_empty();
+    batch.retain(|message| waiting.contains(&message.id));
+    let (count, _, _) = inbox.count();
+    if recovered && count > 0 {
+        batch.extend(inbox.waiting_messages());
+    }
+    let mut changed = false;
+    if batch.is_empty() {
+        let before = core_guard.steering.len() + core_guard.follow_up.len();
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
+        changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
+    } else {
+        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
+        let core_guard = &mut *core_guard;
+        let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
+        for item in steering
+            .iter_mut()
+            .chain(follow_up.iter_mut())
+            .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+        {
+            if item.message != text || item.preview.as_deref() != Some(preview.as_str()) {
+                item.message.clone_from(&text);
+                item.preview = Some(preview.clone());
+                changed = true;
+            }
+        }
+    }
+    if count == 0 {
+        let before = core_guard.steering.len() + core_guard.follow_up.len();
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
+    } else {
+        let reminder = pa_core::session_engine::inbox::reminder_notice(count);
+        let core_guard = &mut *core_guard;
+        let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
+        for item in steering
+            .iter_mut()
+            .chain(follow_up.iter_mut())
+            .filter(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
+        {
+            if item.message != reminder {
+                item.message.clone_from(&reminder);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Admit one periodic unread reminder: while the inbox stays non-empty,
+/// a steering row repeats the waiting count (the reminderIntervalMs
+/// cycle in `agent_inbox.rs`); an empty inbox admits nothing. The queue
+/// key keeps one row — a later reminder replaces the queued one on
+/// either lane (a queued-message mutation can move it there).
+pub(crate) fn admit_inbox_reminder(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    session_is_closed: impl Fn() -> bool,
+    engine: Option<&crate::agent_engine::AgentSessionEngine>,
+) {
+    let mut core_guard = core.lock().unwrap();
+    if session_is_closed() {
+        return;
+    }
+    // The captured store is re-checked under the slot's own mutex: a
+    // replacement that installed the next session's store must never wake
+    // with the retired session's count.
+    if let Some(engine) = engine {
+        if !engine.is_live_inbox(inbox) {
+            return;
+        }
+    }
+    // The count re-samples under the core lock: a concurrent drain and
+    // its wake-row refresh may have emptied the store since the cycle
+    // sampled it, and a reminder for nothing must not queue.
+    let (count, _, _) = inbox.count();
+    if count == 0 {
+        return;
+    }
+    let message = pa_core::session_engine::inbox::reminder_notice(count);
+    let (policy, queue_visible) = if core_guard.busy {
+        (TurnPolicy::Queued, true)
+    } else {
+        (TurnPolicy::Injected, false)
+    };
+    {
+        core_guard
+            .steering
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        core_guard
+            .follow_up
+            .retain(|item| item.queue_key.as_deref() != Some(INBOX_REMINDER_QUEUE_KEY));
+        core_guard.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            preview: Some("Inbox reminder".to_string()),
+            message,
+            custom_message: None,
+            agent_message: None,
+            queue_key: Some(INBOX_REMINDER_QUEUE_KEY.to_string()),
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible,
+            policy,
+            forced_batch: false,
+        });
+    }
+    drop(core_guard);
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+}
+
 /// Withdraw one queued bash completion notice: the kernel read the result
 /// before the notice delivered (pids are reused, so the command disambiguates).
 pub(crate) fn withdraw_bash_completion_notice(

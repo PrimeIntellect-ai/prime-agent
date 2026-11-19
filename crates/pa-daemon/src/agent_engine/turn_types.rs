@@ -9,6 +9,10 @@ pub(crate) enum TurnResult {
     Message(Box<pa_agent::types::AssistantMessage>),
     /// The turn was aborted before a settled message.
     Aborted,
+    /// The delivery parked on a streaming run's lane and that run consumed
+    /// it: the seat carries the acceptance settle only (no reply, no
+    /// settled-turn accounting — the running turn's seat owns those).
+    Queued,
     /// The turn failed before or during the model call; `assistant` is
     /// the failed turn's settled message when one exists (model
     /// resolution and session-build failures carry none).
@@ -40,9 +44,16 @@ pub(crate) enum TurnPrompt {
         batch: Vec<crate::engine::PromptBatchRow>,
     },
     /// An injected custom row (goal continuations, RLM child terminal
-    /// notices): the admission carries the row itself, so the transcript
-    /// holds one representation.
-    Injected(pa_types::session::CustomMessage),
+    /// notices, the daemon's notice deliveries): the admission carries
+    /// the row itself, so the transcript holds one representation.
+    Injected {
+        message: pa_types::session::CustomMessage,
+        /// The delivery's streaming behavior when the agent is busy at
+        /// admission: the queue lane the item rode (the steering lane
+        /// steers the running turn, the follow-up lane queues at its
+        /// boundary) — a busy session queues the row, never rejects it.
+        behavior: pa_core::session_engine::StreamingBehavior,
+    },
 }
 
 /// What the turn-boundary consumption did to the run.
@@ -67,7 +78,19 @@ pub(crate) enum TurnOnce {
     Message {
         assistant: Box<pa_agent::types::AssistantMessage>,
     },
+    /// The delivery parked on a streaming run's lane and that run consumed
+    /// it (its boundary poll — the steering contract — or another drainer
+    /// won the slot): this seat reports acceptance, never the running
+    /// turn's reply (its own seat owns that stream and settle).
+    Queued,
 }
+
+/// The busy delivery was consumed by the running turn: the attempt carries
+/// no settled assistant of its own (the retry driver never retries it —
+/// the sentinel reaches [`super::TurnResult::Queued`] after the driver).
+#[derive(Debug, thiserror::Error)]
+#[error("delivery consumed by the running turn")]
+pub(crate) struct QueuedDeliveryConsumed;
 
 /// Remove the trailing assistant message from the loop context, so a
 /// retried request does not re-send the failed turn's error message.
