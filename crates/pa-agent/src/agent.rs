@@ -350,9 +350,10 @@ struct RunEndGuard(Option<Arc<AgentInner>>);
 
 impl RunEndGuard {
     async fn settle(mut self) {
-        let inner = self.0.take().expect("a run ends once");
+        // Stays armed across the lock wait: a cancelled settle ends the run on drop.
+        let inner = self.0.as_ref().expect("a run ends once");
         inner.shared.lock().await.end_stream();
-        inner.release_run();
+        self.0.take().expect("a run ends once").release_run();
     }
 }
 
