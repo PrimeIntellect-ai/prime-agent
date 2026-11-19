@@ -280,10 +280,7 @@ async fn execute_compact(
     Ok(())
 }
 
-/// `/refine`: the daemon's engine spawns the one-shot refinement child (its
-/// reply applies on arrival); a host without the child runtime (print, RPC,
-/// ACP: a core engine) schedules the planning inline instead, without
-/// holding the host command runner.
+/// `/refine`: schedule planning without holding the host command runner.
 fn execute_refine(
     engine: &SessionEngine,
     params: &mut SessionCommandParams<'_>,
@@ -296,24 +293,6 @@ fn execute_refine(
         instructions: options.instructions,
         rollback_id: options.rollback_id,
     };
-    if refine_options.rollback_id.is_none() {
-        // The child spawn answers the "(child_id)" hint the daemon's
-        // response carries; a host without the runtime refuses and falls
-        // through to the inline path below.
-        match engine.spawn_refinement_child(refine_options.clone(), RefinementSource::User) {
-            Ok(child_id) => {
-                return Ok(execution.push_message(slash_command_result(
-                    command,
-                    format!("Refinement child spawned ({child_id}); its reply applies on arrival."),
-                    true,
-                    "info",
-                    None,
-                    false,
-                )));
-            }
-            Err(_child_unavailable) => {}
-        }
-    }
     execution.pending_refinement = Some(engine.session.start_refinement(
         refine_options,
         RefinementSource::User,
