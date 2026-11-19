@@ -1145,6 +1145,7 @@ fn assert_turn_end_publishes_a_held_goal_change(message: &str, aborted: bool) {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
+                streaming_behavior: None,
             },
             &|| aborted,
             &mut |event| {
