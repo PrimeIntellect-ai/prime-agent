@@ -1,0 +1,1 @@
+- A parked session gets paced keepalive notices, and the bash-done notice carries the output tail and exit status.

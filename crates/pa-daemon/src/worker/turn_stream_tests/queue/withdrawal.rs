@@ -209,7 +209,7 @@ async fn headless_completion_counts_the_bash_lane() {
         &worker.recovery,
         &worker.core,
         &Arc::new(Notify::new()),
-        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
+        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0, None),
         || false,
     );
     worker
