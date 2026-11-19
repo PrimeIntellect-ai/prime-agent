@@ -134,6 +134,20 @@ pub(crate) fn path_token_before(before: &[char]) -> PathToken {
     })
 }
 
+/// A bare, unquoted token at `start` covering `text`: the plain-text shape a replacement needs
+/// where no `@` and no quoting apply (a slash command's argument).
+pub(crate) fn bare_token(text: &str, start: usize) -> PathToken {
+    PathToken {
+        start,
+        end: start + text.chars().count(),
+        text: text.to_string(),
+        at: false,
+        path: text.to_string(),
+        quoting: Quoting::Bare,
+        closed: false,
+    }
+}
+
 fn open_last(mut tokens: Vec<PathToken>, len: usize) -> Option<PathToken> {
     tokens
         .pop()

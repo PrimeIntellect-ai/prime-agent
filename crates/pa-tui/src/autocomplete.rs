@@ -900,13 +900,12 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                     .and_then(|command| self.arguments.get(command))
                     .is_some_and(|items| items.iter().any(|argument| argument.value == item.value))
             {
-                return apply_file_completion(
-                    lines,
-                    cursor_line,
-                    cursor_col,
-                    item,
-                    &context.prefix,
-                );
+                // The argument is plain text, so its replacement token is bare.
+                let start = cursor_col
+                    .min(line.len())
+                    .saturating_sub(context.prefix.chars().count());
+                let token = path_token::bare_token(&context.prefix, start);
+                return apply_file_completion(lines, cursor_line, cursor_col, item, &token);
             }
         }
         let token = path_token::path_token_before(before);
