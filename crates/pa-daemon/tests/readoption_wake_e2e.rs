@@ -543,7 +543,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     );
 
     let rows_before_restart = wait_until(Duration::from_secs(20), || {
-        let rows = session_rows_containing(&session_file, "heartbeat_prompt");
+        let rows = heartbeat_notice_rows(&session_file);
         (rows > 0).then_some(rows)
     });
 
@@ -563,7 +563,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     // THE ASSERT: the heartbeat keeps firing after the re-adoption — the row count
     // grows past the pre-restart snapshot.
     let grew = wait_until(Duration::from_secs(30), || {
-        let rows = session_rows_containing(&session_file, "heartbeat_prompt");
+        let rows = heartbeat_notice_rows(&session_file);
         (rows > rows_before_restart).then_some(rows)
     });
     assert!(
@@ -664,7 +664,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
     let rows_before_restart = wait_until(Duration::from_secs(20), || {
-        let rows = session_rows_containing(&wake_file, "heartbeat_prompt");
+        let rows = heartbeat_notice_rows(&wake_file);
         (rows > 0).then_some(rows)
     });
 
@@ -696,7 +696,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
         );
     }
     let grew = wait_until(Duration::from_secs(30), || {
-        let rows = session_rows_containing(&wake_file, "heartbeat_prompt");
+        let rows = heartbeat_notice_rows(&wake_file);
         (rows > rows_before_restart).then_some(rows)
     });
     assert!(
@@ -710,8 +710,15 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
     );
 }
 
-fn session_rows_containing(session_file: &Path, needle: &str) -> usize {
+/// The heartbeat fires the session announced: each fire lands in the inbox
+/// and steers an `inbox_notice` row that names the `heartbeat` class.
+fn heartbeat_notice_rows(session_file: &Path) -> usize {
     std::fs::read_to_string(session_file).map_or(0, |content| {
-        content.lines().filter(|line| line.contains(needle)).count()
+        content
+            .lines()
+            .filter(|line| {
+                line.contains(r#""customType":"inbox_notice""#) && line.contains("heartbeat")
+            })
+            .count()
     })
 }
