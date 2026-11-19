@@ -723,3 +723,39 @@ async fn a_dropped_queued_fire_withdraws_its_inbox_message_and_wake_row() {
         "no wake row or direct row for the paused job"
     );
 }
+
+/// The heartbeat withdrawal is identity-checked like the durable push: a
+/// retired or replaced slot refuses it and the captured store keeps its
+/// waiting fire (the replacement's replay, not a journal record racing
+/// its reopen, decides what survives).
+#[tokio::test]
+async fn a_retired_slot_refuses_the_heartbeat_withdrawal() {
+    let dir = std::env::temp_dir().join(format!("pa-sched-retire-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = write_active_session(&dir);
+    let (engine, engine_dir) = crate::agent_engine::tests::faux_engine_with_settings(
+        &serde_json::json!({ "responses": ["ack"] }),
+        0,
+    );
+    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
+        engine_dir.path(),
+    )));
+    engine.set_inbox(Arc::clone(&inbox));
+    let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
+    let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(&job, 1);
+    let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&job.id, &row).unwrap();
+    inbox.push(fields, 1);
+
+    engine.clear_inbox();
+    assert!(engine
+        .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
+        .is_none());
+    let replacement = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
+        &dir.join("replacement"),
+    )));
+    engine.set_inbox(replacement);
+    assert!(engine
+        .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
+        .is_none());
+    assert_eq!(inbox.count().0, 1, "the retired store stayed untouched");
+}

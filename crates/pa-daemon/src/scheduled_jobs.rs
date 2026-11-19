@@ -155,8 +155,14 @@ impl QueueHooks {
             // session is a resume site (the runner refuses suspended lanes).
             core.queued_input_suspended = false;
             // One waiting fire per job: the newest replaces the older, and
-            // the arrival batch drops it so the notice never counts it.
-            let withdrawn = engine.withdraw_heartbeat_from_live_inbox(&inbox, &live.id)?;
+            // the arrival batch drops it so the notice never counts it. A
+            // store retired since the capture skips the fire: its waiting
+            // fire replays into the replacement, so a direct row would
+            // deliver twice.
+            let Some(withdrawn) = engine.withdraw_heartbeat_from_live_inbox(&inbox, &live.id)
+            else {
+                return Some(RoutedFire::Skipped);
+            };
             if !withdrawn.is_empty() {
                 seam.arrivals
                     .lock()
