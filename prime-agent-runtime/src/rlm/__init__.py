@@ -602,7 +602,8 @@ async def inbox_read(
     """Read and drain the session inbox: the waiting machine-generated
     notices (bash completions, factory milestones, agent messages,
     child lifecycle terminals, heartbeat fires) return in arrival order
-    with their arrival time, and the inbox empties.
+    with their arrival time, and the inbox empties. Read messages are gone,
+    so assign the result: ``msgs = await rlm.inbox.read()``.
 
     Every argument narrows the read (ANDed); no argument drains
     everything. ``sender`` matches exactly (a command, a run id, an
@@ -762,9 +763,10 @@ _harness_state = _HarnessProxy()
 
 class _RLMInboxNamespace:
     """The session inbox of machine-generated notices:
-    ``await rlm.inbox.read()`` drains and returns the waiting messages
-    (optionally narrowed by sender, inbox_class, and arrival window);
-    ``await rlm.inbox.count()`` counts them without draining.
+    ``msgs = await rlm.inbox.read()`` drains and returns the waiting messages
+    (optionally narrowed by sender, inbox_class, and arrival window); read
+    messages are gone, so assign the result; ``await rlm.inbox.count()``
+    counts them without draining.
     """
 
     async def read(

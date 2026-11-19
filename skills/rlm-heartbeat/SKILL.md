@@ -31,6 +31,10 @@ Each heartbeat has a delivery mode controlling how the scheduled prompt reaches 
 - `steer` (default): interrupt the current turn so the heartbeat runs promptly.
 - `follow_up`: wait for the current turn to finish before running the heartbeat.
 
+With the agent inbox, the fired instruction waits in the inbox (class
+`heartbeat`) and the delivery mode applies to the `[inbox …]` notice that
+announces it.
+
 ## Rules
 
 - Use this when the user asks you to start, create, schedule, or manage your own heartbeat without explicitly referring to `/heartbeat`.

@@ -1422,8 +1422,8 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
         .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
     let notice_text = delivered[notice_at].0.clone();
     assert!(
-        notice_text.contains("1 new message (child-exited)"),
-        "the wake counts the class: {notice_text}"
+        notice_text.contains("1 new message (child-exited from f20-worker)"),
+        "the wake counts the class and names the child: {notice_text}"
     );
     let reply_at = delivered
         .iter()

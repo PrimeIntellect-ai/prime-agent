@@ -807,10 +807,12 @@ pub fn utc_hh_mm(ms: u64) -> String {
 
 /// The arrival notice for one batch of messages: the short steering row
 /// that replaces the notices' full rows. One count row per batch: a
-/// single arrival names its class ("1 new bash-done message"), a same
+/// single arrival names its class ("1 new message (bash-done)"), a same
 /// class burst its count ("3 new bash-done messages"), a mixed burst
 /// the per-class breakdown ("3 new messages (2 bash-done, 1
-/// child-exited)"). The signature is the latest arrival's time; a
+/// child-exited)"). An agent-message or child class whose messages in
+/// the batch share one sender names it ("1 new message (agent-message
+/// from crew-mgr)"). The signature is the latest arrival's time; a
 /// wider batch carries the arrival window.
 #[must_use]
 pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, String) {
@@ -818,25 +820,46 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
         return (String::new(), String::new());
     };
     let signature = utc_hh_mm(last.arrived_at_ms);
-    let mut classes: Vec<(&str, u64)> = Vec::new();
+    // (class, count, the sender every message of the class shares)
+    let mut classes: Vec<(&str, u64, Option<&str>)> = Vec::new();
     for message in batch {
+        let sender = message.sender.as_deref().filter(|_| {
+            matches!(
+                message.class.as_str(),
+                INBOX_CLASS_AGENT_MESSAGE | INBOX_CLASS_CHILD_EXITED | INBOX_CLASS_CHILD_FAILED
+            )
+        });
         match classes
             .iter_mut()
-            .find(|(class, _)| class == &message.class.as_str())
+            .find(|(class, _, _)| class == &message.class.as_str())
         {
-            Some((_, count)) => *count += 1,
-            None => classes.push((&message.class, 1)),
+            Some((_, count, shared)) => {
+                *count += 1;
+                if *shared != sender {
+                    *shared = None;
+                }
+            }
+            None => classes.push((&message.class, 1, sender)),
         }
     }
+    let from = |sender: Option<&str>| {
+        sender
+            .map(|name| format!(" from {name}"))
+            .unwrap_or_default()
+    };
     let count = batch.len();
     let summary = if count == 1 {
-        format!("1 new message ({})", last.class)
+        format!("1 new message ({}{})", last.class, from(classes[0].2))
     } else if classes.len() == 1 {
-        format!("{count} new {} messages", classes[0].0)
+        format!(
+            "{count} new {} messages{}",
+            classes[0].0,
+            from(classes[0].2)
+        )
     } else {
         let breakdown = classes
             .iter()
-            .map(|(class, class_count)| format!("{class_count} {class}"))
+            .map(|(class, class_count, sender)| format!("{class_count} {class}{}", from(*sender)))
             .collect::<Vec<_>>()
             .join(", ");
         format!("{count} new messages ({breakdown})")
@@ -849,7 +872,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
     (
         format!("Inbox: {summary}"),
         format!(
-            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with rlm.inbox.read()."
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
         ),
     )
 }
@@ -859,7 +882,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
 #[must_use]
 pub fn reminder_notice(count: usize) -> String {
     let noun = if count == 1 { "message" } else { "messages" };
-    format!("[inbox reminder] {count} {noun} still waiting — rlm.inbox.read()")
+    format!("[inbox reminder] {count} {noun} still waiting. Read them with msgs = await rlm.inbox.read().")
 }
 
 // The notice rows' wire vocabulary — the customType, the notice-class
@@ -1573,7 +1596,7 @@ mod tests {
         assert_eq!(preview, "Inbox: 1 new message (bash-done)");
         assert_eq!(
             text,
-            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read()."
         );
         let same_class = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
@@ -1583,7 +1606,7 @@ mod tests {
         assert_eq!(preview, "Inbox: 2 new bash-done messages");
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with msgs = await rlm.inbox.read()."
         );
         let batch = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
@@ -1597,7 +1620,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with msgs = await rlm.inbox.read()."
         );
     }
 
@@ -1709,11 +1732,11 @@ mod tests {
     fn reminder_notice_names_the_wait() {
         assert_eq!(
             reminder_notice(3),
-            "[inbox reminder] 3 messages still waiting — rlm.inbox.read()"
+            "[inbox reminder] 3 messages still waiting. Read them with msgs = await rlm.inbox.read()."
         );
         assert_eq!(
             reminder_notice(1),
-            "[inbox reminder] 1 message still waiting — rlm.inbox.read()"
+            "[inbox reminder] 1 message still waiting. Read them with msgs = await rlm.inbox.read()."
         );
     }
 
@@ -1827,7 +1850,7 @@ mod tests {
     #[test]
     fn inbox_notice_row_carries_the_text_and_the_sender_identity() {
         let arrival = format!(
-            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
         );
         let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
         for (class, text) in [
