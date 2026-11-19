@@ -441,8 +441,8 @@ impl FactoryActivityRequest {
         else {
             return Err(anyhow!("unknown factory activity action"));
         };
-        if action == "run" && spec_id.is_none_or(|id| id.trim().is_empty()) {
-            return Err(anyhow!("factory activity run requires specId"));
+        if matches!(action, "run" | "node") && spec_id.is_none_or(|id| id.trim().is_empty()) {
+            return Err(anyhow!("factory activity {action} requires specId"));
         }
         // `library` is the target-free action pair: the list with no
         // target, or one machine's graph payload when `specId` names it

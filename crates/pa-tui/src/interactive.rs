@@ -104,6 +104,7 @@ pub enum SessionPanel {
     /// The factory page, on `row` when a return from a state's session reopened it.
     FactoryRuns {
         row: Option<crate::factory_view::FactoryRow>,
+        node: Option<crate::factory_view::node::NodeTarget>,
     },
 }
 

@@ -260,11 +260,14 @@ impl SessionUi {
                     bash_view.select(&id);
                 }
             }
-            crate::interactive::SessionPanel::FactoryRuns { row } => {
+            crate::interactive::SessionPanel::FactoryRuns { row, node } => {
                 self.open_factory_page(view);
                 if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
                     factory_view.select(row);
                     self.sync_factory_selection(view);
+                }
+                if let Some(node) = node {
+                    self.open_factory_node(view, &node.run_id, &node.state_id, node.instance);
                 }
             }
         }

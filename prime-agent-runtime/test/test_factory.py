@@ -7148,6 +7148,28 @@ def slow(inputs):
 """
 
 
+class FactoryNodeActivityTest(_ExecutorTestCase):
+    @async_test
+    async def test_node_activity_rejects_incomplete_or_malformed_selectors(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="node-test")
+        run = await self.start("node-test")
+        base = {"action": "node", "runId": run["run_id"], "specId": "a"}
+
+        # The kernel's wire form uses a null pair to mean no selector.
+        reply = await self.executor.activity({**base, "entry": None, "instance": None})
+        self.assertEqual(reply["entry"]["index"], 0)
+
+        for selectors in (
+            {"entry": 0},
+            {"instance": 0},
+            {"entry": -1, "instance": 0},
+            {"entry": 0, "instance": "0"},
+        ):
+            with self.subTest(selectors=selectors):
+                with self.assertRaisesRegex(ValueError, "node"):
+                    await self.executor.activity({**base, **selectors})
+
+
 class FactoryPythonStateTest(_ExecutorTestCase):
     def setUp(self) -> None:
         super().setUp()
