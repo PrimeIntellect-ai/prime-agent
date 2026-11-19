@@ -144,7 +144,6 @@ async fn get_rlm_children_carries_the_sequence() {
     assert_eq!(again.data.expect("data")["eventSequence"], json!(sequence));
 }
 
-/// Child attributions move the split between `ownUsage` and `totalUsage`.
 #[tokio::test]
 async fn get_context_tree_matches_the_ts_root_node() {
     let worker = created_worker().await;
@@ -177,14 +176,11 @@ async fn get_context_tree_matches_the_ts_root_node() {
         .await;
     let tree = response.data.expect("data");
     assert_eq!(tree["ownUsage"]["input"], json!(120));
-    assert_eq!(tree["totalUsage"]["totalTokens"], json!(128));
-    assert_eq!(tree["totalUsage"]["cost"]["total"].as_f64(), Some(0.0));
 }
 
 /// The captured-attribution fixture over the full daemon path (create from a
 /// copy, so the repo fixture stays read-only). `ownUsage` is the assistant's
-/// own row (input 2690, cost $0, `totalTokens` clamped to zero); `totalUsage`
-/// carries the attributed child spend (input 52898, cost $0.0089957).
+/// own row (input 2690, cost $0, `totalTokens` clamped to zero).
 #[tokio::test]
 async fn get_context_tree_folds_the_captured_attributions() {
     let root = std::env::temp_dir().join(format!("pa-worker-af-{}", uuid::Uuid::new_v4()));
@@ -213,15 +209,7 @@ async fn get_context_tree_folds_the_captured_attributions() {
         "own cost {} is not ~0",
         tree["ownUsage"]["cost"]["total"]
     );
-    assert_eq!(tree["totalUsage"]["input"], json!(52898));
-    assert_eq!(tree["totalUsage"]["output"], json!(5863));
-    assert_eq!(tree["totalUsage"]["cacheRead"], json!(18560));
-    assert_eq!(tree["totalUsage"]["totalTokens"], json!(23032));
-    assert_eq!(
-        tree["totalUsage"]["cost"]["total"].as_f64(),
-        Some(0.008_995_7)
-    );
-    // `get_session_stats` reports the same folded totals over the gap-bridged branch.
+    // `get_session_stats` reports the folded totals over the gap-bridged branch.
     let stats = worker
         .dispatch(
             "get_session_stats",

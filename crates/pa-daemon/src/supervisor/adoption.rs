@@ -576,6 +576,17 @@ impl Supervisor {
                 self.spawn_roster_registration_seed(Path::new(&root));
             }
         }
+        // Reports sent while no supervisor listened are lost (a restart, or a
+        // worker kept across an update that sends none): reconcile the
+        // family's shards with their transcripts, detached from the reply.
+        let usage_root = resident.descriptor.lock().await.session_file.clone();
+        if let Some(root) = usage_root {
+            let supervisor = Arc::clone(self);
+            drop(tokio::spawn(async move {
+                let moved = supervisor.reconcile_usage(Path::new(&root)).await;
+                supervisor.push_spend(&moved);
+            }));
+        }
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;

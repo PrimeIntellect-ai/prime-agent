@@ -85,10 +85,10 @@ fn windowed_open_folds_attributions_on_both_sides_of_the_boundary() {
     assert!((stats["cost"].as_f64().unwrap() - (0.165 + 0.03)).abs() < 1e-12);
 }
 
-/// Hydrating a windowed store keeps reporting the billed rows appended
-/// afterwards to the engine's sink.
+/// Hydrating a windowed store keeps reporting the usage rows appended
+/// afterwards to the store's sink.
 #[test]
-fn full_history_hydration_keeps_the_billed_row_sink() {
+fn full_history_hydration_keeps_the_usage_row_sink() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hydrate.jsonl");
     let mut full = SessionFile::create("/tmp", None, 0);
@@ -111,9 +111,10 @@ fn full_history_hydration_keeps_the_billed_row_sink() {
     assert!(windowed.window.is_some());
     let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sink_seen = std::sync::Arc::clone(&seen);
-    windowed.billed_row_sink = BilledRowSinkSlot(Some(std::sync::Arc::new(move |_row| {
-        sink_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    })));
+    windowed.usage_row_sink =
+        UsageRowSinkSlot(Some(std::sync::Arc::new(move |_row: &UsageRow<'_>| {
+            sink_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
     windowed.install_full_history(SessionFile::open(&path).unwrap());
     windowed
         .persist_entry(

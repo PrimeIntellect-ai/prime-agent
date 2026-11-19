@@ -30,7 +30,6 @@ pub(super) enum LedgerRecord {
         child: String,
         reason: RlmLedgerDeleteReason,
         usage: Option<crate::session_usage::SessionUsageSummary>,
-        usage_by_model: Option<Vec<crate::session_usage::ModelUsageSummary>>,
     },
 }
 
@@ -142,24 +141,17 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
             else {
                 bail!("malformed RLM ledger line {line_no}: invalid delete record");
             };
-            // The amendment record carries the deleted child's captured
-            // own usage; old readers skip unknown fields (no version bump).
+            // Older builds captured the deleted child's own usage here; old
+            // readers skip unknown fields (no version bump).
             let usage = match record.get("usage") {
                 None => None,
                 Some(usage) => Some(parse_deleted_usage(usage, line_no)?),
             };
-            // The snapshot's optional per-model split: a malformed one reads
-            // as unsplit, so the billed snapshot itself survives.
-            let usage_by_model = record
-                .get("usage")
-                .and_then(|usage| usage.get("byModel"))
-                .and_then(|by_model| serde_json::from_value(by_model.clone()).ok());
             Ok(Some(LedgerRecord::Delete {
                 child_id,
                 child,
                 reason,
                 usage,
-                usage_by_model,
             }))
         }
         _ => Ok(None),
@@ -172,18 +164,11 @@ pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<Mutex<ArtifactIndex>>,
-    pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
     /// Live edges by the durable session id (file-name stem) of their
     /// recorded parent: the family walk's entry into the replay.
     pub(super) children_by_parent_id: HashMap<String, Vec<usize>>,
-}
-
-/// Ledger rows are immutable within a replay, but file moves and transcript
-/// edits can change the inputs of the deleted-spend fold without any append.
-#[derive(Debug)]
-pub(super) struct DeletedBucket {
-    pub(super) inputs: Vec<Option<FileIdentity>>,
-    pub(super) children: super::DeletedChildrenByParent,
+    /// Every recorded edge as a tree of durable session ids, built on first read.
+    pub(super) spawn_tree: OnceLock<Arc<super::SpawnTree>>,
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {

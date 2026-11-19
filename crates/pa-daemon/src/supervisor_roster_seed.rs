@@ -13,7 +13,6 @@ use serde_json::{json, Value};
 use crate::lease::canonical_session_path;
 use crate::rlm_ledger::RlmLedgerEdge;
 use crate::session_store::read_session_info;
-use crate::session_usage::SessionUsageSummary;
 use crate::supervisor::Supervisor;
 
 impl Supervisor {
@@ -112,12 +111,11 @@ impl Supervisor {
         // takes (and is awaited before its snapshot) or it spawns after
         // the take (and its pushes land after the response - either way
         // the push cannot overtake the snapshot answer). The hydration
-        // and the deleted-descendant fold stay DETACHED inside the
-        // task: the tracked work is the lightweight seed (the ledger
-        // walk and the edge-only row writes), never the serial
-        // transcript reads or the ledger-wide bucket fold - a subscribe
-        // must not block on either (that would reintroduce the
-        // large-session open latency this PR removes).
+        // stays DETACHED inside the task: the tracked work is the
+        // lightweight seed (the ledger walk and the edge-only row
+        // writes), never the serial transcript reads - a subscribe must
+        // not block on them (that would reintroduce the large-session
+        // open latency).
         if let Ok(mut pending) = self.pending_registration_seeds.lock() {
             // Self-pruning: no one retained handle per registration.
             pending.retain(|handle| !handle.is_finished());
@@ -129,76 +127,9 @@ impl Supervisor {
                     // The bounded background hydration reads each row's transcript once.
                     drop(supervisor.spawn_seeded_hydration(seeded));
                 }
-                // The newly resident root's family bills its deleted
-                // descendants, detached like the hydration: the fold
-                // reads the whole ledger and may cold-scan legacy
-                // transcripts, so it never rides the subscribe
-                // barrier. Its push applies on top of the snapshot, and
-                // the fold ticket orders it against concurrent folds.
-                drop(tokio::spawn(async move {
-                    let refreshed = supervisor.refresh_deleted_descendant_usage().await;
-                    supervisor.push_roster_update(refreshed, Vec::new());
-                }));
             });
             pending.push(handle);
         }
-    }
-
-    /// The deleted-descendant bucket (the spawn ledger's fold keyed by
-    /// canonical parent session path) with the fold's ticket, computed
-    /// off the async runtime: the fold reads the ledger, stats
-    /// tombstoned paths, and may cold-scan a legacy child's transcript
-    /// once. The ticket is taken under the roster lock BEFORE the ledger
-    /// is read (the folds run on independent tasks, so an older read can
-    /// otherwise finish after a newer apply). `None` is the degrade (a
-    /// failed fold is logged) - the roster keeps its last bucket instead
-    /// of billing a broken read as zero.
-    pub(crate) async fn deleted_descendant_usage_bucket(
-        self: &Arc<Self>,
-    ) -> Option<(u64, HashMap<String, SessionUsageSummary>)> {
-        let ticket = self.roster.lock().unwrap().begin_bucket_fold();
-        let bucket = match self.rlm_spawn_ledger_for(None).await {
-            Ok(ledger) => {
-                tokio::task::spawn_blocking(move || ledger.deleted_descendant_usage_by_parent())
-                    .await
-                    .unwrap_or_else(|error| Err(anyhow::anyhow!(error)))
-            }
-            Err(error) => Err(error),
-        };
-        match bucket {
-            Ok(bucket) => Some((ticket, bucket)),
-            Err(error) => {
-                self.log_line(&format!(
-                    "Could not refresh deleted-descendant usage: {error:#}"
-                ));
-                None
-            }
-        }
-    }
-
-    /// Recompute the deleted-descendant bucket and rewrite the roster
-    /// rows whose attached value changed, returning them for the
-    /// caller's push. The bucket changes only at ledger events and when
-    /// a root appears, so this runs at exactly those: a registration
-    /// seed (create, resume, and supervisor-restart re-registration),
-    /// a stop passivation (the RLM delete's tombstone landed before the
-    /// stop, and the later capture amendment yields the same value),
-    /// a stopped-child delete (the idle-passivated child's tombstone -
-    /// no stop runs for it, so the delete settles the row itself), and
-    /// a saved-session delete. The worker-process delete arm and
-    /// the forwarded-owner arm stay uncovered by design: the TUI never
-    /// sends those forms, and their tombstones are picked up at the
-    /// next registration or stop.
-    pub(crate) async fn refresh_deleted_descendant_usage(
-        self: &Arc<Self>,
-    ) -> Vec<AgentRosterEntry> {
-        let Some((ticket, bucket)) = self.deleted_descendant_usage_bucket().await else {
-            return Vec::new();
-        };
-        self.roster
-            .lock()
-            .unwrap()
-            .set_deleted_descendant_usage(ticket, bucket)
     }
 
     /// The seeded candidate's roster row when already present (TS
@@ -428,11 +359,6 @@ async fn hydrate_summary_display(summary: &mut Value, file: PathBuf) -> bool {
         if let Some(level) = &info.thinking_level {
             object.insert("thinkingLevel".to_string(), json!(level));
         }
-        // The own-usage summary rides the seeded row (the rollup must
-        // not bill a passive child as zero).
-        if let Some(usage) = &info.usage {
-            object.insert("usage".to_string(), json!(usage));
-        }
     }
     true
 }
@@ -476,7 +402,6 @@ pub(crate) mod tests {
             name: name.to_string(),
             deleted: None,
             deleted_usage: None,
-            deleted_usage_by_model: None,
             factory: None,
         }
     }
@@ -957,7 +882,6 @@ pub(crate) mod tests {
                     name: "w9".to_string(),
                     deleted: None,
                     deleted_usage: None,
-                    deleted_usage_by_model: None,
                     factory: None,
                 },
             );
@@ -1078,149 +1002,6 @@ pub(crate) mod tests {
             row.summary["model"],
             json!({ "provider": "p", "modelId": "m" })
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn stopping_a_childless_root_leaves_the_bucket_and_other_rows_unchanged() {
-        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
-        let agent_dir = dir.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        register_root_worker(&supervisor, "w-root", &root_file).await;
-        append_family_edge(
-            &agent_dir,
-            &sessions_dir,
-            "sub-live",
-            &root_file,
-            &child_file,
-        );
-        let gone_child = agent_dir
-            .join("session-artifacts")
-            .join("root-1")
-            .join("sub-gone")
-            .join("sub-gone.jsonl");
-        std::fs::create_dir_all(gone_child.parent().expect("gone child dir")).unwrap();
-        write_display_file(&gone_child, "/the/gone/cwd");
-        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        ledger
-            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
-                child_id: "sub-gone".to_string(),
-                parent: root_file.to_string_lossy().to_string(),
-                child: gone_child.to_string_lossy().to_string(),
-                depth: 1,
-                name: "gone".to_string(),
-                factory: None,
-            })
-            .expect("append spawn");
-        ledger
-            .append_delete_with_usage(
-                "sub-gone",
-                &gone_child.to_string_lossy(),
-                crate::rlm_ledger::RlmLedgerDeleteReason::User,
-                &crate::session_usage::SessionUsageSummary {
-                    input_tokens: 11,
-                    output_tokens: 7,
-                    cost: 0.5,
-                },
-                /*by_model*/ None,
-            )
-            .expect("append delete");
-        let mut events = supervisor.events.subscribe();
-        let mut root_summary = live_child_summary(&root_file, &child_file);
-        root_summary["runtimeKind"] = json!("top-level");
-        root_summary["sessionId"] = json!("root-persisted");
-        root_summary["id"] = json!("root-persisted");
-        root_summary["sessionFile"] = json!(root_file.to_string_lossy());
-        root_summary.as_object_mut().unwrap().remove("rlmChildId");
-        root_summary
-            .as_object_mut()
-            .unwrap()
-            .remove("parentSessionPath");
-        supervisor.write_roster_summary(&root_summary, Some("w-root"));
-        let _ = drain_roster_pushes(&mut events);
-        let childless_file = sessions_dir.join("childless.jsonl");
-        write_display_file(&childless_file, "/the/childless/cwd");
-        register_root_worker(&supervisor, "w-childless", &childless_file).await;
-        let mut childless_summary = live_child_summary(&root_file, &child_file);
-        childless_summary["runtimeKind"] = json!("top-level");
-        childless_summary["sessionId"] = json!("childless-persisted");
-        childless_summary["id"] = json!("childless-persisted");
-        childless_summary["sessionFile"] = json!(childless_file.to_string_lossy());
-        childless_summary
-            .as_object_mut()
-            .unwrap()
-            .remove("rlmChildId");
-        childless_summary
-            .as_object_mut()
-            .unwrap()
-            .remove("parentSessionPath");
-        supervisor.write_roster_summary(&childless_summary, Some("w-childless"));
-        let _ = drain_roster_pushes(&mut events);
-        supervisor.spawn_roster_boot_seed();
-        drain_pending_seeds_for_tests(&supervisor).await;
-        let _ = drain_roster_pushes(&mut events);
-        supervisor.refresh_deleted_descendant_usage().await;
-        let _ = drain_roster_pushes(&mut events);
-
-        let before = supervisor
-            .handle_roster_subscribe("s1", "roster_subscribe")
-            .await;
-        let before_rows = before.data.expect("snapshot")["roster"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let family_root = before_rows
-            .iter()
-            .find(|entry| entry["summary"]["sessionId"] == json!("root-persisted"))
-            .expect("family root row");
-        assert_eq!(
-            family_root["summary"]["deletedDescendantUsage"],
-            json!({ "inputTokens": 11, "outputTokens": 7, "cost": 0.5 }),
-            "the bucket attached to the family root before the stop"
-        );
-        let childless_id = roster_agent_id_for_summary(&childless_summary);
-        let before_others: Vec<&Value> = before_rows
-            .iter()
-            .filter(|entry| entry["agentId"] != json!(childless_id))
-            .collect();
-
-        supervisor.registry.remove("w-childless").await;
-        supervisor
-            .passivate_roster_worker("w-childless", false)
-            .await;
-
-        let after = supervisor
-            .handle_roster_subscribe("s2", "roster_subscribe")
-            .await;
-        let after_rows = after.data.expect("snapshot")["roster"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let stopped = after_rows
-            .iter()
-            .find(|entry| entry["agentId"] == json!(childless_id))
-            .expect("the childless root's row settles in place");
-        assert_eq!(stopped["status"], "inactive");
-        assert_eq!(stopped["summary"]["isSessionActive"], false);
-        let after_others: Vec<&Value> = after_rows
-            .iter()
-            .filter(|entry| entry["agentId"] != json!(childless_id))
-            .collect();
-        assert_eq!(
-            before_others.len(),
-            after_others.len(),
-            "no row appeared or disappeared besides the stopped root"
-        );
-        for expected in &before_others {
-            let found = after_others
-                .iter()
-                .find(|entry| entry["agentId"] == expected["agentId"])
-                .unwrap_or_else(|| panic!("row vanished: {}", expected["agentId"]));
-            assert_eq!(
-                found, expected,
-                "the stop of a childless root rewrote another row"
-            );
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -56,7 +56,7 @@ async fn scripted_engine(
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,

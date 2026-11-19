@@ -70,7 +70,7 @@ pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
-use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
+use config::{GoalRuntimeHandles, RestoredSessionModel, StartupScope};
 
 mod reload;
 mod session_engine_impl;
@@ -231,14 +231,8 @@ pub struct AgentSessionEngine {
     /// build; `None` without a worker pump.
     progress_note_emit:
         std::sync::Mutex<Option<pa_core::session_engine::rlm_host::RlmProgressNoteEmit>>,
-    /// The attribution producer the children registry's sink last got:
-    /// children outlive a rebuild, so their spawn registrations are adopted
-    /// forward.
-    usage_producer: std::sync::Mutex<
-        Option<std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>>,
-    >,
-    rlm_usage_store: std::sync::Mutex<
-        Option<std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>>,
+    usage_store: std::sync::Mutex<
+        Option<std::sync::Arc<dyn pa_core::session_engine::usage_store::UsageStore>>,
     >,
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,

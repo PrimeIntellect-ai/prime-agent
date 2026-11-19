@@ -18,7 +18,6 @@ use pa_core::session_engine::rlm_host::{
 use pa_core::session_engine::rlm_notices::{
     create_rlm_child_failure_message, create_rlm_child_terminal_notice, RlmChildTerminalNotice,
 };
-use pa_core::session_engine::rlm_usage::{RlmChildUsageReport, RlmChildUsageSink};
 use pa_types::daemon::{DaemonCommand, DaemonSessionLifecycle, PromptInput};
 use pa_types::session::CustomMessage;
 use serde_json::{json, Value};
@@ -86,10 +85,6 @@ const WATCH_POLL_INTERVAL_MS: u64 = 2_000;
 /// roster reads never run their own worker recovery.
 const WATCH_MAX_UNREACHABLE_POLLS: u32 = 150;
 
-/// How long a follow-up usage watcher waits for the child's turn to start
-/// before retiring; an unpicked delivery attributes nothing.
-const FOLLOWUP_START_GRACE_MS: u64 = 30_000;
-const FOLLOWUP_START_POLL_MS: u64 = 2_000;
 #[derive(Debug, Clone, Default)]
 pub struct ParentIdentity {
     pub rlm_depth: u32,
@@ -196,26 +191,8 @@ struct ChildRecord {
     /// The delete or close of this child, kept apart from `run` so a live run
     /// is never faked settled during a delete's kill.
     retirement: Retirement,
-    /// The final unregister acknowledged completion; retries must not repeat it.
-    usage_registration_forgotten: bool,
-    /// The child's durable session file: the usage walk's source.
+    /// The child's durable session file.
     session_file: Option<String>,
-    /// Rows of [`ChildRecord::session_file`] already folded into the
-    /// parent's attribution rows. The walk resumes here, so repeated
-    /// observation never double-bills a child. `None` on a reseeded row:
-    /// nothing has been observed since the reseed, and the first delivery
-    /// primes the cursor at the file's tail.
-    attributed_rows: Option<usize>,
-    /// Frozen before delivery: cancellation and retries keep the same row identities.
-    pending_usage_report: Option<(RlmChildUsageReport, usize)>,
-    /// A follow-up usage watcher is live for this retained child
-    /// (delayed agent messaging after the task run settled).
-    usage_watch_live: bool,
-    /// A delivery arrived while the follow-up watcher was live: it re-arms
-    /// at its settle instead of stacking a second watcher.
-    usage_rearm: bool,
-    /// Serializes usage emissions for this child without holding the record lock across them.
-    emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_emitted_status: Option<&'static str>,
     /// Serializes parent-directed rename and delete for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -362,8 +339,6 @@ struct SupervisorChildSessionsInner {
     // an await, so sync engine paths can set it without a runtime `block_on`.
     identity: std::sync::Mutex<ParentIdentity>,
     children: Mutex<Vec<Arc<Mutex<ChildRecord>>>>,
-    /// Confirmed-dead children whose final usage remains owed. Not roster or slot owners.
-    retired_usage: std::sync::Mutex<Vec<Arc<Mutex<ChildRecord>>>>,
     /// Spawn-name reservations held until admission is durable, so
     /// parallel same-name spawns cannot both admit (default names never reserve).
     pending_spawn_names: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -389,9 +364,6 @@ struct SupervisorChildSessionsInner {
     /// The model-allowlist refusal telemetry: `spawn`/`create_session`
     /// refusals emit through the engine's shared lazily-built client.
     model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
-    /// The engine's child-usage attribution producer; it owns the target
-    /// row and the durable append.
-    usage_sink: std::sync::Mutex<Option<std::sync::Arc<dyn RlmChildUsageSink>>>,
     /// The delete notification hook: a deleted child must leave the cached
     /// `/context` children immediately, not wait for the next refresh.
     delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
@@ -436,7 +408,6 @@ impl SupervisorChildSessions {
                 parent_session_name: std::sync::Mutex::new(None),
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
-                retired_usage: std::sync::Mutex::new(Vec::new()),
                 pending_spawn_names: std::sync::Mutex::new(std::collections::HashSet::new()),
                 deleted_children: std::sync::Mutex::new(std::collections::HashMap::new()),
                 parent_turn: tokio::sync::watch::Sender::new(ParentTurn::default()),
@@ -444,7 +415,6 @@ impl SupervisorChildSessions {
                 running: tokio::sync::watch::Sender::new(false),
                 settle_notify: tokio::sync::Notify::new(),
                 model_refusal_telemetry,
-                usage_sink: std::sync::Mutex::new(None),
                 delete_notifier: std::sync::Mutex::new(None),
                 child_update_sink: std::sync::Mutex::new(None),
                 semantic_edges: std::sync::Mutex::new(None),
@@ -500,17 +470,8 @@ impl SupervisorChildSessions {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
     }
 
-    /// Wire the engine's child-usage attribution producer.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the usage-sink mutex is poisoned.
-    pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
-        *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
-    }
-
     /// Wire the parent session's semantic-edge recorder (the per-build
-    /// handoff beside the usage sink): the settle watcher records a
+    /// handoff): the settle watcher records a
     /// returned child's last committed request into it.
     ///
     /// # Panics
@@ -666,15 +627,6 @@ impl SupervisorChildSessions {
         identities
     }
 
-    /// Re-arm usage observation for a child after an agent message was
-    /// delivered to it; no-op for non-children or already-observed targets.
-    pub async fn observe_child_usage(&self, target: &str) {
-        let Some(record) = self.inner.find_record(target).await else {
-            return;
-        };
-        SupervisorChildSessionsInner::arm_usage_watch(&self.inner, &record).await;
-    }
-
     /// Record that this child replied since its task was admitted; the
     /// settle watcher reads the flag before a no-reply notice.
     pub async fn mark_replied(&self, child_active_session_id: &str) {
@@ -742,13 +694,7 @@ impl SupervisorChildSessions {
                 factory: false,
                 prompt_admitted: true,
                 retirement: Retirement::live(),
-                usage_registration_forgotten: false,
                 session_file: None,
-                attributed_rows: Some(0),
-                pending_usage_report: None,
-                usage_watch_live: false,
-                usage_rearm: false,
-                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 last_emitted_status: None,
                 rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             })));
@@ -1084,13 +1030,8 @@ mod lifecycle;
 mod registry;
 mod retirement;
 mod run_state;
-mod usage;
-
 #[cfg(test)]
 mod watch_tests;
-
-#[cfg(test)]
-mod usage_emit_tests;
 
 /// A gated fake supervisor parks each `create` until the test answers,
 /// so the reservation's lifecycle is observable.

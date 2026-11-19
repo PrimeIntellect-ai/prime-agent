@@ -195,7 +195,7 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         additional_prompt_paths: Vec::new(),
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
-        rlm_usage_store: None,
+        usage_store: None,
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,

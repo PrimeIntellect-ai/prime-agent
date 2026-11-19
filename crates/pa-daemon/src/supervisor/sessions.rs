@@ -216,6 +216,7 @@ impl Supervisor {
         let agent_dir = self.options.agent_dir.clone();
         let cursor = cursor.clone();
         let limit = limit.map(|limit| limit as usize);
+        let usage = Arc::clone(&self.usage_ledger);
         let scan = tokio::task::spawn_blocking(move || {
             let persistent_shells =
                 crate::persistent_shells::live_shell_rows_by_session(&agent_dir);
@@ -223,6 +224,7 @@ impl Supervisor {
             let factory_lane = crate::factory_activity::factory_lane_enabled(&agent_dir);
             let mut factory_specs = std::collections::HashMap::new();
             let mut file_total = 0usize;
+            let mut moved = Vec::new();
             let page = list_sessions_with(&dir, cursor.as_deref(), limit, |index, total, info| {
                 file_total = total;
                 if scope_current && info.cwd != scan_cwd {
@@ -232,7 +234,13 @@ impl Supervisor {
                 if factory_lane {
                     count_factory_specs(info, &mut factory_specs);
                 }
-                let row = saved_session_row(info, &persistent_shells, &factory_specs);
+                // A family that ran without this supervisor (print mode, an
+                // older build) reconciles before its row is stamped.
+                match usage.reconcile_family(&info.path) {
+                    Ok(sessions) => moved.extend(sessions),
+                    Err(error) => eprintln!("pa-daemon: usage ledger reconcile failed: {error:#}"),
+                }
+                let row = saved_session_row(info, &persistent_shells, &factory_specs, &usage);
                 let mut item = json!({
                     "id": scan_command_id,
                     "type": "session_list_item",
@@ -277,9 +285,10 @@ impl Supervisor {
                 persistent_shells,
                 factory_specs,
                 factory_lane,
+                moved,
             )
         });
-        let (page, file_total, persistent_shells, mut factory_specs, factory_lane) =
+        let (page, file_total, persistent_shells, mut factory_specs, factory_lane, moved) =
             match scan.await {
                 Ok(scanned) => scanned,
                 Err(error) => {
@@ -291,6 +300,8 @@ impl Supervisor {
                     ))];
                 }
             };
+        // The reconciled families' roster rows follow the ledger.
+        self.push_spend(&moved);
         // The scan's parse trees folded and freed inside the blocking task; return their
         // arena high-water to the OS at the phase boundary (live cache untouched).
         pa_types::memory_release::trim_freed_heap();
@@ -364,7 +375,8 @@ impl Supervisor {
             }
         }
         for info in &merged {
-            let row = saved_session_row(info, &persistent_shells, &factory_specs);
+            let row =
+                saved_session_row(info, &persistent_shells, &factory_specs, &self.usage_ledger);
             let mut item = json!({
                 "id": command_id,
                 "type": "session_list_item",
@@ -377,23 +389,6 @@ impl Supervisor {
             let _ = stream.send((vec![Outbound::Line(item)], false)).await;
         }
         infos.append(&mut merged);
-        // Every row carries its tombstoned descendants' spend, attached by canonical
-        // parent path so the rollup bills deleted subagents to the parent that spent them.
-        match ledger.deleted_descendant_usage_by_parent() {
-            Ok(bucket) => {
-                for info in &mut infos {
-                    let path = crate::lease::canonical_session_path(&info.path)
-                        .to_string_lossy()
-                        .to_string();
-                    info.deleted_descendant_usage = bucket.get(&path).cloned();
-                }
-            }
-            Err(error) => {
-                self.log_line(&format!(
-                    "Could not attach deleted-descendant usage: {error:#}"
-                ));
-            }
-        }
         // The scan's completion marker: the progress counts DIRECTORY entries while rows
         // only stream for valid files, so the last progress can land short of the total; a
         // consumer waiting for `loaded == total` observes completion on the final frame.
@@ -415,7 +410,9 @@ impl Supervisor {
         let mut lines = Vec::new();
         let sessions: Vec<Value> = infos
             .iter()
-            .map(|info| saved_session_row(info, &persistent_shells, &factory_specs))
+            .map(|info| {
+                saved_session_row(info, &persistent_shells, &factory_specs, &self.usage_ledger)
+            })
             .collect();
         let mut data = json!({ "sessions": sessions, "remaining": remaining });
         if let Some(next_cursor) = next_cursor {
@@ -480,7 +477,8 @@ impl Supervisor {
                     );
                 }
             };
-            let scan = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
+            let usage = Arc::clone(&self.usage_ledger);
+            let scan = tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, Vec<String>)> {
                 let mut infos = list_sessions(&dir);
                 if let Some(cwd) = &cwd {
                     infos.retain(|info| info.cwd == *cwd);
@@ -498,6 +496,7 @@ impl Supervisor {
                     });
                 }
                 let mut summaries = Vec::new();
+                let mut moved = Vec::new();
                 let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
                 for info in &infos {
                     roots.push(crate::rlm_roster::RosterWalkRoot {
@@ -509,13 +508,20 @@ impl Supervisor {
                         .iter()
                         .position(|root| root.session_file == canonical)
                         .map(|at| resident_by_file.swap_remove(at));
-                    match resident {
-                        Some(root) => {
-                            roots.last_mut().expect("saved root").active_session_id =
-                                root.active_session_id;
-                            summaries.push(root.summary);
+                    if let Some(root) = resident {
+                        roots.last_mut().expect("saved root").active_session_id =
+                            root.active_session_id;
+                        summaries.push(root.summary);
+                    } else {
+                        // A family that ran without this supervisor
+                        // reconciles before its row is stamped.
+                        match usage.reconcile_family(&info.path) {
+                            Ok(sessions) => moved.extend(sessions),
+                            Err(error) => {
+                                eprintln!("pa-daemon: usage ledger reconcile failed: {error:#}");
+                            }
                         }
-                        None => summaries.push(saved_session_summary(info)),
+                        summaries.push(saved_session_summary(info, &usage));
                     }
                 }
                 let mut resident_only = Vec::new();
@@ -529,7 +535,11 @@ impl Supervisor {
                 match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
                     Ok(children) => {
                         for child in &children {
-                            summaries.push(crate::rlm_roster::passive_child_summary(child));
+                            let mut summary = crate::rlm_roster::passive_child_summary(child);
+                            if let Some(object) = summary.as_object_mut() {
+                                usage.stamp(object, &child.info.path);
+                            }
+                            summaries.push(summary);
                         }
                     }
                     Err(error) => {
@@ -537,10 +547,14 @@ impl Supervisor {
                     }
                 }
                 summaries.append(&mut resident_only);
-                Ok(summaries)
+                Ok((summaries, moved))
             });
             match scan.await {
-                Ok(Ok(summaries)) => summaries,
+                Ok(Ok((summaries, moved))) => {
+                    // The reconciled families' roster rows follow the ledger.
+                    self.push_spend(&moved);
+                    summaries
+                }
                 Ok(Err(message)) => {
                     let message = message.to_string();
                     self.log_line(&message);
@@ -579,11 +593,33 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal,
             )
             .await;
-        if let Some(summary) = response
+        if let Some(mut summary) = response
             .ok()
             .filter(|response| response.success)
             .and_then(|response| response.data)
         {
+            let file = summary
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .filter(|file| !file.is_empty())
+                .map(PathBuf::from);
+            if let Some(file) = file {
+                // A worker that sends no usage reports (an older binary kept
+                // across an update, a scripted harness engine) reconciles on
+                // a usage-row counter mismatch.
+                let ledger = Arc::clone(&self.usage_ledger);
+                let reconcile_file = file.clone();
+                match tokio::task::spawn_blocking(move || ledger.reconcile(&reconcile_file)).await {
+                    Ok(Ok(moved)) => self.push_spend(&moved),
+                    Ok(Err(error)) => {
+                        self.log_line(&format!("usage ledger reconcile failed: {error:#}"));
+                    }
+                    Err(error) => self.log_line(&format!("usage ledger reconcile failed: {error}")),
+                }
+                if let Some(object) = summary.as_object_mut() {
+                    self.usage_ledger.stamp(object, &file);
+                }
+            }
             return summary;
         }
         let root_active_session_id = resident
@@ -709,11 +745,6 @@ impl Supervisor {
             if !seeded.is_empty() {
                 drop(self.spawn_seeded_hydration(seeded));
             }
-            let supervisor = Arc::clone(self);
-            drop(tokio::spawn(async move {
-                let refreshed = supervisor.refresh_deleted_descendant_usage().await;
-                supervisor.push_roster_update(refreshed, Vec::new());
-            }));
         }
         drop(opening_guard);
         Ok(summary)
@@ -798,7 +829,10 @@ struct ResidentRoot {
     active_session_id: Option<String>,
 }
 
-pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {
+pub(super) fn saved_session_summary(
+    info: &crate::session_store::SessionInfo,
+    usage: &crate::usage_ledger::UsageLedger,
+) -> Value {
     let mut row = json!({
         "id": info.id,
         // TS `inactiveLifecycleForSession`: archived/crash markers stay archived;
@@ -839,13 +873,9 @@ pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) ->
             object.insert("thinkingLevel".to_string(), json!(level));
         }
     }
-    // TS `summaryForInactiveSession` publishes the scan's own-usage summary:
-    // the roster record reads it before the saved catalog row's (own cost
-    // `daemon.usage ?? saved.usage`), so rollups never double count.
-    if let Some(usage) = &info.usage {
-        if let Some(object) = row.as_object_mut() {
-            object.insert("usage".to_string(), json!(usage));
-        }
+    // The usage ledger's own and total spend (total = own + every descendant's).
+    if let Some(object) = row.as_object_mut() {
+        usage.stamp(object, &info.path);
     }
     row
 }
@@ -900,6 +930,7 @@ pub(super) fn saved_session_row(
     info: &crate::session_store::SessionInfo,
     persistent_shells: &std::collections::HashMap<String, Vec<Value>>,
     factory_specs: &std::collections::HashMap<String, usize>,
+    usage: &crate::usage_ledger::UsageLedger,
 ) -> Value {
     let mut row = json!({
         "path": info.path.to_string_lossy(),
@@ -925,18 +956,7 @@ pub(super) fn saved_session_row(
             json!({ "provider": provider, "modelId": model_id }),
         );
     }
-    // TS `serializeSavedSessionInfo` publishes the scan's own-usage summary:
-    // the spend columns and the archived-row keep-condition read
-    // `saved.usage.cost`, so rollups never double count.
-    if let Some(usage) = &info.usage {
-        object.insert("usage".to_string(), json!(usage));
-    }
-    // TS #2506 `serializeSavedSessionInfo`'s optional `deletedDescendantUsage`: the
-    // recursive spend of tombstoned descendants — the deleted child keeps no row anywhere,
-    // its spend bills here exactly once.
-    if let Some(deleted) = &info.deleted_descendant_usage {
-        object.insert("deletedDescendantUsage".to_string(), json!(deleted));
-    }
+    usage.stamp(object, &info.path);
     // The persisted thinking level rides the catalog row too: the TUI merges it into
     // live summaries that lack one.
     if let Some(level) = &info.thinking_level {

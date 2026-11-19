@@ -568,10 +568,10 @@ fn a_roster_push_alone_remounts_the_dock_count_and_the_title_cost() {
             timeout_ms: 5_000,
         },
     ];
-    let pushes = vec![roster_push(&[
-        parent_row(),
-        child_row("c1", "running", 0.42),
-    ])];
+    // The parent publishes its family total (its own spend plus the child's).
+    let mut parent = parent_row();
+    parent["summary"]["totalUsage"] = json!({ "cost": 0.42 });
+    let pushes = vec![roster_push(&[parent, child_row("c1", "running", 0.42)])];
     let outcome = run_plan_with_roster(steps, None, None, Vec::new(), pushes);
     let last = outcome.frames.last().cloned().unwrap_or_default();
     assert!(

@@ -86,10 +86,6 @@ impl SupervisorChildSessionsInner {
                 continue;
             };
             self.emit_child_update(record).await;
-            // Capture before the abort: the completed turns' usage (the
-            // aborted turn's partial row folds nowhere) must not die with
-            // the run.
-            self.emit_child_usage(record).await;
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
@@ -148,9 +144,6 @@ impl SupervisorChildSessionsInner {
     /// Delete one inactive child by id: refresh the registry row first, refuse one still in flight,
     /// and tear a settled one down with its ledger tombstone (same as `rlm.delete_subagent`).
     pub(super) async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {
-        if !self.replay_retired_usage(Some(child_id)).await {
-            bail!("RLM child usage remains owed after retirement; retry deletion");
-        }
         let children = self.children.lock().await.clone();
         for record in &children {
             let matched = record.lock().await.rlm_child_id == child_id;
@@ -181,10 +174,7 @@ impl SupervisorChildSessionsInner {
             if running && !already_terminated {
                 return Ok("running");
             }
-            // Capture before the unlink: a deleted child's already-durable
-            // rows are its only remaining spend record on the parent side.
             if !already_terminated {
-                self.emit_child_usage(record).await;
                 let command = DaemonCommand::Kill {
                     id: None,
                     active_session_id: active_session_id.clone(),
@@ -196,21 +186,15 @@ impl SupervisorChildSessionsInner {
                 self.command(&command, KILL_TIMEOUT_MS)
                     .await
                     .with_context(|| format!("kill RLM child \"{child_id}\""))?;
-                // Rows can land between the pre-kill capture and the kill
-                // (a settle racing the kill): the post-kill walk is the last
-                // observation; the cursor keeps it free of double-billing.
-                self.retain_retired_usage(record, RetirementIntent::Delete { was_running: false })
-                    .await;
-                self.emit_child_usage(record).await;
+                record
+                    .lock()
+                    .await
+                    .retirement
+                    .apply(RetirementEvent::KillConfirmed(RetirementIntent::Delete {
+                        was_running: false,
+                    }));
             }
-            let usage_persisted = self.forget_child_usage(record).await;
             self.finish_retirement(record).await;
-            if usage_persisted {
-                self.remove_retired_usage(record);
-            }
-            if !usage_persisted {
-                bail!("RLM child usage remains owed after retirement; retry deletion");
-            }
             return Ok("deleted");
         }
         if self
@@ -228,10 +212,8 @@ impl SupervisorChildSessionsInner {
     /// A child whose session is already gone is a completed no-op; every
     /// other close failure is kept (walk all children, rethrow the first error).
     pub(super) async fn close_children_inner(&self, reason: ChildCloseReason) -> Result<()> {
-        let usage_persisted = self.replay_retired_usage(None).await;
         let children = self.children.lock().await.clone();
-        let mut close_error = (!usage_persisted)
-            .then(|| anyhow::anyhow!("RLM child usage remains owed after retirement; retry close"));
+        let mut close_error = None;
         for record in &children {
             let rename_lock = record.lock().await.rename_lock.clone();
             let _guard = rename_lock.lock().await;
@@ -250,7 +232,6 @@ impl SupervisorChildSessionsInner {
                     record.retirement.apply(RetirementEvent::BeginClose);
                     record.notice_delivered = true;
                 }
-                self.emit_child_usage(record).await;
                 let (active_session_id, was_running) = {
                     let mut record = record.lock().await;
                     // A close that kills a live run settles the row
@@ -288,19 +269,13 @@ impl SupervisorChildSessionsInner {
                     self.record_child_cancelled(record, ChildCancelledReason::CloseKilled)
                         .await;
                 }
-                self.retain_retired_usage(record, RetirementIntent::Close)
-                    .await;
-                self.emit_child_usage(record).await;
+                record
+                    .lock()
+                    .await
+                    .retirement
+                    .apply(RetirementEvent::KillConfirmed(RetirementIntent::Close));
             }
-            let usage_persisted = self.forget_child_usage(record).await;
             self.finish_retirement(record).await;
-            if usage_persisted {
-                self.remove_retired_usage(record);
-            } else {
-                close_error.get_or_insert_with(|| {
-                    anyhow::anyhow!("RLM child usage remains owed after retirement; retry close")
-                });
-            }
         }
         // The walk changed the registry: wake a parked barrier (a closed
         // child is settled work, settled here by its removal).
@@ -436,18 +411,6 @@ impl SupervisorChildSessionsInner {
         }
     }
 
-    /// The one record matching a selector, or `None` (the send hook's
-    /// silent miss: a delivered message may target a non-child family member).
-    pub(super) async fn find_record(&self, target: &str) -> Option<Arc<Mutex<ChildRecord>>> {
-        let children = self.children.lock().await;
-        for record in children.iter() {
-            if record.lock().await.matches(target) {
-                return Some(Arc::clone(record));
-            }
-        }
-        None
-    }
-
     /// The one record matching a selector, or the TS selector errors
     /// (`No direct RLM {kind} matches ...` / `... is ambiguous ...`).
     pub(super) async fn resolve_record(
@@ -476,9 +439,7 @@ impl SupervisorChildSessionsInner {
     /// Rebuild the children registry from the spawn ledger (TS
     /// `listPassiveRlmSubagents`): a restarted parent worker lists its
     /// non-deleted ledger children again, addressed by their durable
-    /// session ids. Every reseeded row is settled (nothing is owed), and
-    /// its usage cursor starts lazy: the first delivery primes it at the
-    /// file's tail.
+    /// session ids. Every reseeded row is settled (nothing is owed).
     pub(super) async fn reseed_from_ledger(&self) {
         let Some(parent_file) = self
             .identity
@@ -611,13 +572,7 @@ fn ledger_child_records(
             factory: edge.factory.is_some(),
             prompt_admitted: true,
             retirement: Retirement::live(),
-            usage_registration_forgotten: false,
             session_file: Some(edge.child),
-            attributed_rows: None,
-            pending_usage_report: None,
-            usage_watch_live: false,
-            usage_rearm: false,
-            emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_emitted_status: None,
             rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         });

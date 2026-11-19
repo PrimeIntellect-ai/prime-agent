@@ -36,8 +36,7 @@ use super::error_classify::classify_error_message;
 mod track;
 pub use track::{
     track_catalog_refresh, track_compaction_abort_declared, track_daemon_event_summary,
-    track_deleted_child_usage_captured, track_model_refused, track_worker_adoption,
-    track_worker_children_closed,
+    track_model_refused, track_worker_adoption, track_worker_children_closed,
 };
 
 mod classify;
@@ -323,12 +322,6 @@ struct CounterValues {
     kernel_bootstrap_cold_count: u64,
     kernel_bootstrap_failed_count: u64,
     kernel_bootstrap_max_ms: u64,
-    rlm_child_usage_count: u64,
-    rlm_child_input_tokens: u64,
-    rlm_child_output_tokens: u64,
-    rlm_child_cache_read_tokens: u64,
-    rlm_child_cache_write_tokens: u64,
-    rlm_child_cost: f64,
     /// `feature_<name>_<outcome>_count` over the fixed feature vocabulary.
     feature_outcomes: std::collections::BTreeMap<String, u64>,
 }
@@ -390,22 +383,8 @@ impl SessionCounters {
                     values.kernel_bootstrap_failed_count,
                 ),
                 ("kernel_bootstrap_max_ms", values.kernel_bootstrap_max_ms),
-                ("rlm_child_usage_count", values.rlm_child_usage_count),
-                ("rlm_child_input_tokens", values.rlm_child_input_tokens),
-                ("rlm_child_output_tokens", values.rlm_child_output_tokens),
-                (
-                    "rlm_child_cache_read_tokens",
-                    values.rlm_child_cache_read_tokens,
-                ),
-                (
-                    "rlm_child_cache_write_tokens",
-                    values.rlm_child_cache_write_tokens,
-                ),
             ] {
                 properties.set(key, Value::from(value));
-            }
-            if values.rlm_child_usage_count > 0 {
-                properties.set("rlm_child_cost", Value::from(values.rlm_child_cost));
             }
             for (key, count) in &values.feature_outcomes {
                 properties.set(key, Value::from(*count));
@@ -681,29 +660,6 @@ impl SessionTelemetry {
     /// uploads.
     pub fn note_skill_used(&self) {
         self.counters.with(|values| values.skill_use_count += 1);
-    }
-
-    /// One durable child-usage attribution row landed in the parent
-    /// session (the RLM producer's flush), summed into the `rlm_child_*`
-    /// counters on `agent session ended`.
-    pub fn note_child_usage_attributed(
-        &self,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-        cost: f64,
-    ) {
-        self.counters.with(|values| {
-            values.rlm_child_usage_count += 1;
-            values.rlm_child_input_tokens += input_tokens;
-            values.rlm_child_output_tokens += output_tokens;
-            values.rlm_child_cache_read_tokens += cache_read_tokens;
-            values.rlm_child_cache_write_tokens += cache_write_tokens;
-            if cost.is_finite() && cost > 0.0 {
-                values.rlm_child_cost += cost;
-            }
-        });
     }
 
     fn session_properties(&self) -> Properties {

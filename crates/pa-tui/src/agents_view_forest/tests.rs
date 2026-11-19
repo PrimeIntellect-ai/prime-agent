@@ -704,123 +704,31 @@ fn selection_resolves_identity_then_keys_and_pins_summary_rows() {
     assert_eq!(resolve_selection(&collapsed, 1, None, None), 1);
 }
 
+/// Every row bills its published `totalUsage` (own plus every descendant's,
+/// deleted ones included); the summary line bills the total minus the own
+/// spend, whatever descendant rows the roster holds.
 #[test]
-fn rollups_sum_costs_over_descendants_only() {
+fn rows_bill_the_published_total() {
+    let mut parent = parent_summary("p");
+    parent["usage"] = json!({ "cost": 0.5 });
+    parent["totalUsage"] = json!({ "cost": 1.25 });
+    let mut child = child_summary("c", "p", "worker");
+    child["usage"] = json!({ "cost": 0.25 });
+    child["totalUsage"] = json!({ "cost": 0.25 });
     let roster = vec![
-        roster_entry(
-            "p",
-            "idle",
-            &json!({
-                "sessionId": "p", "lifecycle": "live", "activeSessionId": "p-live",
-                "sessionFile": "/x/p.jsonl", "runtimeKind": "top-level",
-                "messageCount": 1, "usage": { "cost": 0.5 },
-            }),
-        ),
-        roster_entry(
-            "c",
-            "idle",
-            &json!({
-                "sessionId": "c", "lifecycle": "live", "activeSessionId": "c-live",
-                "sessionFile": "/x/c.jsonl", "runtimeKind": "subagent",
-                "rlmChildId": "child-c",
-                "parentActiveSessionId": "p-live",
-                "parentSessionId": "p", "parentSessionPath": "/x/p.jsonl",
-                "messageCount": 1, "usage": { "cost": 0.25 },
-            }),
-        ),
+        roster_entry("p", "idle", &parent),
+        roster_entry("c", "idle", &child),
     ];
-    let records = reconcile_unified_sessions(&roster, &[], None);
-    let rollups = compute_rollups(&records);
-    let parent = rollups.get("file:/x/p.jsonl").expect("parent rollup");
-    assert!((parent.cost - 0.75).abs() < f64::EPSILON);
-    assert_eq!(parent.descendant_count, 1);
-
-    // The numeric fixture (TS #2506): own $0 + deleted child $0.40 + its deleted grandchild $0.10
-    // (the saved row's deletedDescendantUsage bucket) + live child $0.20 + surviving grandchild
-    // $0.30 => the parent's recursive cost EXACTLY $1.00 (without the bucket the money vanishes).
-    let deleted = json!({
-        "inputTokens": 1_100, "outputTokens": 110, "cost": 0.50
-    });
-    let saved_parent = json!({
-        "path": "/x/p.jsonl", "id": "p",
-        "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
-        "deletedDescendantUsage": deleted,
-    });
-    let fixture_roster = vec![
-        roster_entry(
-            "p",
-            "idle",
-            &json!({
-                "sessionId": "p", "lifecycle": "live", "activeSessionId": "p-live",
-                "sessionFile": "/x/p.jsonl", "runtimeKind": "top-level",
-                "messageCount": 1, "usage": { "cost": 0.0 },
-            }),
-        ),
-        roster_entry(
-            "c2",
-            "idle",
-            &json!({
-                "sessionId": "c2", "lifecycle": "live", "activeSessionId": "c2-live",
-                "sessionFile": "/x/c2.jsonl", "runtimeKind": "subagent",
-                "rlmChildId": "child-c2",
-                "parentActiveSessionId": "p-live",
-                "parentSessionId": "p", "parentSessionPath": "/x/p.jsonl",
-                "messageCount": 1, "usage": { "cost": 0.2 },
-            }),
-        ),
-        roster_entry(
-            "gc2",
-            "idle",
-            &json!({
-                "sessionId": "gc2", "lifecycle": "live", "activeSessionId": "gc2-live",
-                "sessionFile": "/x/gc2.jsonl", "runtimeKind": "subagent",
-                "rlmChildId": "child-gc2",
-                "parentActiveSessionId": "c2-live",
-                "parentSessionId": "c2", "parentSessionPath": "/x/c2.jsonl",
-                "messageCount": 1, "usage": { "cost": 0.3 },
-            }),
-        ),
-    ];
-    let fixture_records =
-        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent), None);
-    let fixture_rollups = compute_rollups(&fixture_records);
-    let fixture_parent = fixture_rollups
-        .get("file:/x/p.jsonl")
-        .expect("parent rollup");
-    assert!(
-        (fixture_parent.cost - 1.00).abs() < 1e-9,
-        "own 0 + deleted bucket 0.50 + live child subtree 0.50 = 1.00, got {}",
-        parent.cost
-    );
-    // Without the bucket the deleted spend vanishes (the pre-fix bug).
-    let bare = json!({
-        "path": "/x/p.jsonl", "id": "p",
-        "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
-    });
-    let bare_records =
-        reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&bare), None);
-    let bare_rollups = compute_rollups(&bare_records);
-    let bare_parent = bare_rollups.get("file:/x/p.jsonl").expect("parent rollup");
-    assert!(
-        (bare_parent.cost - 0.50).abs() < 1e-9,
-        "no bucket: only the live subtree bills, got {}",
-        bare_parent.cost
-    );
     let rows = rows_for(&roster, None, &[]);
-    assert!((rows[0].cost - 0.75).abs() < f64::EPSILON);
-    let empty: HashMap<String, Rollup> = HashMap::new();
-    let rows = build_rows(
-        &records,
-        None,
-        &std::collections::HashSet::default(),
-        &HashSet::default(),
-        &empty,
-        &ActivityCounts::default(),
-        None,
-    );
-    // Without rollups the per-pass walk fills the same totals.
-    assert!((rows[0].cost - 0.75).abs() < f64::EPSILON);
+    assert!((rows[0].cost - 1.25).abs() < f64::EPSILON);
     assert_eq!(rows[0].descendant_count, 1);
+    let summary = rows
+        .iter()
+        .find(|row| row.identity == "subagents:file:/x/p.jsonl")
+        .expect("the ONE line");
+    assert!((summary.cost - 0.75).abs() < f64::EPSILON);
+    let alone = rows_for(&roster[..1], None, &[]);
+    assert!((alone[0].cost - 1.25).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -969,94 +877,6 @@ fn equal_scores_break_ties_by_recency_not_section() {
     assert_eq!(rows[1].title, "sweep alpha");
 }
 
-/// The operator's 2026-09-26 ask, carried by the ONE line: the summary row's Cost cell
-/// aggregates EVERY descendant subagent's spend — running, idle, and inactive rows all bill.
-#[test]
-fn the_summary_line_bills_every_descendant_status() {
-    let mut parent = parent_summary("p");
-    parent["usage"] = json!({ "cost": 0.25 });
-    let mut runner = child_summary("r1", "p", "runner");
-    runner["usage"] = json!({ "cost": 1.25 });
-    let mut grandchild = child_summary("gc", "r1", "grandkid");
-    grandchild["rlmChildId"] = json!("child-gc");
-    grandchild["usage"] = json!({ "cost": 0.25 });
-    let mut idle_child = child_summary("i1", "p", "idle worker");
-    idle_child["usage"] = json!({ "cost": 2.5 });
-    let mut inactive_child = child_summary("x1", "p", "old worker");
-    inactive_child["usage"] = json!({ "cost": 0.75 });
-    let roster = vec![
-        roster_entry("p", "idle", &parent),
-        roster_entry("r1", "running", &runner),
-        roster_entry("gc", "running", &grandchild),
-        roster_entry("i1", "idle", &idle_child),
-        roster_entry("x1", "inactive", &inactive_child),
-    ];
-    let rows = rows_for(&roster, None, &[]);
-    assert!(
-        (rows[0].cost - 5.0).abs() < f64::EPSILON,
-        "the parent row keeps own 0.25 + descendants 4.75"
-    );
-    let summary = rows
-        .iter()
-        .find(|row| row.identity == "subagents:file:/x/p.jsonl")
-        .expect("the ONE line");
-    assert_eq!(summary.title, "4 subagents · 2 running");
-    assert!(
-        (summary.cost - 4.75).abs() < f64::EPSILON,
-        "runner subtree 1.50 + idle 2.50 + inactive 0.75 — every status bills"
-    );
-}
-
-/// The deleted-descendant bucket (TS #2506's `deletedDescendantUsage`) is descendant spend:
-/// the ONE line bills it alongside the live subtree — a deletion must not erase the money.
-#[test]
-fn the_summary_line_bills_the_deleted_descendant_bucket() {
-    let deleted = json!({ "inputTokens": 100, "outputTokens": 10, "cost": 0.5 });
-    let saved_parent = json!({
-        "path": "/x/p.jsonl", "id": "p",
-        "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
-        "deletedDescendantUsage": deleted,
-    });
-    let mut parent = parent_summary("p");
-    parent["usage"] = json!({ "cost": 0.25 });
-    let mut runner = child_summary("r1", "p", "runner");
-    runner["usage"] = json!({ "cost": 0.25 });
-    let roster = vec![
-        roster_entry("p", "idle", &parent),
-        roster_entry("r1", "running", &runner),
-    ];
-    let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent), None);
-    let rollups = compute_rollups(&records);
-    assert!(
-        (rollups
-            .get("file:/x/p.jsonl")
-            .expect("parent rollup")
-            .descendants
-            - 0.75)
-            .abs()
-            < f64::EPSILON,
-        "live child 0.25 + deleted bucket 0.50"
-    );
-    let rows = build_rows(
-        &records,
-        None,
-        &HashSet::new(),
-        &HashSet::new(),
-        &rollups,
-        &ActivityCounts::default(),
-        None,
-    );
-    let summary = rows
-        .iter()
-        .find(|row| row.identity == "subagents:file:/x/p.jsonl")
-        .expect("the ONE line");
-    assert!((summary.cost - 0.75).abs() < f64::EPSILON);
-    assert!(
-        (rows[0].cost - 1.0).abs() < f64::EPSILON,
-        "own 0.25 + aggregate 0.75"
-    );
-}
-
 /// A tree that spends nothing bills its `$0.00` cell — the cost cell is part of the row — and a
 /// parent with no subagents renders no collapsed row to bill at all.
 #[test]
@@ -1085,14 +905,11 @@ fn the_summary_line_cost_is_zero_when_nothing_bills() {
 }
 
 #[test]
-fn a_nested_line_bills_its_own_subtree() {
-    let mut runner = child_summary("r1", "p", "runner");
-    runner["usage"] = json!({ "cost": 1.25 });
+fn a_nested_line_counts_its_own_subtree() {
+    let runner = child_summary("r1", "p", "runner");
     let mut grandchild = child_summary("gc", "r1", "grandkid");
     grandchild["rlmChildId"] = json!("child-gc");
-    grandchild["usage"] = json!({ "cost": 0.25 });
-    let mut idle_child = child_summary("i1", "p", "idle worker");
-    idle_child["usage"] = json!({ "cost": 2.5 });
+    let idle_child = child_summary("i1", "p", "idle worker");
     let roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),
         roster_entry("r1", "running", &runner),
@@ -1111,19 +928,11 @@ fn a_nested_line_bills_its_own_subtree() {
         .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
         .expect("the child's own line");
     assert_eq!(nested.title, "1 subagent · 1 running");
-    assert!(
-        (nested.cost - 0.25).abs() < f64::EPSILON,
-        "only the grandchild's spend"
-    );
     let root = rows
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the root's line");
     assert_eq!(root.title, "3 subagents · 2 running");
-    assert!(
-        (root.cost - 4.0).abs() < f64::EPSILON,
-        "runner subtree 1.50 + idle 2.50"
-    );
 }
 
 /// The operator's acceptance line: a fleet-scale roster — 331 inactive children plus 2 running —

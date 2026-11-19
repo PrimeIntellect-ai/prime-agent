@@ -525,9 +525,6 @@ impl SupervisorChildSessionsInner {
             if record.lock().await.retirement.closed_by_parent() {
                 return;
             }
-            // Slice-top usage flush: rows of turns that completed since the
-            // last slice land here (crash loss is bounded to one slice).
-            self.emit_child_usage(record).await;
             let active_session_id = record.lock().await.active_session_id.clone();
             // One bounded idle-wait slice: a timeout while the child still
             // runs re-slices; a returned slice means the queue drained.
@@ -562,9 +559,6 @@ impl SupervisorChildSessionsInner {
                 if busy {
                     continue;
                 }
-                // The run's final rows are attributed before the terminal
-                // notice rides the parent's follow-up route.
-                self.emit_final_child_usage(record).await;
                 // TS records the return before delivering the notice: the
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
@@ -614,9 +608,6 @@ impl SupervisorChildSessionsInner {
             } else {
                 unreachable_polls += 1;
                 if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                    // A dead child keeps whatever rows its file already
-                    // holds; capture them before the terminal notice.
-                    self.emit_final_child_usage(record).await;
                     if self
                         .settle_failed(record, "Child worker unreachable".to_string())
                         .await
