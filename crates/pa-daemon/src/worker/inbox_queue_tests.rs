@@ -2272,6 +2272,30 @@ async fn a_clear_takes_only_the_unannounced_batch_and_a_pause_takes_none() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A restored arrival row arrives without its batch: a clear right after
+/// the restart cannot tell which waiting records it covers, so it takes
+/// none (older announced mail must never go).
+#[tokio::test]
+async fn a_clear_over_a_restored_arrival_row_takes_nothing() {
+    let (worker, inbox, dir) = faux_worker_with_inbox();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    assert!(
+        deliver_agent_message(&worker, "before the restart")
+            .await
+            .success
+    );
+    // The restart: the queued row survives, the process-local batch not.
+    worker.inbox_arrivals.lock().unwrap().clear();
+    let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
+    assert_eq!(
+        cleared.data,
+        Some(json!({ "steering": [], "followUp": [] }))
+    );
+    assert_eq!(inbox.count().0, 1, "the waiting record stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The kill switch strands no queued notice: an arrival row admitted
 /// while the inbox was on stays queued after `agentInbox.enabled` flips
 /// to false, next to the direct row the disabled route delivers, and its

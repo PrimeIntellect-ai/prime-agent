@@ -146,17 +146,16 @@ impl Worker {
         core.follow_up = retained_follow_up;
         // The inbox-routed deliveries: only the not-yet-announced batch
         // leaves the store (a clear that reports the messages gone must
-        // take them out of `rlm.inbox.read()`) — the records the still
-        // queued arrival row covers. A delivered notice already told the
-        // agent about the rest, so they stay readable. The first refresh
-        // normalizes the batch (trimmed to the waiting set, a restored
-        // row's empty batch refilled), so the covered set is the one the
-        // wake rows render; the second re-renders the rows over what is
-        // left. The withdraw and the refreshes run under the same core
-        // lock as the admission, so a delivery that raced the clear either
-        // lands before it (and leaves) or waits for it (and stays). A
-        // pause blocks new deliveries only: accepted inbox records keep
-        // their success receipts.
+        // take them out of `rlm.inbox.read()`) — the agent messages of the
+        // batch the still-queued arrival row covers. A delivered notice
+        // already told the agent about the rest, so they stay readable.
+        // A restored row arrives with an empty batch, so a clear right
+        // after a restart takes nothing rather than guess; ids already
+        // read are simply not found. The withdraw and the refresh run
+        // under the same core lock as the admission, so a delivery that
+        // raced the clear either lands before it (and leaves) or waits for
+        // it (and stays). A pause blocks new deliveries only: accepted
+        // inbox records keep their success receipts.
         let mut withdrawn_texts = Vec::new();
         let mut wake_on_follow_up = false;
         let inbox = self
@@ -165,7 +164,6 @@ impl Worker {
             .and_then(|engine| engine.inbox())
             .filter(|_| withdraw_unannounced_inbox);
         if let Some(inbox) = inbox {
-            crate::worker::refresh_inbox_wake_rows_locked(&mut core, &self.inbox_arrivals, &inbox);
             let is_arrival_row = |item: &crate::worker::QueuedItem| {
                 item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
             };

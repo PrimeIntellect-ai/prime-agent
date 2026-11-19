@@ -407,9 +407,21 @@ impl Worker {
         let inbox_on = self.agent_engine.as_ref().is_some_and(|engine| {
             crate::agent_inbox::inbox_enabled(&engine.cwd(), &self.config.agent_dir)
         });
+        let inbox_route = self.agent_engine.as_ref().and_then(|engine| {
+            if !inbox_on {
+                return None;
+            }
+            engine
+                .inbox()
+                .map(|inbox| (std::sync::Arc::clone(engine), inbox))
+        });
         // A closing session with the inbox on takes no delivery: no lane
         // row or wake would announce it, so the sender sees the refusal
-        // instead of a receipt for a message nothing delivers.
+        // instead of a receipt for a message nothing delivers. The check
+        // follows the store lookup: the closing paths mark the session
+        // closed before they retire its store, so a store missing because
+        // of a close is always seen as closed here (never a raw row on a
+        // retiring session).
         if inbox_on
             && self
                 .agent_engine
@@ -423,14 +435,6 @@ impl Worker {
                 None,
             );
         }
-        let inbox_route = self.agent_engine.as_ref().and_then(|engine| {
-            if !inbox_on {
-                return None;
-            }
-            engine
-                .inbox()
-                .map(|inbox| (std::sync::Arc::clone(engine), inbox))
-        });
         if let Some((engine, inbox)) = inbox_route {
             let (id, target) = {
                 let (core, inputs) = self.summary_inputs();
