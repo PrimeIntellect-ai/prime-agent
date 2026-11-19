@@ -25,10 +25,14 @@ from check_restore_notice import texts
 
 MARKER = 'LAUNCH_ENV_PARITY='
 LIMIT = 35
-CODE = """import os, json, subprocess, sys
+# The async stack declines in-cell subprocess spawning; bash() is the
+# shell surface, and its child inherits the kernel's launch environment —
+# exactly the propagation this check asserts.
+CODE = """import json, os
 keys = ('PA_ENV_MARKER', 'PA_ENV_BASE', 'PA_ENV_PRECEDENCE', 'PRIME_AGENT_INTERNAL_PARITY_CANARY')
+run = await bash('printenv PA_ENV_MARKER || printf ABSENT')
 result = {'env': {key: os.environ.get(key) for key in keys},
-          'child_marker': subprocess.check_output([sys.executable, '-c', "import os; print(os.environ.get('PA_ENV_MARKER', 'ABSENT'))"], text=True).strip()}
+          'child_marker': run.output.strip()}
 print('LAUNCH_ENV_PARITY=' + json.dumps(result))"""
 
 
