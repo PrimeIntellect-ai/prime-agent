@@ -738,6 +738,46 @@ class ReplTest(unittest.TestCase):
             self.assertIn("bash('...')", error["evalue"], rid)
             self.assertEqual(one(events, "done")["status"], "error", rid)
 
+    def test_discipline_screen_declines_huge_literal_sleeps(self):
+        events = self.repl.execute("sleep-huge", f"import time\ntime.sleep({'9' * 400})")
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "CellDeclinedError")
+        self.assertIn("time.sleep(", error["evalue"])
+
+    def test_discipline_screen_declines_sleeps_in_defaults_and_decorators(self):
+        for rid, code in (
+            ("default", "import time\ndef f(time=time.sleep(5)):\n    pass"),
+            ("decorator", "import time\n@time.sleep(5)\ndef f():\n    pass"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_reads_module_bindings_in_order(self):
+        events = self.repl.execute("order-after", "import time\ntime.sleep(5)\ntime = 3")
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        code = (
+            "import time\n"
+            "time = 3\n"
+            "try:\n"
+            "    time.sleep(5)\n"
+            "except AttributeError:\n"
+            "    print('ran')\n"
+        )
+        events = self.repl.execute("order-before", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_spares_relative_imports(self):
+        code = (
+            "def load():\n"
+            "    from .subprocess import prepare\n"
+            "    return prepare\n"
+            "print('parsed')\n"
+        )
+        events = self.repl.execute("relative", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("parsed", stream_text(events, "stdout"))
+
     def test_discipline_screen_reads_sleep_keywords(self):
         for rid, code in (
             ("aio-delay", "import asyncio\nawait asyncio.sleep(delay=5)"),

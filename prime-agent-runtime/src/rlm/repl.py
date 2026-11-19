@@ -663,7 +663,9 @@ class _BindingCollector(ast.NodeVisitor):
             self._import(alias, alias.name.split(".")[0], None)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        root = (node.module or "").split(".")[0]
+        # A relative import names an application sibling, never the standard
+        # library module of the same name.
+        root = "" if node.level else (node.module or "").split(".")[0]
         for alias in node.names:
             self._import(alias, root, alias.name)
 
@@ -714,19 +716,67 @@ def _scope_bindings(node: ast.AST) -> dict[str, tuple | None]:
     return collector.bindings()
 
 
+def _outer_expressions(node: ast.AST) -> list[ast.AST]:
+    """The expressions a function node runs in its enclosing scope."""
+    expressions: list[ast.AST] = list(getattr(node, "decorator_list", []))
+    arguments = node.args
+    expressions.extend(arguments.defaults)
+    expressions.extend(value for value in arguments.kw_defaults if value is not None)
+    for argument in (
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        arguments.vararg,
+        arguments.kwarg,
+    ):
+        if argument is not None and argument.annotation is not None:
+            expressions.append(argument.annotation)
+    returns = getattr(node, "returns", None)
+    if returns is not None:
+        expressions.append(returns)
+    return expressions
+
+
 def _call_scopes(tree: ast.AST) -> dict[int, tuple[dict[str, tuple | None], ...]]:
-    """Each call node's enclosing scope chain, outermost first."""
+    """Each call node's enclosing scope chain, outermost first.
+
+    Module and class bodies bind in execution order: a call sees the bindings
+    made before its statement, so a later reassignment cannot hide an earlier
+    import. Function locals stay whole-scope, as Python resolves them, and a
+    function's defaults, decorators, and annotations run in the scope that
+    defines it.
+    """
     chains: dict[int, tuple[dict[str, tuple | None], ...]] = {}
 
-    def walk(node: ast.AST, chain: tuple[dict[str, tuple | None], ...]) -> None:
+    def walk(
+        node: ast.AST,
+        chain: tuple[dict[str, tuple | None], ...],
+        table: dict[str, tuple | None],
+    ) -> None:
         if isinstance(node, ast.Call):
-            chains[id(node)] = chain
+            chains[id(node)] = (*chain, dict(table))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for expression in _outer_expressions(node):
+                walk(expression, chain, table)
+            inner = (*chain, dict(table), _scope_bindings(node))
+            body = node.body if isinstance(node.body, list) else [node.body]
+            for statement in body:
+                walk(statement, inner, {})
+            return
+        if isinstance(node, (ast.Module, ast.ClassDef)):
+            table = {}
+            for statement in node.body:
+                walk(statement, chain, table)
+                collector = _BindingCollector()
+                collector.visit(statement)
+                table.update(collector.bindings())
+            return
         if isinstance(node, _SCOPE_NODES):
             chain = (*chain, _scope_bindings(node))
         for child in ast.iter_child_nodes(node):
-            walk(child, chain)
+            walk(child, chain, table)
 
-    walk(tree, ())
+    walk(tree, (), {})
     return chains
 
 
@@ -744,7 +794,11 @@ def _subprocess_import(tree: ast.AST) -> ast.AST | None:
         if isinstance(node, ast.Import):
             if any(alias.name.split(".")[0] == "subprocess" for alias in node.names):
                 return node
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "subprocess":
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and not node.level
+            and (node.module or "").split(".")[0] == "subprocess"
+        ):
             return node
     return None
 
@@ -833,7 +887,7 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
     return None
 
 
-def _literal_seconds(call: ast.Call) -> float | None:
+def _literal_seconds(call: ast.Call) -> int | float | None:
     """The call's duration as a number literal, else None.
 
     Positional first, then the documented keyword (`delay` for asyncio.sleep,
@@ -851,7 +905,7 @@ def _literal_seconds(call: ast.Call) -> float | None:
         return None
     if isinstance(arg.value, bool):
         return None
-    return float(arg.value)
+    return arg.value
 
 
 def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
