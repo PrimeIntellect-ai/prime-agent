@@ -778,6 +778,39 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("parsed", stream_text(events, "stdout"))
 
+    def test_discipline_screen_reads_compound_statements_in_order(self):
+        events = self.repl.execute(
+            "if-import", "if True:\n    import time as clock\n    clock.sleep(5)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_spares_class_headers(self):
+        code = (
+            "import dataclasses\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class Point:\n"
+            "    x: int = 1\n"
+            "class Sub(type('Base', (), {})):\n"
+            "    pass\n"
+            "print(Point().x, Sub.__name__)\n"
+        )
+        events = self.repl.execute("class-headers", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("1 Sub", stream_text(events, "stdout"))
+        # A banned call directly in a class body still declines.
+        events = self.repl.execute(
+            "class-body", "from time import sleep\nclass C:\n    sleep(30)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_reads_the_first_comprehension_iterable(self):
+        events = self.repl.execute(
+            "comp-iter",
+            "from time import sleep as pause\n[pause for pause in (pause(5),)]",
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
     def test_discipline_screen_reads_sleep_keywords(self):
         for rid, code in (
             ("aio-delay", "import asyncio\nawait asyncio.sleep(delay=5)"),

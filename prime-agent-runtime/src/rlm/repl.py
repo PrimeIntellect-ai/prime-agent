@@ -625,16 +625,18 @@ _SUBPROCESS_CALLS = (
 # not the import, and the screen leaves it alone.
 _UNBOUND = object()
 
-_SCOPE_NODES = (
-    ast.Module,
-    ast.FunctionDef,
-    ast.AsyncFunctionDef,
-    ast.Lambda,
-    ast.ClassDef,
-    ast.ListComp,
-    ast.SetComp,
-    ast.DictComp,
-    ast.GeneratorExp,
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+# Statements whose suites run in the enclosing frame, in source order.
+_BLOCKS = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+    ast.TryStar,
 )
 
 
@@ -693,7 +695,7 @@ class _BindingCollector(ast.NodeVisitor):
 
 
 def _scope_bindings(node: ast.AST) -> dict[str, tuple | None]:
-    """The bindings one scope node introduces, parameters included."""
+    """The bindings a function, lambda, or comprehension body introduces."""
     collector = _BindingCollector()
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         arguments = node.args
@@ -707,8 +709,6 @@ def _scope_bindings(node: ast.AST) -> dict[str, tuple | None]:
             if argument is not None:
                 collector.shadows.add(argument.arg)
         statements = node.body if isinstance(node.body, list) else [node.body]
-    elif isinstance(node, (ast.Module, ast.ClassDef)):
-        statements = node.body
     else:  # a comprehension binds its own targets
         statements = [generator.target for generator in node.generators]
     for statement in statements:
@@ -740,43 +740,68 @@ def _outer_expressions(node: ast.AST) -> list[ast.AST]:
 def _call_scopes(tree: ast.AST) -> dict[int, tuple[dict[str, tuple | None], ...]]:
     """Each call node's enclosing scope chain, outermost first.
 
-    Module and class bodies bind in execution order: a call sees the bindings
-    made before its statement, so a later reassignment cannot hide an earlier
-    import. Function locals stay whole-scope, as Python resolves them, and a
-    function's defaults, decorators, and annotations run in the scope that
-    defines it.
+    A module or class body and a compound statement's suites bind in execution
+    order: a call sees the bindings made before its statement, so a later
+    reassignment cannot hide an earlier import. Function locals stay
+    whole-scope, as Python resolves them, and a function's defaults,
+    decorators, and annotations run in the scope that defines it.
     """
     chains: dict[int, tuple[dict[str, tuple | None], ...]] = {}
 
-    def walk(
-        node: ast.AST,
-        chain: tuple[dict[str, tuple | None], ...],
-        table: dict[str, tuple | None],
-    ) -> None:
+    def walk_body(statements: object, chain: tuple[dict[str, tuple | None], ...]) -> None:
+        for statement in statements:  # type: ignore[union-attr]
+            walk(statement, chain)
+            collector = _BindingCollector()
+            collector.visit(statement)
+            chain[-1].update(collector.bindings())
+
+    def walk(node: ast.AST, chain: tuple[dict[str, tuple | None], ...]) -> None:
         if isinstance(node, ast.Call):
-            chains[id(node)] = (*chain, dict(table))
+            chains[id(node)] = tuple(dict(scope) for scope in chain)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             for expression in _outer_expressions(node):
-                walk(expression, chain, table)
-            inner = (*chain, dict(table), _scope_bindings(node))
-            body = node.body if isinstance(node.body, list) else [node.body]
-            for statement in body:
-                walk(statement, inner, {})
+                walk(expression, chain)
+            inner = (*chain, _scope_bindings(node))
+            for statement in node.body if isinstance(node.body, list) else [node.body]:
+                walk(statement, inner)
             return
         if isinstance(node, (ast.Module, ast.ClassDef)):
-            table = {}
-            for statement in node.body:
-                walk(statement, chain, table)
-                collector = _BindingCollector()
-                collector.visit(statement)
-                table.update(collector.bindings())
+            if isinstance(node, ast.ClassDef):
+                for expression in (*node.decorator_list, *node.bases):
+                    walk(expression, chain)
+                for keyword in node.keywords:
+                    walk(keyword.value, chain)
+            walk_body(node.body, (*chain, {}))
             return
-        if isinstance(node, _SCOPE_NODES):
-            chain = (*chain, _scope_bindings(node))
+        if isinstance(node, _COMPREHENSIONS):
+            # The first iterable runs in the enclosing scope, before the
+            # comprehension's own targets bind.
+            first = node.generators[0]
+            walk(first.iter, chain)
+            inner = (*chain, _scope_bindings(node))
+            for index, generator in enumerate(node.generators):
+                if index:
+                    walk(generator.iter, inner)
+                walk(generator.target, inner)
+                for condition in generator.ifs:
+                    walk(condition, inner)
+            if isinstance(node, ast.DictComp):
+                walk(node.key, inner)
+                walk(node.value, inner)
+            else:
+                walk(node.elt, inner)
+            return
+        if isinstance(node, _BLOCKS):
+            for child in ast.iter_child_nodes(node):
+                if not isinstance(child, ast.stmt):
+                    walk(child, chain)
+            for field in ("body", "orelse", "finalbody"):
+                walk_body(getattr(node, field, ()), chain)
+            return
         for child in ast.iter_child_nodes(node):
-            walk(child, chain, table)
+            walk(child, chain)
 
-    walk(tree, (), {})
+    walk(tree, ())
     return chains
 
 
