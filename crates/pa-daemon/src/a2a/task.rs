@@ -91,9 +91,9 @@ pub const RESPONSE_ARTIFACT_NAME: &str = "response";
 #[derive(Debug, Clone)]
 struct ReceivedMessage {
     /// The client's own `messageId`, or the id minted once at admit
-    /// when the client sent none: every later read (GetTask, ListTasks,
-    /// the SSE snapshot) reports the same history messageId for the
-    /// turn, like the agent reply's own minted id.
+    /// when the client sent none: every later read (`GetTask`,
+    /// `ListTasks`, the SSE snapshot) reports the same history
+    /// messageId for the turn, like the agent reply's own minted id.
     message_id: String,
     parts: Vec<Part>,
 }
@@ -724,10 +724,10 @@ impl TaskRegistry {
                 }
                 expected.push_str(text);
                 let streamed = &current[watermark..];
-                if expected.starts_with(streamed) {
+                if let Some(remainder) = expected.strip_prefix(streamed) {
                     // The streamed bytes are a prefix of the window's
                     // tail: only the remainder lands.
-                    return Some(format!("{current}{}", &expected[streamed.len()..]));
+                    return Some(format!("{current}{remainder}"));
                 }
                 // The fallback: the whole window lands with the join —
                 // but never twice. A separator-count mismatch between
