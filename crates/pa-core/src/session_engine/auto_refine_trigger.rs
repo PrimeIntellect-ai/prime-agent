@@ -70,10 +70,23 @@ impl AgentSession {
     ///
     /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn discard_compact_auto_refine(&self) {
-        self.compact_auto_refine
+        let mut state = self
+            .compact_auto_refine
             .lock()
-            .expect("compact auto-refine state lock")
-            .pending = false;
+            .expect("compact auto-refine state lock");
+        state.pending = false;
+        // A branch move bumps the version: a round already planning on the
+        // abandoned branch drops its result instead of applying it here.
+        state.branch_version += 1;
+        drop(state);
+        // Cancel in-flight refinement planning and commit waits — work
+        // started on the abandoned branch never lands on the new one.
+        let mut cancel = self
+            .refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock");
+        cancel.abort();
+        *cancel = pa_agent::abort::AbortController::new();
     }
 
     /// Take one armed round: the gates first (the refine surface, the

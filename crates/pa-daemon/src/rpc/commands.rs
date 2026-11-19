@@ -522,7 +522,6 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
     ))
 }
 
-
 /// `set_auto_compaction`: the live settings toggle plus the settings default it persists.
 async fn set_auto_compaction(
     state: &Arc<RpcState>,

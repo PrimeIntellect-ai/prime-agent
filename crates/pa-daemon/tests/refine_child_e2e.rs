@@ -555,7 +555,10 @@ fn local_harness_state(session_dir: &Path) -> Value {
         .flatten()
         .flatten()
         .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "jsonl"));
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        });
     let Some(store) = log
         .as_deref()
         .and_then(pa_core::session_engine::harness_digest::local_harness_dir_for_log)
