@@ -616,44 +616,42 @@ impl SessionInbox {
             return;
         };
         let line = serde_json::to_string(record).unwrap_or_default();
-        let write = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(journal)
-            .and_then(|mut file| {
-                use std::io::{Read as _, Seek as _, Write as _};
-                let start = file.metadata().map(|meta| meta.len()).ok();
-                // One record per line: the append must start on a fresh
-                // line. A fragment left by an interrupted append (a
-                // failed write, a crash, a failed compaction) would
-                // otherwise concatenate with this record and replay
-                // would drop both lines. The guard writes the missing
-                // newline first, so the fragment stays a complete
-                // (unparseable, skipped) line of its own.
-                if start.is_some_and(|len| len > 0) {
-                    let mut last = [0u8; 1];
-                    let ends_clean = file
-                        .seek(std::io::SeekFrom::End(-1))
-                        .and_then(|_| file.read_exact(&mut last))
-                        .is_ok()
-                        && last[0] == b'\n';
-                    if !ends_clean {
-                        file.write_all(b"\n")?;
-                    }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).append(true);
+        crate::platform::perms::set_private_mode(&mut options);
+        let write = options.open(journal).and_then(|mut file| {
+            use std::io::{Read as _, Seek as _, Write as _};
+            let start = file.metadata().map(|meta| meta.len()).ok();
+            // One record per line: the append must start on a fresh
+            // line. A fragment left by an interrupted append (a
+            // failed write, a crash, a failed compaction) would
+            // otherwise concatenate with this record and replay
+            // would drop both lines. The guard writes the missing
+            // newline first, so the fragment stays a complete
+            // (unparseable, skipped) line of its own.
+            if start.is_some_and(|len| len > 0) {
+                let mut last = [0u8; 1];
+                let ends_clean = file
+                    .seek(std::io::SeekFrom::End(-1))
+                    .and_then(|_| file.read_exact(&mut last))
+                    .is_ok()
+                    && last[0] == b'\n';
+                if !ends_clean {
+                    file.write_all(b"\n")?;
                 }
-                let written = file
-                    .write_all(line.as_bytes())
-                    .and_then(|()| file.write_all(b"\n"));
-                if written.is_err() {
-                    // Drop this attempt's partial bytes: the failure
-                    // never extends the torn fragment it may have left.
-                    if let Some(start) = start {
-                        let _ = file.set_len(start);
-                    }
+            }
+            let written = file
+                .write_all(line.as_bytes())
+                .and_then(|()| file.write_all(b"\n"));
+            if written.is_err() {
+                // Drop this attempt's partial bytes: the failure
+                // never extends the torn fragment it may have left.
+                if let Some(start) = start {
+                    let _ = file.set_len(start);
                 }
-                written
-            });
+            }
+            written
+        });
         // Journal failures degrade durability only: the in-process
         // surface stays truthful, and the error slot names the
         // degradation in the notices until a full rewrite re-persists
