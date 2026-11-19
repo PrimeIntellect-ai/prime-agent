@@ -251,15 +251,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_already_fired_abort_beats_a_ready_result() {
-        // Both branches are ready before the first poll: the abort already
-        // fired and the operation resolves without yielding. The race must
-        // settle on the cancelled outcome, never on the ready value.
+    async fn a_requested_abort_wins_over_a_result_ready_in_the_same_poll() {
+        // The operation requests the abort in the poll that makes its result,
+        // so the abort branch has not seen it. Only the re-check in the result
+        // branch reports cancelled, and poll order cannot change that, so one
+        // run is exact.
         let controller = AbortController::new();
         let signal = controller.signal();
-        controller.abort();
-        let result = race_with_abort(async { 7 }, &signal).await;
-        assert!(result.is_err(), "a fired abort must beat a ready result");
+        let result = race_with_abort(
+            async {
+                controller.abort();
+                7
+            },
+            &signal,
+        )
+        .await;
+        assert!(is_abort_error(&result.unwrap_err()));
     }
 
     #[tokio::test]
