@@ -150,10 +150,6 @@ impl QueueHooks {
                 crate::util::now_ms(),
             );
             let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&live.id, &row)?;
-            // TS cron fires resume the suspension before admission
-            // (`resumeIfIdle: true`): a fire on a post-abort/post-compact
-            // session is a resume site (the runner refuses suspended lanes).
-            core.queued_input_suspended = false;
             // One waiting fire per job: the newest replaces the older, and
             // the arrival batch drops it so the notice never counts it. A
             // store retired since the capture skips the fire: its waiting
@@ -169,6 +165,10 @@ impl QueueHooks {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .retain(|message| withdrawn.iter().all(|gone| gone.id != message.id));
             }
+            // TS cron fires resume the suspension before admission
+            // (`resumeIfIdle: true`): a fire on a post-abort/post-compact
+            // session is a resume site (the runner refuses suspended lanes).
+            core.queued_input_suspended = false;
             // A heartbeat rides its delivery-mode lane; the wake row keeps it.
             let lane = if matches!(live.delivery_mode, Some(DeliveryMode::FollowUp)) {
                 Lane::FollowUp
