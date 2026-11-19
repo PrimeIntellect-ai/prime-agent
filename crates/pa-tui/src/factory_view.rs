@@ -33,8 +33,13 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::{Line, Span};
 
+// PR A exposes the block engine for the machines detail view added by PR B.
+#[allow(dead_code)]
+mod blocks;
 mod diagram;
 mod library;
+mod mermaid;
+pub(crate) mod node;
 #[cfg(test)]
 mod tests;
 
@@ -408,6 +413,11 @@ pub enum FactoryViewAction {
     Open {
         child_id: String,
     },
+    /// Open the selected state's node inspection view.
+    OpenNode {
+        run_id: String,
+        state_id: String,
+    },
     /// Stop the selected run (a confirmed stop on its header).
     Stop {
         run_id: String,
@@ -459,6 +469,8 @@ pub struct FactoryView {
     armed: Option<(FactoryRow, FactoryViewAction)>,
     error: Option<String>,
     viewport_rows: usize,
+    /// The open node inspection view, if the selected run state is open.
+    pub node: Option<node::NodeView>,
 }
 
 impl FactoryView {
@@ -475,6 +487,7 @@ impl FactoryView {
             armed: None,
             error: None,
             viewport_rows,
+            node: None,
         };
         view.selected = view.rows().into_iter().next();
         view
@@ -523,20 +536,10 @@ impl FactoryView {
         let mut rows = Vec::new();
         for run in &self.runs {
             rows.push(FactoryRow::header(&run.run_id));
-            rows.extend(
-                run.states
-                    .iter()
-                    .filter(|state| {
-                        run.nodes
-                            .get(&state.id)
-                            .and_then(FactoryNodeState::latest_child)
-                            .is_some()
-                    })
-                    .map(|state| FactoryRow {
-                        run_id: run.run_id.clone(),
-                        state_id: Some(state.id.clone()),
-                    }),
-            );
+            rows.extend(run.states.iter().map(|state| FactoryRow {
+                run_id: run.run_id.clone(),
+                state_id: Some(state.id.clone()),
+            }));
         }
         rows
     }
@@ -624,6 +627,36 @@ impl FactoryView {
     /// state), and any other key only disarms. `r` resumes a paused run.
     #[must_use]
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
+        if let Some(node) = self.node.as_mut() {
+            if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") || key == "left" {
+                if !node.step_back() {
+                    self.node = None;
+                }
+                return FactoryViewAction::None;
+            }
+            if key == "o" || key == "right" {
+                return node
+                    .selected_child()
+                    .map_or(FactoryViewAction::None, |child_id| {
+                        FactoryViewAction::Open {
+                            child_id: child_id.to_string(),
+                        }
+                    });
+            }
+            let handled = node.handle_key(key, kb, self.viewport_rows);
+            if handled {
+                let selected = node.selected_selector();
+                let fetched = node.document_selector();
+                if selected.is_some() && selected != fetched {
+                    return FactoryViewAction::OpenNode {
+                        run_id: node.run_id.clone(),
+                        state_id: node.state_id.clone(),
+                    };
+                }
+                return FactoryViewAction::None;
+            }
+            return FactoryViewAction::None;
+        }
         let armed = self.armed.take();
         if kb.matches(key, "app.agents.delete") {
             let Some(row) = self.selected.clone() else {
@@ -656,6 +689,9 @@ impl FactoryView {
             return FactoryViewAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
+            return self.open_selected_node();
+        }
+        if key == "o" {
             return self.open_selected();
         }
         // The horizontal arrows are fallbacks after the configured
@@ -692,6 +728,18 @@ impl FactoryView {
 
     /// The selected state's latest child, as the open action; a header
     /// opens nothing.
+    fn open_selected_node(&self) -> FactoryViewAction {
+        self.selected
+            .as_ref()
+            .and_then(|row| row.state_id.as_ref().map(|state_id| (row, state_id)))
+            .map_or(FactoryViewAction::None, |(row, state_id)| {
+                FactoryViewAction::OpenNode {
+                    run_id: row.run_id.clone(),
+                    state_id: state_id.clone(),
+                }
+            })
+    }
+
     fn open_selected(&self) -> FactoryViewAction {
         self.selected
             .as_ref()
@@ -747,6 +795,9 @@ impl FactoryView {
     /// trailing key hint.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+        if let Some(node) = &self.node {
+            return node.render(theme, width, kb, self.viewport_rows);
+        }
         // The panel area: one panel per run; the selected row's line (and
         // its panel's start) is recorded for the budget window below.
         let mut panels: Vec<Line> = Vec::new();

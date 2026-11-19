@@ -26,7 +26,13 @@ impl AgentsViewMode {
                 self.open_activity_line(&row, SessionPanel::Shells { shell_id: None });
             }
             RowKind::FactoryRuns => {
-                self.open_activity_line(&row, SessionPanel::FactoryRuns { row: None });
+                self.open_activity_line(
+                    &row,
+                    SessionPanel::FactoryRuns {
+                        row: None,
+                        node: None,
+                    },
+                );
             }
         }
     }

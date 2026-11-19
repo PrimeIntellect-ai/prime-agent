@@ -153,6 +153,7 @@ impl SessionUi {
             factory_refresh_in_flight: false,
             factory_refresh_queued: false,
             factory_list_epoch: 0,
+            factory_node_epoch: 0,
             factory_updates: activity_updates.factory,
             library_updates: activity_updates.library,
             library_list_epoch: 0,

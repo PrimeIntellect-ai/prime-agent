@@ -164,6 +164,30 @@ impl MockSupervisor {
                             command.get("action").and_then(Value::as_str),
                         ) {
                             (Some(runs), Some("graph")) => runs.clone(),
+                            (_, Some("node")) => json!({
+                                "name": "node-run",
+                                "specId": "sw",
+                                "state": {
+                                    "id": "worker",
+                                    "status": "running",
+                                    "instances": [{
+                                        "index": 0,
+                                        "entry": 0,
+                                        "status": "running",
+                                        "child": "child-1",
+                                    }],
+                                },
+                                "entry": {"index": 0, "status": "running"},
+                                "instance": {
+                                    "index": 0,
+                                    "entry": 0,
+                                    "status": "running",
+                                    "child": "child-1",
+                                    "prompt": "Node prompt fixture",
+                                    "inputs": "{}",
+                                    "answer": "Node answer fixture",
+                                },
+                            }),
                             _ => json!({}),
                         };
                         write_json(
@@ -697,6 +721,26 @@ fn factory_page_run(id: &str, name: &str) -> Value {
     })
 }
 
+fn factory_node_run() -> Value {
+    json!({
+        "runId": "node-run",
+        "specId": "sw",
+        "name": "node-run",
+        "state": "running",
+        "elapsedMs": 100,
+        "machine": {
+            "states": [{"id": "worker", "entry": true, "subagent": "worker"}],
+            "transitions": [],
+        },
+        "nodes": [{
+            "id": "worker",
+            "status": "running",
+            "instances": [{"index": 0, "entry": 0, "status": "running", "child": "child-1"}],
+        }],
+        "usage": { "running": 1 },
+    })
+}
+
 /// One alt+a key event (the dock's focus hand-off).
 fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
@@ -773,6 +817,43 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     assert!(
         all.contains("\u{25b8} factory: first-run"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
+    );
+}
+
+#[test]
+fn factory_page_opens_and_renders_a_state_node_document() {
+    let graph = json!({"runs": [factory_node_run()]});
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Node prompt fixture".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(escape()),
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitMs(100),
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("node: worker"),
+        "the selected state opens its node view:
+{all}"
+    );
+    assert!(
+        all.contains("Node prompt fixture"),
+        "the node view renders the fetched prompt:
+{all}"
     );
 }
 

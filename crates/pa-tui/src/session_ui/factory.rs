@@ -41,6 +41,13 @@ pub(crate) enum FactoryUpdate {
         message: String,
         tone: crate::agents_view::StatusTone,
     },
+    Node {
+        session: String,
+        run_id: String,
+        state_id: String,
+        request_epoch: u64,
+        result: Result<Value, String>,
+    },
 }
 
 impl super::SessionUi {
@@ -90,6 +97,79 @@ impl super::SessionUi {
         self.spawn_factory_refresh();
     }
 
+    /// Open a state's node document through the factory activity lane.
+    pub(crate) fn open_factory_node(
+        &mut self,
+        view: &mut AgentView,
+        run_id: &str,
+        state_id: &str,
+        selector: Option<(u64, u64)>,
+    ) {
+        if !self.factory_activity_supported() {
+            self.note(
+                "The node view needs a daemon that advertises the factory lane",
+                view,
+            );
+            return;
+        }
+        self.factory_node_epoch += 1;
+        let request_epoch = self.factory_node_epoch;
+        let factory_view = view.factory_view.as_mut();
+        let Some(factory_view) = factory_view else {
+            return;
+        };
+        if !factory_view
+            .node
+            .as_ref()
+            .is_some_and(|node| node.run_id == run_id && node.state_id == state_id)
+        {
+            factory_view.node = Some(crate::factory_view::node::NodeView::loading(
+                run_id, state_id,
+            ));
+        }
+        if let Some(node) = factory_view.node.as_mut() {
+            node.set_request_epoch(request_epoch);
+        }
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let run_id = run_id.to_string();
+        let state_id = state_id.to_string();
+        let tx = self.factory_updates.clone();
+        tokio::spawn(async move {
+            let mut rest = Map::default();
+            if let Some((entry, instance)) = selector {
+                rest.insert("entry".to_string(), Value::from(entry));
+                rest.insert("instance".to_string(), Value::from(instance));
+            }
+            let fetched = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(DaemonCommand::FactoryActivity {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    action: "node".to_string(),
+                    run_id: Some(run_id.clone()),
+                    spec_id: Some(state_id.clone()),
+                    timeout_ms: None,
+                    rest,
+                }),
+            )
+            .await;
+            let result = match fetched {
+                Ok(Ok(data)) => Ok(data),
+                Ok(Err(error)) => Err(format!("{error:#}")),
+                Err(_) => Err("the node request timed out".to_string()),
+            };
+            let _ = tx.send(FactoryUpdate::Node {
+                session: active_session_id,
+                run_id,
+                state_id,
+                request_epoch,
+                result,
+            });
+        });
+        self.dirty = true;
+    }
+
     /// One key press while the view is open: the view resolves the key;
     /// Open hands off to the child's session, the run stop/resume ride the
     /// daemon lane and the child stop rides `cancel_rlm_child` (bounded,
@@ -117,6 +197,9 @@ impl super::SessionUi {
                 self.dirty = true;
             }
             Some(FactoryViewAction::Open { child_id }) => self.open_factory_child(view, &child_id),
+            Some(FactoryViewAction::OpenNode { run_id, state_id }) => {
+                self.open_factory_node(view, &run_id, &state_id, None);
+            }
             Some(FactoryViewAction::Stop { run_id }) => {
                 self.factory_control(view, "stop", run_id).await?;
             }
@@ -148,6 +231,11 @@ impl super::SessionUi {
                         .as_ref()
                         .and_then(FactoryView::selected_row)
                         .cloned(),
+                    node: view
+                        .factory_view
+                        .as_ref()
+                        .and_then(|factory_view| factory_view.node.as_ref())
+                        .map(crate::factory_view::node::NodeView::target),
                 },
                 closes_to_agents_view: self.panel_returns_to_agents_view,
             });
@@ -412,6 +500,27 @@ impl super::SessionUi {
     /// reports it on its error line instead of painting a fake empty
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
+        let update = match update {
+            FactoryUpdate::Node {
+                session,
+                run_id,
+                state_id,
+                request_epoch,
+                result,
+            } => {
+                if session == self.active_session_id {
+                    let node = view
+                        .factory_view
+                        .as_mut()
+                        .and_then(|factory_view| factory_view.node.as_mut())
+                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                    self.dirty |=
+                        node.is_some_and(|node| node.apply_request_result(request_epoch, result));
+                }
+                return;
+            }
+            other => other,
+        };
         let (session, epoch, payload) = match update {
             FactoryUpdate::Snapshot {
                 session,
@@ -445,6 +554,7 @@ impl super::SessionUi {
                 }
                 return;
             }
+            FactoryUpdate::Node { .. } => return,
         };
         // Only refresh deliveries release the refresh slot; child-stop
         // results are independent of any snapshot currently in flight.
