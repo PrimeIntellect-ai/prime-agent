@@ -621,23 +621,12 @@ _SUBPROCESS_CALLS = (
 
 # A watched import binding: `("module", "time")` for `import time as t`,
 # `("member", "os", "system")` for `from os import system`. Any other binding
-# of the name — a parameter or an assignment — shadows it: the call is then
-# not the import, and the screen leaves it alone.
+# of the name — a parameter, an assignment, a loop target — shadows it: the
+# call is then not the import, and the screen leaves it alone.
 _UNBOUND = object()
+_MISSING = object()
 
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-
-# Statements whose suites run in the enclosing frame, in source order.
-_BLOCKS = (
-    ast.If,
-    ast.For,
-    ast.AsyncFor,
-    ast.While,
-    ast.With,
-    ast.AsyncWith,
-    ast.Try,
-    ast.TryStar,
-)
 
 
 class _BindingCollector(ast.NodeVisitor):
@@ -737,48 +726,110 @@ def _outer_expressions(node: ast.AST) -> list[ast.AST]:
     return expressions
 
 
-def _call_scopes(tree: ast.AST) -> dict[int, tuple[dict[str, tuple | None], ...]]:
-    """Each call node's enclosing scope chain, outermost first.
+def _pattern_names(pattern: ast.AST | None) -> set[str]:
+    """The names a match pattern binds."""
+    names: set[str] = set()
+    for node in ast.walk(pattern) if pattern is not None else ():
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+    return names
 
-    A module or class body and a compound statement's suites bind in execution
-    order: a call sees the bindings made before its statement, so a later
-    reassignment cannot hide an earlier import. Function locals stay
-    whole-scope, as Python resolves them, and a function's defaults,
-    decorators, and annotations run in the scope that defines it.
+
+class _Scope:
+    """One lexical scope: its bindings and the scope that encloses it."""
+
+    __slots__ = ("kind", "bindings", "parent")
+
+    def __init__(self, kind: str, parent: "_Scope | None" = None) -> None:
+        self.kind = kind
+        self.bindings: dict[str, tuple | None] = {}
+        self.parent = parent
+
+
+def _resolve(scope: _Scope, name: str) -> object:
+    """The name's innermost binding, or `_UNBOUND` when no scope binds it.
+
+    A class namespace is not part of a nested function's lookup chain, so
+    only the immediate scope counts when it is a class.
     """
-    chains: dict[int, tuple[dict[str, tuple | None], ...]] = {}
+    current: _Scope | None = scope
+    while current is not None:
+        if current is not scope and current.kind == "class":
+            current = current.parent
+            continue
+        if name in current.bindings:
+            return current.bindings[name]
+        current = current.parent
+    return _UNBOUND
 
-    def walk_body(statements: object, chain: tuple[dict[str, tuple | None], ...]) -> None:
+
+def _join(*tables: dict[str, tuple | None]) -> dict[str, tuple | None]:
+    """Merge branch tables: a watched import wins over a plain shadow."""
+    joined: dict[str, tuple | None] = {}
+    for table in tables:
+        for name, binding in table.items():
+            current = joined.get(name, _MISSING)
+            if current is _MISSING or (current is None and binding is not None):
+                joined[name] = binding
+    return joined
+
+
+def _call_bindings(tree: ast.AST) -> dict[int, object]:
+    """Each call node's callee binding, resolved at its source position.
+
+    Module and class bodies and compound-statement suites bind in execution
+    order; branch suites join afterward, so neither branch sees the other's
+    names. Function locals stay whole-scope, as Python resolves them, and a
+    function's defaults, decorators, and annotations run in the scope that
+    defines it. Resolution happens during the walk, so the screen keeps one
+    entry per call.
+    """
+    bindings_by_call: dict[int, object] = {}
+
+    def apply(scope: _Scope, node: ast.AST) -> None:
+        collector = _BindingCollector()
+        collector.visit(node)
+        scope.bindings.update(collector.bindings())
+
+    def walk_block(statements: object, scope: _Scope) -> None:
         for statement in statements:  # type: ignore[union-attr]
-            walk(statement, chain)
-            collector = _BindingCollector()
-            collector.visit(statement)
-            chain[-1].update(collector.bindings())
+            walk(statement, scope)
+            apply(scope, statement)
 
-    def walk(node: ast.AST, chain: tuple[dict[str, tuple | None], ...]) -> None:
+    def walk(node: ast.AST, scope: _Scope) -> None:
         if isinstance(node, ast.Call):
-            chains[id(node)] = tuple(dict(scope) for scope in chain)
+            func = node.func
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                bindings_by_call[id(node)] = _resolve(scope, func.value.id)
+            elif isinstance(func, ast.Name):
+                bindings_by_call[id(node)] = _resolve(scope, func.id)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             for expression in _outer_expressions(node):
-                walk(expression, chain)
-            inner = (*chain, _scope_bindings(node))
+                walk(expression, scope)
+            inner = _Scope("function", scope)
+            inner.bindings.update(_scope_bindings(node))
             for statement in node.body if isinstance(node.body, list) else [node.body]:
                 walk(statement, inner)
             return
-        if isinstance(node, (ast.Module, ast.ClassDef)):
-            if isinstance(node, ast.ClassDef):
-                for expression in (*node.decorator_list, *node.bases):
-                    walk(expression, chain)
-                for keyword in node.keywords:
-                    walk(keyword.value, chain)
-            walk_body(node.body, (*chain, {}))
+        if isinstance(node, ast.ClassDef):
+            for expression in (*node.decorator_list, *node.bases):
+                walk(expression, scope)
+            for keyword in node.keywords:
+                walk(keyword.value, scope)
+            walk_block(node.body, _Scope("class", scope))
+            return
+        if isinstance(node, ast.Module):
+            walk_block(node.body, _Scope("module"))
             return
         if isinstance(node, _COMPREHENSIONS):
             # The first iterable runs in the enclosing scope, before the
             # comprehension's own targets bind.
             first = node.generators[0]
-            walk(first.iter, chain)
-            inner = (*chain, _scope_bindings(node))
+            walk(first.iter, scope)
+            inner = _Scope("comprehension", scope)
+            inner.bindings.update(_scope_bindings(node))
             for index, generator in enumerate(node.generators):
                 if index:
                     walk(generator.iter, inner)
@@ -791,26 +842,67 @@ def _call_scopes(tree: ast.AST) -> dict[int, tuple[dict[str, tuple | None], ...]
             else:
                 walk(node.elt, inner)
             return
-        if isinstance(node, _BLOCKS):
-            for child in ast.iter_child_nodes(node):
-                if not isinstance(child, ast.stmt):
-                    walk(child, chain)
-            for field in ("body", "orelse", "finalbody"):
-                walk_body(getattr(node, field, ()), chain)
+        if isinstance(node, ast.If):
+            walk(node.test, scope)
+            base = dict(scope.bindings)
+            walk_block(node.body, scope)
+            body_bindings = dict(scope.bindings)
+            scope.bindings = base
+            walk_block(node.orelse, scope)
+            scope.bindings = _join(body_bindings, scope.bindings)
+            return
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            walk(node.iter, scope)
+            apply(scope, node.target)
+            walk_block(node.body, scope)
+            walk_block(node.orelse, scope)
+            return
+        if isinstance(node, ast.While):
+            walk(node.test, scope)
+            walk_block(node.body, scope)
+            walk_block(node.orelse, scope)
+            return
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                walk(item.context_expr, scope)
+                if item.optional_vars is not None:
+                    apply(scope, item.optional_vars)
+            walk_block(node.body, scope)
+            return
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            walk_block(node.body, scope)
+            for handler in node.handlers:
+                walk(handler, scope)
+            walk_block(node.orelse, scope)
+            walk_block(node.finalbody, scope)
+            return
+        if isinstance(node, ast.ExceptHandler):
+            if node.type is not None:
+                walk(node.type, scope)
+            saved = scope.bindings.get(node.name) if node.name else _MISSING
+            if node.name:
+                scope.bindings[node.name] = None
+            walk_block(node.body, scope)
+            if node.name:
+                if saved is _MISSING:
+                    scope.bindings.pop(node.name, None)
+                else:
+                    scope.bindings[node.name] = saved
+            return
+        if isinstance(node, ast.Match):
+            walk(node.subject, scope)
+            for case in node.cases:
+                for name in _pattern_names(case.pattern):
+                    scope.bindings[name] = None
+                if case.guard is not None:
+                    walk(case.guard, scope)
+                walk_block(case.body, scope)
             return
         for child in ast.iter_child_nodes(node):
-            walk(child, chain)
+            walk(child, scope)
 
-    walk(tree, ())
-    return chains
-
-
-def _resolve_binding(name: str, chain: tuple[dict[str, tuple | None], ...]) -> object:
-    """The innermost binding of a name, or `_UNBOUND` when no scope binds it."""
-    for bindings in reversed(chain):
-        if name in bindings:
-            return bindings[name]
-    return _UNBOUND
+    walk(tree, _Scope("module"))
+    return bindings_by_call
 
 
 def _subprocess_import(tree: ast.AST) -> ast.AST | None:
@@ -847,7 +939,7 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return None
-    call_scopes = _call_scopes(tree)
+    call_bindings = _call_bindings(tree)
     subprocess_import = _subprocess_import(tree)
 
     def head(node: ast.AST) -> str:
@@ -857,10 +949,9 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        chain = call_scopes[id(node)]
         func = node.func
+        bound = call_bindings.get(id(node), _UNBOUND)
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            bound = _resolve_binding(func.value.id, chain)
             if bound is _UNBOUND:
                 root = func.value.id
             elif bound is not None and bound[0] == "module":
@@ -869,7 +960,6 @@ def _declined_reason(code: str) -> CellDeclinedError | None:
                 continue
             member = func.attr
         elif isinstance(func, ast.Name):
-            bound = _resolve_binding(func.id, chain)
             if bound is _UNBOUND or bound is None or bound[0] != "member":
                 continue
             root, member = bound[1], bound[2]

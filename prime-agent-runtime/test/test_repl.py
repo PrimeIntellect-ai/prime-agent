@@ -778,6 +778,73 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("parsed", stream_text(events, "stdout"))
 
+    def test_discipline_screen_keeps_if_branches_separate(self):
+        code = (
+            "import time\n"
+            "if True:\n"
+            "    from time import sleep as delay\n"
+            "else:\n"
+            "    delay(5)\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("branch-separate", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+        # The join keeps a watched binding from either branch.
+        events = self.repl.execute(
+            "branch-join", "if True:\n    from time import sleep as delay\ndelay(5)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_honors_exception_handler_names(self):
+        code = (
+            "import time\n"
+            "try:\n"
+            "    pass\n"
+            "except Exception as time:\n"
+            "    time.sleep(5)\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("handler-name", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_honors_loop_targets(self):
+        code = (
+            "from time import sleep as item\n"
+            "for item in ():\n"
+            "    item(5)\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("loop-target", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_keeps_class_names_out_of_methods(self):
+        code = (
+            "delay = print\n"
+            "class C:\n"
+            "    from time import sleep as delay\n"
+            "    def method(self):\n"
+            "        delay(5)\n"
+            "C().method()\n"
+        )
+        events = self.repl.execute("class-method", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
+        # The class body itself still sees its own import.
+        events = self.repl.execute(
+            "class-body-import",
+            "class C:\n    from time import sleep as delay\n    delay(5)",
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_handles_many_calls(self):
+        code = "import time\n" + "\n".join(f"v{i} = len('x')" for i in range(1500))
+        events = self.repl.execute("many-calls", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+
     def test_discipline_screen_reads_compound_statements_in_order(self):
         events = self.repl.execute(
             "if-import", "if True:\n    import time as clock\n    clock.sleep(5)"
