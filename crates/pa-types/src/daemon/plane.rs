@@ -125,6 +125,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "tail_kernel_bash",
     "list_persistent_shells",
     "tail_persistent_shell",
+    "search_session_content",
     "get_session_header",
     "get_state",
     "get_connection_state",
