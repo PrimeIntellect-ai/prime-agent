@@ -206,19 +206,20 @@ fn heredoc_start(rest: &str) -> Option<(usize, usize, &str, bool)> {
         .next()
         .filter(|c| matches!(c, '\'' | '"'));
     let name_start = op + usize::from(quote.is_some());
-    let name_len = rest[name_start..]
-        .bytes()
-        .take_while(|b| is_word(char::from(*b)))
-        .count();
+    // A quoted delimiter runs to its closing quote, a bare one to the end
+    // of the shell word.
+    let name = &rest[name_start..];
+    let name_len = match quote {
+        Some(quote) => name.find(quote)?,
+        None => name
+            .find(|c: char| c.is_whitespace() || "'\";&|()<>".contains(c))
+            .unwrap_or(name.len()),
+    };
     if name_len == 0 {
         return None;
     }
     let name_end = name_start + name_len;
-    let end = match quote {
-        Some(quote) if rest[name_end..].starts_with(quote) => name_end + 1,
-        Some(_) => return None,
-        None => name_end,
-    };
+    let end = name_end + usize::from(quote.is_some());
     Some((op, end, &rest[name_start..name_end], strip_tabs))
 }
 
@@ -355,6 +356,10 @@ mod tests {
             vec!["'EOF'", "\techo $x\n\tEOF"]
         );
         assert_eq!(scoped(code, Scope::BuiltIn), vec!["cat", "ls"]);
+        assert_eq!(
+            scoped("cat <<END-X\nbody\nEND-X\nls", Scope::BuiltIn),
+            vec!["cat", "ls"]
+        );
         // Arithmetic and subshell parens close back out of arithmetic.
         assert_eq!(
             scoped(
