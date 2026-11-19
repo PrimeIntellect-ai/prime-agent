@@ -457,9 +457,12 @@ fn write_battery_catalog_and_retry_off_settings(agent_dir: &Path, mock_url: &str
         .to_string(),
     )
     .expect("write models.json");
+    // The wake tests assert the delivery's full `[agent-message from ...]`
+    // row: the inbox kill switch keeps the direct delivery (the inbox route
+    // is covered by `agent_inbox_e2e`).
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "retry": { "enabled": false } }).to_string(),
+        json!({ "retry": { "enabled": false }, "agentInbox": { "enabled": false } }).to_string(),
     )
     .expect("write settings.json");
 }
