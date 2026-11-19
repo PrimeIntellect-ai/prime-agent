@@ -625,8 +625,49 @@ pub(crate) fn admit_inbox_notice(
 ) -> Result<bool, String> {
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
-    // them would queue an invisible row for a busy session.
-    let mut core_guard = core.lock().unwrap();
+    // them would queue an invisible row for a busy session. The guard
+    // drops with this statement: the checkpoint re-locks the core.
+    let queued = admit_inbox_notice_locked(
+        &mut core.lock().unwrap(),
+        inbox,
+        arrivals,
+        notice,
+        lane,
+        session_is_closed,
+        capacity_error,
+        engine,
+    )?;
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+    Ok(queued)
+}
+
+/// [`admit_inbox_notice`] over an already locked core, without the
+/// checkpoint and wake (the checkpoint re-locks the core, so the caller
+/// runs both after releasing its guard): the heartbeat route holds the
+/// lock across its live-job check and withdrawal.
+#[allow(clippy::too_many_arguments)] // the wrapper's seams minus the lock-order handles
+pub(crate) fn admit_inbox_notice_locked(
+    core_guard: &mut SessionCore,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    notice: pa_core::session_engine::inbox::InboxNotice,
+    lane: Lane,
+    session_is_closed: impl Fn() -> bool,
+    capacity_error: impl Fn(
+        &std::collections::VecDeque<QueuedItem>,
+        &std::collections::VecDeque<QueuedItem>,
+    ) -> Option<String>,
+    engine: Option<&crate::agent_engine::AgentSessionEngine>,
+) -> Result<bool, String> {
     // A notice that raced past the sink's first check is refused here
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
@@ -726,19 +767,6 @@ pub(crate) fn admit_inbox_notice(
             forced_batch: false,
         });
     }
-    // The checkpoint re-locks the core (documented order: recovery lock
-    // first), so the admission's guard must release first.
-    drop(core_guard);
-    // The busy-evidence checkpoint: the notice is undelivered live
-    // work until its turn settles.
-    checkpoint_queue_recovery(
-        recovery,
-        core,
-        QueueCheckpoint::Admitted {
-            operation: "steer_queued",
-        },
-    );
-    work_notify.notify_one();
     Ok(queued)
 }
 
