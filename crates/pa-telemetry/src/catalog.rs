@@ -1495,6 +1495,11 @@ mod tests {
                 "{}",
                 rule.name
             );
+            assert!(
+                !rule.name.starts_with(|c: char| c.is_ascii_digit()),
+                "{} starts with a digit",
+                rule.name
+            );
         }
     }
 

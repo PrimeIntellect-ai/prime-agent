@@ -714,16 +714,19 @@ pub(crate) async fn on_session_event(state: &Arc<Mutex<A2aState>>, event: &Value
     if let Some(delta) = delta {
         guard.registry.append_artifact_chunk(&task_id, &delta);
     } else if separator
-        && guard
-            .registry
-            .task(&task_id)
-            .is_some_and(|task| !task.artifact_text().is_empty())
+        && guard.registry.task(&task_id).is_some_and(|task| {
+            let text = task.artifact_text();
+            !text.is_empty() && !text.ends_with("\n\n")
+        })
     {
         // The artifact rule's blank-line join, applied to the live
         // stream too: a second assistant message of the same turn
         // separates from the first with the same blank line the final
         // artifact carries, so the streamed chunks and the artifact
-        // read identically.
+        // read identically. The join's own condition (no separator
+        // when the artifact already ends with one) keeps a text-less
+        // assistant message from stacking blank lines the window join
+        // never carries.
         guard.registry.append_artifact_chunk(&task_id, "\n\n");
     }
 }

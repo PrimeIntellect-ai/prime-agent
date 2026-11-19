@@ -719,14 +719,29 @@ impl TaskRegistry {
                 // landed mid-run) falls back to the whole-window join.
                 let watermark = entry.reconciled_len.min(current.len());
                 let mut expected = String::new();
-                if watermark > 0 {
+                if !current.is_empty() {
                     expected.push_str("\n\n");
                 }
                 expected.push_str(text);
                 let streamed = &current[watermark..];
-                Some(if expected.starts_with(streamed) {
-                    format!("{current}{}", &expected[streamed.len()..])
-                } else if current.ends_with("\n\n") {
+                if expected.starts_with(streamed) {
+                    // The streamed bytes are a prefix of the window's
+                    // tail: only the remainder lands.
+                    return Some(format!("{current}{}", &expected[streamed.len()..]));
+                }
+                // The fallback: the whole window lands with the join —
+                // but never twice. A separator-count mismatch between
+                // the live stream and the window join (a text-less
+                // assistant message) leaves the window's text already
+                // in the artifact with different blank lines: the
+                // trimmed tail match recognizes that and reconciles in
+                // place instead of appending a copy.
+                let trimmed_current = current.trim_end_matches('\n');
+                let trimmed_text = text.trim_start_matches('\n');
+                if !trimmed_text.is_empty() && trimmed_current.ends_with(trimmed_text) {
+                    return Some(current.clone());
+                }
+                Some(if current.ends_with("\n\n") {
                     format!("{current}{text}")
                 } else {
                     format!("{current}\n\n{text}")
