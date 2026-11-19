@@ -721,6 +721,7 @@ pub(crate) fn admit_inbox_notice_locked(
         let custom_message = pa_core::session_engine::inbox::create_inbox_notice_row(
             &text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+            arrivals.len(),
             now,
         );
         // The replacement pattern the scheduler's queue keys use: the
@@ -808,7 +809,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
         {
             if item.message != text || item.preview.as_deref() != Some(preview.as_str()) {
-                rerender_inbox_notice(item, &text);
+                rerender_inbox_notice(item, &text, batch.len());
                 item.preview = Some(preview.clone());
                 changed = true;
             }
@@ -833,7 +834,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .chain(follow_up.iter_mut())
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
         {
-            if rerender_inbox_notice(item, &reminder) {
+            if rerender_inbox_notice(item, &reminder, count) {
                 changed = true;
             }
         }
@@ -896,6 +897,7 @@ pub(crate) fn admit_inbox_reminder(
     let custom_message = pa_core::session_engine::inbox::create_inbox_notice_row(
         &message,
         pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
+        count,
         now,
     );
     let (policy, queue_visible) = if core_guard.busy {
@@ -937,11 +939,11 @@ pub(crate) fn admit_inbox_reminder(
 }
 
 /// Re-render one queued inbox notice row's text: the queue's `message`
-/// and the custom twin's `content` move together — a stale twin would
-/// deliver an old count — while the twin's sender, class, and admission
-/// timestamp keep the row's identity (the re-render only re-syncs
-/// content). Returns whether the text changed.
-fn rerender_inbox_notice(item: &mut QueuedItem, text: &str) -> bool {
+/// and the custom twin's `content` and `details.count` move together — a
+/// stale twin would deliver an old count — while the twin's sender, class,
+/// and admission timestamp keep the row's identity (the re-render only
+/// re-syncs content). Returns whether the text changed.
+fn rerender_inbox_notice(item: &mut QueuedItem, text: &str, count: usize) -> bool {
     if item.message == text {
         return false;
     }
@@ -949,6 +951,9 @@ fn rerender_inbox_notice(item: &mut QueuedItem, text: &str) -> bool {
     if let Some(row) = item.custom_message.as_mut() {
         if let Some(object) = row.as_object_mut() {
             object.insert("content".to_string(), json!(text));
+        }
+        if let Some(details) = row.get_mut("details").and_then(Value::as_object_mut) {
+            details.insert("count".to_string(), json!(count));
         }
     }
     true

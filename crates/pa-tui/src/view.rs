@@ -228,14 +228,7 @@ impl AgentView {
     /// Agent messages, tool calls, bash executions, shell completions, and
     /// the inbox notices render flush against each other.
     pub(super) fn is_compact_neighbor(entry: &ChatEntry) -> bool {
-        matches!(
-            entry,
-            ChatEntry::Tool(_)
-                | ChatEntry::AgentMessage(_)
-                | ChatEntry::InboxNotice(_)
-                | ChatEntry::ShellCompletion(_)
-                | ChatEntry::BashExecution(_)
-        )
+        entry.is_envelope_row() || matches!(entry, ChatEntry::BashExecution(_))
     }
 
     /// One paste routed by the open overlay: the overlay's own input takes it, the input-less
@@ -639,13 +632,7 @@ impl AgentView {
             *slot = [None, None, None];
         }
         for (offset, entry) in self.chat.iter().enumerate().skip(index + 1) {
-            if matches!(
-                entry,
-                ChatEntry::AgentMessage(_)
-                    | ChatEntry::InboxNotice(_)
-                    | ChatEntry::ShellCompletion(_)
-                    | ChatEntry::Tool(_)
-            ) {
+            if entry.is_envelope_row() {
                 if let Some(slot) = self.entry_layout.get_mut(offset) {
                     *slot = [None, None, None];
                 }

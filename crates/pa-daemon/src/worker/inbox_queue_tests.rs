@@ -150,6 +150,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
         &pa_core::session_engine::inbox::create_inbox_notice_row(
             &expected_text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+            1,
             admitted_at,
         ),
         "the arrival twin is exactly the builder's row"
@@ -360,6 +361,7 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
         &pa_core::session_engine::inbox::create_inbox_notice_row(
             message,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
+            1,
             admitted_at,
         ),
         "the reminder twin is exactly the builder's row"
@@ -583,6 +585,7 @@ async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
             &pa_core::session_engine::inbox::create_inbox_notice_row(
                 &reminder.message,
                 pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
+                1,
                 SENTINEL_TIMESTAMP,
             ),
             "the re-rendered twin keeps its identity and only its content moved: {row}"
@@ -966,6 +969,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
                 &pa_core::session_engine::inbox::create_inbox_notice_row(
                     &item.message,
                     class,
+                    1,
                     SENTINEL_TIMESTAMP,
                 ),
                 "the re-rendered twin keeps its identity and only its content moved: {row}"
@@ -2600,6 +2604,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         pa_core::session_engine::inbox::create_inbox_notice_row(
             &expected_text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+            arrivals.lock().unwrap().len(),
             admitted_at,
         ),
         "the twin re-rendered its content and kept its admission identity"
