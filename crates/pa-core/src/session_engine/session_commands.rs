@@ -193,7 +193,7 @@ pub async fn execute_session_command(
     }
     let result = match command.name {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
-        "refine" => execute_refine(engine, params, command, &mut execution).await,
+        "refine" => execute_refine(engine, params, command, &mut execution),
         "goal" => execute_goal(engine, command, images, &mut execution).await,
         "autonomous" => execute_autonomous(params, command, &mut execution),
         other => Err(format!("Unknown session command: {other}")),
@@ -280,13 +280,10 @@ async fn execute_compact(
     Ok(())
 }
 
-/// `/refine`: the mechanical rollback applies inline (no model pass); the
-/// planning refinement is the refinement child's — a daemon `refine_child`
-/// spawn — so this layer only refuses without the daemon and
-/// leaves the spawn to the daemon-backed session command hosts.
-async fn execute_refine(
+/// `/refine`: schedule planning without holding the host command runner.
+fn execute_refine(
     engine: &SessionEngine,
-    _params: &mut SessionCommandParams<'_>,
+    params: &mut SessionCommandParams<'_>,
     command: &SessionSlashCommand,
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
@@ -296,48 +293,11 @@ async fn execute_refine(
         instructions: options.instructions,
         rollback_id: options.rollback_id,
     };
-    if refine_options.rollback_id.is_none() {
-        // The rollback is the one mechanical path (no model pass, no
-        // child); every planning refinement is a spawned child, so a
-        // session without the daemon refuses the command.
-        return Err(
-            "The refine command requires a daemon-backed session: the refinement child is a spawned session, and this session has no RLM child runtime."
-                .to_string(),
-        );
-    }
-    // The rollback's target store comes from the session's own digest
-    // context (main's store pair), never a param the host happened to carry.
-    let stores = engine
-        .session
-        .refinement_stores()
-        .map_err(|error| format!("{error:#}"))?;
-    let result = match engine
-        .session
-        .run_rollback_refinement(&refine_options, RefinementSource::User, &stores.global_dir)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            // The refinement run itself failed: a host transport surfaces
-            // this as a refinement event, distinct from the command failure.
-            execution.refinement_failed = Some(format!("{error:#}"));
-            return Err(format!("{error:#}"));
-        }
-    };
-    execution.refinement = Some(result.clone());
-    let applied = result
-        .applied_edits
-        .iter()
-        .filter(|edit| edit.applied)
-        .count();
-    let content = format!(
-        "Refined continual harness state: {applied} edit{} applied.",
-        if applied == 1 { "" } else { "s" }
-    );
-    // The refinement outcome message renders the details; the result row is
-    // durable but not displayed (TS `displayResult = false`).
-    execution.push_message(slash_command_result(
-        command, content, true, "info", None, false,
+    execution.pending_refinement = Some(engine.session.start_refinement(
+        refine_options,
+        RefinementSource::User,
+        params.model.clone(),
+        params.api_key.take(),
     ));
     Ok(())
 }

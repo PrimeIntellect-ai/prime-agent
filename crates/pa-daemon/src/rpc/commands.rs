@@ -500,34 +500,28 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
             .map(str::to_string),
     };
     let handle = state.session.handle().await;
+    let model = handle.model.clone();
+    let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
-    let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
-    // Refine appends durable rows into the live loop context; it shares
-    // compact's one-command-at-a-time serialization.
-    let _ops = state.session_ops.lock().await;
-    // The planning refinement is the refinement child's — a daemon
-    // `refine_child` spawn. The RPC surface hosts a core
-    // engine without the daemon's child runtime, so only the mechanical
-    // rollback runs inline; every other refinement refuses.
-    if options.rollback_id.is_none() {
-        return Err(
-            "The refine command requires a daemon-backed session: the refinement child is a spawned session, and this session has no RLM child runtime."
-                .to_string(),
-        );
-    }
-    let result = engine
-        .session
-        .run_rollback_refinement(
-            &options,
-            pa_core::session_engine::refine::RefinementSource::User,
-            &global_harness_dir,
-        )
+    // Register the job against this session, then release the lease before
+    // waiting. Other prompts and session replacement must not await planning.
+    let pending = engine.session.start_refinement(
+        options,
+        pa_core::session_engine::refine::RefinementSource::User,
+        model,
+        api_key,
+    );
+    drop(handle);
+    drop(engine);
+    let committed = pending
         .await
+        .map_err(|error| format!("refinement task failed: {error}"))?
         .map_err(|error| format!("{error:#}"))?;
     Ok(ResponseData::Present(
-        serde_json::to_value(result).unwrap_or(Value::Null),
+        serde_json::to_value(committed.result).unwrap_or(Value::Null),
     ))
 }
+
 
 /// `set_auto_compaction`: the live settings toggle plus the settings default it persists.
 async fn set_auto_compaction(

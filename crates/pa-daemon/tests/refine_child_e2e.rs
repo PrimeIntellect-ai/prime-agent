@@ -545,10 +545,24 @@ fn child_ledger(agent_dir: &Path, durable_session_id: &str, child_id: &str) -> V
         .collect()
 }
 
-/// The local harness state the wake-side apply wrote (the session's own
-/// store under its session dir).
+/// The local harness state the wake-side apply wrote: the session's own
+/// digest store — the artifact dir the conversation log implies — never a
+/// shared sessions/harness file.
 fn local_harness_state(session_dir: &Path) -> Value {
-    let path = session_dir.join("harness").join("harness_state.json");
+    let log = std::fs::read_dir(session_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "jsonl"));
+    let Some(store) = log
+        .as_deref()
+        .and_then(pa_core::session_engine::harness_digest::local_harness_dir_for_log)
+    else {
+        return Value::Null;
+    };
+    let path = pa_core::refinement::get_harness_state_path(&store);
     std::fs::read_to_string(&path).map_or(Value::Null, |content| {
         serde_json::from_str::<Value>(&content).expect("harness state parses")
     })

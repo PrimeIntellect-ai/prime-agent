@@ -613,11 +613,11 @@ impl SupervisorChildSessionsInner {
                 // refused abort can roll a cancelled run back to running
                 // inside this tail: the live run keeps its watcher.
                 if self.fire_settle_hook(record).await {
+                    // The one-shot refinement child retires at its settle —
+                    // the registry observed it, so it owns the teardown.
+                    self.retire_refine_child_record(record).await;
                     return;
                 }
-                // The one-shot refinement child retires at its settle —
-                // the registry observed it, so it owns the teardown.
-                self.retire_refine_child_record(record).await;
                 continue;
             }
             // Still running (a timed-out slice or a re-queued continuation):
