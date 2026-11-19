@@ -23,7 +23,7 @@ use crate::engine::{
 use pa_core::session_engine::agent_messaging::{
     AgentFamilyRelationship, AgentMessageController, AgentMessageSendInput,
 };
-use pa_core::session_engine::decision_api::ResolvedDecisionModel;
+use pa_core::session_engine::decision_api::{RefusedDecisionReply, ResolvedDecisionModel};
 use pa_core::session_engine::side_question::SideQuestionSink;
 
 /// The decision child's engine.
@@ -418,6 +418,28 @@ impl SessionEngine for DecisionEngine {
                 emit(EngineEvent::Done(Ok(())));
             }
             Err(error) => {
+                // A refused reply is a completed call: its row persists with
+                // the call's usage, so the transcript keeps the model's reply
+                // and the cost ledger bills the call.
+                if let (Some(refused), Ok(resolved)) = (
+                    error.downcast_ref::<RefusedDecisionReply>(),
+                    self.model.as_ref(),
+                ) {
+                    let (provider, model) = resolved.provider_and_id();
+                    let (update, message) = Self::answer_rows(
+                        resolved.api(),
+                        provider,
+                        model,
+                        &refused.reply,
+                        refused.usage,
+                    );
+                    for event in [update, message] {
+                        if !emit(event) {
+                            emit(cancelled());
+                            return;
+                        }
+                    }
+                }
                 // The failure reaches the parent as a tagged error reply, so
                 // its await fails fast instead of timing out.
                 let reply = json!({
@@ -1162,5 +1184,101 @@ mod tests {
         let typed: pa_types::ai::AssistantMessage = serde_json::from_value(answer.clone())
             .expect("the persisted row must deserialize as a typed assistant message");
         assert_eq!(typed.stop_reason, pa_types::ai::StopReason::Stop);
+    }
+
+    /// The refused-reply bill, pinned: a completed call whose reply the
+    /// answer validation refuses still spent its tokens, so its row
+    /// persists with the call's usage and the child-usage ledger bills
+    /// it, while the turn settles with the refusal.
+    #[test]
+    fn a_refused_reply_still_bills_the_decision_call() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other decision tests' response queues.
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-refused".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        // The reply chooses an action the request does not offer.
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                r#"{"action": {"choice": "jump"}}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionModel": "decision-model" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-refused", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        let engine = engine(dir.path());
+        let body = json!({
+            "seq": 7,
+            "state": {"observation": 1},
+            "questions": {"action": {
+                "type": "choice", "criteria": {"left": "go left", "right": "go right"}
+            }}
+        });
+        let request = PromptRequest {
+            message: body.to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+        };
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(0, request, &|| false, &mut |event| {
+            events.push(event);
+            true
+        });
+        assert!(
+            matches!(events.last(), Some(EngineEvent::Done(Err(error)))
+                if error.contains("not one of the requested actions")),
+            "the refused reply must settle with the refusal: {events:?}"
+        );
+        let row = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                EngineEvent::AssistantMessage(message) => Some(message),
+                _ => None,
+            })
+            .expect("a refused reply still persists the call's row");
+        let entry = crate::session_store::SessionEntry {
+            type_: "message".to_string(),
+            id: "d1".to_string(),
+            parent_id: None,
+            timestamp: "2026-11-19T00:00:00.000Z".to_string(),
+            fields: json!({ "message": row }),
+        };
+        let (batches, _) =
+            crate::rlm_child_usage::child_usage_batches(std::slice::from_ref(&entry), 0);
+        assert_eq!(
+            batches.len(),
+            1,
+            "a refused call must bill in the cost ledger"
+        );
+        assert!(
+            batches[0].1.input > 0 && batches[0].1.output > 0,
+            "the ledger must bill the refused call's usage: {row}"
+        );
     }
 }

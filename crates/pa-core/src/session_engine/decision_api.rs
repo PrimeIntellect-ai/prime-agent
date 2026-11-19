@@ -455,6 +455,25 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// A completed decision call whose reply the answer validation refused.
+/// The call still spent its tokens, so the refusal carries the reply and
+/// the call's usage: the decision child keeps them as the turn's row, and
+/// the cost ledger bills the call like an answered one.
+#[derive(Debug)]
+pub struct RefusedDecisionReply {
+    pub reply: String,
+    pub usage: pa_types::ai::Usage,
+    refusal: anyhow::Error,
+}
+
+impl std::fmt::Display for RefusedDecisionReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.refusal)
+    }
+}
+
+impl std::error::Error for RefusedDecisionReply {}
+
 /// Serve one decision request with the resolved model: one non-streaming
 /// completion, parsed into the decision envelope. Structured-decision
 /// (`api: "systemone"`) models speak the native protocol; every other model
@@ -532,10 +551,16 @@ async fn serve_decision(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if reply.trim().is_empty() {
-        bail!("the decision model returned an empty reply");
+    let answer = if reply.trim().is_empty() {
+        Err(anyhow!("the decision model returned an empty reply"))
+    } else {
+        parse_decision_answer(&reply, &request.criteria)
     }
-    let answer = parse_decision_answer(&reply, &request.criteria)?;
+    .map_err(|refusal| RefusedDecisionReply {
+        reply,
+        usage: response.usage,
+        refusal,
+    })?;
     Ok(json!({
         "model": resolved.label(),
         // The completion's usage rides the envelope so the decision child's
@@ -624,10 +649,6 @@ async fn serve_systemone(
     }
     let raw = reply.trim();
     let parsed = parse_reply_json(raw)?;
-    let answers = parsed
-        .get("answers")
-        .ok_or_else(|| anyhow!("the decision model's reply has no \"answers\" object: {raw}"))?;
-    let answer = decision_answer(answers, &request.criteria)?;
     // The envelope reports the resolved model's label, never the
     // endpoint's bare id. The endpoint's usage — clef's two token counts
     // — maps into the typed `Usage` the cost ledger bills: the raw
@@ -635,7 +656,7 @@ async fn serve_systemone(
     // usage at all, so every clef decision would read as a free call.
     // The mapped usage is priced through the resolved model like any
     // chat completion, so the decision child's answer rows carry real
-    // cost.
+    // cost. A refused answer carries the same usage.
     let usage = {
         let endpoint = parsed.get("usage");
         let input = endpoint
@@ -655,6 +676,15 @@ async fn serve_systemone(
         pa_ai::models::calculate_cost(&resolved.model, &mut usage, None);
         usage
     };
+    let answer = parsed
+        .get("answers")
+        .ok_or_else(|| anyhow!("the decision model's reply has no \"answers\" object: {raw}"))
+        .and_then(|answers| decision_answer(answers, &request.criteria))
+        .map_err(|refusal| RefusedDecisionReply {
+            reply: raw.to_string(),
+            usage,
+            refusal,
+        })?;
     Ok(json!({
         "model": resolved.label(),
         "usage": usage,
@@ -1340,13 +1370,16 @@ mod tests {
 
     /// The envelope's `answers` run the same validation as a chat-path
     /// reply: a choice outside the requested criteria is refused, so the
-    /// systemone transport cannot pass an answer through unvalidated.
+    /// systemone transport cannot pass an answer through unvalidated. The
+    /// refused call still spent the endpoint's tokens, so the refusal
+    /// carries the mapped usage the decision child bills.
     #[tokio::test]
     async fn systemone_answers_run_the_shared_decision_validation() {
         let dir = tempfile::tempdir().unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let envelope = json!({
             "model": "fixture-decisions/systemone-model",
+            "usage": {"input_tokens": 11, "output_tokens": 3},
             "answers": {"action": {"choice": "up"}}
         });
         systemone_fixture(dir.path(), envelope, std::sync::Arc::clone(&seen))
@@ -1355,10 +1388,14 @@ mod tests {
         let request = json!({ "state": {}, "questions": { "action": {
             "type": "choice", "criteria": {"left": "go left", "right": "go right"}
         } } });
-        let error = decide(request, dir.path()).await.unwrap_err().to_string();
+        let error = decide(request, dir.path()).await.unwrap_err();
         assert!(
-            error.contains("chose"),
+            error.to_string().contains("chose"),
             "the envelope's choice must be validated against the criteria: {error}"
         );
+        let refused = error
+            .downcast_ref::<RefusedDecisionReply>()
+            .expect("a refused answer carries the call's usage");
+        assert_eq!((refused.usage.input, refused.usage.output), (11, 3));
     }
 }
