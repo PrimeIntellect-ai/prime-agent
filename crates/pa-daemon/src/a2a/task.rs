@@ -90,7 +90,11 @@ pub const RESPONSE_ARTIFACT_NAME: &str = "response";
 /// joined text).
 #[derive(Debug, Clone)]
 struct ReceivedMessage {
-    message_id: Option<String>,
+    /// The client's own `messageId`, or the id minted once at admit
+    /// when the client sent none: every later read (GetTask, ListTasks,
+    /// the SSE snapshot) reports the same history messageId for the
+    /// turn, like the agent reply's own minted id.
+    message_id: String,
     parts: Vec<Part>,
 }
 
@@ -293,7 +297,10 @@ impl TaskEntry {
             session_id,
             state: TaskState::Submitted,
             user_messages: vec![ReceivedMessage {
-                message_id: user_message_id,
+                // An empty client id mints ONCE here, never per read.
+                message_id: user_message_id
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 parts: user_parts,
             }],
             agent_message_id: uuid::Uuid::new_v4().to_string(),
@@ -336,10 +343,7 @@ impl TaskEntry {
 
     fn user_message(&self, received: &ReceivedMessage) -> Message {
         Message {
-            message_id: received
-                .message_id
-                .clone()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            message_id: received.message_id.clone(),
             context_id: Some(self.context_id.clone()),
             task_id: Some(self.id.clone()),
             role: Role::User,
