@@ -202,6 +202,9 @@ fn path_completion_lists_directories_first() {
         values.iter().position(|v| *v == "./main.rs").unwrap()
             > values.iter().position(|v| *v == "./src/").unwrap()
     );
+    // `=` delimits a path token.
+    let suggestions = ready(provider.get_suggestions(&["--config=./ma".to_string()], 0, 13, false));
+    assert_eq!(suggestions.items[0].value, "./main.rs");
     // Non-path tokens do not trigger on natural typing.
     assert!(provider
         .get_suggestions(&["hello wor".to_string()], 0, 9, false)
@@ -268,6 +271,7 @@ fn at_prefix_lists_nested_fuzzy_matches() {
     std::fs::write(base.join(".hidden/partial"), "x").expect("write");
     std::fs::write(base.join(".git/partial"), "x").expect("write");
     std::fs::write(base.join("other.md"), "x").expect("write");
+    std::fs::write(base.join("shot\u{202F}AM.png"), "x").expect("write");
     let provider = provider(base.to_str().unwrap());
     let values = |text: &str| -> Vec<String> {
         at_suggestions(&provider, text)
@@ -284,6 +288,9 @@ fn at_prefix_lists_nested_fuzzy_matches() {
         ["@.hidden/partial", "@src/deep/partial_match.rs"]
     );
     assert_eq!(values("@src/par"), ["@src/deep/partial_match.rs"]);
+    assert_eq!(values("cfg=@src/par"), ["@src/deep/partial_match.rs"]);
+    // Any whitespace in a name quotes it (macOS screenshots carry U+202F).
+    assert_eq!(values("@shot"), ["@\"shot\u{202F}AM.png\""]);
     let item = CompletionItem {
         value: "@src/deep/partial_match.rs".to_string(),
         label: "partial_match.rs".to_string(),
@@ -873,9 +880,12 @@ fn at_index_matches_the_walk_on_random_trees() {
             let mut walks: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
             for query in random_queries(&forms, &mut rng) {
                 let at_prefix = format!("@{query}");
+                let token =
+                    crate::path_token::at_token_before(&at_prefix.chars().collect::<Vec<_>>())
+                        .expect("token");
                 let mut matched = 0;
                 let expected =
-                    fuzzy_file_search::resolve_search(&base, &at_prefix, &cancel, |search, _| {
+                    fuzzy_file_search::resolve_search(&base, &token, &cancel, |search, _| {
                         let walk =
                             walks
                                 .entry(search.walk_base.to_path_buf())

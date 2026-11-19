@@ -4,6 +4,7 @@
 //! the user-message transcript block ([`PromptTokenMask`]), and the session-command echo row
 //! ([`slash_command_source_spans`]).
 
+use crate::path_token;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use pa_types::slash_commands::{parse_slash_command, SlashCommandRegistry};
@@ -17,38 +18,25 @@ pub struct ArgTokenSpan {
     pub color: ThemeColor,
 }
 
-/// TS `ARG_TOKEN_PATTERN`, or its separator variant when the command line
-/// takes arguments (a bare `--` separator also highlights).
-fn arg_token_pattern(include_bare_separator: bool) -> &'static fancy_regex::Regex {
+/// TS `ARG_TOKEN_PATTERN`'s `--flag` half (the `@` paths are [`path_token`]'s), or its
+/// separator variant when the command line takes arguments (a bare `--` separator also
+/// highlights).
+fn flag_pattern(include_bare_separator: bool) -> &'static fancy_regex::Regex {
     static PLAIN: OnceLock<fancy_regex::Regex> = OnceLock::new();
     static WITH_SEPARATOR: OnceLock<fancy_regex::Regex> = OnceLock::new();
     if include_bare_separator {
         WITH_SEPARATOR.get_or_init(|| {
-            fancy_regex::Regex::new(
-                r#"@"[^"\n]*"|@(?:\\[^\s\x1b]|[^\s\x1b|])+|--[A-Za-z0-9][A-Za-z0-9-]*|--(?=\s|$)"#,
-            )
-            .expect("arg-token pattern compiles")
+            fancy_regex::Regex::new(r"--[A-Za-z0-9][A-Za-z0-9-]*|--(?=\s|$)")
+                .expect("flag pattern compiles")
         })
     } else {
         PLAIN.get_or_init(|| {
-            fancy_regex::Regex::new(
-                r#"@"[^"\n]*"|@(?:\\[^\s\x1b]|[^\s\x1b|])+|--[A-Za-z0-9][A-Za-z0-9-]*"#,
-            )
-            .expect("arg-token pattern compiles")
+            fancy_regex::Regex::new(r"--[A-Za-z0-9][A-Za-z0-9-]*").expect("flag pattern compiles")
         })
     }
 }
 
-/// `@`-tokens are `success`, flags are `mdLink`.
-fn token_color(token: &str) -> ThemeColor {
-    if token.starts_with('@') {
-        ThemeColor::Success
-    } else {
-        ThemeColor::MdLink
-    }
-}
-
-/// A token must start at index 0 or after whitespace.
+/// A flag must start at index 0 or after whitespace.
 fn has_token_boundary(text: &str, byte_start: usize) -> bool {
     byte_start == 0
         || text[..byte_start]
@@ -71,26 +59,43 @@ pub(crate) fn char_slice(text: &str, start: usize, end: usize) -> &str {
     &text[byte_at_char(text, start)..byte_at_char(text, end)]
 }
 
-/// The token spans of `text` at or after `from_index` (char offsets), each needing a whitespace
-/// boundary before it.
+/// The token spans of `text` at or after `from_index` (char offsets): the `@` path tokens
+/// (`success`; a lone `@` is no path) and the flags outside them (`mdLink`), each flag needing
+/// a whitespace boundary before it.
 pub fn find_arg_tokens(
     text: &str,
     from_index: usize,
     include_bare_separator: bool,
 ) -> Vec<ArgTokenSpan> {
-    let regex = arg_token_pattern(include_bare_separator);
-    let mut spans = Vec::new();
-    for result in regex.find_iter(text) {
+    let chars: Vec<char> = text.chars().collect();
+    let paths = path_token::at_tokens(&chars);
+    let mut spans: Vec<ArgTokenSpan> = paths
+        .iter()
+        .filter(|token| token.start >= from_index && token.text != "@")
+        .map(|token| ArgTokenSpan {
+            start: token.start,
+            end: token.end,
+            color: ThemeColor::Success,
+        })
+        .collect();
+    for result in flag_pattern(include_bare_separator).find_iter(text) {
         let Ok(m) = result else { continue };
-        if char_at_index(text, m.start()) < from_index || !has_token_boundary(text, m.start()) {
+        let start = char_at_index(text, m.start());
+        if start < from_index
+            || !has_token_boundary(text, m.start())
+            || paths
+                .iter()
+                .any(|token| (token.start..token.end).contains(&start))
+        {
             continue;
         }
         spans.push(ArgTokenSpan {
-            start: char_at_index(text, m.start()),
+            start,
             end: char_at_index(text, m.end()),
-            color: token_color(&text[m.start()..m.end()]),
+            color: ThemeColor::MdLink,
         });
     }
+    spans.sort_by_key(|span| span.start);
     spans
 }
 
@@ -539,17 +544,33 @@ mod tests {
                 color: ThemeColor::Success
             }]
         );
-        // An unterminated quote falls back to the bare-path form.
+        // An unterminated quote runs to the end of the line; a flag inside a quoted path is no
+        // flag; a delimiter (`=`, a quote) starts an `@` token too.
         assert_eq!(
             find_arg_tokens(r#"a @"open b"#, 0, false),
             vec![ArgTokenSpan {
                 start: 2,
-                end: 8,
+                end: 10,
                 color: ThemeColor::Success
             }]
         );
-        // A backslash escape can carry a non-space char; the token stops at the first whitespace
-        // either way.
+        assert_eq!(
+            find_arg_tokens(r#"a @"my --file" b"#, 0, false),
+            vec![ArgTokenSpan {
+                start: 2,
+                end: 14,
+                color: ThemeColor::Success
+            }]
+        );
+        assert_eq!(
+            find_arg_tokens("cfg=@a.rs", 0, false),
+            vec![ArgTokenSpan {
+                start: 4,
+                end: 9,
+                color: ThemeColor::Success
+            }]
+        );
+        // A backslash is a plain path char.
         assert_eq!(
             find_arg_tokens(r"a @pa\th b", 0, false),
             vec![ArgTokenSpan {
