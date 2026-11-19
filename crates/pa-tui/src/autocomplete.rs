@@ -857,7 +857,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
 
     /// Replace the token at the cursor as the current text reads, never as the lookup that
     /// built the menu read it (typing runs ahead of an open menu): the `@` token, else a
-    /// `/name` token, else the path token — `get_suggestions`' extraction order.
+    /// `/name` token or a command's argument, else the path token — `get_suggestions`'
+    /// extraction order.
     fn apply_completion(
         &self,
         lines: &[String],
@@ -888,6 +889,19 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                     item,
                     &context.prefix,
                 );
+            }
+            // An argument item replaces the whole typed argument, as `get_suggestions` matched
+            // it against the trimmed argument text.
+            if context.kind == SlashKind::Argument
+                && context
+                    .command_name
+                    .as_deref()
+                    .and_then(|command| self.arguments.get(command))
+                    .is_some_and(|items| items.iter().any(|argument| argument.value == item.value))
+            {
+                let start = before.len() - context.prefix.chars().count();
+                let argument = PathToken::bare(start, context.prefix);
+                return apply_file_completion(lines, cursor_line, cursor_col, item, &argument);
             }
         }
         let token = path_token::path_token_before(before);

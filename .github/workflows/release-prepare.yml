@@ -214,11 +214,7 @@ jobs:
 
           ### What this PR is
 
-          The reviewed half of the release flow: the workspace version bump plus the
-          `.changes/` fragment fold. Nothing else lands here - this PR IS the
-          release's review surface (`RELEASE-FLOW-PROPOSAL.md` §1). Review the section
-          below as the changelog's final read; reverting a fragment means deleting its
-          bullet here before merge.
+          The reviewed half of the release flow: the workspace version bump plus the `.changes/` fragment fold. Nothing else lands here - this PR IS the release's review surface (`RELEASE-FLOW-PROPOSAL.md` §1). Review the section below as the changelog's final read; reverting a fragment means deleting its bullet here before merge.
 
           {folded}
 
@@ -230,32 +226,17 @@ jobs:
 
           ### What happens on merge (the flow under the operator's eye)
 
-          1. The tag act of `release-prepare` creates the annotated `{tag}` at this
-             PR's squash-merge commit via the GitHub API (the release-bot App; no
-             user PAT, no local tags).
-          2. `release.yml` (tag-triggered, unchanged) validates tag == Cargo.toml,
-             builds the 5-target matrix (the windows MSVC build included), and
-             `promote` waits for the protected `release` environment approval -
-             **the approval is the publish**.
-          3. On approval: assets + SHA256SUMS + SBOMs + SLSA provenance +
-             `latest.json` land on the `{tag}` GitHub release; the in-app updater
-             (`latest.json`) picks it up, and the curl install lands with the
-             channels lane (the artifact path keeps working meanwhile).
+          1. The tag act of `release-prepare` creates the annotated `{tag}` at this PR's squash-merge commit via the GitHub API (the release-bot App; no user PAT, no local tags).
+          2. `release.yml` (tag-triggered, unchanged) validates tag == Cargo.toml, builds the 5-target matrix (the windows MSVC build included), and `promote` waits for the protected `release` environment approval - **the approval is the publish**.
+          3. On approval: assets + SHA256SUMS + SBOMs + SLSA provenance + `latest.json` land on the `{tag}` GitHub release; the in-app updater (`latest.json`) picks it up, and the curl install lands with the channels lane (the artifact path keeps working meanwhile).
 
           ### Config checklist (operator org-settings - the machinery is inert until these are wired)
 
-          - [ ] The release-bot GitHub App: Contents: Read & write, installed on
-                `{repo}`; secrets `RELEASE_BOT_CLIENT_ID` + `RELEASE_BOT_PRIVATE_KEY`.
-                (Without it this PR could not have been opened - the guard holds.)
-          - [ ] The `v*` tag protection rule (Settings - Tags): only the release bot
-                and named humans may create/move tags; manual/local tags are refused.
-          - [ ] The `release` environment approvers (Settings - Environments -
-                release): the promotion authority for the promote gate.
+          - [ ] The release-bot GitHub App: Contents: Read & write, installed on `{repo}`; secrets `RELEASE_BOT_CLIENT_ID` + `RELEASE_BOT_PRIVATE_KEY`. (Without it this PR could not have been opened - the guard holds.)
+          - [ ] The `v*` tag protection rule (Settings - Tags): only the release bot and named humans may create/move tags; manual/local tags are refused.
+          - [ ] The `release` environment approvers (Settings - Environments - release): the promotion authority for the promote gate.
 
-          _No tag is cut by opening or reviewing this PR; the tag act runs only after
-          the merge, and the publish itself is gated behind the environment approval.
-          If the tag act's run fails (a transient API error), re-run it from the run
-          page - it is idempotent._
+          _No tag is cut by opening or reviewing this PR; the tag act runs only after the merge, and the publish itself is gated behind the environment approval. If the tag act's run fails (a transient API error), re-run it from the run page - it is idempotent._
           """
           print(textwrap.dedent(body).lstrip("\n"))
           PY

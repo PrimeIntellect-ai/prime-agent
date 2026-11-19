@@ -31,23 +31,22 @@ fn extract_frontmatter(content: &str) -> (Option<String>, String) {
     (Some(yaml.to_string()), body)
 }
 
-/// Parse `---` YAML frontmatter into a JSON object plus the body.
-#[must_use]
-pub fn parse_frontmatter(content: &str) -> (Value, String) {
+/// Parse `---` YAML frontmatter into a JSON object plus the body. Invalid
+/// YAML is the frontmatter's `Err`; the body is split off either way.
+pub fn parse_frontmatter(content: &str) -> (Result<Value, serde_yaml::Error>, String) {
     let (yaml_string, body) = extract_frontmatter(content);
     let Some(yaml_string) = yaml_string else {
-        return (serde_json::Map::new().into(), body);
+        return (Ok(serde_json::Map::new().into()), body);
     };
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(&yaml_string) {
-        Ok(parsed) => parsed,
-        Err(_) => return (serde_json::Map::new().into(), body),
-    };
-    let converted = serde_json::to_value(parsed).unwrap_or_else(|_| serde_json::Map::new().into());
-    let frontmatter = if converted.is_null() {
-        serde_json::Map::new().into()
-    } else {
-        converted
-    };
+    let frontmatter = serde_yaml::from_str::<serde_yaml::Value>(&yaml_string).map(|parsed| {
+        let converted =
+            serde_json::to_value(parsed).unwrap_or_else(|_| serde_json::Map::new().into());
+        if converted.is_null() {
+            serde_json::Map::new().into()
+        } else {
+            converted
+        }
+    });
     (frontmatter, body)
 }
 
@@ -65,6 +64,7 @@ mod tests {
     fn parses_simple_frontmatter() {
         let (frontmatter, body) =
             parse_frontmatter("---\nname: my-skill\ndescription: A skill\n---\nUse it well.");
+        let frontmatter = frontmatter.unwrap();
         assert_eq!(frontmatter["name"], "my-skill");
         assert_eq!(frontmatter["description"], "A skill");
         assert_eq!(body, "Use it well.");
@@ -73,6 +73,7 @@ mod tests {
     #[test]
     fn no_frontmatter_returns_body() {
         let (frontmatter, body) = parse_frontmatter("Just text");
+        let frontmatter = frontmatter.unwrap();
         assert!(frontmatter.as_object().unwrap().is_empty());
         assert_eq!(body, "Just text");
     }
@@ -80,6 +81,7 @@ mod tests {
     #[test]
     fn unterminated_frontmatter_returns_body() {
         let (frontmatter, body) = parse_frontmatter("---\nname: x\nno end");
+        let frontmatter = frontmatter.unwrap();
         assert!(frontmatter.as_object().unwrap().is_empty());
         assert_eq!(body, "---\nname: x\nno end");
     }
@@ -90,6 +92,7 @@ mod tests {
         // document is the body (the slice bounds are inverted).
         for text in ["---\n---\nbody", "---\n---", "---\n----\nbody"] {
             let (frontmatter, body) = parse_frontmatter(text);
+            let frontmatter = frontmatter.unwrap();
             assert!(frontmatter.as_object().unwrap().is_empty(), "{text}");
             assert_eq!(body, text, "{text} is the body verbatim");
         }
@@ -99,6 +102,7 @@ mod tests {
     fn an_empty_first_line_between_delimiters_is_no_frontmatter() {
         // `---x\n---\nbody`: TS slice(4, 4) = "" -> falsy -> no frontmatter.
         let (frontmatter, body) = parse_frontmatter("---x\n---\nbody");
+        let frontmatter = frontmatter.unwrap();
         assert!(frontmatter.as_object().unwrap().is_empty());
         assert_eq!(body, "---x\n---\nbody");
     }
@@ -106,6 +110,7 @@ mod tests {
     #[test]
     fn crlf_and_bom_normalized() {
         let (frontmatter, _) = parse_frontmatter("\u{feff}---\r\nname: x\r\n---\r\nbody");
+        let frontmatter = frontmatter.unwrap();
         assert_eq!(frontmatter["name"], "x");
     }
 }

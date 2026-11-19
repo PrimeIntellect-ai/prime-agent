@@ -257,6 +257,7 @@ impl SessionEngine for ScriptedEngine {
                     },
                     "timestamp": crate::util::now_ms(),
                 })),
+                streaming_behavior: None,
             },
             goal_update: Some(goal.state.clone()),
             // The scripted faux mints through no real driver: no guard.
@@ -451,6 +452,7 @@ impl SessionEngine for ScriptedEngine {
         run_messages.push(final_message);
         run_messages.extend(tool_results);
         if !emit(EngineEvent::AgentEnd {
+            aborted: false,
             messages: run_messages,
         }) {
             emit(cancelled());

@@ -208,27 +208,26 @@ pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult
         .collect()
 }
 
-/// Merged cross-session + in-session refinement history.
-#[must_use]
-pub fn load_refinement_history(
-    session: &SessionManager,
-    global_harness_dir: &Path,
-) -> Vec<RefinementResult> {
-    let global = load_global_refinement_history(global_harness_dir);
-    let session_entries = session.refinement_history();
-    crate::refinement::merge_refinement_history(&global, &session_entries)
+/// The refinement stores, the same directory pair the kernel reads and the
+/// harness digest renders: the global under the agent dir's harness path,
+/// the local in the session's own artifact state. Refinement paths derive
+/// their stores from the session's harness digest context.
+#[derive(Debug, Clone)]
+pub struct RefinementStores {
+    /// Global harness state directory (`<agent dir>/harness`).
+    pub global_dir: PathBuf,
+    /// The session's own local harness state directory, when the session
+    /// persists artifacts.
+    pub local_dir: Option<PathBuf>,
 }
 
-/// The session's local harness state directory (under the session dir).
-///
-/// # Panics
-///
-/// The `expect` cannot fire: the mapping is total for `Some` session dirs.
-#[must_use]
-pub fn local_harness_state_dir(session: &SessionManager) -> PathBuf {
-    let session_dir = session.get_session_dir().to_path_buf();
-    crate::refinement::get_local_harness_state_dir(Some(&session_dir))
-        .expect("session dir always yields a local harness dir")
+impl From<&super::harness_digest::HarnessDigestContext> for RefinementStores {
+    fn from(context: &super::harness_digest::HarnessDigestContext) -> Self {
+        Self {
+            global_dir: context.global_dir.clone(),
+            local_dir: context.local_dir.clone(),
+        }
+    }
 }
 
 /// Strip display-only `local:`/`global:` prefixes from edit ids.
@@ -282,7 +281,7 @@ pub async fn execute_refinement(
     session: &tokio::sync::Mutex<SessionManager>,
     agent: &pa_agent::agent::Agent,
     transcript: RefinementTranscript<'_>,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
     model: &pa_types::ai::Model,
     options: &RefineOptions,
     source: RefinementSource,
@@ -293,7 +292,7 @@ pub async fn execute_refinement(
         session,
         agent_dir,
         transcript,
-        global_harness_dir,
+        stores,
         model,
         options,
         refine_call,
@@ -343,7 +342,7 @@ pub(crate) async fn run_refinement(
     source: RefinementSource,
     model: pa_types::ai::Model,
     refine_call: crate::refinement::executor::RefinerFn,
-    global_harness_dir: PathBuf,
+    stores: RefinementStores,
 ) -> anyhow::Result<CommittedRefinement> {
     let _flight = RefinementFlightGuard::enter(refinements_in_flight);
     let ready = pa_agent::abort::race_with_abort(
@@ -362,7 +361,7 @@ pub(crate) async fn run_refinement(
                     messages: &messages,
                     refinement_history: &refinement_history,
                 },
-                &global_harness_dir,
+                &stores,
                 &model,
                 &options,
                 refine_call,
@@ -399,7 +398,7 @@ pub(crate) async fn prepare_refinement(
     session: &tokio::sync::Mutex<SessionManager>,
     agent_dir: Option<&Path>,
     transcript: RefinementTranscript<'_>,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
     model: &pa_types::ai::Model,
     options: &RefineOptions,
     refine_call: crate::refinement::executor::RefinerFn,
@@ -408,13 +407,9 @@ pub(crate) async fn prepare_refinement(
         messages,
         refinement_history,
     } = transcript;
-    let (local_harness_dir, has_session_dir, cwd) = {
+    let (local_harness_dir, cwd) = {
         let session = session.lock().await;
-        (
-            local_harness_state_dir(&session),
-            session.has_session_dir(),
-            session.get_cwd().to_path_buf(),
-        )
+        (stores.local_dir.clone(), session.get_cwd().to_path_buf())
     };
     // The live master gate decides before any harness load or plan request:
     // a disabled session never plans. The one settings construction rides
@@ -445,23 +440,24 @@ pub(crate) async fn prepare_refinement(
     } else {
         HarnessScope::Local
     };
-    // A local refinement needs the session's own directory: its harness state
-    // and artifact paths live there. The daemon's engine session is deliberately
-    // non-persisted but carries the session's directory, so local refinement runs.
-    if options.rollback_id.is_none() && requested_scope == HarnessScope::Local && !has_session_dir {
-        anyhow::bail!(
-            "Local harness refinement requires a session directory; use global refinement instead."
-        );
+    // A local refinement needs the session's own harness state directory
+    // (the digest context's `local_dir`): the per-session artifact store the
+    // kernel and the digest read. Sessions without one — a pathless session —
+    // refuse rather than write a store no digest ever shows.
+    if options.rollback_id.is_none() && requested_scope == HarnessScope::Local {
+        local_store_dir(local_harness_dir.as_deref())?;
     }
     // Planning state: global, or merged global+local for local refinements.
-    let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
+    let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
     let planning_state = if requested_scope == HarnessScope::Global {
         global_state.clone()
     } else {
-        let local_state = load_harness_state(&local_harness_dir, HarnessScope::Local);
-        merge_harness_states(&global_state, Some(&local_state))
+        let local_state = local_harness_dir
+            .as_deref()
+            .map(|dir| load_harness_state(dir, HarnessScope::Local));
+        merge_harness_states(&global_state, local_state.as_ref())
     };
-    let global = load_global_refinement_history(global_harness_dir);
+    let global = load_global_refinement_history(&stores.global_dir);
     let history = crate::refinement::merge_refinement_history(&global, refinement_history);
     // Baseline captured before the (slow) LLM pass, so concurrent kernel
     // writes are rejected instead of clobbered.
@@ -472,8 +468,8 @@ pub(crate) async fn prepare_refinement(
         .and_then(crate::refinement::infer_refinement_result_scope)
         .unwrap_or(requested_scope);
     let baseline_dir = match baseline_scope {
-        HarnessScope::Global => global_harness_dir.to_path_buf(),
-        HarnessScope::Local => local_harness_dir.clone(),
+        HarnessScope::Global => stores.global_dir.clone(),
+        HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     let baseline_state = load_harness_state(&baseline_dir, baseline_scope);
 
@@ -490,17 +486,63 @@ pub(crate) async fn prepare_refinement(
 
     let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
     let target_dir = match target_scope {
-        HarnessScope::Global => global_harness_dir.to_path_buf(),
-        HarnessScope::Local => local_harness_dir.clone(),
+        HarnessScope::Global => stores.global_dir.clone(),
+        HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
+    // A rollback must land in the store its target actually wrote, named
+    // by the recorded `harness_state_path`. A mismatch means the record
+    // predates the store split (the orphan agent-dir file, the shared
+    // sessions-root file) or belongs to another session; applying the
+    // inverse to the current store would edit entries the refinement
+    // never touched, so refuse and name both files. The recorded path is
+    // the raw join `save_harness_state` returned, so the same store can
+    // carry two spellings (a symlinked or relative dir): compare the
+    // real files, keeping a spelling only when that side no longer
+    // exists on disk.
+    if let Some(rollback_id) = &core_options.rollback_id {
+        if let Some(recorded) = history
+            .iter()
+            .find(|item| &item.id == rollback_id)
+            .map(|item| item.harness_state_path.clone())
+            .filter(|recorded| !recorded.is_empty())
+        {
+            let current = crate::refinement::get_harness_state_path(&target_dir);
+            let recorded_store = crate::skills::loader::canonicalize_path(Path::new(&recorded));
+            let current_store = crate::skills::loader::canonicalize_path(&current);
+            if recorded_store != current_store {
+                anyhow::bail!(
+                    "Refinement {rollback_id} was recorded against the harness store {recorded}, \
+                     not this session's current store {}; the rollback is refused rather than \
+                     edit a store the refinement never touched. The recorded store is either a \
+                     pre-split file nothing reads anymore or another session's store (a fork \
+                     inherits its parent's records): edit or remove the entry by hand in the \
+                     recorded store, or roll the refinement back from the session that wrote it",
+                    current.display()
+                );
+            }
+        }
+    }
     Ok(ReadyRefinement {
         plan,
         core_options,
         baseline_state,
         target_scope,
         target_dir,
-        global_harness_dir: global_harness_dir.to_path_buf(),
+        global_harness_dir: stores.global_dir.clone(),
         settings,
+    })
+}
+
+/// The local store dir for a scope that resolved local: a session without
+/// one cannot apply or roll back a local refinement, so it refuses rather
+/// than write a store no digest ever shows. The refusal keeps the TS
+/// wording (v0.9.8 `agent-session.ts`): it names the user's real next step,
+/// not the internal path the session lacks.
+fn local_store_dir(local_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
+    local_dir.map(Path::to_path_buf).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Local harness refinement requires a persisted session; use global refinement instead."
+        )
     })
 }
 
@@ -518,7 +560,11 @@ async fn reserve_refinement_commit<'a>(
     compaction_flight: Option<&'a tokio::sync::Mutex<()>>,
 ) -> anyhow::Result<RefinementCommitGuards<'a>> {
     tokio::fs::create_dir_all(&target_dir).await?;
-    let state_path = crate::refinement::get_harness_state_path(target_dir);
+    // Lock the file the kernel locks: the real file behind a state
+    // symlink, so both writers contend on one lock directory.
+    let state_path = crate::refinement::resolved_state_file(
+        &crate::refinement::get_harness_state_path(target_dir),
+    );
     let mut attempts = 0;
     let guards = loop {
         let admission = agent.reserve_idle().await;
@@ -779,7 +825,7 @@ async fn review_compact_refinement(
     usage_store: std::sync::Arc<dyn super::rlm_usage::RlmChildUsageStore>,
     model: &pa_types::ai::Model,
     api_key: Option<String>,
-    global_harness_dir: &Path,
+    stores: &RefinementStores,
     turns_since_last_review: u32,
     branch_version: u64,
 ) -> anyhow::Result<Option<AutoRefineReview>> {
@@ -787,13 +833,15 @@ async fn review_compact_refinement(
     // against, extracted under this lock from the retained rows.
     let (parts, merged_state, history, session_id) = {
         let session = session.lock().await;
-        let local_state =
-            load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
-        let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
+        let local_state = stores
+            .local_dir
+            .as_deref()
+            .map(|dir| load_harness_state(dir, HarnessScope::Local));
+        let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
         (
             session.refine_transcript_parts(),
-            merge_harness_states(&global_state, Some(&local_state)),
-            load_global_refinement_history(global_harness_dir),
+            merge_harness_states(&global_state, local_state.as_ref()),
+            load_global_refinement_history(&stores.global_dir),
             session.get_session_id().to_string(),
         )
     };
@@ -838,7 +886,31 @@ async fn review_compact_refinement(
     Ok(Some(review))
 }
 
+/// The refusal for a session built without a harness digest context: it has
+/// no store pair to read or write, so every refinement entry point errors
+/// instead of guessing a directory.
+pub(crate) fn refinement_stores_missing_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "refinement requires the session's harness digest context; this session was built without one"
+    )
+}
+
 impl AgentSession {
+    /// The refinement stores: the session's harness digest context's store
+    /// pair, the same directories the kernel reads and the digest renders.
+    /// Every refinement entry point on the session derives its stores here.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the session was built without a harness digest context;
+    /// engine-built sessions always carry one.
+    pub(crate) fn refinement_stores(&self) -> anyhow::Result<RefinementStores> {
+        self.harness_digest
+            .as_ref()
+            .map(RefinementStores::from)
+            .ok_or_else(refinement_stores_missing_error)
+    }
+
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
     /// decline; `Ok(Some(review))` a fresh approval.
@@ -855,13 +927,13 @@ impl AgentSession {
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: &Path,
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> anyhow::Result<Option<AutoRefineReview>> {
         if !self.harness_refinements_enabled() {
             return Ok(None);
         }
+        let stores = self.refinement_stores()?;
         pa_agent::abort::race_with_abort(
             review_compact_refinement(
                 &self.session,
@@ -870,7 +942,7 @@ impl AgentSession {
                 std::sync::Arc::clone(&self.usage_store),
                 model,
                 api_key,
-                global_harness_dir,
+                &stores,
                 turns_since_last_review,
                 branch_version,
             ),
@@ -886,7 +958,6 @@ impl AgentSession {
         &self,
         model: pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: PathBuf,
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> tokio::task::JoinHandle<anyhow::Result<Option<CommittedRefinement>>> {
@@ -899,6 +970,9 @@ impl AgentSession {
         let agent_dir = self.agent_dir.clone();
         let usage_store = std::sync::Arc::clone(&self.usage_store);
         let cancel = self.refinement_signal();
+        let Ok(stores) = self.refinement_stores() else {
+            return tokio::spawn(async { Err(refinement_stores_missing_error()) });
+        };
         tokio::spawn(async move {
             let Some(review) = pa_agent::abort::race_with_abort(
                 review_compact_refinement(
@@ -908,7 +982,7 @@ impl AgentSession {
                     std::sync::Arc::clone(&usage_store),
                     &model,
                     api_key.clone(),
-                    &global_harness_dir,
+                    &stores,
                     turns_since_last_review,
                     branch_version,
                 ),
@@ -940,7 +1014,7 @@ impl AgentSession {
                 RefinementSource::Auto,
                 model,
                 refiner,
-                global_harness_dir,
+                stores,
             )
             .await
             .map(Some)
@@ -954,9 +1028,9 @@ impl AgentSession {
         review: &AutoRefineReview,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
         cancel: pa_agent::abort::AbortSignal,
     ) -> anyhow::Result<RefinementResult> {
+        let stores = self.refinement_stores()?;
         let options = RefineOptions {
             global: false,
             instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
@@ -986,7 +1060,7 @@ impl AgentSession {
             RefinementSource::Auto,
             model.clone(),
             refiner,
-            global_harness_dir,
+            stores,
         )
         .await
         .map(|committed| committed.result)
@@ -1112,6 +1186,47 @@ mod tests {
         session
     }
 
+    /// The local store a production session's digest context carries for a
+    /// materialized manager: the session's own artifact harness dir
+    /// (`<dir>/session-artifacts/<id>/harness`), the derivation
+    /// `create_session` wires — not the session dir itself.
+    fn local_store_for(manager: &SessionManager) -> PathBuf {
+        crate::refinement::get_local_harness_state_dir(
+            manager.get_session_artifact_dir().as_deref(),
+        )
+        .expect("a materialized manager always has an artifact dir")
+    }
+
+    /// Seed one memory entry into a harness store dir, the shape a prior
+    /// refinement wrote. `merge_harness_states` re-scopes by source store,
+    /// so the entry's scope field only names the store it was seeded into.
+    fn seed_store_memory(dir: &std::path::Path, id: &str, scope: HarnessScope) {
+        let mut state = crate::refinement::empty_harness_state();
+        state
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                id.to_string(),
+                crate::refinement::HarnessEntry {
+                    id: id.to_string(),
+                    kind: crate::refinement::RefinementKind::Memory,
+                    title: format!("Seeded {id} entry"),
+                    content: format!("Seeded {id} content"),
+                    path: "general".to_string(),
+                    scope: Some(scope),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
+                    source: "agent".to_string(),
+                    created_at: "2026-11-16T00:00:00Z".to_string(),
+                    updated_at: "2026-11-16T00:00:00Z".to_string(),
+                    version: 1,
+                },
+            );
+        crate::refinement::save_harness_state(dir, &state).unwrap();
+    }
+
     fn user_message(text: &str) -> AgentMessage {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
@@ -1127,6 +1242,7 @@ mod tests {
         manager
             .append_message(user_message("remember this"))
             .unwrap();
+        let local_dir = local_store_for(&manager);
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
@@ -1142,7 +1258,10 @@ mod tests {
                 messages: &[],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1160,7 +1279,10 @@ mod tests {
                 messages: &[user_message("remember this")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::SelfRefine,
@@ -1178,11 +1300,80 @@ mod tests {
             session.lock().await.retained_entries(),
             entries_before.as_slice()
         );
-        let session_guard = session.lock().await;
-        assert!(!local_harness_state_dir(&session_guard)
-            .join("harness_state.json")
-            .exists());
+        assert!(!local_dir.join("harness_state.json").exists());
         assert!(!global_dir.exists());
+    }
+
+    /// A local refinement on a session without a local store refuses with the
+    /// TS wording (v0.9.8's persisted-session message) before any planner call.
+    #[tokio::test]
+    async fn a_local_refinement_without_a_local_store_refuses_with_the_ts_message() {
+        let dir = TempDir::new().unwrap();
+        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: &[],
+            },
+            &RefinementStores {
+                global_dir: dir.path().join("harness"),
+                local_dir: None,
+            },
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            Box::new(|_, _, _| panic!("a refused local refinement must not call the planner")),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Local harness refinement requires a persisted session; use global refinement instead."
+        );
+    }
+
+    /// A session built without a harness digest context (`AgentSession::new`
+    /// is the only such constructor) refuses at the refinement entry points
+    /// instead of guessing a store pair.
+    #[tokio::test]
+    async fn a_session_without_a_digest_context_refuses_refinements() {
+        let dir = TempDir::new().unwrap();
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let session = AgentSession::new(agent, persisted_session(&dir), Vec::new())
+            .await
+            .unwrap();
+        let error = session
+            .refine_with_refiner(
+                &RefineOptions::default(),
+                RefinementSource::User,
+                &test_model(),
+                seam(r#"{"summary":"bench","edits":[]}"#),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "refinement requires the session's harness digest context; this session was built without one"
+        );
+        // The background funnel refuses the same way.
+        let error = session
+            .start_refinement(
+                RefineOptions::default(),
+                RefinementSource::User,
+                test_model(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "refinement requires the session's harness digest context; this session was built without one"
+        );
     }
 
     #[test]
@@ -1272,7 +1463,9 @@ Reviewer instructions: record it"
         // is off, the edit refuses with the one exact disabled message
         // and nothing persists; enabled, the same proposal applies.
         let dir = TempDir::new().unwrap();
-        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
@@ -1283,7 +1476,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1297,10 +1493,7 @@ Reviewer instructions: record it"
             disabled.applied_edits[0].error.as_deref(),
             Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
         );
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
         // The user opts in: the same proposal applies, read live from the
         // agent dir's settings.json.
@@ -1318,7 +1511,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1329,7 +1525,7 @@ Reviewer instructions: record it"
         .unwrap();
         assert!(enabled.applied_edits[0].applied);
         assert!(enabled.applied_edits[0].error.is_none());
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].contains_key("sweep"));
     }
 
@@ -1343,7 +1539,9 @@ Reviewer instructions: record it"
         // persists, and a plan authored while disabled that lands after
         // the opt-in applies.
         let dir = TempDir::new().unwrap();
-        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let agent_dir = dir.path().join("agent");
@@ -1359,7 +1557,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1373,10 +1574,7 @@ Reviewer instructions: record it"
             turned_off.applied_edits[0].error.as_deref(),
             Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
         );
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
         // Authored while disabled; the request opts in.
         std::fs::write(&settings, r#"{"factory": {"enabled": false}}"#).unwrap();
@@ -1387,7 +1585,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1407,6 +1608,7 @@ Reviewer instructions: record it"
         manager
             .append_message(user_message("do a thing twice"))
             .unwrap();
+        let local_dir = local_store_for(&manager);
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
@@ -1418,7 +1620,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1431,10 +1636,7 @@ Reviewer instructions: record it"
         assert!(result.applied_edits[0].applied);
         let state_path = Path::new(&result.harness_state_path);
         assert!(state_path.exists());
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"));
         let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
@@ -1448,7 +1650,11 @@ Reviewer instructions: record it"
             .collect();
         assert_eq!(custom_messages.len(), 2);
         let session = session.lock().await;
-        assert_eq!(load_refinement_history(&session, &global_dir).len(), 1);
+        let merged_history = crate::refinement::merge_refinement_history(
+            &load_global_refinement_history(&global_dir),
+            &session.refinement_history(),
+        );
+        assert_eq!(merged_history.len(), 1);
     }
 
     /// The failed rows stay live-indexed so the in-process history sees
@@ -1469,6 +1675,7 @@ Reviewer instructions: record it"
         let file = manager.get_session_file().unwrap().to_path_buf();
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
+        let local_dir = local_store_for(&manager);
         let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let error = execute_refinement(
@@ -1478,7 +1685,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("x")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions::default(),
             RefinementSource::User,
@@ -1491,10 +1701,7 @@ Reviewer instructions: record it"
             error.to_string().contains("audit:"),
             "the audit error surfaces after the durable writes: {error:#}"
         );
-        let session_dir = session.lock().await.get_session_dir().to_path_buf();
-        let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
-        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m9"));
         let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
@@ -1561,7 +1768,15 @@ Reviewer instructions: record it"
                 probe.await.unwrap();
                 std::fs::write(&path, &body).unwrap();
             }
+            // Two distinct stores, the shape every production session
+            // wires: the global store and the session's own local store
+            // never share a directory. Each carries one seeded entry, so
+            // a crossed read — the local half reading the global store —
+            // changes the prompt this test compares.
             let global_harness_dir = dir.path().join("harness");
+            let local_harness_dir = dir.path().join("local-harness");
+            seed_store_memory(&global_harness_dir, "gseed", HarnessScope::Global);
+            seed_store_memory(&local_harness_dir, "lseed", HarnessScope::Local);
             let parts = session.refine_transcript_parts();
             let crate::session::manager::RefineTranscriptParts {
                 messages,
@@ -1579,7 +1794,10 @@ Reviewer instructions: record it"
                     messages: &messages,
                     refinement_history: &refinement_history,
                 },
-                &global_harness_dir,
+                &RefinementStores {
+                    global_dir: global_harness_dir.clone(),
+                    local_dir: Some(local_harness_dir.clone()),
+                },
                 &test_model(),
                 &RefineOptions::default(),
                 RefinementSource::User,
@@ -1615,6 +1833,16 @@ Reviewer instructions: record it"
             captured[0].user.contains("hello 4"),
             "the fixture's conversation must appear in the prompt"
         );
+        assert!(
+            captured[0].user.contains("global:gseed]"),
+            "the planner read the global store: {}",
+            captured[0].user
+        );
+        assert!(
+            captured[0].user.contains("local:lseed]"),
+            "the planner read the session's own local store: {}",
+            captured[0].user
+        );
 
         // The read-leg proof: the unleased window must serve an
         // out-of-band audit row.
@@ -1649,7 +1877,9 @@ Reviewer instructions: record it"
     #[tokio::test]
     async fn global_refinement_appends_history() {
         let dir = TempDir::new().unwrap();
-        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
         let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"global lesson","edits":[{"action":"create","kind":"memory","id":"g1","title":"Lesson","content":"durable"}]}"#;
@@ -1660,7 +1890,10 @@ Reviewer instructions: record it"
                 messages: &[user_message("x")],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions {
                 global: true,
@@ -1687,7 +1920,10 @@ Reviewer instructions: record it"
                 messages: &[],
                 refinement_history: &[],
             },
-            &global_dir,
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
             &test_model(),
             &RefineOptions {
                 global: true,
@@ -1704,6 +1940,221 @@ Reviewer instructions: record it"
         let global_state = load_harness_state(&global_dir, HarnessScope::Global);
         assert!(
             !global_state.entries[&crate::refinement::RefinementKind::Memory].contains_key("g1")
+        );
+    }
+
+    /// A rollback whose target recorded a different harness store than the
+    /// session's current one — a pre-split record (the old session-dir or
+    /// orphan agent-dir file) or another session's store — refuses and
+    /// names both files instead of applying the inverse to a store the
+    /// refinement never touched.
+    #[tokio::test]
+    async fn a_rollback_recorded_against_another_store_refuses_and_names_both() {
+        let dir = TempDir::new().unwrap();
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let global_dir = dir.path().join("harness");
+        // The pre-upgrade local record: the session dir's harness store,
+        // the derivation this change replaced.
+        let legacy_local_store = dir.path().join("session").join("harness");
+        let legacy_local = RefinementResult {
+            id: "refine_legacy_local".to_string(),
+            summary: "legacy local".to_string(),
+            rationale: "legacy".to_string(),
+            expected_outcome: "legacy".to_string(),
+            applied_edits: vec![],
+            harness_state_path: crate::refinement::get_harness_state_path(&legacy_local_store)
+                .display()
+                .to_string(),
+            rollback_of: None,
+            scope: Some(HarnessScope::Local),
+        };
+        // The pre-upgrade global record: the orphan file directly in the
+        // agent dir.
+        let legacy_global_store = dir.path().join("agent").join("harness_state.json");
+        let legacy_global = RefinementResult {
+            id: "refine_legacy_global".to_string(),
+            summary: "legacy global".to_string(),
+            rationale: "legacy".to_string(),
+            expected_outcome: "legacy".to_string(),
+            applied_edits: vec![],
+            harness_state_path: legacy_global_store.display().to_string(),
+            rollback_of: None,
+            scope: Some(HarnessScope::Global),
+        };
+        let rollback = |rollback_id: &str, global: bool| RefineOptions {
+            global,
+            rollback_id: Some(rollback_id.to_string()),
+            ..Default::default()
+        };
+        // The local arm: the current store is the session's artifact dir.
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: std::slice::from_ref(&legacy_local),
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &rollback("refine_legacy_local", false),
+            RefinementSource::User,
+            seam("unused"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(&legacy_local.harness_state_path),
+            "the refusal names the recorded store: {error:#}"
+        );
+        assert!(
+            error.to_string().contains(
+                crate::refinement::get_harness_state_path(&local_dir)
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "the refusal names the current store: {error:#}"
+        );
+        // The refusal stays true for both mismatch kinds: it names
+        // another session's store (the fork-copied record) and drops
+        // the pre-split-only claim that was false for that case.
+        assert!(
+            error.to_string().contains("another session's store"),
+            "the refusal covers the fork-copied record: {error:#}"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("predates the store split and is no longer read"),
+            "no claim that every recorded file predates the split: {error:#}"
+        );
+        assert!(
+            !local_dir.join("harness_state.json").exists(),
+            "the refusal happens before any write to the current store"
+        );
+        // The global arm: the current store is the agent dir's harness
+        // dir, not the orphan file beside it.
+        let error = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: std::slice::from_ref(&legacy_global),
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &rollback("refine_legacy_global", true),
+            RefinementSource::User,
+            seam("unused"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&legacy_global.harness_state_path),
+            "the refusal names the recorded store: {error:#}"
+        );
+        assert!(
+            error.to_string().contains(
+                crate::refinement::get_harness_state_path(&global_dir)
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "the refusal names the current store: {error:#}"
+        );
+        assert!(
+            !global_dir.join("harness_state.json").exists(),
+            "the refusal happens before any write to the current store"
+        );
+    }
+
+    /// A rollback whose record spells the current store through a symlink
+    /// still applies: the recorded `harness_state_path` is the raw join
+    /// `save_harness_state` returned, so one store can carry two spellings
+    /// (a symlinked dir — the macOS `$TMPDIR` shape — or a relative one),
+    /// and the guard compares the real files, not the path strings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rollback_recorded_through_a_re_spelled_store_still_applies() {
+        let dir = TempDir::new().unwrap();
+        let manager = persisted_session(&dir);
+        let local_dir = local_store_for(&manager);
+        let session = tokio::sync::Mutex::new(manager);
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
+        let global_dir = dir.path().join("harness");
+        // A real create through the session's own store.
+        let reply = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+        let result = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+            None,
+        )
+        .await
+        .unwrap();
+        // The same store re-spelled through a symlink, the shape a
+        // differently-resolved dir records.
+        let linked_store = dir.path().join("linked-store");
+        std::os::unix::fs::symlink(&local_dir, &linked_store).unwrap();
+        let mut record = result;
+        record.harness_state_path = crate::refinement::get_harness_state_path(&linked_store)
+            .display()
+            .to_string();
+        let rolled = execute_refinement(
+            &session,
+            &agent,
+            RefinementTranscript {
+                messages: &[],
+                refinement_history: std::slice::from_ref(&record),
+            },
+            &RefinementStores {
+                global_dir: global_dir.clone(),
+                local_dir: Some(local_dir.clone()),
+            },
+            &test_model(),
+            &RefineOptions {
+                rollback_id: Some(record.id.clone()),
+                ..Default::default()
+            },
+            RefinementSource::User,
+            seam("unused"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rolled.rollback_of.as_deref(),
+            Some(record.id.as_str()),
+            "the re-spelled record still rolls back: {rolled:#?}"
+        );
+        let state = load_harness_state(&local_dir, HarnessScope::Local);
+        assert!(
+            !state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"),
+            "the inverse Delete landed in the session's own store"
         );
     }
 }

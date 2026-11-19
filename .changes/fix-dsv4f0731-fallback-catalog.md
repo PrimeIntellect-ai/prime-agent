@@ -1,0 +1,1 @@
+- When the live model catalog is unavailable, DeepSeek V4 Flash 0731 on Prime Inference now offers the low and max reasoning levels its route accepts, and uses its real context window, output limit, and cache-read price.

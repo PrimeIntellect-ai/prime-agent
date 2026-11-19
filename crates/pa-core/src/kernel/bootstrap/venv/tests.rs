@@ -1120,6 +1120,193 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
 }
 
+/// A pyproject on disk, so record project names come from the file instead
+/// of the import-name fallback.
+#[cfg(unix)]
+fn write_skill_pyproject(dir: &Path, project_name: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        format!("[project]\nname = \"{project_name}\"\nversion = \"0.1.0\"\n"),
+    )
+    .unwrap();
+}
+
+/// Switching the session's `goal` between the bundled skill (project
+/// `goal`) and a user override (project `user-goal`, selected after the
+/// user's `-goal` setting) must leave the selected code importable each
+/// time. uv keeps differently named distributions side by side, so the
+/// other source's editable install would shadow the selected one on
+/// sys.path, and its path-keyed record would let a later sync skip a needed
+/// reinstall.
+#[cfg(unix)]
+#[tokio::test]
+async fn switching_a_skill_between_sources_replaces_the_other_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            dir.path().join("uv.log").display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let packaged_path = dir.path().join("payload/skills/goal");
+    let user_path = dir.path().join("home/skills/goal");
+    write_skill_pyproject(&packaged_path, "goal");
+    write_skill_pyproject(&user_path, "user-goal");
+    let packaged_skill = skill("goal", packaged_path.to_str().unwrap(), "packaged-hash");
+    let user_skill = skill("goal", user_path.to_str().unwrap(), "user-hash");
+    let python = dir.path().join("python");
+    let mut recorded = Vec::new();
+    for selected in [&packaged_skill, &user_skill, &packaged_skill] {
+        sync_python_skills(
+            &UvCommand {
+                executable: uv.to_str().unwrap(),
+                project: None,
+            },
+            &venv,
+            &python,
+            dir.path().join("prime-agent-runtime").as_path(),
+            "sha256:rt",
+            std::slice::from_ref(selected),
+            &EnsureKernelPythonOptions::default(),
+        )
+        .await
+        .unwrap();
+        recorded.push(
+            read_bootstrap_version(&venv)
+                .expect("version written")
+                .python_skills
+                .expect("skills recorded"),
+        );
+    }
+    assert_eq!(
+        recorded,
+        vec![
+            vec![packaged_skill.clone()],
+            vec![user_skill.clone()],
+            vec![packaged_skill.clone()],
+        ],
+        "each sync records only the selected source"
+    );
+    let python = python.display();
+    let runtime = dir.path().join("prime-agent-runtime");
+    let runtime = runtime.display();
+    let install = |path: &Path| {
+        format!(
+            "--no-config pip install --python {python} {runtime} --editable {}",
+            path.display()
+        )
+    };
+    assert_eq!(
+        uv_invocations(dir.path()),
+        vec![
+            install(&packaged_path),
+            format!("--no-config pip uninstall --python {python} goal"),
+            install(&user_path),
+            format!("--no-config pip uninstall --python {python} user-goal"),
+            install(&packaged_path),
+        ],
+        "each switch uninstalls the other source's distribution first"
+    );
+}
+
+/// uv replaces distributions by project name, so an install can displace a
+/// record with a DIFFERENT import name: a user skill importing `user_goal`
+/// from a distribution named `goal` (the bundled goal's project name) has
+/// its code replaced when a sync installs another `goal` distribution. The
+/// stale record must go, or the next session selecting the user skill
+/// short-circuits `kernel_ready` on it and imports a missing module.
+#[cfg(unix)]
+#[tokio::test]
+async fn installing_a_skill_drops_records_displaced_by_distribution_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            dir.path().join("uv.log").display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    // The user's skill imports `user_goal`, but its distribution is named
+    // `goal` — the same project name as the bundled goal.
+    let user_path = dir.path().join("home/skills/mygoal");
+    let packaged_path = dir.path().join("payload/skills/goal");
+    write_skill_pyproject(&user_path, "goal");
+    write_skill_pyproject(&packaged_path, "goal");
+    let user_skill = skill("user_goal", user_path.to_str().unwrap(), "user-hash");
+    let packaged_skill = skill("goal", packaged_path.to_str().unwrap(), "packaged-hash");
+    let uv_command = UvCommand {
+        executable: uv.to_str().unwrap(),
+        project: None,
+    };
+    // A previous session installed and recorded the user's skill.
+    write_bootstrap_version(&venv, "sha256:rt", std::slice::from_ref(&user_skill)).unwrap();
+
+    // The session's set now carries the packaged goal: uv replaces the
+    // `goal` distribution, so the user's record must not survive.
+    sync_python_skills(
+        &uv_command,
+        &venv,
+        dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
+        "sha256:rt",
+        std::slice::from_ref(&packaged_skill),
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let recorded = read_bootstrap_version(&venv)
+        .expect("version written")
+        .python_skills
+        .expect("skills recorded");
+    assert_eq!(
+        recorded,
+        vec![packaged_skill.clone()],
+        "the replaced-distribution record must not survive"
+    );
+    assert!(
+        !recorded_skills_cover(Some(&recorded), std::slice::from_ref(&user_skill)),
+        "the replaced record must not satisfy the next session's kernel_ready"
+    );
+
+    // The next session resyncs its own discovery: the user's skill returns
+    // and the packaged record goes, symmetrically.
+    sync_python_skills(
+        &uv_command,
+        &venv,
+        dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
+        "sha256:rt",
+        std::slice::from_ref(&user_skill),
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let recorded = read_bootstrap_version(&venv)
+        .expect("version written")
+        .python_skills
+        .expect("skills recorded");
+    assert_eq!(
+        recorded,
+        vec![user_skill.clone()],
+        "the sync installs the user's skill back over the packaged record"
+    );
+    // Same-project displacement needs no uninstall: uv's install replaces
+    // the distribution itself.
+    assert!(
+        !uv_invocations(dir.path())
+            .iter()
+            .any(|call| call.contains("uninstall")),
+        "same-project displacement replaces via the install: {:?}",
+        uv_invocations(dir.path())
+    );
+}
+
 /// Permission semantics need a non-root runner: `chmod` cannot deny root, so these
 /// tests skip as root and the gate harness runs the binary via `runuser` as a
 /// non-root user (a shared install dir readable but not writable, like the verifiers

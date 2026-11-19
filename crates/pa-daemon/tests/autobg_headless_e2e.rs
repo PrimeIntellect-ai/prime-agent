@@ -2,7 +2,9 @@
 //! blocking `await bash(...)` keeps the turn moving instead of wedging it,
 //! with NO override — the kernel bootstrap's default wiring (the
 //! bash.completed host handler flips the runtime's bounded default on) is
-//! the thing under test.
+//! the thing under test. The late completion lands in the session inbox
+//! (the default agent-inbox routing) and its short steering notice wakes
+//! the idle session.
 //!
 //! The mock provider scripts the turn: request 1 calls `python_repl` with a
 //! one-shot `await bash('sleep 5; echo ...')`. The await degrades at the
@@ -159,6 +161,51 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
             ),
             chunk(&json!({}), Some("stop")),
         ],
+        // The wake turn collects the saved handle through the production
+        // wiring: the `poll()` read fires `bash.consumed`, whose
+        // withdrawal drains the pushed inbox message. The count probe runs
+        // a model round later — host requests process concurrently, so
+        // the withdrawal may land after the poll's own count would have.
+        2 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-bounded-2",
+                        "type": "function",
+                        "function": {
+                            "name": "python_repl",
+                            "arguments": "{\"code\": \"r = res.handle.poll()\\nprint(('COLLECTED', r.exit_code))\"}"
+                        }
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ],
+        3 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-bounded-3",
+                        "type": "function",
+                        "function": {
+                            "name": "python_repl",
+                            "arguments": "{\"code\": \"from rlm import inbox\\nc = await inbox.count()\\nprint(('AFTER', c.count, dict(c.classes)))\"}"
+                        }
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ],
+        // Every later request (the woken turn's settle and anything past
+        // it) answers with the woken reply.
         _ => [
             chunk(
                 &json!({"role": "assistant", "content": "woken by the bash-done notice"}),
@@ -398,18 +445,40 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
     );
 
     // Event ORDER, part 2 — the command finishes past the turn, and its
-    // notice wakes the idle session: the woken reply can only follow the
-    // [bash-done] row that caused it.
+    // notice wakes the idle session: the completion message lands in the
+    // durable inbox, and the woken reply can only follow the short
+    // steering notice that caused it.
     let settled = wait_until(Duration::from_mins(1), || {
         let messages = client.messages(&active_id);
-        (messages.contains("[bash-done pid:") && messages.contains("exit:0")).then_some(messages)
+        (messages.contains("[inbox ") && messages.contains("1 new message (bash-done)"))
+            .then_some(messages)
     });
     let notice = settled
-        .find("[bash-done pid:")
-        .expect("the bash-done notice never landed");
+        .find("[inbox ")
+        .expect("the inbox arrival notice never landed");
     assert!(
         notice > turn_end,
         "the notice must land after the turn settled, not inside it: {settled}"
+    );
+    // The inbox journal is the durable copy of the completion message.
+    let session_file = std::fs::read_dir(dir.join("agent").join("sessions"))
+        .expect("sessions dir")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("the session file");
+    let inbox_journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(session_file.file_stem().expect("session file stem"))
+        .join("inbox.jsonl");
+    let inbox = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
+    assert!(
+        inbox.contains("BOUNDED_AWAIT_E2E_DONE"),
+        "the completion message never journaled: {inbox}"
     );
     // The wake itself: the woken reply can only exist after the notice.
     wait_until(Duration::from_mins(1), || {
@@ -419,6 +488,29 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
             .is_some_and(|at| at > notice);
         woken_after_notice.then_some(messages)
     });
+
+    // The collection pin (the production wiring): the woken turn read the
+    // saved handle, its `bash.consumed` withdrawal drained the pushed
+    // message — the count dropped to zero without a read — and the
+    // journal's last record marks the withdrawal.
+    let collected = client.messages(&active_id);
+    assert!(
+        collected.contains("('COLLECTED', 0)"),
+        "the wake turn never collected the handle: {collected}"
+    );
+    assert!(
+        collected.contains("('AFTER', 0, {})"),
+        "the collection drained the inbox message without a read: {collected}"
+    );
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("re-read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains("\"kind\":\"withdrawn\"")),
+        "the collection journaled its withdrawal: {journal}"
+    );
 
     // Teardown: stop the session through the live supervisor so the worker
     // (and its kernel + the 5s sleeper) do not leak past the test.

@@ -97,21 +97,32 @@ Queue-lane command surface (`queue_commands.rs`): the full TS
 (`AgentSession.mutateQueuedMessage`/`resumeQueuedWork`: preview-addressed
 delete/move/replace over the two lanes with the TS status vocabulary, and
 the empty-queue resume refusal). The `sessionActions` queue projection
-(`SessionActionSnapshot`) carries one Rust-native typed rider the TS wire
+(`SessionActionSnapshot`) carries Rust-native typed riders the TS wire
 has no counterpart for: `rlmChildStatus`, the parked RLM child status
 notices' lane indices, derived per item from the injected custom row (the
 `rlm_child_terminal_notice`/`rlm_child_failure` kinds) at projection time —
 so journal recovery re-derives it, the lane strings stay the TS
 `queuedAgentMessagePreview` projection verbatim, and the condensed queue
 strip folds exactly these rows (a user-typed lookalike never flags); the
-rider serializes only when a notice is parked. The reserved kinds are
-daemon provenance, never client data (`child_status_notices.rs`): the
+rider serializes only when a notice is parked. The `inboxNotice` rider
+marks the parked daemon inbox notices the same way (the arrival/reminder
+wake rows' lane indices — the strip folds them into the condensed count
+and the user-typed browse never offers them). The reserved kinds are
+daemon provenance, never client data (`child_status_notices.rs`, plus
+the `inbox_notice` custom kind): the
 prompt/steer/follow-up parse and the `restore_actions` validation answer a
 caller-supplied custom row claiming one loudly — it never parks, never
-folds — and the daemon's own notice injection rides the follow-up route
+folds — and a plain-user restored action whose `queueKey` claims a
+reserved inbox coalescing key (`inbox:arrival`/`inbox:reminder`) refuses
+the same way: a parked spoof would silently delete at the emptied
+read's key sweep or the next arrival's coalescing replace. The
+child-status kinds' own injection rides the follow-up route
 with a one-shot capability minted in the worker process (the wire's
-optional `rlmNoticeNonce`), so the queue's classification only ever sees
-daemon-authentic rows.
+optional `rlmNoticeNonce`); the `inbox_notice` kind has no client route
+at all — the worker's inbox routing admits it directly
+(`admit_inbox_notice`/`admit_inbox_reminder` push the wake rows
+straight onto the lanes, never through an intake) — so the queue's
+classification only ever sees daemon-authentic rows.
 Prompt attachments: the `prompt`/`steer`/`follow_up` wire `images` array
 (base64 payload + mime type) rides the queue item into the session engine
 as multimodal user content (images on a queued prompt do not survive a

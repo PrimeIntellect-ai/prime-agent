@@ -169,12 +169,18 @@ pub struct SessionActionSnapshot {
     /// never render as individual rows).
     #[serde(default, skip_serializing_if = "QueueLaneIndices::is_empty")]
     pub injected_prompts: QueueLaneIndices,
+    /// Rust-native typed provenance: which parked lane items are daemon
+    /// inbox notices (the arrival/reminder rows), by index — the strip
+    /// folds them into the condensed count and never offers them in the
+    /// user-typed browse.
+    #[serde(default, skip_serializing_if = "QueueLaneIndices::is_empty")]
+    pub inbox_notice: QueueLaneIndices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<SessionActionActive>,
 }
 
 /// The lane-indices rider shape the typed-provenance marks share: parked lane items, by index, of
-/// one internal class — a user-typed lookalike never carries either mark.
+/// one internal class — a user-typed lookalike never carries any mark.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueLaneIndices {

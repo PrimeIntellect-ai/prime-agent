@@ -107,7 +107,7 @@ fn map_skill_path(resource: &ResolvedResource) -> PathBuf {
 pub(crate) fn enabled_paths(resources: &[ResolvedResource]) -> Vec<PathBuf> {
     resources
         .iter()
-        .filter(|resource| resource.enabled)
+        .filter(|resource| resource.enabled())
         .map(|resource| resource.path.clone())
         .collect()
 }
@@ -185,13 +185,23 @@ pub(crate) fn resolve_session_resources(
     index_source_infos(&mut source_infos, &resolved.themes);
 
     let enabled_prompts = as_strings(&enabled_paths(&resolved.prompts));
-    let enabled_skills: Vec<String> = resolved
+    // Skill loading is first-wins by name, and bundled skills win every name
+    // collision: they load ahead of every other source, explicit paths
+    // included. The loser's collision diagnostic names the settings line
+    // that disables the bundled skill.
+    let (builtin_skills, other_skills): (Vec<&ResolvedResource>, Vec<&ResolvedResource>) = resolved
         .skills
         .iter()
-        .filter(|resource| resource.enabled)
-        .map(map_skill_path)
-        .map(|path| path.display().to_string())
-        .collect();
+        .filter(|resource| resource.enabled())
+        .partition(|resource| resource.metadata.source == MetadataSource::Builtin);
+    let skill_path_strings = |resources: Vec<&ResolvedResource>| -> Vec<String> {
+        resources
+            .into_iter()
+            .map(|resource| map_skill_path(resource).display().to_string())
+            .collect()
+    };
+    let builtin_skills = skill_path_strings(builtin_skills);
+    let other_skills = skill_path_strings(other_skills);
 
     let prompt_paths = if options.no_prompt_templates {
         merge_paths(&[], &options.additional_prompt_paths, &options.cwd)
@@ -206,7 +216,12 @@ pub(crate) fn resolve_session_resources(
     let skill_paths = if options.no_skills {
         merge_paths(&[], &options.additional_skill_paths, &options.cwd)
     } else {
-        let primary = [options.additional_skill_paths.clone(), enabled_skills].concat();
+        let primary = [
+            builtin_skills,
+            options.additional_skill_paths.clone(),
+            other_skills,
+        ]
+        .concat();
         merge_paths(&primary, &[], &options.cwd)
     };
 

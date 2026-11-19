@@ -17,18 +17,28 @@ pub struct SkillInvocationRow {
     pub content: String,
 }
 
-/// The skill-invocation decode for a user message: one `<skill ...>` block renders the
-/// expandable card, and a trailing user message after the block renders as its own user block
-/// below it. `None` means the text is an ordinary user prompt.
+/// The skill-invocation decode for a user message: each leading `<skill ...>` block (a message
+/// referencing several skills carries one per skill) renders its expandable card, and the user
+/// text after the blocks renders as its own user block below them. `None` means the text is an
+/// ordinary user prompt.
 #[must_use]
 pub fn skill_invocation_entries(text: &str) -> Option<Vec<ChatEntry>> {
-    let block = pa_types::skill_blocks::parse_skill_block(text)?;
-    let mut entries = vec![ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
-        name: block.name,
-        content: block.content,
-    }))];
-    if let Some(user_message) = block.user_message {
-        entries.push(ChatEntry::User { text: user_message });
+    let mut block = pa_types::skill_blocks::parse_skill_block(text)?;
+    let mut entries = Vec::new();
+    loop {
+        entries.push(ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
+            name: block.name,
+            content: block.content,
+        })));
+        let Some(user_message) = block.user_message else {
+            break;
+        };
+        if let Some(next) = pa_types::skill_blocks::parse_skill_block(&user_message) {
+            block = next;
+        } else {
+            entries.push(ChatEntry::User { text: user_message });
+            break;
+        }
     }
     Some(entries)
 }
@@ -134,6 +144,28 @@ mod tests {
             entries.as_slice(),
             [ChatEntry::SkillInvocation(_)]
         ));
+        // A message referencing two skills carries one block per skill:
+        // each renders its own card above the user text.
+        let entries = skill_invocation_entries(
+            "<skill name=\"a\" location=\"/a/SKILL.md\">\nUse a.\n</skill>\n\n<skill name=\"b\" location=\"/b/SKILL.md\">\nUse b.\n</skill>\n\nmix /skill:a and /skill:b",
+        )
+        .expect("parses");
+        assert_eq!(
+            entries,
+            vec![
+                ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
+                    name: "a".to_string(),
+                    content: "Use a.".to_string(),
+                })),
+                ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
+                    name: "b".to_string(),
+                    content: "Use b.".to_string(),
+                })),
+                ChatEntry::User {
+                    text: "mix /skill:a and /skill:b".to_string()
+                },
+            ]
+        );
         assert!(skill_invocation_entries("hello world").is_none());
         assert!(skill_invocation_entries("/skill:websearch find tuis").is_none());
     }

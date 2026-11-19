@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use super::discovery::collect_resource_files;
 use super::patterns::{apply_patterns, split_patterns};
 use super::{
-    settings_array, to_resolved_paths, top_level_metadata, ConfiguredSource, MetadataSource,
-    MissingSourceAction, PackageFilter, PathMetadata, ResolvedPaths, ResourceAccumulator,
-    ResourceOrigin, ResourceType, RESOURCE_TYPES,
+    settings_array, to_resolved_paths, top_level_metadata, ConfiguredSource, DisabledBy,
+    MetadataSource, MissingSourceAction, PackageFilter, PathMetadata, ResolvedPaths,
+    ResourceAccumulator, ResourceOrigin, ResourceType, RESOURCE_TYPES,
 };
 
 /// Parse the object (filter) form of a `packages` settings entry.
@@ -345,10 +345,10 @@ impl PackageManager {
         let all_files = collect_files_from_paths(&resolved_plain, resource_type);
         let enabled_paths = apply_patterns(&all_files, &pattern_entries, base_dir);
         for file in all_files {
-            let enabled = enabled_paths.contains(&file);
+            let disabled_by = (!enabled_paths.contains(&file)).then_some(DisabledBy::Settings);
             accumulator
                 .map(resource_type)
-                .add(&file, metadata.clone(), enabled);
+                .add(&file, metadata.clone(), disabled_by);
         }
     }
 

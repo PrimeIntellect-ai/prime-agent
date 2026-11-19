@@ -146,6 +146,7 @@ impl SaturatingSub1OrZero for usize {
 fn load_template_from_file(file_path: &Path, source_info: SourceInfo) -> Option<PromptTemplate> {
     let raw_content = std::fs::read_to_string(file_path).ok()?;
     let (frontmatter, body) = parse_frontmatter(&raw_content);
+    let frontmatter = frontmatter.unwrap_or_else(|_| serde_json::Map::new().into());
     let name = file_path
         .file_name()?
         .to_string_lossy()

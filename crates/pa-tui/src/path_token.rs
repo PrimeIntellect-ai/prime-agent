@@ -49,6 +49,21 @@ pub(crate) struct PathToken {
     pub closed: bool,
 }
 
+impl PathToken {
+    /// `text` as an unquoted plain token starting at char `start`.
+    pub(crate) fn bare(start: usize, text: String) -> Self {
+        PathToken {
+            start,
+            end: start + text.chars().count(),
+            path: text.clone(),
+            text,
+            at: false,
+            quoting: Quoting::Bare,
+            closed: false,
+        }
+    }
+}
+
 fn is_delimiter(c: char) -> bool {
     c.is_whitespace() || matches!(c, '"' | '\'' | '=')
 }
@@ -72,15 +87,8 @@ pub(crate) fn at_token_before(before: &[char]) -> Option<PathToken> {
 /// The path token, with or without `@`, the cursor is typing; an empty token at the cursor
 /// when `before` ends with none.
 pub(crate) fn path_token_before(before: &[char]) -> PathToken {
-    open_last(tokens(before, false), before.len()).unwrap_or(PathToken {
-        start: before.len(),
-        end: before.len(),
-        text: String::new(),
-        at: false,
-        path: String::new(),
-        quoting: Quoting::Bare,
-        closed: false,
-    })
+    open_last(tokens(before, false), before.len())
+        .unwrap_or_else(|| PathToken::bare(before.len(), String::new()))
 }
 
 fn open_last(mut tokens: Vec<PathToken>, len: usize) -> Option<PathToken> {

@@ -24,6 +24,7 @@
 )]
 pub mod acp;
 pub mod agent_engine;
+pub mod agent_inbox;
 pub mod agent_message_broadcast;
 pub mod agent_message_ingest;
 pub mod agent_messaging;
@@ -90,6 +91,7 @@ pub(crate) mod scheduling_catalog;
 pub(crate) mod session_bindings;
 pub(crate) mod session_catalog;
 pub(crate) mod session_commands;
+pub(crate) mod session_content_search;
 pub(crate) mod session_custom;
 pub mod session_export;
 pub mod session_input_pause;

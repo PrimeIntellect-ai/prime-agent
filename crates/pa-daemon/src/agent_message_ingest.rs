@@ -143,14 +143,55 @@ impl Worker {
             }
         }
         core.follow_up = retained_follow_up;
+        // The inbox-routed deliveries: the durable records leave the
+        // store too (a clear that reports the messages gone must take
+        // them out of `rlm.inbox.read()`), and the wake rows that
+        // referred to them refresh over what is left (an emptied inbox
+        // leaves no stale notice or reminder). The withdraw and the
+        // refresh run under the same core lock as the admission, so a
+        // delivery that raced the clear either lands before it (and
+        // leaves) or waits for it (and stays).
+        let mut withdrawn_texts = Vec::new();
+        let mut wake_on_follow_up = false;
+        if let Some(inbox) = self.agent_engine.as_ref().and_then(|engine| engine.inbox()) {
+            // The batch rides ONE wake row (it never splits), so the
+            // row's lane before the refresh is the withdrawn prompts'
+            // lane in the reply; no row means older unread records only,
+            // and they follow the delivery default (steering).
+            wake_on_follow_up = core.follow_up.iter().any(|item| {
+                item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
+            });
+            let withdrawn =
+                inbox.withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE);
+            if !withdrawn.is_empty() {
+                withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
+                crate::worker::refresh_inbox_wake_rows_locked(
+                    &mut core,
+                    &self.inbox_arrivals,
+                    &inbox,
+                );
+            }
+        }
+        // The withdrawn prompts report like the direct route's marker
+        // rows: the reply says what the clear took, never an empty set
+        // over records it removed (the report-only defect this pins
+        // shut). A follow-up delivery coalesced under a steering wake
+        // row reports under steering (one row, one lane).
+        if wake_on_follow_up {
+            follow_up.extend(withdrawn_texts);
+        } else {
+            steering.extend(withdrawn_texts);
+        }
         crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
-        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The sweep may have settled the session: the verdict follows the remaining lanes.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_mutated",
         });
-        let _ = self.emit_action_update(&snapshot);
+        // The projection recomputes under the emission lock, so a
+        // concurrent read hook's newer strip is never overwritten by a
+        // stale copy.
+        let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
         json!({ "steering": steering, "followUp": follow_up })
     }
 }

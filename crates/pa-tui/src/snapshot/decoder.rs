@@ -43,7 +43,14 @@ pub enum TurnUpdate {
         is_error: bool,
     },
     /// `turn_end`, with the turn error string when the turn failed.
-    TurnEnded { error: Option<String> },
+    /// `run_failed`: the settle ends the run without a deliverable
+    /// result (the daemon's fallback terminal frame, or the engine's
+    /// aborted/errored terminal message).
+    TurnEnded {
+        error: Option<String>,
+        run_failed: bool,
+        aborted: bool,
+    },
     /// A `custom`-role message the transcript renders (session-command
     /// echo/result rows, or the malformed-notice fallback).
     CustomRow(ChatEntry),
@@ -60,13 +67,16 @@ pub enum TurnUpdate {
     /// retries were exhausted; `restored_model` after a successful
     /// failover.
     AutoRetryEnd {
+        aborted: bool,
         success: bool,
         attempt: u32,
         final_error: Option<String>,
         restored_model: Option<String>,
     },
-    /// `agent_end`: the agent run ended.
-    Idle,
+    /// `agent_end`: the prompt queue drained; `aborted` marks a run that
+    /// ended under an abort (the daemon's wire marker — absent when the
+    /// run settled on its own).
+    Idle { aborted: bool },
     /// `compaction_start`: a compaction run began.
     CompactionStart {
         /// Why the compaction runs (`manual`/`requested`/`overflow`/`threshold`).
@@ -93,19 +103,22 @@ pub enum TurnUpdate {
         error_message: Option<String>,
         /// `warning` or `error`.
         error_severity: Option<String>,
+        /// The overflow recovery re-issues the failed turn next.
+        will_retry: bool,
     },
     /// `goal_update`: the raw wire `goal` payload (the session view
     /// owns rendering).
     GoalUpdate(Value),
     /// `session_action_update`: the queue projection changed. `starting`
     /// carries the picked-up prompt still preparing (TS #2063); the
-    /// `rlm_child_status`/`injected_prompts` riders are Rust-native
-    /// provenance, so the strip folds exactly those rows.
+    /// `rlm_child_status`/`inbox_notice`/`injected_prompts` riders are
+    /// Rust-native provenance, so the strip folds exactly those rows.
     QueueUpdated {
         steering: Vec<String>,
         follow_ups: Vec<String>,
         starting: Option<String>,
         rlm_child_status: crate::queued::QueueLaneIndices,
+        inbox_notice: crate::queued::QueueLaneIndices,
         injected_prompts: crate::queued::QueueLaneIndices,
     },
     /// `bash_start` (the user-bash slot): a command run outside the model
@@ -190,6 +203,10 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .get("errorSeverity")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            will_retry: event
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
         "agent_start" | "turn_start" => Some(TurnUpdate::TurnStarted),
         // Every attached client re-reads the session display name.
@@ -208,13 +225,41 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .unwrap_or_default()
                 .to_string(),
         }),
-        "turn_end" => Some(TurnUpdate::TurnEnded {
-            error: event
+        "turn_end" => {
+            let error = event
                 .get("error")
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(str::to_string);
+            // The aborted/errored terminal message settles the run
+            // without a result; the fallback terminal frame's error does
+            // too.
+            let run_failed = error.is_some()
+                || event
+                    .get("message")
+                    .and_then(|message| message.get("stopReason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason == "aborted" || reason == "error");
+            let aborted = event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || event
+                    .get("message")
+                    .and_then(|m| m.get("stopReason"))
+                    .and_then(Value::as_str)
+                    == Some("aborted");
+            Some(TurnUpdate::TurnEnded {
+                error,
+                run_failed,
+                aborted,
+            })
+        }
+        "agent_end" => Some(TurnUpdate::Idle {
+            aborted: event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
-        "agent_end" => Some(TurnUpdate::Idle),
         "message_start" | "message_update" | "message_end" => {
             let message = event.get("message")?.clone();
             let event_type = event.get("type").and_then(Value::as_str);
@@ -310,6 +355,10 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
             },
         }),
         "auto_retry_end" => Some(TurnUpdate::AutoRetryEnd {
+            aborted: event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             success: event
                 .get("success")
                 .and_then(Value::as_bool)
@@ -337,6 +386,7 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 follow_ups: queue_lane(&actions, "followUps"),
                 starting: starting_from_actions(&actions),
                 rlm_child_status: queue_lane_indices(&actions, "rlmChildStatus"),
+                inbox_notice: queue_lane_indices(&actions, "inboxNotice"),
                 injected_prompts: queue_lane_indices(&actions, "injectedPrompts"),
             })
         }

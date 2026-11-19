@@ -20,7 +20,7 @@ members = [
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.10.3"
+version = "0.10.5"
 edition = "2021"
 license = "MIT"
 
@@ -45,7 +45,7 @@ pa-ai = { path = "crates/pa-ai" }
 pa-agent = { path = "crates/pa-agent" }
 thiserror = "2"
 futures = "0.3"
-toml = "0.9"
+toml = "1"
 # Dev-only; the default fork/timeout features are unused.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 

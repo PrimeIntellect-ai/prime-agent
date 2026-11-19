@@ -699,6 +699,23 @@ impl DaemonClient {
         response_data_or_error(&name, response)
     }
 
+    /// Send a command and require `success: true`, with an explicit timeout: the
+    /// whole-store scans pass the long-running class instead of the 30s default.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when [`Self::request_with_timeout`] fails or the response carries
+    /// `success: false`.
+    pub async fn request_ok_with_timeout(
+        &self,
+        command: DaemonCommand,
+        timeout_ms: u64,
+    ) -> Result<Value> {
+        let name = command_type_debug(&command);
+        let response = self.request_with_timeout(command, timeout_ms).await?;
+        response_data_or_error(&name, response)
+    }
+
     /// The live direct link that may serve `command` (TS `servesDirect`):
     /// the command must be session-plane and address the link's session.
     fn direct_link_for(&self, command: &DaemonCommand) -> Option<DirectLink> {

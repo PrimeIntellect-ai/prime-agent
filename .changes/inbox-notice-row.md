@@ -1,0 +1,1 @@
+- inbox notifications now render in the transcript as their own attributed row (the inbox system's envelope line with the notice text always visible beneath it) instead of typed user messages, and a queued inbox notice folds into the queue strip's internal-prompt count instead of a browsable steering preview, so the daemon's machine notices never look like the operator's input

@@ -25,7 +25,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
-base64 = "0.22"
+base64 = "0.23"
 # The release-workflow test parses the CI workflow YAML and builds fixture
 # tarballs/manifests for the promote-job layout gates (the same versions the
 # workspace already resolves for pa-core's update/release seam).
