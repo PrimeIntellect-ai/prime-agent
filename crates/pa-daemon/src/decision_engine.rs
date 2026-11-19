@@ -159,15 +159,15 @@ impl DecisionEngine {
         })
     }
 
-    /// The transcript row pair for an answer: the assistant update and the
-    /// final message. Both rows are typed assistant messages — one text
-    /// block, the resolved model's `api`, a real usage, `StopReason::Stop`
-    /// — because `turn.rs` persists them verbatim and every later reader
-    /// deserializes: the reopened or revived child's context builder and
+    /// The event pair for an answer: the streaming update and the final
+    /// message. Both carry a typed assistant message — one text block, the
+    /// resolved model's `api`, a real usage, `StopReason::Stop` — because
+    /// `turn.rs` persists the final message verbatim and every later reader
+    /// deserializes it: the reopened or revived child's context builder and
     /// the exit capture's `last_assistant_text_from_file` skip a row that
-    /// does not parse. The decision's usage rides both rows — the final
-    /// message is the row the cost ledger bills, and a row without usage
-    /// reads as a free call.
+    /// does not parse. The update is a wire frame only and never persists,
+    /// so the final message is the one row the cost ledger bills; a row
+    /// without usage reads as a free call.
     fn answer_rows(
         api: &str,
         provider: &str,
