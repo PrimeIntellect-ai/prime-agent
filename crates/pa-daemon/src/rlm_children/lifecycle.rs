@@ -1009,7 +1009,10 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
 }
 
 /// The busy flags of one child `get_state` summary (streaming, its own
-/// descendants, or queued work in flight).
+/// descendants, queued work in flight, or live background work — a
+/// backgrounded kernel cell and a queued completion both mean the child has
+/// work that will still land, so an ordinary child must not settle while the
+/// count is non-zero).
 fn child_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
     flag("isStreaming")
@@ -1020,6 +1023,30 @@ fn child_busy_flags(state: &Value) -> bool {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             > 0
+        || state
+            .get("outstandingBackgroundJobs")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+}
+
+#[cfg(test)]
+mod background_busy_tests {
+    use super::*;
+
+    /// A live background cell (or a queued completion) keeps an ordinary
+    /// child unsettled: the count is the only evidence that work will still
+    /// land, and a child that settles without it reports done/no-reply while
+    /// its cell still runs.
+    #[test]
+    fn a_child_with_live_background_work_is_not_idle() {
+        assert!(child_busy_flags(&json!({ "outstandingBackgroundJobs": 1 })));
+        assert!(!child_busy_flags(
+            &json!({ "outstandingBackgroundJobs": 0 })
+        ));
+        // A summary that predates the field keeps the old rules only.
+        assert!(!child_busy_flags(&json!({})));
+    }
 }
 
 #[cfg(test)]

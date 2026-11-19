@@ -415,11 +415,18 @@ impl Worker {
         }
         let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
-        response_success(
-            None,
-            "get_state",
-            Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-        )
+        drop(core);
+        let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
+        // The background-work count rides every state read: a settling child
+        // with a live background cell (or a queued completion) is not idle,
+        // and the parent's settle watcher needs the count.
+        if let Some(object) = data.as_object_mut() {
+            object.insert(
+                "outstandingBackgroundJobs".to_string(),
+                json!(self.outstanding_background_jobs()),
+            );
+        }
+        response_success(None, "get_state", Some(data))
     }
 
     /// `get_session_header`: the persisted session header line (TS wraps it
