@@ -292,9 +292,11 @@ impl AgentSessionEngine {
                     )
                     .await
             };
+            // A committed compaction keeps its result: the signal is
+            // checked inside the run before the durable append.
             let outcome = self
                 .runtime
-                .block_on(pa_agent::abort::race_with_abort(compact, &signal));
+                .block_on(pa_agent::abort::race_keep_result(compact, &signal));
             self.clear_auto_compaction_abort(&controller);
             outcome
         };

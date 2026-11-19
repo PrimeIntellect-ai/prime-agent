@@ -1,1 +1,1 @@
-- Fixed a requested abort sometimes losing to a result that was ready in the same poll, so an aborted turn could settle as a normal reply instead of the cancelled row.
+- Fixed a requested abort sometimes losing to a result that was ready in the same poll, so an aborted turn could settle as a normal reply instead of the cancelled row. A compaction that already committed now keeps its result, so its success event and retry still land.

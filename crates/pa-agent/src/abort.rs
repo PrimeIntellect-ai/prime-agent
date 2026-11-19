@@ -166,6 +166,31 @@ fn consume_unless_aborted<T>(result: T, signal: &AbortSignal) -> anyhow::Result<
     }
 }
 
+/// Race an operation against an abort signal, and keep a result that is ready.
+///
+/// The operation is polled first, and its result is not re-checked. Use this
+/// for work that is durable once it produces a result: a cancellation that
+/// arrives in the poll that makes the result does not replace the result.
+/// The operation must check the signal before it commits.
+///
+/// # Errors
+///
+/// Returns `AbortedError` if `signal` is already aborted, or if it aborts before `operation` completes.
+pub async fn race_keep_result<T, F>(operation: F, signal: &AbortSignal) -> anyhow::Result<T>
+where
+    F: Future<Output = T>,
+{
+    if signal.is_aborted() {
+        drop(operation);
+        return Err(aborted_error());
+    }
+    tokio::select! {
+        biased;
+        value = operation => Ok(value),
+        () = signal.aborted() => Err(aborted_error()),
+    }
+}
+
 /// # Errors
 ///
 /// Returns the abort error (`AbortedError`) if `signal` is already aborted.
@@ -233,6 +258,53 @@ mod tests {
         let signal = AbortSignal::never();
         let value = race_with_abort(async { 7 }, &signal).await.unwrap();
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn race_keep_result_keeps_a_result_that_aborts_in_its_poll() {
+        // The operation requests the abort in the poll that makes its result.
+        // The operation branch is polled first and is not re-checked, so the
+        // result stands even though the signal is aborted when the race
+        // returns.
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let result = race_keep_result(
+            async {
+                controller.abort();
+                7
+            },
+            &signal,
+        )
+        .await;
+        assert_eq!(result.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn race_keep_result_still_cancels_before_a_result() {
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let aborter = {
+            let controller = controller.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                controller.abort();
+            })
+        };
+        let error = race_keep_result(std::future::pending::<()>(), &signal)
+            .await
+            .unwrap_err();
+        aborter.await.unwrap();
+        assert!(is_abort_error(&error));
+    }
+
+    #[tokio::test]
+    async fn race_keep_result_short_circuits_a_pre_aborted_signal() {
+        let controller = AbortController::new();
+        controller.abort();
+        let error = race_keep_result(async { 7 }, &controller.signal())
+            .await
+            .unwrap_err();
+        assert!(is_abort_error(&error));
     }
 
     #[test]

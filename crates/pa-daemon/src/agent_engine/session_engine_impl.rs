@@ -655,14 +655,15 @@ impl SessionEngine for AgentSessionEngine {
                     &model,
                     api_key,
                     // The run's own signal: a raced summarizer still lands
-                    // the pre-commit check (TS `_performCompaction`).
+                    // the pre-commit check (TS `_performCompaction`), and a
+                    // committed run keeps its result.
                     Some(signal),
                 )
                 .await
         };
         let result = self
             .runtime
-            .block_on(pa_agent::abort::race_with_abort(run, signal));
+            .block_on(pa_agent::abort::race_keep_result(run, signal));
         let compaction = match result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
