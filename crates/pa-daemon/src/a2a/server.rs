@@ -711,13 +711,12 @@ async fn settle_prompt_at_pump(state: &Arc<Mutex<A2aState>>, task_id: &str, succ
     };
 
     if let Some(text) = window_text.filter(|text| !text.is_empty()) {
-        if guard
-            .registry
-            .task(task_id)
-            .is_some_and(|task| task.artifact_text() != text)
-        {
-            guard.registry.set_artifact_text(task_id, &text);
-        }
+        // Unconditional: set_artifact_text no-ops on an unchanged text
+        // (the normal streamed turn, whose deltas already landed the
+        // window) while still reconciling the run text's watermark, so
+        // the first continuation continues from the streamed bytes
+        // instead of re-landing the whole window.
+        guard.registry.set_artifact_text(task_id, &text);
     }
     if success {
         guard.registry.mark_awaiting_completion(task_id);
@@ -5841,6 +5840,188 @@ mod tests {
             task.artifacts[0].parts[0].text.as_deref(),
             Some("OWN-REPLY"),
             "the engine-minted row is owned by the delivery whose clientAdmissionId it carries: {task:?}"
+        );
+    }
+
+    /// The streamed first turn seeds the reconciliation: the prompt
+    /// settle runs even when the deltas already landed the exact
+    /// window text, so the FIRST continuation continues from the
+    /// streamed bytes instead of re-landing its whole window (the
+    /// watermark a settle skipped for an unchanged artifact would
+    /// leave unseeded). Driven through the real frame order — no
+    /// registry seeding.
+    #[tokio::test]
+    async fn a_streamed_first_turn_seeds_the_continuation_reconciliation() {
+        let mut registry = TaskRegistry::new();
+        registry.admit(
+            "t-1".into(),
+            "ctx".into(),
+            "s".into(),
+            None,
+            vec![Part::text("hi")],
+        );
+        registry.mark_prompt_writing("t-1");
+        registry.mark_prompt_dispatched("t-1", Some(1));
+        let sessions = BTreeMap::from([("s".to_string(), "ctx".to_string())]);
+        let state = Arc::new(Mutex::new(A2aState::for_test(registry, sessions)));
+        let frame = |event: Value| serde_json::json!({ "type": "session_event", "activeSessionId": "s", "event": event });
+        // The task's own delivery id (the unique admission its prompt
+        // sent) — the run's frames credit to the task through it.
+        let delivery = state
+            .lock()
+            .await
+            .registry
+            .task("t-1")
+            .expect("the admitted task")
+            .delivery_id()
+            .to_string();
+        // The first turn, streamed: the deltas land the window text
+        // exactly, so the settle's set_artifact_text no-ops on the
+        // text but must still reconcile the watermark.
+        for event in [
+            frame(serde_json::json!({
+                "type": "agent_start",
+                "admissionId": "wire-1",
+                "clientAdmissionId": delivery,
+            })),
+            frame(serde_json::json!({ "type": "turn_start" })),
+            frame(serde_json::json!({
+                "type": "message_start",
+                "message": { "role": "assistant", "content": [] },
+            })),
+            frame(serde_json::json!({
+                "type": "message_update",
+                "message": { "role": "assistant", "content": [] },
+                "assistantMessageEvent": { "type": "text_delta", "delta": "FIRST-TURN" },
+            })),
+            frame(serde_json::json!({
+                "type": "message_end",
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": "FIRST-TURN" }] },
+            })),
+            frame(serde_json::json!({ "type": "turn_end" })),
+            frame(serde_json::json!({ "type": "agent_end" })),
+        ] {
+            on_session_event(&state, &event).await;
+        }
+        settle_prompt_at_pump(&state, "t-1", true).await;
+        {
+            let guard = state.lock().await;
+            let task = guard.registry.snapshot("t-1", None).unwrap();
+            assert_eq!(
+                task.artifacts[0].parts[0].text.as_deref(),
+                Some("FIRST-TURN"),
+                "the streamed first turn lands once: {task:?}"
+            );
+        }
+        // The first continuation, streamed as a PREFIX of its window
+        // (the live deltas stopped early): only its remainder may land
+        // — never the whole window again.
+        for event in [
+            frame(serde_json::json!({ "type": "agent_start", "engineContinuation": true })),
+            frame(serde_json::json!({ "type": "turn_start" })),
+            frame(serde_json::json!({
+                "type": "message_start",
+                "message": { "role": "assistant", "content": [] },
+            })),
+            frame(serde_json::json!({
+                "type": "message_update",
+                "message": { "role": "assistant", "content": [] },
+                "assistantMessageEvent": { "type": "text_delta", "delta": "CONTINU" },
+            })),
+            frame(serde_json::json!({
+                "type": "message_end",
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": "CONTINUATION" }] },
+            })),
+            frame(serde_json::json!({ "type": "turn_end" })),
+            frame(serde_json::json!({ "type": "agent_end" })),
+        ] {
+            on_session_event(&state, &event).await;
+        }
+        {
+            let guard = state.lock().await;
+            let task = guard.registry.snapshot("t-1", None).unwrap();
+            assert_eq!(
+                task.artifacts[0].parts[0].text.as_deref(),
+                Some("FIRST-TURN\n\nCONTINUATION"),
+                "the first streamed continuation lands exactly once: {task:?}"
+            );
+        }
+    }
+
+    /// A continuation whose assistant messages include a text-less
+    /// round (a tool call) still lands its window exactly once: the
+    /// live stream's separator discipline matches the window join, and
+    /// the close's fallback never appends a second copy.
+    #[tokio::test]
+    async fn a_tool_first_continuation_lands_its_window_once() {
+        let mut registry = TaskRegistry::new();
+        registry.admit(
+            "t-1".into(),
+            "ctx".into(),
+            "s".into(),
+            None,
+            vec![Part::text("hi")],
+        );
+        registry.mark_prompt_writing("t-1");
+        registry.mark_prompt_dispatched("t-1", Some(1));
+        let sessions = BTreeMap::from([("s".to_string(), "ctx".to_string())]);
+        let state = Arc::new(Mutex::new(A2aState::for_test(registry, sessions)));
+        let frame = |event: Value| serde_json::json!({ "type": "session_event", "activeSessionId": "s", "event": event });
+        let delivery = state
+            .lock()
+            .await
+            .registry
+            .task("t-1")
+            .expect("the admitted task")
+            .delivery_id()
+            .to_string();
+        // The first turn lands unstreamed (the settle's replacement).
+        for event in [
+            frame(serde_json::json!({
+                "type": "agent_start",
+                "admissionId": "wire-1",
+                "clientAdmissionId": delivery,
+            })),
+            frame(serde_json::json!({ "type": "turn_start" })),
+            frame(serde_json::json!({
+                "type": "message_end",
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": "FIRST-TURN" }] },
+            })),
+            frame(serde_json::json!({ "type": "turn_end" })),
+            frame(serde_json::json!({ "type": "agent_end" })),
+        ] {
+            on_session_event(&state, &event).await;
+        }
+        settle_prompt_at_pump(&state, "t-1", true).await;
+        // The continuation opens with a text-less assistant message
+        // (a tool-call round): its message_start carries the separator
+        // while the window join drops the empty message.
+        for event in [
+            frame(serde_json::json!({ "type": "agent_start", "engineContinuation": true })),
+            frame(serde_json::json!({ "type": "turn_start" })),
+            frame(serde_json::json!({
+                "type": "message_start",
+                "message": { "role": "assistant", "content": [] },
+            })),
+            frame(serde_json::json!({
+                "type": "message_start",
+                "message": { "role": "assistant", "content": [] },
+            })),
+            frame(serde_json::json!({
+                "type": "message_end",
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": "REPLY" }] },
+            })),
+            frame(serde_json::json!({ "type": "turn_end" })),
+            frame(serde_json::json!({ "type": "agent_end" })),
+        ] {
+            on_session_event(&state, &event).await;
+        }
+        let guard = state.lock().await;
+        let task = guard.registry.snapshot("t-1", None).unwrap();
+        assert_eq!(
+            task.artifacts[0].parts[0].text.as_deref(),
+            Some("FIRST-TURN\n\nREPLY"),
+            "the tool-first continuation lands its window exactly once: {task:?}"
         );
     }
 
