@@ -633,6 +633,9 @@ pub enum DaemonCommand {
         /// (the `wait_for_headless_completion` barrier of the same name).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_for_rlm_quiescence: Option<bool>,
+        /// Maximum time to wait for the session and its optional RLM subtree to become idle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         #[serde(flatten)]
         rest: JsonMap,
     },
