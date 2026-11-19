@@ -405,8 +405,12 @@ impl SessionEngine for DecisionEngine {
                     emit(cancelled());
                     return;
                 }
+                // Main's aborted marker: the decision engine's own runs
+                // complete normally (a cancel emits the cancelled error
+                // before this frame, never an aborted agent_end).
                 if !emit(EngineEvent::AgentEnd {
                     messages: vec![accepted_row, turn_message],
+                    aborted: false,
                 }) {
                     emit(cancelled());
                     return;
@@ -1038,7 +1042,7 @@ mod tests {
         let agent_end = events
             .iter()
             .find_map(|event| match event {
-                EngineEvent::AgentEnd { messages } => Some(messages.clone()),
+                EngineEvent::AgentEnd { messages, .. } => Some(messages.clone()),
                 _ => None,
             })
             .expect("a served decision emits its agent_end frame");
