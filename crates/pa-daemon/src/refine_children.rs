@@ -280,13 +280,23 @@ impl AgentSessionEngine {
     pub(crate) async fn apply_pending_refine_reply(
         &self,
     ) -> Option<anyhow::Result<(RefinementResult, RefinementSource)>> {
-        let pending = {
-            let mut pending = self
-                .pending_refine_reply
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            pending.take()?
-        };
+        if self
+            .pending_refine_reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+        {
+            return None;
+        }
+        // The apply holds the lane until its harness write lands: under the
+        // spawn lock, a concurrent admission cannot see both cells empty
+        // and prepare a new child against a half-applied store.
+        let _spawn = self.refine_spawn_lock.lock().await;
+        let pending = self
+            .pending_refine_reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
         let source = pending.flight.source;
         let outcome = self
             .apply_flight_reply(pending.flight, &pending.reply)
@@ -577,6 +587,50 @@ mod tests {
                 .is_none(),
             "the apply is one-shot"
         );
+    }
+
+    /// The idle apply holds the lane until its harness write lands: a
+    /// racing spawn admission (the spawn lock, then the flight-then-pending
+    /// read) must never find both cells empty while the apply is still
+    /// mid-write — that admission would plan a second child against a
+    /// half-applied store. Red when the apply takes the parked reply
+    /// outside the spawn lock.
+    #[test]
+    fn the_apply_holds_the_lane_until_its_write_lands() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, dir) = park_engine();
+        park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
+        assert_eq!(
+            engine.park_refine_child_reply("active-1", PROPOSAL),
+            Some(())
+        );
+        // The held session cell pauses the apply right after its take.
+        let held = engine.session.blocking_lock();
+        std::thread::scope(|scope| {
+            let applying = scope.spawn(|| {
+                engine
+                    .runtime
+                    .block_on(async { engine.apply_pending_refine_reply().await })
+            });
+            while pending_some(&engine) {
+                std::thread::yield_now();
+            }
+            let admission = engine.refine_spawn_lock.try_lock();
+            assert!(
+                admission.is_err() || flight_some(&engine) || pending_some(&engine),
+                "a racing admission found an empty lane mid-apply"
+            );
+            drop(admission);
+            drop(held);
+            let (result, _) = applying
+                .join()
+                .expect("the applying thread")
+                .expect("the parked reply applied")
+                .expect("the apply succeeded");
+            assert_eq!(result.applied_edits.len(), 1);
+        });
     }
 
     /// A branch move and a replacement teardown abandon the conversation
