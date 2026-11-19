@@ -156,7 +156,7 @@ impl QueueHooks {
             core.queued_input_suspended = false;
             // One waiting fire per job: the newest replaces the older, and
             // the arrival batch drops it so the notice never counts it.
-            let withdrawn = inbox.withdraw_heartbeat(&live.id);
+            let withdrawn = engine.withdraw_heartbeat_from_live_inbox(&inbox, &live.id)?;
             if !withdrawn.is_empty() {
                 seam.arrivals
                     .lock()
@@ -486,8 +486,9 @@ impl ScheduledJobs {
                         // like the reminder's check: a replacement's
                         // successor rows never sweep for the retired
                         // store's job.
-                        if engine.is_live_inbox(&inbox)
-                            && !inbox.withdraw_heartbeat(&job.id).is_empty()
+                        if engine
+                            .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
+                            .is_some_and(|withdrawn| !withdrawn.is_empty())
                         {
                             // The wake rows that promised the withdrawn
                             // fire refresh over what is left (an emptied
