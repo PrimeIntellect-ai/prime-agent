@@ -478,13 +478,18 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         .expect("active id")
         .to_string();
 
+    // A fire that lands once the resumed session's inbox route is ready
+    // steers an `inbox_notice` row naming the `heartbeat` class; an
+    // earlier fire keeps the direct row with the ping text (the
+    // `route_heartbeat_fire` fallback). Either way the woken turn answers.
     let fired = wait_until(Duration::from_secs(30), || {
         let text = messages(&mut client, "gm1", &active_id);
-        (text.contains("the stale heartbeat ping") && text.contains("dormant reply"))
-            .then_some(text)
+        ((text.contains("new message (heartbeat)") || text.contains("the stale heartbeat ping"))
+            && text.contains("dormant reply"))
+        .then_some(text)
     });
     assert!(
-        fired.contains("the stale heartbeat ping"),
+        fired.contains("dormant reply"),
         "the heartbeat fired once the user resumed the session"
     );
 

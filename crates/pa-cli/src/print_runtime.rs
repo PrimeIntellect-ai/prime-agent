@@ -863,6 +863,8 @@ pub(crate) async fn build_headless_engine_with(
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host,
             rlm_usage_store: None,
+
+            inbox: None,
             progress_note_emit: None,
             rlm_depth,
             factory_child,
@@ -1519,8 +1521,6 @@ pub(crate) async fn run_prompts_and_emit(
     options: &RunOptions,
     root_node: &std::sync::Arc<crate::print_rlm::InlineSessionNode>,
 ) -> Result<i32, String> {
-    let global_harness_dir =
-        pa_core::refinement::get_global_harness_state_dir(&options.config.agent_dir);
     let mut boundary = crate::print_boundary::TurnBoundary::new(options.app_mode == AppMode::Json);
     let exit = run_prompts(
         engine,
@@ -1529,7 +1529,6 @@ pub(crate) async fn run_prompts_and_emit(
         options,
         root_node,
         &mut boundary,
-        global_harness_dir.clone(),
     )
     .await;
     // The disposal drain runs on every exit path, errors included: the
@@ -1537,7 +1536,7 @@ pub(crate) async fn run_prompts_and_emit(
     // (a `/refine` command's too) and loses a compact-trigger auto-refine no
     // boundary consumed. A failed `/refine` fails the run once awaited.
     boundary
-        .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
+        .drain_compact_auto_refine_at_disposal(engine, model, api_key)
         .await;
     let exit_code = exit?;
     Ok(if boundary.refine_command_failed() {
@@ -1556,7 +1555,6 @@ async fn run_prompts(
     options: &RunOptions,
     root_node: &std::sync::Arc<crate::print_rlm::InlineSessionNode>,
     boundary: &mut crate::print_boundary::TurnBoundary,
-    global_harness_dir: std::path::PathBuf,
 ) -> Result<i32, String> {
     let json_mode = options.app_mode == AppMode::Json;
     let mut unsubscribe: Option<pa_agent::agent::Subscription> = None;
@@ -1624,7 +1622,6 @@ async fn run_prompts(
                 &goal,
                 model,
                 api_key.clone(),
-                global_harness_dir.clone(),
                 &autonomous_state,
                 boundary,
                 &command,
@@ -1643,21 +1640,14 @@ async fn run_prompts(
                     boundary,
                     model,
                     api_key.clone(),
-                    global_harness_dir.clone(),
                     &continuation,
                 )
                 .await?;
             }
             // The same queue drain a settled turn gets: held continuations and armed steers run as
             // this prompt's follow-up turns.
-            goal.drive_boundary(
-                engine,
-                boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
-            .await?;
+            goal.drive_boundary(engine, boundary, model, api_key.clone())
+                .await?;
             continue;
         }
         boundary
@@ -1674,29 +1664,17 @@ async fn run_prompts(
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         boundary
-            .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+            .run_at_settled_turn(engine, model, api_key.clone())
             .await?;
-        goal.drive_boundary(
-            engine,
-            boundary,
-            model,
-            api_key.clone(),
-            global_harness_dir.clone(),
-        )
-        .await?;
+        goal.drive_boundary(engine, boundary, model, api_key.clone())
+            .await?;
         // The autonomous arm runs only when the goal does not own the boundary (the goal arm takes
         // exclusive priority).
         if !engine.goal_owns_continuation_wakeup().await {
             // The held threshold continuation drains as this invocation's follow-up
             // turn; the stop surfaces only through the exit contract.
             autonomous
-                .drive_boundary(
-                    engine,
-                    boundary,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                )
+                .drive_boundary(engine, boundary, model, api_key.clone())
                 .await
                 .map_err(|error| format!("{error:#}"))?;
         }
@@ -1728,7 +1706,6 @@ async fn run_prompts(
             boundary,
             model,
             api_key.clone(),
-            global_harness_dir.clone(),
         )
         .await?
         {
@@ -1744,15 +1721,8 @@ async fn run_prompts(
                 ..
             } => {
                 goal.publish_goal_update(engine).await;
-                goal.run_queued_turn(
-                    engine,
-                    boundary,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                    &continuation,
-                )
-                .await?;
+                goal.run_queued_turn(engine, boundary, model, api_key.clone(), &continuation)
+                    .await?;
                 continue;
             }
             // A refused or failed mint can still move the goal (a failed persist fails it).
@@ -1762,13 +1732,7 @@ async fn run_prompts(
             | GoalContinuationDecision::Owed => {}
         }
         if autonomous
-            .deliver_rlm_continuation(
-                engine,
-                boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
+            .deliver_rlm_continuation(engine, boundary, model, api_key.clone())
             .await?
         {
             continue;
@@ -1778,23 +1742,11 @@ async fn run_prompts(
         // around — the leading quiescence pass then waits for whatever
         // they left behind.
         let mut boundary_ran = goal
-            .drive_boundary(
-                engine,
-                boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
+            .drive_boundary(engine, boundary, model, api_key.clone())
             .await?;
         if !engine.goal_owns_continuation_wakeup().await {
             boundary_ran |= autonomous
-                .drive_boundary(
-                    engine,
-                    boundary,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                )
+                .drive_boundary(engine, boundary, model, api_key.clone())
                 .await?;
         }
         if boundary_ran {

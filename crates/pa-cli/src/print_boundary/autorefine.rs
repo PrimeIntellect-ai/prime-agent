@@ -1,7 +1,7 @@
 //! The compact-trigger auto-refine machine: the review gates, the durable-row
 //! surface, the requested-refinement streaming, and the disposal drain.
 
-use super::{json, Model, PathBuf, SessionAgentMessage, SessionEngine, TurnBoundary};
+use super::{json, Model, SessionAgentMessage, SessionEngine, TurnBoundary};
 
 /// Wall-clock milliseconds (the review-cooldown stamps).
 fn now_millis() -> u64 {
@@ -134,16 +134,9 @@ impl TurnBoundary {
         engine: &SessionEngine,
         model: &Model,
         api_key: Option<String>,
-        global_harness_dir: PathBuf,
     ) {
         self.wait_for_refinement_reports().await;
-        self.consume_compact_auto_refine(
-            engine,
-            model,
-            api_key,
-            global_harness_dir,
-            RefineSurface::Dispose,
-        );
+        self.consume_compact_auto_refine(engine, model, api_key, RefineSurface::Dispose);
         self.wait_for_refinement_reports().await;
     }
 
@@ -157,7 +150,6 @@ impl TurnBoundary {
         engine: &SessionEngine,
         model: &Model,
         api_key: Option<String>,
-        global_harness_dir: PathBuf,
         surface: RefineSurface,
     ) {
         if !self.compact_auto_refine_pending {
@@ -194,13 +186,10 @@ impl TurnBoundary {
             return;
         }
         let turns = self.assistant_turns_since_review;
-        let pending = engine.session.start_auto_refine_after_compaction(
-            model.clone(),
-            api_key,
-            global_harness_dir,
-            turns,
-            0,
-        );
+        let pending =
+            engine
+                .session
+                .start_auto_refine_after_compaction(model.clone(), api_key, turns, 0);
         // Stamp admission, not completion: a held review cannot start duplicates
         // at every user turn while its provider call remains in flight.
         self.last_auto_refine_review_at = Some(now_millis());

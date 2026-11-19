@@ -1,1 +1,0 @@
-Refinement planning runs in the background, with harness edits and model notices committed between complete agent runs. Existing context rows stay unchanged, and resumed sessions append an updated harness digest only when durable harness state changed.

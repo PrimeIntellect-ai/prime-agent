@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Run state-machine workflows of spawned child agents: store a validated machine or dag spec as a continual-harness factory entry (rlm.harness.create_factory), then run, watch, stop, and resume it through rlm.factory. For the full authoring reference and API guide, call rlm.factory.help() in the kernel.
+description: "Run state-machine workflows of spawned child agents: store a validated machine or dag spec as a continual-harness factory entry (rlm.harness.create_factory), then run, watch, stop, and resume it through rlm.factory. For the full authoring reference and API guide, call rlm.factory.help() in the kernel."
 ---
 
 # Factory

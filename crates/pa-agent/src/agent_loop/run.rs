@@ -82,6 +82,7 @@ pub(crate) async fn run_loop(
                 })
                 .await?;
                 emit(AgentEvent::AgentEnd {
+                    aborted: message.stop_reason == StopReason::Aborted,
                     messages: new_messages.clone(),
                 })
                 .await?;
@@ -117,6 +118,7 @@ pub(crate) async fn run_loop(
             .await?;
             if signal.is_some_and(AbortSignal::is_aborted) {
                 emit(AgentEvent::AgentEnd {
+                    aborted: true,
                     messages: new_messages.clone(),
                 })
                 .await?;
@@ -145,6 +147,7 @@ pub(crate) async fn run_loop(
             match should_stop_result {
                 PostTurnResult::Aborted | PostTurnResult::Completed(true) => {
                     emit(AgentEvent::AgentEnd {
+                        aborted: matches!(should_stop_result, PostTurnResult::Aborted),
                         messages: new_messages.clone(),
                     })
                     .await?;
@@ -154,6 +157,7 @@ pub(crate) async fn run_loop(
             }
             if should_stop_before_turn!() {
                 emit(AgentEvent::AgentEnd {
+                    aborted: false,
                     messages: new_messages.clone(),
                 })
                 .await?;
@@ -168,6 +172,7 @@ pub(crate) async fn run_loop(
             match steering_messages_result {
                 PostTurnResult::Aborted => {
                     emit(AgentEvent::AgentEnd {
+                        aborted: true,
                         messages: new_messages.clone(),
                     })
                     .await?;
@@ -179,6 +184,7 @@ pub(crate) async fn run_loop(
                     // stop only when it was empty.
                     if pending_messages.is_empty() && should_stop_before_turn!() {
                         emit(AgentEvent::AgentEnd {
+                            aborted: false,
                             messages: new_messages.clone(),
                         })
                         .await?;
@@ -199,6 +205,7 @@ pub(crate) async fn run_loop(
         let follow_up_messages = match follow_up_messages_result {
             PostTurnResult::Aborted => {
                 emit(AgentEvent::AgentEnd {
+                    aborted: true,
                     messages: new_messages.clone(),
                 })
                 .await?;
@@ -228,6 +235,7 @@ pub(crate) async fn run_loop(
         let continuation_messages = match continuation_messages_result {
             PostTurnResult::Aborted => {
                 emit(AgentEvent::AgentEnd {
+                    aborted: true,
                     messages: new_messages.clone(),
                 })
                 .await?;
@@ -244,6 +252,7 @@ pub(crate) async fn run_loop(
     }
 
     emit(AgentEvent::AgentEnd {
+        aborted: false,
         messages: new_messages.clone(),
     })
     .await?;

@@ -13,7 +13,7 @@ unicode-width = "0.2"
 unicode-properties = "0.1"
 unicode-segmentation = "1"
 emojis = "0.9"
-fancy-regex = "0.14"
+fancy-regex = "0.20"
 url = "2"
 regex = "1"
 ignore = "0.4"
@@ -21,7 +21,7 @@ notify = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }

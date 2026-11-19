@@ -1,0 +1,1 @@
+- Fixed a goal status change made during a turn (for example `/goal pause`) sometimes not reaching clients until a later turn: the turn end now always publishes it.

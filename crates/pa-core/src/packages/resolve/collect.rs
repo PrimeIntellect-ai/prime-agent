@@ -8,8 +8,8 @@ use super::discovery::{collect_resource_files, read_pi_manifest};
 use super::manager::collect_files_from_paths;
 use super::patterns::{apply_patterns, has_glob_pattern, is_override_pattern};
 use super::{
-    resource_type_dir_name, PackageFilter, PathMetadata, ResourceAccumulator, ResourceType,
-    RESOURCE_TYPES,
+    resource_type_dir_name, DisabledBy, PackageFilter, PathMetadata, ResourceAccumulator,
+    ResourceType, RESOURCE_TYPES,
 };
 
 impl PackageManager {
@@ -62,9 +62,11 @@ impl PackageManager {
             let dir = package_root.join(resource_type_dir_name(resource_type));
             if dir.exists() {
                 for file in collect_resource_files(&dir, resource_type) {
-                    accumulator
-                        .map(resource_type)
-                        .add(&file, metadata.clone(), true);
+                    accumulator.map(resource_type).add(
+                        &file,
+                        metadata.clone(),
+                        /*disabled_by*/ None,
+                    );
                 }
                 has_any_dir = true;
             }
@@ -85,18 +87,20 @@ impl PackageManager {
         // An explicit empty list disables this resource type.
         if user_patterns.is_empty() {
             for file in &all_files {
-                accumulator
-                    .map(resource_type)
-                    .add(file, metadata.clone(), false);
+                accumulator.map(resource_type).add(
+                    file,
+                    metadata.clone(),
+                    Some(DisabledBy::Settings),
+                );
             }
             return;
         }
         let enabled_by_user = apply_patterns(&all_files, user_patterns, package_root);
         for file in &all_files {
-            let enabled = enabled_by_user.contains(file);
+            let disabled_by = (!enabled_by_user.contains(file)).then_some(DisabledBy::Settings);
             accumulator
                 .map(resource_type)
-                .add(file, metadata.clone(), enabled);
+                .add(file, metadata.clone(), disabled_by);
         }
     }
 
@@ -152,9 +156,11 @@ impl PackageManager {
         let enabled_paths = apply_patterns(&all_files, &patterns, root);
         for file in all_files {
             if enabled_paths.contains(&file) {
-                accumulator
-                    .map(resource_type)
-                    .add(&file, metadata.clone(), true);
+                accumulator.map(resource_type).add(
+                    &file,
+                    metadata.clone(),
+                    /*disabled_by*/ None,
+                );
             }
         }
     }
@@ -200,9 +206,11 @@ impl PackageManager {
         let dir = package_root.join(resource_type_dir_name(resource_type));
         if dir.exists() {
             for file in collect_resource_files(&dir, resource_type) {
-                accumulator
-                    .map(resource_type)
-                    .add(&file, metadata.clone(), true);
+                accumulator.map(resource_type).add(
+                    &file,
+                    metadata.clone(),
+                    /*disabled_by*/ None,
+                );
             }
         }
     }

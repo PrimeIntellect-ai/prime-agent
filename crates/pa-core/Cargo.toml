@@ -18,8 +18,8 @@ pa-ai.workspace = true
 pa-models = { path = "../pa-models" }
 pa-agent.workspace = true
 pa-telemetry.workspace = true
-base64 = "0.22"
-fancy-regex = "0.14"
+base64 = "0.23"
+fancy-regex = "0.20"
 # The traces browser login's auth challenge (RSA-2048 keypair, OAEP-SHA256
 # result decrypt; sha2 matches the workspace's version, pem for the SPKI
 # wire form).

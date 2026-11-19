@@ -145,6 +145,7 @@ impl SessionEngine for AgentSessionEngine {
                     source: "user".to_string(),
                     agent_message_id: None,
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
+                    streaming_behavior: None,
                 },
                 goal_update,
                 pending_handle,
@@ -351,6 +352,16 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(handles) = self.built_handles() {
             handles.progress_notes.clear();
         }
+    }
+
+    /// The live-slot identity check: the store a replacement retired is
+    /// not the session's published inbox (the consumed withdrawal's
+    /// re-check consults this under the core lock).
+    fn inbox_is_live(
+        &self,
+        inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    ) -> bool {
+        self.is_live_inbox(inbox)
     }
 
     fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {
@@ -1243,7 +1254,6 @@ impl SessionEngine for AgentSessionEngine {
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
         let (model, api_key) = self.resolve_request_target(model);
-        let global_harness_dir = self.config.agent_dir.clone();
         // The lock covers the clone only; the model call below must not ride it.
         let core = self
             .session
@@ -1256,7 +1266,6 @@ impl SessionEngine for AgentSessionEngine {
                 pa_core::session_engine::refine::RefinementSource::User,
                 model,
                 api_key,
-                global_harness_dir,
             );
             drop(core);
             pending
@@ -1377,7 +1386,14 @@ impl SessionEngine for AgentSessionEngine {
                 )) {
                     return;
                 }
-                self.run_turns(TurnPrompt::Injected(message), aborted, &mut emit);
+                self.run_turns(
+                    TurnPrompt::Injected {
+                        message,
+                        behavior: pa_core::session_engine::StreamingBehavior::Steer,
+                    },
+                    aborted,
+                    &mut emit,
+                );
             } else {
                 emit(EngineEvent::Done(Ok(())));
             }
@@ -1484,7 +1500,16 @@ impl SessionEngine for AgentSessionEngine {
             }
         }
         let turn_prompt = match injected {
-            Some(custom) => TurnPrompt::Injected(custom),
+            // The delivery's queue lane carries the busy-session behavior:
+            // a steering-lane item interrupts the running turn, a
+            // follow-up-lane item queues at its boundary, and a caller
+            // that set none keeps the injected-notice default (steer).
+            Some(custom) => TurnPrompt::Injected {
+                message: custom,
+                behavior: request
+                    .streaming_behavior
+                    .unwrap_or(pa_core::session_engine::StreamingBehavior::Steer),
+            },
             None => TurnPrompt::User {
                 text: request.message.clone(),
                 images: request.images.clone(),
@@ -1498,7 +1523,7 @@ impl SessionEngine for AgentSessionEngine {
             TurnPrompt::User { images, batch, .. } => {
                 !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
             }
-            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
+            TurnPrompt::Injected { message, .. } => Self::custom_message_carries_images(message),
         };
         if let Err(refusal) = self.arm_image_turn_route(carries_images) {
             emit(EngineEvent::Done(Err(refusal)));

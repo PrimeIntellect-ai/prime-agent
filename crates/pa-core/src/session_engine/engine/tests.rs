@@ -130,6 +130,8 @@ async fn engine_runs_tool_loop_and_persists() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
@@ -241,6 +243,8 @@ async fn spawned_child_prompt_stamps_its_depth() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: Some(2),
         factory_child: false,
@@ -315,6 +319,8 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: None,
             rlm_usage_store: None,
+
+            inbox: None,
             progress_note_emit: None,
             rlm_depth: None,
             factory_child: false,
@@ -506,6 +512,8 @@ async fn create_session_appends_missing_resume_settings_rows() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
@@ -890,6 +898,8 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
         rlm_usage_store: None,
+
+        inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
         factory_child: false,
@@ -962,4 +972,67 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         )),
         "the receipt persists as a custom entry"
     );
+}
+
+/// A fresh root session whose skill resolution found a problem (here a user
+/// skill that loses its name to the bundled `goal`) shows it as a
+/// display-only warning row on its first turn.
+#[tokio::test]
+async fn a_fresh_session_reports_skill_problems_on_its_first_turn() {
+    let model = pa_agent::types::Model {
+        id: "m".into(),
+        name: "m".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let user_goal = agent_dir.join("skills/goal/SKILL.md");
+    std::fs::create_dir_all(user_goal.parent().unwrap()).unwrap();
+    std::fs::write(&user_goal, "---\nname: goal\ndescription: Mine\n---\nBody").unwrap();
+    let engine = create_session(SessionEngineConfig {
+        cwd,
+        agent_dir: agent_dir.clone(),
+        model: Some(model),
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let bundled_goal = engine
+        .skills
+        .iter()
+        .find(|skill| skill.name == "goal")
+        .expect("bundled goal loads")
+        .file_path
+        .clone();
+    let expected =
+        super::super::skill_problems_notice::notice_message(&[crate::resources::SkillStatus {
+            name: "goal".to_string(),
+            path: user_goal.display().to_string(),
+            state: crate::resources::SkillState::IgnoredForBundled {
+                winner_path: bundled_goal.display().to_string(),
+                settings_path: agent_dir.join("settings.json").display().to_string(),
+            },
+        }]);
+    let rows: Vec<_> = engine
+        .session
+        .pending_next_turn_rows
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|row| row.custom_type == expected.custom_type)
+        .map(|row| (row.content.clone(), row.display))
+        .collect();
+    assert_eq!(rows, vec![(expected.content, true)]);
 }

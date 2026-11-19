@@ -179,6 +179,93 @@ fn event_type(event: &AgentEvent) -> &'static str {
     }
 }
 
+#[tokio::test]
+async fn a_completed_end_keeps_its_outcome_when_a_listener_aborts() {
+    let (agent, provider, _) = scripted_agent(vec![]).await;
+    provider.push_text_turn("finished");
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let subscription = agent
+        .subscribe({
+            let agent = agent.clone();
+            let outcomes = Arc::clone(&outcomes);
+            move |event, signal| {
+                let agent = agent.clone();
+                let outcomes = Arc::clone(&outcomes);
+                Box::pin(async move {
+                    if let AgentEvent::AgentEnd { aborted, .. } = event {
+                        agent.abort();
+                        outcomes
+                            .lock()
+                            .unwrap()
+                            .push((aborted, signal.is_aborted()));
+                    }
+                    Ok(())
+                })
+            }
+        })
+        .await;
+    agent.prompt("go").await.unwrap();
+    subscription.unsubscribe().await;
+    assert_eq!(*outcomes.lock().unwrap(), vec![(false, true)]);
+}
+
+#[tokio::test]
+async fn an_abort_after_tools_is_carried_by_the_end_without_an_aborted_message() {
+    let echo = EchoTool::new("echo");
+    let (agent, provider, _) = scripted_agent(vec![echo.clone()]).await;
+    provider.push_tool_call_turn(
+        None,
+        vec![("call", "echo", serde_json::json!({ "text": "done" }))],
+    );
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let subscription = agent
+        .subscribe({
+            let agent = agent.clone();
+            let outcomes = Arc::clone(&outcomes);
+            move |event, _signal| {
+                let agent = agent.clone();
+                let outcomes = Arc::clone(&outcomes);
+                Box::pin(async move {
+                    match event {
+                        AgentEvent::TurnEnd { tool_results, .. } => {
+                            assert_eq!(tool_results.len(), 1);
+                            assert_eq!(tool_results[0].tool_call_id, "call");
+                            assert!(!tool_results[0].is_error);
+                            assert_eq!(single_text(&tool_results[0].content), "echo:done");
+                            agent.abort();
+                        }
+                        AgentEvent::AgentEnd { aborted, messages } => {
+                            let assistant_stops: Vec<StopReason> = messages
+                                .iter()
+                                .filter_map(|message| match message {
+                                    AgentMessage::Standard(Message::Assistant(message)) => {
+                                        Some(message.stop_reason)
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            outcomes.lock().unwrap().push((aborted, assistant_stops));
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })
+            }
+        })
+        .await;
+    agent.prompt("go").await.unwrap();
+    subscription.unsubscribe().await;
+    assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls().len(), 1);
+    // The scripted helper retains Stop on its message even for a tool-call
+    // event. The completed tool above proves cancellation happened after tools,
+    // while the assistant itself still has no Aborted stop reason.
+    assert_eq!(
+        *outcomes.lock().unwrap(),
+        vec![(true, vec![StopReason::Stop])]
+    );
+}
+
 /// Build an agent wired to the scripted provider, with an event-type log.
 async fn scripted_agent(
     tools: Vec<Arc<dyn AgentTool>>,

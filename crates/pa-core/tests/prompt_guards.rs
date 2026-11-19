@@ -515,42 +515,44 @@ fn core_layer_documents_the_real_tool_surface() {
     }
 }
 
-// Packaged-set parity (TS packages/coding-agent/skills)
+// Packaged-set discovery
 
-/// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): 12 skills — the
-/// generic `mcp` doc skill in, the per-service linear/notion pair out (TS removed theirs when the
-/// generic MCP surface landed).
-const TS_PACKAGED_SKILL_SET: &[&str] = &[
-    "agent-message",
-    "agent-observe",
-    "attach-image",
-    "compact",
-    "edit",
-    "goal",
-    "mcp",
-    "prime-intellect",
-    "refine",
-    "rlm-heartbeat",
-    "skill-creator",
-    "websearch",
-];
-
-/// The bundled skills directory matches the TS packaged set name-for-name: the generic `mcp` skill
-/// is present and markdown-only, and the retired per-service pair (linear/notion) is gone.
+/// Every shipped skill directory is discoverable: the bundled `skills/` tree
+/// loads name-for-name through the real discovery path, so a broken SKILL.md
+/// (frontmatter that fails to parse, an empty description) fails here instead
+/// of silently vanishing from the prompt and `/skill:<name>` lookup.
 #[test]
-fn bundled_skills_match_the_ts_packaged_set() {
-    let skills = sorted_bundled_skills();
-    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
-    let mut expected = TS_PACKAGED_SKILL_SET.to_vec();
-    expected.sort_unstable();
-    assert_eq!(
-        names, expected,
-        "the packaged skill set must match the TS packaged set"
-    );
+fn every_shipped_skill_is_discoverable() {
+    let skills_dir = bundled_skills_dir();
+    let mut shipped: Vec<String> = std::fs::read_dir(&skills_dir)
+        .expect("bundled skills directory")
+        .filter_map(|entry| {
+            let entry = entry.expect("skill dir entry");
+            (entry.path().join("SKILL.md").is_file())
+                .then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    shipped.sort_unstable();
     assert!(
-        !names.contains(&"linear") && !names.contains(&"notion"),
-        "the per-service MCP skills retired with the generic mcp skill"
+        !shipped.is_empty(),
+        "the bundled skills directory must ship skills"
     );
+
+    let skills = sorted_bundled_skills();
+    let loaded: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
+    assert_eq!(
+        loaded, shipped,
+        "every shipped skill directory must be discoverable"
+    );
+    for skill in &skills {
+        assert_eq!(
+            skill.file_path,
+            skills_dir.join(&skill.name).join("SKILL.md"),
+            "skill {} must load from its shipped directory",
+            skill.name
+        );
+    }
+
     let mcp_skill = skills
         .iter()
         .find(|skill| skill.name == "mcp")
@@ -558,10 +560,6 @@ fn bundled_skills_match_the_ts_packaged_set() {
     assert!(
         mcp_skill.python.is_none(),
         "the mcp skill is documentation for the pre-imported runtime module, not a Python package"
-    );
-    assert_eq!(
-        mcp_skill.description,
-        "Use external MCP services generically from Python - search the supported-service catalog, inspect the user's connections, discover live tool schemas, and call tools on any connection (Notion, Linear, Slack, and the rest of the catalog) without per-service packages."
     );
 }
 

@@ -3,6 +3,54 @@
 Release notes for Prime Agent. Historical TypeScript release notes are
 recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
 
+## [0.10.5] - 2026-11-18
+
+- Daemon, print/JSON (`prime-agent -p`), and RPC stdio-mode refinements now write the harness stores the session's digest reads: the global store under the agent dir's `harness/` path and the local store in the session's own artifact directory, instead of the orphan `~/.prime/agent/harness_state.json` and `~/.prime/agent/refinement_history.jsonl` (written by daemon and RPC `/refine --global`), one shared `~/.prime/agent/sessions/harness/harness_state.json` (written by every session whose session dir is the sessions root), and `<session dir>/harness/harness_state.json` under any custom session dir (`--session-dir`, `PRIME_AGENT_SESSION_DIR`, or the `sessionDir` setting). The old files stay on disk but nothing reads them anymore. No automatic migration ships: entries in the orphaned global file can be merged by hand into `~/.prime/agent/harness/harness_state.json`; the shared local files mix sessions and cannot be attributed back.
+- Bundled skills now win name clashes: a project or user skill with the same name (for example `goal`) no longer replaces the bundled one. To use your own skill instead, add `"skills": ["-<name>"]` to `~/.prime/agent/settings.json`.
+- The bundled `factory` skill loads again, and a skill with invalid frontmatter now reports the YAML error instead of vanishing.
+- New `prime-agent skills` command lists every discovered skill and why it is active, hidden, shadowed, disabled, or invalid. A new session also shows a warning when a skill could not load.
+- `/skill:<name>` now works anywhere in a message, including for hidden skills. Unknown skill names show a notice.
+- Switching a Python skill between the bundled copy and your own now installs the selected copy into the Python kernel.
+- Fixed uv discovery rejecting the global `~/.local/bin/uv` install when Prime Agent is launched from the home directory (notably on Windows), and made the missing-uv install hint match the platform.
+
+## [0.10.4] - 2026-11-17
+
+- Fixed `rlm.collect` reporting a child as completed (`done`, settled) when it read idle for a moment right after its task was admitted and then started running.
+- Fixed submits staying blocked with "Daemon reconnection failed" after the TUI reconnected to the daemon.
+- Fixed a paste while the /factory page is open landing in the hidden prompt editor.
+- Retrying a session whose worker crashed now relaunches the worker instead of reporting success while the worker is dead.
+- `/update` and `prime-agent update` now describe the update as installing the latest version, without mentioning the TypeScript version or the Rust build.
+- Session HTML exports now escape the `read` tool's line range, so a crafted `offset` in a tool call can no longer inject HTML or script into the exported page.
+- `/mcp login` and MCP OAuth token refresh now give up after 8 seconds on an unresponsive authorization server instead of hanging, which also blocked other processes waiting on the same refresh.
+- The agents view's Model column now widens to fit the longest model name when the terminal has room, instead of cutting names at 32 characters. In narrow terminals the model name is shortened first, and the Session column keeps at least half of the shared space.
+- Sessions created with `rlm.create_session` now keep the parent's telemetry opt-out (`DO_NOT_TRACK`, `PI_OFFLINE`, `PRIME_AGENT_TELEMETRY`).
+- The TUI no longer turns raw OSC 8 terminal-link sequences in model output, tool arguments, file contents, agent messages, or background shell output into clickable links; only links the TUI renders itself (such as markdown links) stay clickable.
+- On shared Unix hosts, the daemon now refuses a default socket directory owned by another user or replaced by a symlink, and clients refuse a daemon socket served by another user.
+- Files that can hold private data are now created readable only by you (mode 0600 on Linux and macOS): large bash output spill files in the temp directory, rewritten session transcripts, window-cache sidecars, refinement history, diagnostic logs, and persistent-shell output and records. Existing files keep their current permissions.
+- When `PRIME_API_KEY` or `--api-key` supplies the Prime Inference key, requests no longer send the team saved by `/login` with it. The team now comes from the same place as the key: `PRIME_TEAM_ID` (or no team) for an environment or command-line key, the saved team for the saved login.
+- Private Prime Inference models now come from the same account-scoped model catalog as the public ones. A newly granted private model appears after the next catalog refresh (startup, login, or the hourly refresh) instead of within 5 minutes, and a key without a team selection now sees the private models the server lists for it.
+- Closing a menu with Ctrl+C (settings, tree, fork, confirm, share upload) no longer makes the next quick Ctrl+C at the editor force-quit Prime Agent about 1.5 seconds later.
+- The kernel's Python runtime now requires patched releases of mcp (>= 2.2), PyJWT (>= 2.15), and opentelemetry-api (>= 1.45.1), which clears the open security advisories against its locked versions.
+- When a provider rejects a signed-in OAuth credential that has not expired yet, the session now refreshes the token and retries once. When the refresh fails, the turn ends with a message that names the provider and the reason and asks you to run `/login`, instead of a bare provider error or "No API key".
+- ACP: `session/list` and `session/load` are served (`loadSession` and `sessionCapabilities.list` are advertised), so editors such as Zed can list saved prime-agent sessions and reopen one. The ACP session id is now the prime-agent session id; `session/load` opens the saved session (reusing its live worker if one is running), replays its conversation as `session/update` notifications, and then answers. Subagent sessions and sessions without messages are not listed.
+- Release archives on every platform now include `THIRD-PARTY-NOTICES.txt`, with the license texts of all Rust crates built into the `prime-agent` binary and the crates each license covers. Installs keep it beside `LICENSE` in the payload directory.
+- Turning auto-compaction on or off in a running daemon session now takes effect at the next turn instead of after the session restarts.
+- A session that replaced another in the same daemon worker (fork, import, new or switched session) no longer stays marked closed: its goal and autonomous continuations run again, and background bash completion notices reach it.
+- Accepting an `@` file, path, or slash-command suggestion right after typing more characters now replaces the whole typed token. Before, part of the old token stayed in front of the completion (`@pr@prime-agent/`).
+- Every model request a session makes now carries an `X-PI-Session-Id` header with the session's stable id, so the Prime Inference gateway aggregates one session's calls into a single trace instead of one trace per request; requests without a session context send no header.
+- The prompt editor suggests emoji for shortcodes: typing `:` plus two letters at the start of a word (for example `:he`) lists matching emoji in the completion menu, and accepting one (Enter or Tab) inserts it, so `:heart` becomes ❤️. Typed text is never converted on its own: `:heart:` followed by a space stays as typed. No menu opens in code spans, fenced code blocks, URL paths, or text like `std::fmt`. Turn it off with the `emojiShortcodes` setting or the Emoji shortcodes row in `/settings`.
+- Fixed sessions whose sessions folder sat behind a symlink (such as macOS `/tmp`) silently dropping every message after the first session was created, and stopping an attached session on macOS showing "connection lost" instead of the stop notice.
+- Fixed a duplicated `cwd` field in pa-daemon's watch tests that broke the workspace build.
+- The TUI stays busy for the whole agent run instead of going idle after each model turn: Esc and Ctrl+C between two tool turns now abort the run, the loader no longer blinks out between turns, and `!` bash output started mid-run is held until the run ends. A run that ends without its own `agent_end` (an abort before the run starts, or a run interrupted by a tree move or compaction) is now still closed on the wire, so attached clients no longer stay busy after it.
+Refinement planning runs in the background, with harness edits and model notices committed between complete agent runs. Existing context rows stay unchanged, and resumed sessions append an updated harness digest only when durable harness state changed.
+- Fixed an injected custom message without a timestamp failing the turn with "parse failed: missing field timestamp": a missing clock now fills from the serde default on the message type at parse, and a row that still fails to parse logs a redacted summary (its customType, top-level keys, and byte length) plus the requesting session's identity to the daemon log.
+- Fixed sessions wedging on the provider's request-size limit: a provider 413 now triggers one compact-and-retry.
+- The ACP terminal-quiescence observation now reports `outstandingBackgroundJobs` (live background `bash()` handles plus `[bash-done]` notifications still queued for delivery), so hosts that close episodes on quiescence no longer tear a sandbox down while a detached background job is still running.
+- Project settings can no longer redirect session storage or select executable configuration when opening a repository.
+- The Rust TUI reports its status to terminals that support OSC 7501 (the Program Status Protocol), such as Rex: it asks the terminal once at startup and writes reports only when the terminal answers. A chat reports working for the whole agent run (including a pending provider retry), done when the run ends normally, error when it fails for good, and idle at rest or after an interrupt; the agents view reports idle. On exit it leaves the terminal's record alone, as the protocol asks.
+- The daemon sends a failed run's `agent_end` after the retry loop's next event, so clients see a pending `auto_retry_start` before the end of the attempt it retries.
+- Run completion keeps its original cancellation outcome even when an abort request races delivery of the final event.
+
 ## [0.10.3] - 2026-11-11
 
 - Concurrent OAuth credential lookups now keep the refresh flight reserved until the refreshed credential is committed and reloaded, preventing a second lookup from reusing the expired refresh token between fetch and persistence.

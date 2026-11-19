@@ -109,10 +109,14 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
+    // The fixture's own dir, never /tmp, is the session's cwd: the kill
+    // switch above sits in the agent dir's global scope, and a
+    // project-scope settings file under a shared /tmp could otherwise
+    // override it and silently re-route these probes.
     let created = worker
         .dispatch(
             "create",
-            &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-send" }),
+            &json!({ "noSession": true, "cwd": dir.to_string_lossy(), "name": "abort-send" }),
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
@@ -725,6 +729,17 @@ async fn held_turn_worker(
 ) {
     let dir = std::env::temp_dir().join(format!("pa-worker-abort-am-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
+    // The probes' transcript oracles read the parked message's delivered
+    // row; the default inbox route delivers a short notice with the
+    // message in the durable inbox instead (the message never parks), so
+    // this helper pins the direct route. The inbox route is covered by
+    // `agent_inbox_e2e`.
+    std::fs::create_dir_all(dir.join("agent")).unwrap();
+    std::fs::write(
+        dir.join("agent").join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .unwrap();
     let config = WorkerConfig {
         socket_path: dir.join("worker.sock"),
         supervisor_socket_path: PathBuf::new(),

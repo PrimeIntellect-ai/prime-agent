@@ -1,1 +1,0 @@
-- Fixed a paste while the /factory page is open landing in the hidden prompt editor.

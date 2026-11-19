@@ -20,6 +20,12 @@ pub struct PromptRequest {
     /// (persisted and rendered) in order ahead of the model turn, and the
     /// loop context carries every row as one `agent.prompt` message list.
     pub batch: Vec<PromptBatchRow>,
+    /// The delivery's streaming behavior when the agent is busy at
+    /// admission (the queue lane the item rode): the runner's steering
+    /// lane steers the running turn, the follow-up lane queues at its
+    /// boundary. `None` (tests and pass-through callers) admits as
+    /// `Steer`, the injected-notice default.
+    pub streaming_behavior: Option<pa_core::session_engine::StreamingBehavior>,
 }
 
 /// One co-delivered user row of a batched prompt request.
@@ -110,6 +116,8 @@ pub enum EngineEvent {
     /// their own events; this frame carries only the accumulated payload.
     AgentEnd {
         messages: Vec<Value>,
+        /// Immutable cancellation outcome from the loop producer.
+        aborted: bool,
     },
     /// A durable custom message (wire `role: "custom"`): recorded into the
     /// session store, framed to clients as a `message_start` + `message_end` pair.
@@ -154,6 +162,7 @@ pub enum EngineEvent {
     /// `auto_retry_end`: the retry loop settled. `restored_model` is the
     /// `"provider/model-id"` primary restored after a failover switch.
     AutoRetryEnd {
+        aborted: bool,
         success: bool,
         attempt: u32,
         final_error: Option<String>,

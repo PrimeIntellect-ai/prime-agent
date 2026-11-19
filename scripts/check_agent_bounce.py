@@ -118,8 +118,14 @@ def run_case(binary, root, long_name, observed):
             'models': [{'id': 'parity-1', 'name': 'Parity 1', 'reasoning': False,
                         'contextWindow': 128000, 'maxTokens': 4096}]}}}
         (root / 'agent/models.json').write_text(json.dumps(models))
+        # The bounce path is a direct-route behavior: with the agent inbox
+        # enabled (the default) a delivered message lands in the durable
+        # inbox and the queued row is a short notice without the
+        # agent-message marker, so a clearance cannot bounce it. Pin the
+        # route under test explicitly.
         (root / 'agent/settings.json').write_text(json.dumps({'prewarmPythonKernel': False,
             'defaultProvider': 'parity-local', 'defaultModel': 'parity-1',
+            'agentInbox': {'enabled': False},
             'onboardingCompleted': True, 'telemetry': {'noticeShown': True}}))
         path = root / 'd.sock'
         log = open(root / 'daemon.log', 'wb')

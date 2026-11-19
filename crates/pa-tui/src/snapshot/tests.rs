@@ -826,21 +826,26 @@ fn reconstructs_the_queue_from_session_actions() {
     let mut attach = slim_attach();
     attach["snapshot"]["state"]["sessionActions"] = json!({
         "queuedCount": 2,
-        "steering": ["turn right"],
+        "steering": ["Inbox: 1 new message (bash-done)"],
         "followUps": ["then summarize"],
+        "inboxNotice": { "steering": [0], "followUp": [] },
     });
     let data = attach_data_from_response(attach).unwrap();
     let view = reconstruct(&data);
     assert_eq!(
         view.queued,
         crate::queued::QueuedMessages {
-            steering: vec!["turn right".to_string()],
+            steering: vec!["Inbox: 1 new message (bash-done)".to_string()],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
             rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices {
+                steering: vec![0],
+                follow_up: Vec::new(),
+            },
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         },
-        "an attach re-syncs the queue strip from the snapshot"
+        "an attach re-syncs the queue strip and the inbox rider from the snapshot"
     );
 }
 
@@ -992,6 +997,7 @@ fn decodes_session_action_update_as_the_queue_projection() {
             follow_ups: vec!["queued follow-up".to_string()],
             starting: None,
             rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices::default(),
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         }
     );
@@ -1019,6 +1025,7 @@ fn decodes_the_child_status_provenance_from_the_live_queue_update() {
                 steering: vec![0],
                 follow_up: Vec::new(),
             },
+            inbox_notice: crate::queued::QueueLaneIndices::default(),
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         }
     );
@@ -1049,10 +1056,39 @@ fn decodes_the_injected_provenance_from_the_live_queue_update() {
             ],
             starting: None,
             rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices::default(),
             injected_prompts: crate::queued::QueueLaneIndices {
                 steering: Vec::new(),
                 follow_up: vec![0],
             },
+        }
+    );
+}
+
+#[test]
+fn decodes_the_inbox_notice_provenance_from_the_live_queue_update() {
+    let update = event_to_update(&json!({
+        "type": "session_action_update",
+        "actions": {
+            "queuedCount": 2,
+            "steering": ["Inbox: 1 new message (bash-done)"],
+            "followUps": ["then summarize"],
+            "inboxNotice": { "steering": [0], "followUp": [] },
+        },
+    }))
+    .expect("a queue update");
+    assert_eq!(
+        update,
+        TurnUpdate::QueueUpdated {
+            steering: vec!["Inbox: 1 new message (bash-done)".to_string()],
+            follow_ups: vec!["then summarize".to_string()],
+            starting: None,
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices {
+                steering: vec![0],
+                follow_up: Vec::new(),
+            },
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         }
     );
 }
@@ -1079,6 +1115,7 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             follow_ups: vec![],
             starting: Some("queued before compaction".to_string()),
             rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices::default(),
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
@@ -1102,6 +1139,7 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             follow_ups: vec![],
             starting: None,
             rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices::default(),
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
@@ -1125,6 +1163,7 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             follow_ups: vec![],
             starting: None,
             rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            inbox_notice: crate::queued::QueueLaneIndices::default(),
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
@@ -1288,6 +1327,7 @@ fn decodes_auto_retry_events() {
     assert_eq!(
         end,
         TurnUpdate::AutoRetryEnd {
+            aborted: false,
             success: false,
             attempt: 2,
             final_error: Some("provider down".to_string()),
@@ -1304,6 +1344,7 @@ fn decodes_auto_retry_events() {
     assert_eq!(
         settled,
         TurnUpdate::AutoRetryEnd {
+            aborted: false,
             success: true,
             attempt: 2,
             final_error: None,
@@ -1414,17 +1455,45 @@ fn decodes_streamed_events() {
         TurnUpdate::AssistantMessage { message, streaming: false, .. } if message["content"] == "done"
     ));
     let ended = event_to_update(&json!({ "type": "turn_end" })).unwrap();
-    assert_eq!(ended, TurnUpdate::TurnEnded { error: None });
+    assert_eq!(
+        ended,
+        TurnUpdate::TurnEnded {
+            error: None,
+            run_failed: false,
+            aborted: false,
+        }
+    );
     let failed = event_to_update(&json!({ "type": "turn_end", "error": "boom" })).unwrap();
     assert_eq!(
         failed,
         TurnUpdate::TurnEnded {
-            error: Some("boom".to_string())
+            error: Some("boom".to_string()),
+            run_failed: true,
+            aborted: false,
         }
     );
+    // The engine's own terminal message settles the run as failed too; a
+    // step's toolUse settle does not.
+    for (stop_reason, run_failed) in [("aborted", true), ("error", true), ("toolUse", false)] {
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "turn_end",
+                "message": { "role": "assistant", "stopReason": stop_reason },
+            })),
+            Some(TurnUpdate::TurnEnded {
+                error: None,
+                run_failed,
+                aborted: stop_reason == "aborted",
+            })
+        );
+    }
     assert_eq!(
         event_to_update(&json!({ "type": "agent_end" })),
-        Some(TurnUpdate::Idle)
+        Some(TurnUpdate::Idle { aborted: false })
+    );
+    assert_eq!(
+        event_to_update(&json!({ "type": "agent_end", "aborted": true })),
+        Some(TurnUpdate::Idle { aborted: true })
     );
 }
 
@@ -1762,7 +1831,7 @@ fn decodes_compaction_events() {
             "reason": "manual",
             "result": { "summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 12 },
             "aborted": false,
-            "willRetry": false,
+            "willRetry": true,
             "customInstructions": "focus",
         })),
         Some(TurnUpdate::CompactionEnd {
@@ -1772,6 +1841,7 @@ fn decodes_compaction_events() {
             aborted: false,
             error_message: None,
             error_severity: None,
+            will_retry: true,
         })
     );
     assert_eq!(
@@ -1790,6 +1860,7 @@ fn decodes_compaction_events() {
             aborted: false,
             error_message: Some("Session is too short to compact".to_string()),
             error_severity: Some("warning".to_string()),
+            will_retry: false,
         })
     );
     // The settling end stays the summary's only durable source.

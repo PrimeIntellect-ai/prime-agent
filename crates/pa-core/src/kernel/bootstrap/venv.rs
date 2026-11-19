@@ -42,9 +42,8 @@ use runtime_source::collect_python_files;
 pub(super) use runtime_source::{hash_runtime_source, require_runtime_source_dir};
 pub(super) use runtime_source::{package_dir, packaged_runtime_dir};
 #[cfg(test)]
-use skills::{
-    file_content_hash, read_python_skill_dependency_names, read_python_skill_project_name,
-};
+use skills::{file_content_hash, read_python_skill_dependency_names};
+use skills::{normalize_project_name, read_python_skill_project_name};
 pub(crate) use skills::{normalize_python_skills, BootstrapPythonSkill};
 pub(crate) use uv::ensure_uv;
 #[cfg(test)]
@@ -184,6 +183,18 @@ pub(crate) async fn bootstrap_venv(
     .await
 }
 
+/// True when installing `skill` displaces `existing`'s install. uv replaces
+/// distributions by project name and leaves different-named distributions
+/// installed side by side, so another package path is displaced in two
+/// ways: the same import name stays installed and shadows this skill on
+/// sys.path, and the same project name has its code replaced outright.
+fn displaces_install(existing: &BootstrapPythonSkill, skill: &BootstrapPythonSkill) -> bool {
+    existing.package_path != skill.package_path
+        && (existing.import_name == skill.import_name
+            || normalize_project_name(&read_python_skill_project_name(existing))
+                == normalize_project_name(&read_python_skill_project_name(skill)))
+}
+
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
 /// changed are installed. Per-skill failures warn and continue.
 pub(crate) async fn sync_python_skills(
@@ -220,6 +231,44 @@ pub(crate) async fn sync_python_skills(
         missing.push(skill);
     }
     if !missing.is_empty() {
+        // Installing a skill can displace another source's install (see
+        // [`displaces_install`]). Drop the displaced records before
+        // installing: uv swaps distributions by project name, so a displaced
+        // record may describe code this sync replaces, and a record dropped
+        // while its code is still installed only costs one redundant
+        // reinstall. The same-import distributions from other package paths
+        // are NOT replaced by the install, so uninstall them first or their
+        // editable install shadows the skill this session selected.
+        let mut shadowing: Vec<String> = Vec::new();
+        for skill in &missing {
+            let skill_project = normalize_project_name(&read_python_skill_project_name(skill));
+            installed.retain(|_, existing| {
+                if !displaces_install(existing, skill) {
+                    return true;
+                }
+                let existing_project = read_python_skill_project_name(existing);
+                if normalize_project_name(&existing_project) != skill_project
+                    && !shadowing.contains(&existing_project)
+                {
+                    shadowing.push(existing_project);
+                }
+                false
+            });
+        }
+        if !shadowing.is_empty() {
+            let mut uninstall_args = vec![
+                "pip".to_string(),
+                "uninstall".to_string(),
+                "--python".to_string(),
+                python_str.clone(),
+            ];
+            uninstall_args.extend(shadowing.iter().cloned());
+            if let Err(error) = run_async(uv.executable, &uninstall_args, uv.project).await {
+                options.report(&format!(
+                    "Warning: failed to uninstall the Python skill distributions this sync replaces ({shadowing:?}): {error}"
+                ));
+            }
+        }
         // One uv invocation installs the whole batch of missing skills: a fresh bootstrap otherwise
         // pays one process plus build-backend startup per install. A batch failure falls back to
         // the per-skill loop.

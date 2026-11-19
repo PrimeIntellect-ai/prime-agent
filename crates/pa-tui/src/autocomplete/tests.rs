@@ -166,6 +166,20 @@ fn slash_completion_applies_separator_by_argument() {
     assert_eq!(result.cursor_col, 7);
 }
 
+/// Accepting an argument item replaces the whole typed argument, a trailing space included; a
+/// forced path completion there still replaces only the path token.
+#[test]
+fn argument_completion_replaces_the_typed_argument() {
+    let mut provider = provider("/tmp");
+    provider.set_argument_completions("tier", vec![item("default")]);
+    let result = provider.apply_completion(&["/tier de ".to_string()], 0, 9, &item("default"));
+    assert_eq!(result.lines[0], "/tier default");
+    assert_eq!(result.cursor_col, 13);
+    let result =
+        provider.apply_completion(&["/tier a src/ma".to_string()], 0, 14, &item("src/main.rs"));
+    assert_eq!(result.lines[0], "/tier a src/main.rs");
+}
+
 #[test]
 fn path_completion_lists_directories_first() {
     let dir = std::env::temp_dir().join("pa-tui-path-completion");

@@ -1,1 +1,0 @@
-- The TUI no longer turns raw OSC 8 terminal-link sequences in model output, tool arguments, file contents, agent messages, or background shell output into clickable links; only links the TUI renders itself (such as markdown links) stay clickable.

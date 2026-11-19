@@ -80,7 +80,16 @@ pub(crate) fn load_skill_from_file(
             return (None, diagnostics);
         }
     };
-    let (frontmatter, _body) = parse_frontmatter(&raw_content);
+    let frontmatter = match parse_frontmatter(&raw_content).0 {
+        Ok(frontmatter) => frontmatter,
+        Err(error) => {
+            diagnostics.push(ResourceDiagnostic::Warning {
+                message: format!("invalid YAML frontmatter: {error}"),
+                path: Some(file_path.display().to_string()),
+            });
+            return (None, diagnostics);
+        }
+    };
     let skill_dir = file_path.parent().unwrap_or_else(|| Path::new("."));
     let parent_dir_name = skill_dir
         .file_name()
