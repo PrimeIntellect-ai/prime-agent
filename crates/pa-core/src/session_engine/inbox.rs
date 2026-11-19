@@ -93,8 +93,14 @@ pub struct InboxNotice {
 /// Python): every set field narrows the read (`ANDed`), an all-`None`
 /// filter reads everything. The wire shape is camelCase, like the
 /// message rows.
+///
+/// The shape is STRICT: an unknown field is a request error, never a
+/// silently empty filter that would drain the whole inbox — a typo has
+/// to fail closed. `type` is reserved for the host-request envelope's
+/// routing key (the read handler strips it), so no filter field may
+/// ever take that name.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct InboxReadFilter {
     /// Exact sender match (the command, the run id, or the agent name).
     pub sender: Option<String>,
@@ -896,7 +902,21 @@ pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut Ho
         host_handler(move |payload| {
             let inbox = Arc::clone(&read_inbox);
             Box::pin(async move {
-                let filter: InboxReadFilter = serde_json::from_value(payload.data)?;
+                // The host-request envelope routes on its `type` key and the
+                // kernel manager hands the handler the whole request object,
+                // so the transport's routing key rides beside the filter
+                // fields; it is never filter data (the runtime puts the
+                // request type last, so a caller-supplied `type` was already
+                // overwritten before the wire).
+                let mut data = payload.data;
+                if let Some(fields) = data.as_object_mut() {
+                    fields.remove("type");
+                }
+                let filter: InboxReadFilter = if data.is_null() {
+                    InboxReadFilter::default()
+                } else {
+                    serde_json::from_value(data)?
+                };
                 let messages = inbox.drain_matching(&filter);
                 let drained_count = messages.len();
                 if let Some(hook) = inbox.read_hook() {
@@ -1836,6 +1856,166 @@ mod tests {
     }
 
     /// The host handlers drain on read and summarize on count.
+    /// The envelope shape the kernel manager really delivers: the
+    /// host-request routing `type` key rides beside the filter fields (the
+    /// runtime puts the request type last), so the read handler must treat
+    /// it as transport metadata, never an unknown filter field — a bare
+    /// enveloped read drains all, a filtered one drains only its class.
+    #[tokio::test]
+    async fn the_read_handler_treats_the_envelope_routing_key_as_transport() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        inbox.push(
+            notice(
+                "peer",
+                INBOX_CLASS_AGENT_MESSAGE,
+                "the agent mail",
+                json!({}),
+            ),
+            1_000,
+        );
+        inbox.push(
+            notice(
+                "child",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "the child notice",
+                json!({}),
+            ),
+            2_000,
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let enveloped = |class: Option<&str>| {
+            let read = read.clone();
+            let class = class.map(str::to_string);
+            async move {
+                let mut data = json!({ "type": INBOX_READ_REQUEST_TYPE });
+                if let Some(class) = class {
+                    data["class"] = json!(class);
+                }
+                read(HostRequestPayload { data }).await
+            }
+        };
+        let filtered = enveloped(Some(INBOX_CLASS_FACTORY_PROGRESS))
+            .await
+            .expect("the routing key is not an unknown filter field");
+        assert_eq!(filtered["drainedCount"], 1);
+        assert_eq!(
+            inbox
+                .waiting_messages()
+                .into_iter()
+                .map(|message| message.text)
+                .collect::<Vec<_>>(),
+            ["the agent mail"]
+        );
+        let bare = enveloped(None).await.expect("a bare read drains the rest");
+        assert_eq!(bare["drainedCount"], 1);
+        assert!(inbox.waiting_messages().is_empty());
+    }
+
+    /// A filter with an unknown field is a REQUEST ERROR that drains
+    /// nothing: silently reading it as an empty filter would drain the
+    /// whole inbox on a typo. Known fields, a mixed known+unknown filter,
+    /// an empty object, and a null payload keep their documented behavior.
+    #[tokio::test]
+    async fn unknown_read_filter_fields_do_not_drain_the_inbox() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        let pushed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let pushed = Arc::clone(&pushed);
+            inbox.set_read_hook(Arc::new(move |_inbox| {
+                pushed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }
+        inbox.push(
+            notice(
+                "peer",
+                INBOX_CLASS_AGENT_MESSAGE,
+                "keep this message",
+                json!({}),
+            ),
+            1_000,
+        );
+        inbox.push(
+            notice(
+                "child",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "keep this child notice",
+                json!({}),
+            ),
+            2_000,
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let read_with = |data| {
+            let read = read.clone();
+            async move { read(HostRequestPayload { data }).await }
+        };
+        let waiting_texts = || {
+            inbox
+                .waiting_messages()
+                .into_iter()
+                .map(|message| message.text)
+                .collect::<Vec<_>>()
+        };
+
+        let unknown_only = read_with(json!({ "inbox_clas": INBOX_CLASS_AGENT_MESSAGE })).await;
+        assert!(
+            unknown_only.is_err(),
+            "an unknown-only filter must be rejected"
+        );
+        assert_eq!(
+            waiting_texts(),
+            ["keep this message", "keep this child notice"],
+            "the malformed request must leave every message unread"
+        );
+        assert_eq!(
+            pushed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "validation precedes the read hook"
+        );
+
+        let mixed_unknown = read_with(json!({
+            "class": INBOX_CLASS_AGENT_MESSAGE,
+            "inbox_clas": INBOX_CLASS_AGENT_MESSAGE,
+        }))
+        .await;
+        assert!(
+            mixed_unknown.is_err(),
+            "known fields do not excuse an unknown field"
+        );
+        assert_eq!(
+            waiting_texts(),
+            ["keep this message", "keep this child notice"],
+            "the mixed malformed request must leave every message unread"
+        );
+        assert_eq!(
+            pushed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "validation precedes the read hook"
+        );
+
+        let known = read_with(json!({ "class": INBOX_CLASS_AGENT_MESSAGE }))
+            .await
+            .expect("a known-only filter reads");
+        assert_eq!(known["drainedCount"], 1);
+        assert_eq!(waiting_texts(), ["keep this child notice"]);
+        let empty_object = read_with(json!({})).await.expect("an empty filter reads");
+        assert_eq!(empty_object["drainedCount"], 1);
+        assert_eq!(
+            pushed.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a validated read drains"
+        );
+    }
+
     #[tokio::test]
     async fn read_drains_and_count_summarizes() {
         let inbox = Arc::new(SessionInbox::in_memory());

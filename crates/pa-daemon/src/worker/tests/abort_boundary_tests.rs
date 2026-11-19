@@ -109,10 +109,14 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
+    // The fixture's own dir, never /tmp, is the session's cwd: the kill
+    // switch above sits in the agent dir's global scope, and a
+    // project-scope settings file under a shared /tmp could otherwise
+    // override it and silently re-route these probes.
     let created = worker
         .dispatch(
             "create",
-            &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-send" }),
+            &json!({ "noSession": true, "cwd": dir.to_string_lossy(), "name": "abort-send" }),
         )
         .await;
     assert!(created.success, "create failed: {created:?}");

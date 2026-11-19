@@ -943,36 +943,6 @@ fn rerender_inbox_notice(item: &mut QueuedItem, text: &str) -> bool {
     true
 }
 
-/// Re-render every queued reminder row over the live count: a
-/// consumed-bash withdrawal or a drain-window refill changed the store
-/// after the reminder's admission promised its own count, so the queued
-/// rows must never keep the stale text. Returns whether any row changed.
-/// Call holding the core lock.
-fn rerender_queued_reminders(
-    core: &mut SessionCore,
-    inbox: &pa_core::session_engine::inbox::SessionInbox,
-    count: usize,
-) -> bool {
-    let reminder =
-        inbox.with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
-    let mut changed = false;
-    for item in &mut core.steering {
-        if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
-            && rerender_inbox_notice(item, &reminder)
-        {
-            changed = true;
-        }
-    }
-    for item in &mut core.follow_up {
-        if item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY)
-            && rerender_inbox_notice(item, &reminder)
-        {
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// Withdraw one queued bash completion notice: the kernel read the finished
 /// command's result through its handle (`bash.consumed`, fired by any read
 /// of a finished handle inside a live cell — `poll()`, `output()`, `tail()`,
@@ -1026,73 +996,21 @@ pub(crate) fn withdraw_bash_completion_notice(
     core_guard.steering.retain(&mut withdraw_one);
     core_guard.follow_up.retain(withdraw_one);
     // The collected job's inbox message leaves the store like a read would
-    // drain it; the queued rows that announced it stop promising it.
+    // drain it; the reconciliation runs through the shared refresh, which
+    // trims the covered batch against the LIVE waiting set and refills a
+    // batch that arrived empty (a restored queue snapshot whose arrival row
+    // comes back without its process-local batch), so a collected notice
+    // never strands a surviving unread message's wake.
     let mut inbox_rows_changed = false;
     if let Some((inbox, arrivals)) = inbox {
         if inbox
             .withdraw_bash_completion(notice.pid, &notice.command)
             .is_some()
         {
-            let mut batch = arrivals.lock().unwrap();
-            // The batch reconciles against the LIVE waiting set, not a
-            // single-id trim: a concurrent read can have drained other
-            // covered messages since the batch formed, and the re-rendered
-            // row (and its checkpoint) must not advertise ids that are
-            // already gone.
-            let waiting = inbox.waiting_ids();
-            batch.retain(|message| waiting.contains(&message.id));
-            let (count, _, _) = inbox.count();
-            if count == 0 {
-                // An emptied inbox drops its queued wake rows (a coalesced
-                // arrival row, a reminder): both would announce an empty
-                // inbox.
-                inbox_rows_changed = drop_inbox_wake_rows(&mut core_guard);
-            } else {
-                // The queued arrival row promised only the withdrawn
-                // message when the batch emptied: drop its now-empty wake
-                // (older waiting messages keep the reminder). A batch that
-                // still covers arrivals re-renders the row over the
-                // trimmed batch and the live count.
-                if batch.is_empty() {
-                    let before = core_guard.steering.len() + core_guard.follow_up.len();
-                    let not_arrival_row = |item: &QueuedItem| {
-                        item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY)
-                    };
-                    core_guard.steering.retain(not_arrival_row);
-                    core_guard.follow_up.retain(not_arrival_row);
-                    inbox_rows_changed =
-                        before != core_guard.steering.len() + core_guard.follow_up.len();
-                } else if core_guard
-                    .steering
-                    .iter()
-                    .chain(core_guard.follow_up.iter())
-                    .any(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
-                {
-                    let (preview, text) =
-                        pa_core::session_engine::inbox::arrival_notice(&batch, count);
-                    let text = inbox.with_persistence_error_clause(text);
-                    for item in &mut core_guard.steering {
-                        if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
-                            rerender_inbox_notice(item, &text);
-                            item.preview = Some(preview.clone());
-                        }
-                    }
-                    for item in &mut core_guard.follow_up {
-                        if item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY) {
-                            rerender_inbox_notice(item, &text);
-                            item.preview = Some(preview.clone());
-                        }
-                    }
-                    inbox_rows_changed = true;
-                }
-                // A queued reminder repeats the count the withdrawal may
-                // have changed: re-render it with the live count.
-                if rerender_queued_reminders(&mut core_guard, inbox, count) {
-                    inbox_rows_changed = true;
-                }
-            }
+            inbox_rows_changed = refresh_inbox_wake_rows_locked(&mut core_guard, arrivals, inbox);
         }
     }
+
     // The idle-session progress note clears only once the lanes it
     // reported on are final (the sweep may have emptied them).
     if let Some(engine) = engine {
@@ -1110,25 +1028,6 @@ pub(crate) fn withdraw_bash_completion_notice(
             },
         );
     }
-}
-
-/// Drop every queued inbox wake row (both coalescing keys, both lanes):
-/// the store they announced is empty, so each would wake a turn that
-/// lies with a dead count. Returns whether any row left. Call holding
-/// the core lock — the count's critical section owns the drop, so a
-/// racing admission (store push and row push under the same lock) can
-/// never have its fresh row swept.
-fn drop_inbox_wake_rows(core: &mut SessionCore) -> bool {
-    let before = core.steering.len() + core.follow_up.len();
-    let not_inbox_row = |item: &QueuedItem| {
-        !matches!(
-            item.queue_key.as_deref(),
-            Some(INBOX_ARRIVAL_QUEUE_KEY | INBOX_REMINDER_QUEUE_KEY)
-        )
-    };
-    core.steering.retain(not_inbox_row);
-    core.follow_up.retain(not_inbox_row);
-    before != core.steering.len() + core.follow_up.len()
 }
 
 /// One drained inbox read swept the queue: `rlm.inbox.read` returned

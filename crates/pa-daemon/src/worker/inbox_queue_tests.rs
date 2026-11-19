@@ -2893,3 +2893,122 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
+
+/// A restored queue snapshot's arrival row comes back with an EMPTY
+/// process-local batch (the batch is runtime routing state, never
+/// persisted). Collecting its bash notice must reconcile against the
+/// durable waiters: the shared refresh refills the batch from the live
+/// messages, so the surviving unread message keeps its re-rendered wake
+/// instead of the row vanishing as if the inbox were empty.
+#[tokio::test]
+async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_collection() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    worker.dispatch("clear_queue", &json!({})).await;
+    worker.core.lock().unwrap().busy = true;
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        bash_done_notice(4321, "sleep 1"),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    let _ = admit_inbox_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        &inbox,
+        &arrivals,
+        inbox_notice(
+            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            "recovery survivor full body",
+        ),
+        Lane::Steering,
+        || false,
+        |_, _| None,
+        None,
+    );
+    let initial_waiting = inbox.waiting_messages();
+    assert_eq!(initial_waiting.len(), 2);
+    let (persisted_steering, persisted_follow_up, _) = super::queue::restore_queue_snapshot(
+        worker
+            .recovery
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("the recovery journal is open"),
+        "target-session",
+    );
+    assert!(persisted_follow_up.is_empty());
+    assert_eq!(persisted_steering.len(), 1);
+    assert_eq!(
+        persisted_steering[0].queue_key.as_deref(),
+        Some(INBOX_ARRIVAL_QUEUE_KEY)
+    );
+    assert_eq!(
+        persisted_steering[0].message,
+        pa_core::session_engine::inbox::arrival_notice(&initial_waiting, 2).1
+    );
+
+    // Restore the durable queue and a freshly opened inbox, while the
+    // process-local arrival batch starts empty as it does on worker
+    // construction.
+    let (steering, follow_up, suspended) = super::queue::restore_queue_snapshot(
+        worker
+            .recovery
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("the recovery journal is open"),
+        "target-session",
+    );
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering = steering;
+        core.follow_up = follow_up;
+        core.queued_input_suspended = suspended;
+    }
+    let session_dir = worker
+        .config
+        .recovery_journal_path
+        .parent()
+        .expect("the session directory")
+        .to_path_buf();
+    drop(inbox);
+    drop(arrivals);
+    let inbox = Arc::new(SessionInbox::open(Some(&session_dir)));
+    let arrivals = pa_core::session_engine::inbox::InboxArrivals::default();
+    assert!(arrivals.lock().unwrap().is_empty());
+    assert_eq!(inbox.waiting_messages(), initial_waiting);
+
+    withdraw_bash_completion_notice(
+        &worker.recovery,
+        &worker.core,
+        Some((&inbox, &arrivals)),
+        &crate::engine::BashConsumedNotice {
+            pid: 4321,
+            command: "sleep 1".to_string(),
+        },
+        None,
+    );
+
+    let remaining = inbox.waiting_messages();
+    assert_eq!(remaining, vec![initial_waiting[1].clone()]);
+    assert_eq!(
+        remaining[0].meta,
+        json!({ "text": "recovery survivor full body" })
+    );
+    assert_eq!(arrivals.lock().unwrap().as_slice(), remaining.as_slice());
+    let (expected_preview, expected_text) =
+        pa_core::session_engine::inbox::arrival_notice(&remaining, 1);
+    assert_eq!(
+        steering_rows(&worker),
+        vec![(expected_text, Some(expected_preview), true)],
+        "the persisted wake is re-rendered for the surviving unread message"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
