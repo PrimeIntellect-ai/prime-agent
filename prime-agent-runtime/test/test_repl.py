@@ -796,6 +796,31 @@ class ReplTest(unittest.TestCase):
         )
         self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
 
+    def test_discipline_screen_keeps_joined_imports_after_the_statement(self):
+        code = (
+            "flag = False\n"
+            "if flag:\n"
+            "    import time as clock\n"
+            "else:\n"
+            "    clock = None\n"
+            "clock.sleep(5)\n"
+        )
+        events = self.repl.execute("if-join-after", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # A loop body can run zero times, so its shadow does not hide the import.
+        for rid, code in (
+            ("for-join-after", "import time\nfor time in ():\n    pass\ntime.sleep(5)"),
+            ("while-join-after", "import time\nwhile False:\n    time = None\ntime.sleep(5)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # A walrus target in the if condition binds before the suites run.
+        events = self.repl.execute(
+            "walrus-test", "from time import sleep as pause\nif (pause := print):\n    pause(5)"
+        )
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
+
     def test_discipline_screen_honors_exception_handler_names(self):
         code = (
             "import time\n"
@@ -808,6 +833,83 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("handler-name", code)
         self.assertIsNone(one(events, "error"))
         self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_unbinds_handler_names_after_the_handler(self):
+        # The handler name is unbound after the handler, so the call after it
+        # is charged as written.
+        code = (
+            "try:\n"
+            "    pass\n"
+            "except Exception as time:\n"
+            "    pass\n"
+            "time.sleep(5)\n"
+        )
+        events = self.repl.execute("handler-name-after", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_keeps_handler_bindings_off_other_paths(self):
+        raised = (
+            "import time\ntry:\n    raise ValueError\nexcept ValueError:\n    time = None\n"
+        )
+        for rid, code in (
+            # The handler's bindings stay off the paths that skip it.
+            ("try-else", raised + "else:\n    time.sleep(5)"),
+            ("try-other-handler", raised + "except Exception:\n    time.sleep(5)"),
+            ("try-finally", raised + "finally:\n    time.sleep(5)"),
+            # A handler or the finally suite can start before the body's bindings.
+            (
+                "try-early-handler",
+                "import time\ntry:\n    int('x')\n    time = None\n"
+                "except ValueError:\n    time.sleep(5)",
+            ),
+            (
+                "try-early-finally",
+                "import time\ntry:\n    int('x')\n    time = None\nfinally:\n    time.sleep(5)",
+            ),
+            # The statements after the try keep the import that a handler binds.
+            (
+                "try-after",
+                "import types\n"
+                "try:\n"
+                "    time = types.SimpleNamespace(sleep=print)\n"
+                "except Exception:\n"
+                "    import time\n"
+                "time.sleep(5)",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_keeps_match_cases_separate(self):
+        code = (
+            "import time\n"
+            "match 1:\n"
+            "    case 1:\n"
+            "        time = None\n"
+            "    case _:\n"
+            "        time.sleep(5)\n"
+        )
+        events = self.repl.execute("match-cases", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # When no case matches, the statements after the match keep the import.
+        events = self.repl.execute(
+            "match-no-case",
+            "import time\nmatch 1:\n    case 1:\n        time = None\ntime.sleep(5)",
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # A final wildcard case leaves no path around the cases.
+        code = (
+            "import time, types\n"
+            "match 1:\n"
+            "    case 1:\n"
+            "        time = types.SimpleNamespace(sleep=print)\n"
+            "    case _:\n"
+            "        time = types.SimpleNamespace(sleep=print)\n"
+            "time.sleep(5)\n"
+        )
+        events = self.repl.execute("match-wildcard", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
 
     def test_discipline_screen_honors_loop_targets(self):
         code = (
