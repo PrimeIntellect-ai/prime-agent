@@ -236,6 +236,62 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
     );
 }
 
+/// An emit cancel while the admission still runs aborts the run: the turn
+/// settles aborted now, not after the held follow-up provider call.
+#[test]
+fn emit_cancel_aborts_the_running_admission() {
+    let (engine, _engine_dir) = faux_engine_with_settings(
+        &serde_json::json!({ "responses": [
+            {"content": [{"type": "toolCall", "id": "call-1", "name": "synthetic_missing_tool", "arguments": {}}]},
+            { "text": "held reply", "delayMs": 60000 },
+        ]}),
+        1,
+    );
+    let (settled_tx, settled_rx) = std::sync::mpsc::channel::<Vec<EngineEvent>>();
+    let turn = std::thread::spawn(move || {
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(
+            0,
+            PromptRequest {
+                batch: Vec::new(),
+                images: Vec::new(),
+                message: "run the tool".to_string(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+                streaming_behavior: None,
+            },
+            &|| false,
+            &mut |event| {
+                // The tool-result row cancels the turn while the follow-up
+                // provider call is still to come.
+                let cancel = matches!(event, EngineEvent::ToolResultMessage(_));
+                events.push(event);
+                !cancel
+            },
+        );
+        let _ = settled_tx.send(events);
+    });
+    let events = settled_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the cancelled turn settles now, not after the 60s hold");
+    turn.join().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::DoneAborted)),
+        "the cancelled turn settles aborted: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            EngineEvent::AssistantMessage(message)
+                if message["content"] == serde_json::json!([{ "type": "text", "text": "held reply" }])
+        )),
+        "the held reply never streamed: {events:?}"
+    );
+}
+
 #[test]
 fn settled_turn_emits_the_terminal_turn_end_payload() {
     let (engine, _engine_dir) = faux_engine_with_settings(

@@ -43,7 +43,7 @@ impl AdmissionState {
     }
 
     fn is_pending(&self) -> bool {
-        matches!(self, Self::Running | Self::Aborted)
+        matches!(self, Self::Running)
     }
 
     fn is_aborted(&self) -> bool {
