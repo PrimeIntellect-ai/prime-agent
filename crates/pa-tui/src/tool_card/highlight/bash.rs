@@ -53,6 +53,8 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
     // The delimiter (and `<<-` tab stripping) of a heredoc whose body
     // starts at the next line break.
     let mut heredoc: Option<(&str, bool)> = None;
+    // The paren depth inside `((...))` arithmetic, where `<<` is a shift.
+    let mut arith = 0usize;
     let mut i = 0usize;
     while i < code.len() {
         let rest = &code[i..];
@@ -71,8 +73,12 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
                 }
                 (1, Scope::Plain)
             }
-            // A comment starts only at a word boundary: `a#b` and `$#` stay code.
-            '#' if prev.is_none_or(char::is_whitespace) => {
+            // A comment starts a word: after whitespace or an operator
+            // character (`ok;# note`); `a#b` and `$#` stay code.
+            '#' if prev.is_none_or(|c| {
+                c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>')
+            }) =>
+            {
                 (rest.find('\n').unwrap_or(rest.len()), Scope::Comment)
             }
             '\\' => (
@@ -89,7 +95,19 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
             }
             '$' => variable_len(rest).map_or((1, Scope::Plain), |n| (n, Scope::Variable)),
             '<' if rest.starts_with("<<<") => (3, Scope::Plain),
-            '<' if rest.starts_with("<<") => match heredoc_start(rest) {
+            '(' if arith > 0 => {
+                arith += 1;
+                (1, Scope::Plain)
+            }
+            '(' if rest.starts_with("((") => {
+                arith = 2;
+                (2, Scope::Plain)
+            }
+            ')' if arith > 0 => {
+                arith -= 1;
+                (1, Scope::Plain)
+            }
+            '<' if arith == 0 && rest.starts_with("<<") => match heredoc_start(rest) {
                 Some((op, end, delimiter, strip_tabs)) => {
                     push(&rest[..op], Scope::Plain, &mut plain, &mut tokens);
                     push(&rest[op..end], Scope::String, &mut plain, &mut tokens);
@@ -304,6 +322,7 @@ mod tests {
             scoped("#!/bin/bash\nls", Scope::Comment),
             vec!["#!/bin/bash"]
         );
+        assert_eq!(scoped("ok;# don't\nls", Scope::Comment), vec!["# don't"]);
     }
 
     #[test]
@@ -336,8 +355,23 @@ mod tests {
             vec!["'EOF'", "\techo $x\n\tEOF"]
         );
         assert_eq!(scoped(code, Scope::BuiltIn), vec!["cat", "ls"]);
-        // A here-string is not a heredoc.
-        assert!(scoped("cat <<<word\nls", Scope::String).is_empty());
+        // Arithmetic and subshell parens close back out of arithmetic.
+        assert_eq!(
+            scoped(
+                "echo $(( (a) )) $( (cd b) )\ncat <<EOF\nx\nEOF",
+                Scope::String
+            ),
+            vec!["EOF", "x\nEOF"]
+        );
+        // Neither a here-string nor an arithmetic shift is a heredoc.
+        for code in [
+            "cat <<<word\nls",
+            "echo $(( (1 + x) << 2 ))\nls",
+            "((x <<= 1))\nls",
+        ] {
+            assert!(scoped(code, Scope::String).is_empty(), "{code}");
+            assert_eq!(scoped(code, Scope::BuiltIn).last().unwrap(), "ls", "{code}");
+        }
     }
 
     fn fragment() -> impl Strategy<Value = String> {
