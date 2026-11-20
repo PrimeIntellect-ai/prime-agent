@@ -1404,6 +1404,91 @@ mod backfill_tests {
     }
 
     #[tokio::test]
+    async fn library_list_success_does_not_clear_a_graph_failure() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, _requests) = mock_session(
+                &dir.path().join("library-error-order.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            let machines = json!({"machines": [
+                {"name": "first", "description": "", "source": "repo"}
+            ]});
+            view.library_view = Some(crate::factory_view::LibraryView::new(
+                crate::factory_view::parse_library_machines(&machines),
+                20,
+            ));
+            for graph_failed in [false, true] {
+                session.apply_library_update(
+                    crate::session_ui::LibraryUpdate::Error {
+                        session: session.active_session_id.clone(),
+                        epoch: session.library_list_epoch,
+                        message: "list request failed".to_string(),
+                    },
+                    &mut view,
+                );
+                if graph_failed {
+                    session.apply_library_update(
+                        crate::session_ui::LibraryUpdate::Graph {
+                            session: session.session_id.clone(),
+                            epoch: session.library_detail_epoch,
+                            name: "first".to_string(),
+                            result: Err("graph request failed".to_string()),
+                        },
+                        &mut view,
+                    );
+                }
+                session.apply_library_update(
+                    crate::session_ui::LibraryUpdate::Machines {
+                        session: session.active_session_id.clone(),
+                        epoch: session.library_list_epoch,
+                        data: machines.clone(),
+                    },
+                    &mut view,
+                );
+                let frame = view.render_frame(100, 30);
+                let text = frame
+                    .iter()
+                    .flatten()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>();
+                assert!(!text.contains("list request failed"), "{text}");
+                assert_eq!(
+                    text.contains("graph request failed"),
+                    graph_failed,
+                    "{text}"
+                );
+            }
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Graph {
+                    session: session.session_id.clone(),
+                    epoch: session.library_detail_epoch,
+                    name: "first".to_string(),
+                    result: Ok(json!({"specId": "first", "machine": {}})),
+                },
+                &mut view,
+            );
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(text.contains("machine: first"), "{text}");
+            assert!(!text.contains("graph request failed"), "{text}");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library error ordering completes within ten seconds");
+    }
+
+    #[tokio::test]
     async fn library_navigation_dirties_selection_and_detail_back() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let dir = tempfile::tempdir().unwrap();
