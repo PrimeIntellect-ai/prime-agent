@@ -1039,6 +1039,25 @@ class ReplTest(unittest.TestCase):
                 "        t = None\n"
                 "    t.sleep(5)\n",
             ),
+            # A break leaves the loop without the else suite.
+            (
+                "for-else-break",
+                "    import time as t\n"
+                "    for i in range(2):\n"
+                "        break\n"
+                "    else:\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "while-else-break",
+                "    import time as t\n"
+                "    while t:\n"
+                "        break\n"
+                "    else:\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
             (
                 "while-next-pass",
                 "    t = None\n"
@@ -1093,9 +1112,50 @@ class ReplTest(unittest.TestCase):
                 "class-global",
                 "class C:\n    global t\n    import time as t\ndef wait():\n    t.sleep(5)\n",
             ),
+            # A nonlocal declaration puts the import in the enclosing function.
+            (
+                "nonlocal-escape",
+                "def outer():\n"
+                "    t = None\n"
+                "    def inner():\n"
+                "        nonlocal t\n"
+                "        import time as t\n"
+                "    inner()\n"
+                "    t.sleep(5)\n",
+            ),
         ):
             events = self.repl.execute(rid, code)
             self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # The global import reaches the module scope only: a parameter with the
+        # same name in another function is not the import.
+        code = (
+            "def setup():\n"
+            "    global t\n"
+            "    import time as t\n"
+            "def helper(t):\n"
+            "    t.sleep(5)\n"
+            "print('defined')\n"
+        )
+        events = self.repl.execute("global-elsewhere", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+
+    def test_discipline_screen_keeps_bindings_past_operands_that_may_not_run(self):
+        # A walrus in an operand that may not run does not hide the import.
+        for rid, code in (
+            ("walrus-and", "flag = False\nflag and (time := None)\n"),
+            ("walrus-or", "flag = True\nflag or (time := None)\n"),
+            ("walrus-ifexp", "flag = True\nx = 1 if flag else (time := None)\n"),
+            ("walrus-compare", "x = 2 < 1 < (time := 3)\n"),
+            ("walrus-assert-message", "assert True, (time := None)\n"),
+        ):
+            events = self.repl.execute(rid, "import time\n" + code + "time.sleep(5)\n")
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # The first operand always runs, so its walrus shadows the import.
+        code = "from time import sleep as pause\n(pause := print) and 1\npause(5)\n"
+        events = self.repl.execute("walrus-first-operand", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
 
     def test_discipline_screen_honors_loop_targets(self):
         code = (
