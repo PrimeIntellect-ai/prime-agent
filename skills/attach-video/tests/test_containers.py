@@ -15,24 +15,24 @@ def _box(kind, payload):
     return struct.pack(">I4s", len(payload) + 8, kind) + payload
 
 
-def mp4(handler=b"vide"):
+def _mp4(handler=b"vide"):
     return _box(b"ftyp", b"isom" + bytes(4)) + _box(
         b"moov", _box(b"trak", _box(b"mdia", _box(b"hdlr", bytes(8) + handler)))
     )
 
 
-def element(kind, payload):
+def _element(kind, payload):
     assert len(payload) < 127
     return kind + bytes([0x80 | len(payload)]) + payload
 
 
-def webm(track_type=b"\x01", *, unknown_segment=False):
-    header = element(bytes.fromhex("1a45dfa3"), element(bytes.fromhex("4282"), b"webm"))
-    tracks = element(bytes.fromhex("1654ae6b"), element(b"\xae", element(b"\x83", track_type)))
+def _webm(track_type=b"\x01", *, unknown_segment=False):
+    header = _element(bytes.fromhex("1a45dfa3"), _element(bytes.fromhex("4282"), b"webm"))
+    tracks = _element(bytes.fromhex("1654ae6b"), _element(b"\xae", _element(b"\x83", track_type)))
     segment = bytes.fromhex("18538067")
     if unknown_segment:
         return header + segment + b"\xff" + tracks
-    return header + element(segment, tracks)
+    return header + _element(segment, tracks)
 
 
 class ContainerTests(unittest.TestCase):
@@ -43,19 +43,19 @@ class ContainerTests(unittest.TestCase):
             return _validate_video(str(path))[1]
 
     def test_accepts_video_track_metadata(self):
-        extended_mp4 = mp4()[:16] + struct.pack(">I4sQ", 1, b"moov", len(mp4()) - 8) + mp4()[24:]
-        zero_size_mp4 = mp4()[:16] + bytes(4) + mp4()[20:]
-        streaming_webm = webm(unknown_segment=True) + bytes.fromhex("1f43b675ff")
-        cases = [(mp4(), "video/mp4"), (extended_mp4, "video/mp4"),
-                 (zero_size_mp4, "video/mp4"), (webm(), "video/webm"),
-                 (webm(unknown_segment=True), "video/webm"), (streaming_webm, "video/webm")]
+        extended_mp4 = _mp4()[:16] + struct.pack(">I4sQ", 1, b"moov", len(_mp4()) - 8) + _mp4()[24:]
+        zero_size_mp4 = _mp4()[:16] + bytes(4) + _mp4()[20:]
+        streaming_webm = _webm(unknown_segment=True) + bytes.fromhex("1f43b675ff")
+        cases = [(_mp4(), "video/mp4"), (extended_mp4, "video/mp4"),
+                 (zero_size_mp4, "video/mp4"), (_webm(), "video/webm"),
+                 (_webm(unknown_segment=True), "video/webm"), (streaming_webm, "video/webm")]
         for data, mime in cases:
             with self.subTest(mime=mime, data=data):
                 self.assertEqual(self.validate(data), mime)
 
     def test_rejects_signature_only_files(self):
         cases = [(_box(b"ftyp", b"isom" + bytes(4)), "moov"),
-                 (element(bytes.fromhex("1a45dfa3"), element(bytes.fromhex("4282"), b"webm")),
+                 (_element(bytes.fromhex("1a45dfa3"), _element(bytes.fromhex("4282"), b"webm")),
                   "Segment")]
         for data, reason in cases:
             with self.subTest(reason=reason):
@@ -63,31 +63,31 @@ class ContainerTests(unittest.TestCase):
                     self.validate(data)
 
     def test_rejects_audio_only_containers(self):
-        for data in [mp4(b"soun"), webm(b"\x02")]:
+        for data in [_mp4(b"soun"), _webm(b"\x02")]:
             with self.subTest(data=data):
                 with self.assertRaisesRegex(ValueError, "video track"):
                     self.validate(data)
 
     def test_rejects_truncated_declared_payloads(self):
-        for data in [mp4()[:-1], webm()[:-1], mp4() + b"x",
-                     mp4() + struct.pack(">I4s", 1, b"free"), webm() + b"\x81\x40"]:
+        for data in [_mp4()[:-1], _webm()[:-1], _mp4() + b"x",
+                     _mp4() + struct.pack(">I4s", 1, b"free"), _webm() + b"\x81\x40"]:
             with self.subTest(data=data):
                 with self.assertRaisesRegex(ValueError, "truncated"):
                     self.validate(data)
 
     def test_rejects_invalid_nested_lengths(self):
-        cases = [mp4() + struct.pack(">I4s", 4, b"free"),
+        cases = [_mp4() + struct.pack(">I4s", 4, b"free"),
                  _box(b"ftyp", b"isom" + bytes(4)) + _box(b"moov", b"\x00"),
-                 element(bytes.fromhex("1a45dfa3"), element(bytes.fromhex("4282"), b"webm"))
-                 + element(bytes.fromhex("18538067"), b"\x16\x54\xae\x6b\x00")]
+                 _element(bytes.fromhex("1a45dfa3"), _element(bytes.fromhex("4282"), b"webm"))
+                 + _element(bytes.fromhex("18538067"), b"\x16\x54\xae\x6b\x00")]
         for data in cases:
             with self.subTest(data=data):
                 with self.assertRaisesRegex(ValueError, "truncated|invalid"):
                     self.validate(data)
 
     def test_requires_webm_doctype_not_a_substring(self):
-        data = element(bytes.fromhex("1a45dfa3"), element(bytes.fromhex("4282"), b"matroska"))
-        data += element(bytes.fromhex("18538067"), element(b"\xec", b"webm"))
+        data = _element(bytes.fromhex("1a45dfa3"), _element(bytes.fromhex("4282"), b"matroska"))
+        data += _element(bytes.fromhex("18538067"), _element(b"\xec", b"webm"))
         with self.assertRaisesRegex(ValueError, "DocType"):
             self.validate(data)
 
@@ -95,7 +95,7 @@ class ContainerTests(unittest.TestCase):
 class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_emits_validated_bytes_when_file_changes(self):
         skill = importlib.import_module("attach_video.attach_video")
-        original = mp4()
+        original = _mp4()
         validate = skill._validate_video
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
