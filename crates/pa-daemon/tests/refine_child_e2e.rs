@@ -763,6 +763,82 @@ fn refine_spawns_a_child_that_applies_on_its_reply_wake() {
     );
 }
 
+/// The slash `/refine` records its spawn result row and the child id: the
+/// host skips the executor's first row as the already-emitted echo, so the
+/// spawn result must ride after the echo. Red when the spawn path returns
+/// only the result row: the host drops it and the transcript never names
+/// the child.
+#[test]
+fn a_slash_refine_records_its_spawn_result_row() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &dir.path().join("daemon.stderr"));
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable_session_id) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    prompt_and_wait(
+        &mut client,
+        "r2",
+        &session_id,
+        "/refine record the recurring tactic as a memory",
+    );
+
+    let result_text = client
+        .events
+        .iter()
+        .rev()
+        .find_map(|(event, _)| {
+            (event["type"] == "message_end"
+                && event["message"]["customType"] == "session_slash_command_result")
+                .then(|| {
+                    event["message"]["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+        })
+        .expect("the slash /refine result row surfaced");
+    assert!(
+        result_text.starts_with("Refinement child spawned ("),
+        "unexpected slash /refine result row: {result_text}"
+    );
+
+    // The host's event persistence keeps the same row and the child id.
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .expect("the parent's session file")
+        .path();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows: Vec<Value> = std::fs::read_to_string(&session_file)
+            .expect("read session file")
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        if rows.iter().any(|row| {
+            row["type"] == "custom_message"
+                && row["customType"] == "session_slash_command_result"
+                && row["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Refinement child spawned ("))
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the slash /refine result row is not durable; rows: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The failed proposal surfaces visibly: the child's unparseable reply
 /// wakes the parent into a `refine_failed` event, and the child still
 /// tears down (a failed refinement is never silent).

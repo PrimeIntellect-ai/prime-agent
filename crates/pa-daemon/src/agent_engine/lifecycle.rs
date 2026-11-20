@@ -866,7 +866,9 @@ impl AgentSessionEngine {
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     ) -> anyhow::Result<SessionCommandExecution> {
         use pa_core::session_engine::refine::RefinementSource;
-        use pa_core::session_engine::session_commands::slash_command_result;
+        use pa_core::session_engine::session_commands::{
+            session_command_echo_row, slash_command_result,
+        };
 
         let options =
             pa_core::session_engine::slash_commands::parse_refine_command_options(&command.args)
@@ -881,14 +883,14 @@ impl AgentSessionEngine {
             format!("Refinement child spawned ({child_id}); its reply applies on arrival.");
         let row = slash_command_result(command, content, true, "info", None, false);
         Ok(SessionCommandExecution {
-            messages: vec![row],
+            // The host skips the first row as the echo it already emitted:
+            // the spawn result rides after it.
+            messages: vec![session_command_echo_row(command), row],
             compaction: None,
             compaction_skipped: None,
             continuation_message: None,
             error: None,
             pending_refinement: None,
-            refinement: None,
-            refinement_failed: None,
         })
     }
 

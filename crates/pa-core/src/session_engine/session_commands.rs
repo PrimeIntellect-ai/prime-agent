@@ -62,12 +62,6 @@ pub struct SessionCommandExecution {
     /// the transcript holds ONE representation of the turn, NOT part of
     /// `messages` — the loop's `message_end` persists it once admitted.
     pub continuation_message: Option<CustomMessage>,
-    /// The brush of the last applied refinement: the command result row's
-    /// payload (the /refine outcome the host renders).
-    pub refinement: Option<crate::refinement::RefinementResult>,
-    /// A failed refinement run surfaced through the command: the host's
-    /// refinement event carries this distinct from the command failure.
-    pub refinement_failed: Option<String>,
     /// The command failed: the TS error message (the failure result row
     /// is already appended to `messages`).
     pub error: Option<String>,
