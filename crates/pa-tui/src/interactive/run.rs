@@ -57,6 +57,17 @@ fn frame_gate_due(dirty: bool, scrollback_flush_pending: bool) -> bool {
     dirty || scrollback_flush_pending
 }
 
+/// Whether the pre-select inventory wakes the frame gate now: everything the gate paints, or a
+/// wanted transcript page. A keystroke's inline paint clears the frame deadline but leaves a
+/// settle's flush pending, and no other wake is due for it.
+fn frame_wake_due(
+    dirty: bool,
+    scrollback_flush_pending: bool,
+    wants_transcript_page: bool,
+) -> bool {
+    frame_gate_due(dirty, scrollback_flush_pending) || wants_transcript_page
+}
+
 /// Run the interactive UI until the user exits (terminal) or the plan
 /// completes (headless).
 ///
@@ -1308,7 +1319,13 @@ async fn run_interactive_surface(
         // paint; a keystroke's toast or hint) must not park behind a select that has no other wake.
         // The headless barriers' deadlines and the hint/toast expiry arm HERE, not after the frame
         // gate.
-        if (session.dirty || session.wants_transcript_page(&view)) && render_deadline.is_none() {
+        if render_deadline.is_none()
+            && frame_wake_due(
+                session.dirty,
+                scrollback_flush_pending,
+                session.wants_transcript_page(&view),
+            )
+        {
             render_deadline = Some(Instant::now());
         }
         for deadline in [
@@ -2021,5 +2038,16 @@ mod tests {
         assert!(frame_gate_due(false, true));
         assert!(frame_gate_due(true, false));
         assert!(!frame_gate_due(false, false));
+    }
+
+    /// After a keystroke's inline paint cleared the frame deadline, a settle's pending flush
+    /// alone still wakes the gate: otherwise it waits for an unrelated wake, which can be the
+    /// next run's first event batch.
+    #[test]
+    fn a_pending_scrollback_flush_wakes_the_frame_gate() {
+        assert!(frame_wake_due(false, true, false));
+        assert!(frame_wake_due(true, false, false));
+        assert!(frame_wake_due(false, false, true));
+        assert!(!frame_wake_due(false, false, false));
     }
 }
