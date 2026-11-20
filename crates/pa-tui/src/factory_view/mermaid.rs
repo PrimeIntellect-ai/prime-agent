@@ -139,6 +139,7 @@ fn parse_state_diagram(text: &str) -> Mermaid {
         let Some(from) = bare_id(from) else {
             continue;
         };
+        graph.node(&from);
         let Some(to) = to else {
             continue;
         };
@@ -426,6 +427,20 @@ fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
 #[cfg(test)]
 mod tests {
     use super::parse_mermaid;
+
+    #[test]
+    fn terminal_transition_keeps_its_source_node() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid("stateDiagram-v2\nDone --> [*]").unwrap()
+        else {
+            panic!("expected diagram");
+        };
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].id, "Done");
+        assert!(transitions.is_empty());
+    }
 
     #[test]
     fn state_labels_do_not_depend_on_declaration_order() {

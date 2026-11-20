@@ -255,3 +255,86 @@ fn dense_dag_ordering_finishes_without_scanning_unrelated_segments() {
     );
     assert_eq!(layers.iter().map(Vec::len).sum::<usize>(), items);
 }
+
+#[test]
+fn shortcut_expansion_is_bounded_before_ordering() {
+    let states: Vec<_> = (0..120).map(|i| state(&format!("s{i}"), i == 0)).collect();
+    let transitions: Vec<_> = (0..states.len())
+        .flat_map(|from| (from + 1..states.len()).map(move |to| (from, to)))
+        .map(|(from, to)| transition(&[&states[from].id], &states[to].id, None))
+        .collect();
+    ORDERING_VISITS.with(|visits| visits.set(0));
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    );
+    assert_eq!(diagram.lines.len(), 1);
+    assert!(diagram.node_rows.is_empty());
+    assert!(plain(&diagram).contains("120 states, 7140 transitions"));
+    assert_eq!(ORDERING_VISITS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn entry_markers_follow_their_states_layer_without_hiding_guards() {
+    let states = vec![state("a", true), state("b", true), state("c", true)];
+    let transitions = vec![
+        transition(
+            &["a"],
+            "b",
+            Some(json!({"output": "route", "op": "eq", "value": "approved"})),
+        ),
+        transition(&["b"], "c", None),
+    ];
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    );
+    let text = plain(&diagram);
+    let rows: Vec<_> = text.lines().collect();
+    let mut previous_top = 0;
+    for &top in &diagram.node_rows {
+        assert!(
+            rows[previous_top..top]
+                .iter()
+                .any(|row| row.contains("▼ start")),
+            "entry marker missing above layer at row {top}:\n{text}"
+        );
+        previous_top = top + BOX_ROWS;
+    }
+    assert!(text.contains("▼ approved"), "{text}");
+}
+
+#[test]
+fn adjacent_single_incoming_guards_keep_their_full_labels() {
+    let states = vec![
+        state("source", true),
+        state("left", false),
+        state("right", false),
+    ];
+    let guards = ["approve after inspection", "retry after changes"];
+    let transitions = vec![
+        transition(
+            &["source"],
+            "left",
+            Some(json!({"output": "route", "op": "eq", "value": guards[0]})),
+        ),
+        transition(
+            &["source"],
+            "right",
+            Some(json!({"output": "route", "op": "eq", "value": guards[1]})),
+        ),
+    ];
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    );
+    let text = plain(&diagram);
+    assert_eq!(diagram.node_rows[1], diagram.node_rows[2]);
+    let arrow_row = text.lines().nth(diagram.node_rows[1] - 1).unwrap();
+    for guard in guards {
+        assert!(arrow_row.contains(&format!("▼ {guard}")), "{text}");
+    }
+}

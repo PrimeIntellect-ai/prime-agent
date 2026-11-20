@@ -128,7 +128,7 @@ impl super::SessionUi {
             ));
         }
         if let Some(node) = factory_view.node.as_mut() {
-            node.set_request_epoch(request_epoch);
+            node.set_request_epoch(request_epoch, selector);
         }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
