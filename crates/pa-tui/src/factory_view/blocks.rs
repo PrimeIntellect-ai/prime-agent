@@ -39,6 +39,8 @@ enum Role {
 enum Cell {
     Empty,
     Line(u8),
+    /// Perpendicular straight runs cross without joining.
+    Crossing,
     Char(char, Role),
 }
 
@@ -76,14 +78,6 @@ struct Band {
     entry: Option<usize>,
     arrow: Option<usize>,
     height: usize,
-}
-
-/// The route value of an `eq` guard (`approve`), else the whole guard.
-fn short_label(when: &str) -> String {
-    when.rsplit_once(" eq ")
-        .map_or(when, |(_, value)| value)
-        .trim_matches('"')
-        .to_string()
 }
 
 /// A box's second line: what runs there (a mermaid node's shape label,
@@ -213,7 +207,7 @@ pub(crate) fn block_diagram(
         let label = if transition.from.len() > 1 {
             Some("join".to_string())
         } else {
-            transition.when.as_deref().map(short_label)
+            transition.label.clone()
         };
         for source in &transition.from {
             let Some(from) = index_of(source) else {
@@ -428,7 +422,17 @@ pub(crate) fn block_diagram(
 
     // Back edges take gutter columns, the shortest span innermost.
     backs.sort_by_key(|back| layer[back.from] - layer[back.to]);
-    let gutter = |k: usize| MARGIN + widest + 2 + 2 * k;
+    let gutter_start = backs
+        .iter()
+        .filter_map(|back| {
+            back.label
+                .as_ref()
+                .map(|label| center(back.from) + 4 + label.chars().count())
+        })
+        .max()
+        .unwrap_or(0)
+        .max(MARGIN + widest + 2);
+    let gutter = |k: usize| gutter_start + 2 * k;
 
     // Rows: band b sits above layer b (band `depth` below the last).
     let mut bands: Vec<Band> = Vec::with_capacity(depth + 1);
@@ -697,6 +701,7 @@ pub(crate) fn block_diagram(
                 let (ch, color) = match cell {
                     Cell::Empty => (' ', ThemeColor::Text),
                     Cell::Line(bits) => (line_char(bits), ThemeColor::Dim),
+                    Cell::Crossing => ('┊', ThemeColor::Dim),
                     Cell::Char(ch, role) => (
                         ch,
                         match role {
@@ -741,9 +746,11 @@ impl Canvas {
     fn connect(&mut self, x: usize, y: usize, bits: u8) {
         if let Some(cell) = self.0.get_mut(y).and_then(|row| row.get_mut(x)) {
             *cell = match *cell {
+                Cell::Line(old) if matches!((old, bits), (3, 12) | (12, 3)) => Cell::Crossing,
                 Cell::Line(old) => Cell::Line(old | bits),
                 Cell::Empty => Cell::Line(bits),
-                Cell::Char(..) => *cell,
+                Cell::Crossing if !matches!(bits, 0 | 3 | 12) => Cell::Line(15),
+                Cell::Crossing | Cell::Char(..) => *cell,
             };
         }
     }

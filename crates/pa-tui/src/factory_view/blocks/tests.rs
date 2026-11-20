@@ -338,3 +338,116 @@ fn adjacent_single_incoming_guards_keep_their_full_labels() {
         assert!(arrow_row.contains(&format!("▼ {guard}")), "{text}");
     }
 }
+
+#[test]
+fn mermaid_literal_guards_keep_comparisons_and_quotes() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    for source in [
+        "stateDiagram-v2\na --> b: left eq right\n",
+        "flowchart TB\na -->|left eq right| b\n",
+        "stateDiagram-v2\na --> b: \"quoted label\"\n",
+    ] {
+        let rows = super::super::mermaid::mermaid_block_lines(&theme, source);
+        let text = rows
+            .iter()
+            .map(|row| row.iter().map(|s| s.content.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let label = if source.contains("left eq right") {
+            "left eq right"
+        } else {
+            "\"quoted label\""
+        };
+        assert!(text.contains(&format!("▼ {label}")), "{text}");
+    }
+    let guard = transition(
+        &["a"],
+        "b",
+        Some(json!({"output": "route", "value": "left eq right"})),
+    );
+    assert_eq!(guard.when.as_deref(), Some("route eq \"left eq right\""));
+    assert_eq!(guard.label.as_deref(), Some("left eq right"));
+    let text = plain(&block_diagram(
+        &theme,
+        &[state("a", true), state("b", false)],
+        &[guard],
+    ));
+    assert!(text.contains("▼ left eq right"), "{text}");
+}
+
+#[test]
+fn long_back_edge_guards_stay_complete_before_the_gutter() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    for label in [
+        "0123456789abcdefghijklmnopqrstuvwxyz",
+        "review all the inputs before trying again",
+    ] {
+        let transitions = vec![
+            transition(&["a"], "b", None),
+            transition(
+                &["b"],
+                "a",
+                Some(json!({"output": "route", "op": "eq", "value": label})),
+            ),
+        ];
+        let text = plain(&block_diagram(
+            &theme,
+            &[state("a", true), state("b", false)],
+            &transitions,
+        ));
+        let departure = text
+            .lines()
+            .find(|row| row.contains(label))
+            .unwrap_or_else(|| panic!("missing full label {label:?}:\n{text}"));
+        let after_label = departure.split_once(label).unwrap().1;
+        assert!(
+            after_label.contains('┘'),
+            "gutter bend must follow the full label:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn crossing_routes_leave_a_gap_without_hiding_real_junctions() {
+    let states = vec![
+        state("a", true),
+        state("b", true),
+        state("c", true),
+        state("d", false),
+        state("e", false),
+        state("f", false),
+    ];
+    let transitions: Vec<_> = ["a", "b", "c"]
+        .into_iter()
+        .flat_map(|source| {
+            ["d", "e", "f"]
+                .into_iter()
+                .map(move |target| transition(&[source], target, None))
+        })
+        .collect();
+    let text = plain(&block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    ));
+    assert!(text.contains("─┊─"), "crossing must leave a gap:\n{text}");
+    for vertical_first in [true, false] {
+        let mut canvas = Canvas(vec![vec![Cell::Empty; 5]; 5]);
+        if vertical_first {
+            canvas.vertical(2, 0, 4);
+            canvas.horizontal(2, 0, 4);
+        } else {
+            canvas.horizontal(2, 0, 4);
+            canvas.vertical(2, 0, 4);
+        }
+        assert_eq!(canvas.0[2][2], Cell::Crossing);
+        canvas.vertical(2, 2, 4);
+        assert_eq!(canvas.0[2][2], Cell::Line(UP | DOWN | LEFT | RIGHT));
+    }
+
+    let mut junction = Canvas(vec![vec![Cell::Empty; 5]; 5]);
+    junction.horizontal(2, 0, 4);
+    junction.vertical(2, 2, 4);
+    assert_eq!(junction.0[2][2], Cell::Line(LEFT | RIGHT | DOWN));
+    assert_eq!(line_char(LEFT | RIGHT | DOWN), '┬');
+}

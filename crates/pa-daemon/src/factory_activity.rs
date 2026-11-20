@@ -47,7 +47,9 @@ pub(crate) fn stored_factory_spec_count(session_artifact_dir: &Path) -> usize {
 pub(crate) fn advertised_server_capabilities(agent_dir: &Path) -> Vec<String> {
     let mut capabilities = crate::protocol::default_server_capabilities();
     if !factory_lane_enabled(agent_dir) {
-        capabilities.retain(|capability| capability != "factory_activity");
+        capabilities.retain(|capability| {
+            capability != "factory_activity" && capability != "factory_node_activity"
+        });
     }
     capabilities
 }
@@ -157,7 +159,7 @@ impl Worker {
                                 "factory_activity",
                                 &format!("{error:#}"),
                                 None,
-                            )
+                            );
                         }
                     }
                 }
@@ -339,6 +341,9 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
 
         let disabled = advertised_server_capabilities(&agent_dir);
+        assert!(!disabled
+            .iter()
+            .any(|capability| capability == "factory_node_activity"));
         assert!(
             !disabled
                 .iter()
@@ -355,6 +360,9 @@ mod tests {
         )
         .expect("write settings");
         let enabled = advertised_server_capabilities(&agent_dir);
+        assert!(enabled
+            .iter()
+            .any(|capability| capability == "factory_node_activity"));
         assert!(
             enabled
                 .iter()
@@ -371,6 +379,9 @@ mod tests {
         )
         .expect("write settings");
         let disabled_again = advertised_server_capabilities(&agent_dir);
+        assert!(!disabled_again
+            .iter()
+            .any(|capability| capability == "factory_node_activity"));
         assert!(
             !disabled_again
                 .iter()

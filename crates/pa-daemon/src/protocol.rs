@@ -254,7 +254,7 @@ fn parse_daemon_command_value(
                 Some(_) => {
                     return Err(EnvelopeParseError::Invalid(
                         "clientId must be a string".into(),
-                    ))
+                    ));
                 }
             };
             let command_value = obj.remove("command").ok_or_else(|| {
@@ -344,6 +344,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "persistent_shells",
                 "session_content_search",
                 "factory_activity",
+                "factory_node_activity",
                 "session_input_admission",
                 "prompt_admission_cancellation",
                 "owned_prompt_cancellation",
