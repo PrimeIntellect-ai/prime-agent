@@ -100,7 +100,13 @@ impl super::SessionUi {
             .map(|machine| machine.name.as_str());
         // Navigation mutates selection and scroll even without a daemon action.
         self.dirty = true;
-        if selected_before.as_deref() != selected_after
+        let selection_changed = selected_before.as_deref() != selected_after;
+        if selection_changed {
+            if let Some(library_view) = view.library_view.as_mut() {
+                library_view.set_error(None);
+            }
+        }
+        if selection_changed
             || matches!(
                 action,
                 Some(LibraryViewAction::Close | LibraryViewAction::DrillIn { .. })

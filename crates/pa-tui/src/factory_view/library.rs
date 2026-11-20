@@ -182,9 +182,6 @@ impl LibraryView {
 
     /// Record a drill-in error without changing the list fetch outcome.
     pub fn set_error(&mut self, error: Option<String>) {
-        if error.is_some() {
-            self.loading = false;
-        }
         self.error = error.map(|text| crate::menu_panel::scrub_controls(&text));
     }
 
@@ -731,7 +728,7 @@ mod tests {
     #[test]
     fn the_compact_frame_keeps_list_outcomes_visible() {
         let mut failed = LibraryView::loading(20);
-        failed.set_error(Some("offline".to_string()));
+        failed.set_list_error(Some("offline".to_string()));
         let mut retained = LibraryView::new(
             vec![LibraryMachine {
                 name: "builder".to_string(),
@@ -740,7 +737,7 @@ mod tests {
             }],
             20,
         );
-        retained.set_error(Some("offline".to_string()));
+        retained.set_list_error(Some("offline".to_string()));
         for (library, expected) in [
             (LibraryView::loading(20), "Loading machines"),
             (
@@ -902,7 +899,7 @@ mod tests {
         assert!(loaded.contains("No machines"), "{loaded}");
 
         let mut failed = LibraryView::loading(20);
-        failed.set_error(Some("fetch failed".to_string()));
+        failed.set_list_error(Some("fetch failed".to_string()));
         let error = plain(&failed.render(&theme(), 100, &kb(), 20));
         assert!(error.contains("fetch failed"), "{error}");
         assert!(!error.contains("Loading machines"), "{error}");

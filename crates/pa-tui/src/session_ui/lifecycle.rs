@@ -1481,6 +1481,61 @@ mod backfill_tests {
                 .collect::<String>();
             assert!(text.contains("machine: first"), "{text}");
             assert!(!text.contains("graph request failed"), "{text}");
+            for replace_list in [false, true] {
+                let two_machines = json!({"machines": [
+                    {"name": "first", "description": "", "source": "repo"},
+                    {"name": "second", "description": "", "source": "repo"}
+                ]});
+                view.library_view = Some(crate::factory_view::LibraryView::new(
+                    crate::factory_view::parse_library_machines(&two_machines),
+                    20,
+                ));
+                session.apply_library_update(
+                    crate::session_ui::LibraryUpdate::Graph {
+                        session: session.session_id.clone(),
+                        epoch: session.library_detail_epoch,
+                        name: "first".to_string(),
+                        result: Err("graph request failed".to_string()),
+                    },
+                    &mut view,
+                );
+                if replace_list {
+                    session.apply_library_update(
+                        crate::session_ui::LibraryUpdate::Machines {
+                            session: session.active_session_id.clone(),
+                            epoch: session.library_list_epoch,
+                            data: json!({"machines": [two_machines["machines"][1].clone()]}),
+                        },
+                        &mut view,
+                    );
+                } else {
+                    session
+                        .handle_library_view_key(
+                            crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::Down,
+                                crossterm::event::KeyModifiers::NONE,
+                            ),
+                            &mut view,
+                        )
+                        .unwrap();
+                }
+                assert_eq!(
+                    view.library_view
+                        .as_ref()
+                        .unwrap()
+                        .selected_machine()
+                        .unwrap()
+                        .name,
+                    "second"
+                );
+                let frame = view.render_frame(100, 30);
+                let text = frame
+                    .iter()
+                    .flatten()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>();
+                assert!(!text.contains("graph request failed"), "{text}");
+            }
             drop(session);
             server.abort();
         })
