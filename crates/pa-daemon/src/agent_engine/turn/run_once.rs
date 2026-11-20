@@ -86,7 +86,9 @@ impl AgentSessionEngine {
         // item's first run; this subscription forwards them only once a
         // boundary frame already passed.
         let boundary_passed = std::sync::Arc::clone(boundary_passed);
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let subscription = {
+            let live = std::sync::Arc::clone(&live);
             let tx = tx.clone();
             let pending_model_changes = pending_model_changes.clone();
             let boundary_passed = std::sync::Arc::clone(&boundary_passed);
@@ -99,6 +101,7 @@ impl AgentSessionEngine {
             );
             agent
                 .subscribe(move |event, _signal| {
+                    let live = live.load(std::sync::atomic::Ordering::SeqCst);
                     let tx = tx.clone();
                     let pending_model_changes = pending_model_changes.clone();
                     let boundary_passed = std::sync::Arc::clone(&boundary_passed);
@@ -108,6 +111,9 @@ impl AgentSessionEngine {
                     let goal_budget_crossed = goal_budget_crossed.clone();
                     Box::pin(async move {
                         use pa_agent::types::AgentEvent;
+                        if !live {
+                            return Ok(());
+                        }
                         if let AgentEvent::MessageEnd {
                             message:
                                 pa_agent::types::AgentMessage::Standard(
@@ -326,7 +332,10 @@ impl AgentSessionEngine {
                 })
                 .await
         };
-        let subscription = TurnSubscription(Some(subscription));
+        let subscription = TurnSubscription {
+            subscription: Some(subscription),
+            live,
+        };
         // Admit the turn without blocking the forwarding loop: the admission
         // future settles only when the whole turn settles, while the loop
         // hands each streamed event to `emit` the moment it arrives (buffering
@@ -470,14 +479,18 @@ impl AgentSessionEngine {
     }
 }
 
-/// The turn's listener, removed on every exit path: an `emit` panic unwinds
+/// The turn's listener, inert on every exit path: an `emit` panic unwinds
 /// past the awaited unsubscribe, and a listener left behind would forward and
 /// account (`account_message`, goal usage) every later run's events again.
-struct TurnSubscription(Option<pa_agent::agent::Subscription>);
+/// Drop silences it at once; the removal it spawns is only cleanup.
+struct TurnSubscription {
+    subscription: Option<pa_agent::agent::Subscription>,
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl TurnSubscription {
     async fn unsubscribe(mut self) {
-        if let Some(subscription) = self.0.take() {
+        if let Some(subscription) = self.subscription.take() {
             subscription.unsubscribe().await;
         }
     }
@@ -485,9 +498,11 @@ impl TurnSubscription {
 
 impl Drop for TurnSubscription {
     fn drop(&mut self) {
-        if let (Some(subscription), Ok(runtime)) =
-            (self.0.take(), tokio::runtime::Handle::try_current())
-        {
+        self.live.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let (Some(subscription), Ok(runtime)) = (
+            self.subscription.take(),
+            tokio::runtime::Handle::try_current(),
+        ) {
             runtime.spawn(subscription.unsubscribe());
         }
     }
