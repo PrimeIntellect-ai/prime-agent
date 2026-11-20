@@ -4417,6 +4417,36 @@ class CellSpanGuardTest(unittest.TestCase):
         self.assertIsNone(one(events, "result"))
         self.assertEqual(one(events, "done")["status"], "error")
 
+    def test_an_interrupt_during_the_close_reports_the_span_teaching(self):
+        # The guard can fire while the request closes its interrupt window.
+        # The close sits inside the guarded region, so that interrupt still
+        # becomes the teaching, and the retry finishes the half-run close
+        # instead of letting the request escape to the bare-error backstop.
+        repl = self.guarded_repl()
+        repl.execute(
+            "arm-close",
+            "import rlm.repl as repl_module\n"
+            "repl_module._span_guard_fired['close'] = 0.4\n"
+            "real_finish = repl_module._finish_request\n"
+            "raised = []\n"
+            "def finish(rid):\n"
+            "    if rid == 'close' and not raised:\n"
+            "        raised.append(True)\n"
+            "        raise KeyboardInterrupt\n"
+            "    return real_finish(rid)\n"
+            "repl_module._finish_request = finish",
+        )
+        events = repl.execute("close", "1 + 1")
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.4s cell limit", error["evalue"])
+        self.assertIsNone(one(events, "result"))
+        self.assertEqual(one(events, "done")["status"], "error")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
     def test_no_announced_limit_keeps_the_guard_disarmed(self):
         # An absent field and an explicit 0 both mean the session runs with
         # no cell limit (the setting is off): the guard must not invent one.
