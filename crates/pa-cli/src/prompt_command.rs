@@ -57,7 +57,7 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    match assemble_breakdown(&cwd, parsed.model.as_deref()) {
+    match assemble_breakdown(&cwd, &get_agent_dir(), parsed.model.as_deref()) {
         Ok((breakdown, errors)) => {
             for error in &errors {
                 eprintln!("Error: {error}");
@@ -133,14 +133,14 @@ fn session_model(
 
 fn assemble_breakdown(
     cwd: &std::path::Path,
+    agent_dir: &std::path::Path,
     model: Option<&str>,
 ) -> anyhow::Result<(pa_core::prompts::SystemPromptBreakdown, Vec<String>)> {
-    let agent_dir = get_agent_dir();
-    let (settings, resources, generic_servers) = load_session_resources(cwd, &agent_dir)?;
-    let model = session_model(model, &settings, &agent_dir)?;
+    let (settings, resources, generic_servers) = load_session_resources(cwd, agent_dir)?;
+    let model = session_model(model, &settings, agent_dir)?;
     let model_prompts = pa_core::prompts::model_prompts::load_model_prompts(
         Some(&format!("{}/{}", model.provider, model.id)),
-        &agent_dir,
+        agent_dir,
     );
     let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
@@ -263,7 +263,9 @@ mod tests {
     #[test]
     fn assembles_the_layered_prompt_for_a_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let (breakdown, errors) = assemble_breakdown(dir.path(), Some(TEXT_MODEL)).unwrap();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let (breakdown, errors) =
+            assemble_breakdown(dir.path(), agent_dir.path(), Some(TEXT_MODEL)).unwrap();
         assert!(errors.is_empty());
         assert!(breakdown.assembled.starts_with("# prime-agent harness"));
         assert!(breakdown
@@ -296,14 +298,19 @@ mod tests {
         let config_dir = dir.path().join(pa_core::settings::CONFIG_DIR_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("APPEND_SYSTEM.md"), "Project appendix.").unwrap();
-        let (breakdown, _) = assemble_breakdown(dir.path(), Some(TEXT_MODEL)).unwrap();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let (breakdown, _) =
+            assemble_breakdown(dir.path(), agent_dir.path(), Some(TEXT_MODEL)).unwrap();
         assert!(breakdown.assembled.ends_with("Project appendix."));
     }
 
     #[test]
     fn an_unknown_model_fails_like_the_cli_flag() {
         let dir = tempfile::tempdir().unwrap();
-        let error = assemble_breakdown(dir.path(), Some("no-such-model-anywhere")).unwrap_err();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let error =
+            assemble_breakdown(dir.path(), agent_dir.path(), Some("no-such-model-anywhere"))
+                .unwrap_err();
         assert!(error.to_string().contains("not found"), "{error}");
     }
 }
