@@ -235,20 +235,34 @@ class SelectionReportingTestCase(unittest.TestCase):
         self.assertIn(f"units={count}", output.read_text())
 
     def test_an_empty_selection_reports_zero_and_skips_nothing(self):
-        """A crate whose units all hash to OTHER shards leaves a leg with
-        nothing to run: the bins build reads units=0 and skips."""
+        """A crate whose units all land on OTHER shards leaves a leg with
+        nothing to run: the bins build reads units=0 and skips. The shard
+        that owns no pa-ai unit depends on the measured timing map, so find
+        it from the script's own selection instead of hardcoding one."""
+        empty_shard = None
+        for shard in range(1, TOTAL + 1):
+            probe = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "ci_test_shard.py"),
+                 "--shard", str(shard), "--total", str(TOTAL),
+                 "--crates", "pa-ai", "--print-selection"],
+                capture_output=True, text=True, cwd=REPO, check=False)
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            if "SELECTED=0" in probe.stdout:
+                empty_shard = shard
+                break
+        self.assertIsNotNone(
+            empty_shard, "no shard owns zero pa-ai units; the map regressed")
         env = dict(os.environ)
         output = Path(tempfile.mkdtemp()) / "github-output"
         env["GITHUB_OUTPUT"] = str(output)
-        # pa-ai's two units both hash to shard 8: every other leg selects zero.
         result = subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "ci_test_shard.py"),
-             "--shard", "3", "--total", str(TOTAL), "--crates", "pa-ai",
-             "--print-selection"],
+             "--shard", str(empty_shard), "--total", str(TOTAL),
+             "--crates", "pa-ai"],
             capture_output=True, text=True, env=env, cwd=REPO, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("SELECTED=0", result.stdout)
         self.assertIn("units=0", output.read_text())
+
 
     def test_an_unknown_package_is_refused_fail_closed(self):
         """A --crates name the workspace does not build is a mapping bug:
