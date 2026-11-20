@@ -17,11 +17,12 @@ tokio = { workspace = true }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 # `http2` enables ALPN-negotiated HTTP/2 for providers whose TS transport
 # speaks it (bedrock); every other provider stays pinned to HTTP/1.1 via the
-# shared client's `http1_only()`.
-reqwest = { version = "0.12", default-features = false, features = [
+# shared client's `http1_only()`. `rustls-no-provider`: every client gets the
+# shared ring configuration from `utils_inner::tls` (reqwest's `rustls`
+# feature would add aws-lc-rs).
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
-    "rustls-tls-native-roots",
-    "rustls-tls-webpki-roots",
+    "rustls-no-provider",
     "gzip",
     "http2",
 ] }

@@ -445,7 +445,9 @@ mod tests {
             server.redirect_uri(),
             format!("http://localhost:{port}/callback")
         );
-        let response = reqwest::Client::new()
+        let response = pa_ai::utils::tls::http_client_builder()
+            .build()
+            .unwrap()
             .get(format!(
                 "http://127.0.0.1:{port}/callback?code=code&state=state"
             ))
@@ -485,7 +487,9 @@ mod tests {
         let server = CallbackServer::start("Linear", /*callback_port*/ None)
             .await
             .unwrap();
-        let response = reqwest::Client::new()
+        let response = pa_ai::utils::tls::http_client_builder()
+            .build()
+            .unwrap()
             .get(format!(
                 "http://127.0.0.1:{}/callback?code=the-code&state=the-state",
                 server.port
@@ -508,7 +512,9 @@ mod tests {
         let server = CallbackServer::start("Linear", /*callback_port*/ None)
             .await
             .unwrap();
-        let response = reqwest::Client::new()
+        let response = pa_ai::utils::tls::http_client_builder()
+            .build()
+            .unwrap()
             .get(format!(
                 "http://127.0.0.1:{}/callback?error=access_denied",
                 server.port
@@ -525,7 +531,9 @@ mod tests {
         let server = CallbackServer::start("Linear", /*callback_port*/ None)
             .await
             .unwrap();
-        let response = reqwest::Client::new()
+        let response = pa_ai::utils::tls::http_client_builder()
+            .build()
+            .unwrap()
             .get(format!("http://127.0.0.1:{}/other", server.port))
             .send()
             .await
