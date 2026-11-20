@@ -687,7 +687,12 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             try:
                 _drain_output()
             finally:
-                _finish_request(cell_id)
+                with _interrupt_lock:
+                    # An interrupt parked while the screen ran belongs to
+                    # this cell, never to the next one.
+                    if cell_id in _inflight:
+                        _consume_pending_interrupt(cell_id)
+                    _finish_locked(cell_id)
             _send(_declined_event(cell_id, declined))
             _send({"event": "done", "id": cell_id, "status": "error"})
             return

@@ -1521,6 +1521,24 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("launched", stream_text(events, "stdout"))
 
+    def test_declined_cell_keeps_an_interrupt_from_the_next_cell(self):
+        # The long cell keeps the screen busy while the untargeted interrupt
+        # arrives, so the interrupt parks for the declined cell.
+        declined = "\n".join(f"v{i} = len('x')" for i in range(3000)) + "\nimport time\ntime.sleep(30)"
+        lines = [
+            json.dumps({"type": "execute", "id": "declined", "code": declined}),
+            json.dumps({"type": "interrupt"}),
+            json.dumps({"type": "execute", "id": "next", "code": "5+5"}),
+        ]
+        assert self.repl.proc.stdin is not None
+        self.repl.proc.stdin.write("\n".join(lines) + "\n")
+        self.repl.proc.stdin.flush()
+        events = self.repl.until_done("declined")
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        events = self.repl.until_done("next")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "result")["text"], "10")
+
     def test_declined_cell_keeps_kernel_usable(self):
         self.repl.execute("d1", "import time\ntime.sleep(10)")
         events = self.repl.execute("d2", "2+2")
