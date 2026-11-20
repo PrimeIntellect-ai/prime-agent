@@ -4831,7 +4831,9 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
     takes the oldest DROPPABLE row (a live row never silently drops: the
     dock's count, the page's panels, and the ``/factory off`` guard read
     this list, and every live run reports). A frame that still cannot fit
-    fails loudly (a graph must never truncate silently)."""
+    fails loudly (a graph must never truncate silently). Oversized
+    library lists shed descriptions, never machine names or sources;
+    library detail sheds optional Mermaid text, never the structured graph."""
     while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
         result = frame.get("result")
         events = result.get("events") if isinstance(result, dict) else None
@@ -4840,6 +4842,15 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
             continue
         runs = result.get("runs") if isinstance(result, dict) else None
         if isinstance(runs, list) and _shed_runs_frame(runs):
+            continue
+        machines = result.get("machines") if isinstance(result, dict) else None
+        if isinstance(machines, list) and any(row.get("description") for row in machines if isinstance(row, dict)):
+            for row in machines:
+                if isinstance(row, dict):
+                    row["description"] = ""
+            continue
+        if isinstance(result, dict) and "mermaid" in result:
+            del result["mermaid"]
             continue
         frame.pop("result", None)
         frame["status"] = "error"

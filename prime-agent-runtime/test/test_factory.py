@@ -8556,6 +8556,41 @@ class FactoryLibraryLaneTest(_ExecutorTestCase):
                 self.assertEqual(factory_module.library_graph("sweep")[field], metadata[field])
 
     @async_test
+    async def test_library_detail_sheds_mermaid_before_losing_its_graph(self) -> None:
+        machine = {
+            "states": [
+                {"id": "source", "entry": True, "subagent": {"prompt": "P."},
+                 "outputs": [{"name": "o", "type": "json"}]},
+                {"id": "sink", "subagent": {"prompt": "P."}},
+            ],
+            "transitions": [{
+                "from": "source", "to": "sink",
+                "when": {"output": "o", "op": "eq", "value": "=" * 55_000},
+            }],
+        }
+        self.assertEqual(validate_factory_spec(machine), [])
+        self.store_library("sweep", "The repo machine.", machine)
+        request = {"id": "library-detail", "action": "library", "specId": "sweep"}
+        expected = await factory_module.default_factory_executor().activity(request)
+        frame = {"event": "done", "id": request["id"], "status": "ok", "result": expected}
+        self.assertGreater(len(json.dumps(frame)), factory_module.FACTORY_FRAME_CAP)
+        mermaid = expected.pop("mermaid")
+        self.assertLessEqual(len(json.dumps(frame)), factory_module.FACTORY_FRAME_CAP)
+        with patch("rlm.repl._send") as send:
+            await factory_module._run_activity(request)
+        self.assertEqual(send.call_args.args[0], frame)
+        self.assertEqual(factory_module.library_graph("sweep")["mermaid"], mermaid)
+
+        machine["transitions"][0]["when"]["value"] = "=" * factory_module.FACTORY_FRAME_CAP
+        self.store_library("sweep", "The repo machine.", machine)
+        with patch("rlm.repl._send") as send:
+            await factory_module._run_activity(request)
+        self.assertEqual(send.call_args.args[0], {
+            "event": "done", "id": request["id"], "status": "error",
+            "reason": "factory activity reply exceeds the wire cap",
+        })
+
+    @async_test
     async def test_activity_library_serves_one_machines_graph_payload(self) -> None:
         graph = await factory_module.default_factory_executor().activity(
             {"action": "library", "specId": "sweep"}
@@ -9759,6 +9794,17 @@ class SpecToMermaidTest(unittest.TestCase):
         self.assertIn("reviewing --> reviewing: verdict exists\n", rendered)
         self.assertIn("fixing --> reviewing\n", rendered)
         self.assertIn("[*] --> collect\n", rendered)
+
+    def test_exists_guard_ignores_a_declared_value_in_its_label(self) -> None:
+        machine = valid_machine()
+        guard = machine["transitions"][2]["when"]
+        guard["value"] = False
+        self.assertEqual(validate_factory_spec(machine), [])
+        self.assertTrue(_guard_passes(guard, {"verdict": True}))
+        self.assertEqual(
+            spec_to_mermaid(machine).splitlines()[-2],
+            "    reviewing --> reviewing: verdict exists",
+        )
 
     def test_hyphenated_state_ids_alias_without_merging_nodes(self) -> None:
         # stateDiagram-v2 ids cannot carry hyphens, so a hyphenated id
