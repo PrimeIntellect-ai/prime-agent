@@ -1,3 +1,37 @@
+#[test]
+fn the_live_goal_keeps_its_text_and_click_target_before_the_library() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        subagents_running_direct: 2,
+        heartbeats: 3,
+        heartbeats_paused: 1,
+        shells: items(1),
+        factory_group: true,
+        goal_label: Some("Pursuing goal (0s)".to_string()),
+        ..ActivityDock::default()
+    };
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 100);
+    let row = &frame[1];
+    let goal = segments
+        .iter()
+        .find(|segment| segment.group == ActivityGroup::Goal)
+        .expect("the live goal has a click target");
+    let goal_text = dock.goal_label.as_deref().unwrap();
+    let rendered = row
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect::<String>();
+    assert_eq!(
+        rendered
+            .chars()
+            .skip(goal.cols.start)
+            .take(goal.cols.len())
+            .collect::<String>(),
+        goal_text
+    );
+    assert!(crate::width::spans_width(row) <= 100);
+}
+
 /// Separators stay inert, and a truncated row keeps no region for dropped groups.
 #[test]
 fn the_dock_segments_cover_each_groups_own_cells() {
@@ -145,7 +179,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ▤ machines  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  Pursuing goal (0s)  ·  ▤ machines"
     );
     // The operator's 2026-09-24 color-coding directive.
     let success = theme.fg_style(ThemeColor::Success).fg;
@@ -420,8 +454,8 @@ fn the_focused_dock_expands_into_one_row_per_group() {
             " ◷ heartbeats  5m lane canary",
             " ▸ shells      1 running · 0 persistent  ·  cargo test · 12.0s",
             " ⚙ factory     2 factories · 0 running · 1 paused  ·  nightly paused",
-            " ▤ machines",
             " Pursuing goal (0s)",
+            " ▤ machines",
         ]
     );
     assert_eq!(
@@ -439,7 +473,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
     let texts = line_texts(&render_activity_dock(&collapsed, &theme, 160));
     assert_eq!(
         texts[1..],
-        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  ▤ machines  ·  Pursuing goal (0s)"]
+        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)  ·  ▤ machines"]
     );
 }
 
@@ -662,8 +696,8 @@ fn dock_arrows_visit_the_same_groups_with_items() {
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
             ActivityGroup::Factory,
-            ActivityGroup::Library,
             ActivityGroup::Goal,
+            ActivityGroup::Library,
         ]
     );
     // The full cycle right: every group in order, the goal group
@@ -673,8 +707,8 @@ fn dock_arrows_visit_the_same_groups_with_items() {
         ActivityGroup::Heartbeats,
         ActivityGroup::Bash,
         ActivityGroup::Factory,
-        ActivityGroup::Library,
         ActivityGroup::Goal,
+        ActivityGroup::Library,
         ActivityGroup::Subagents,
     ] {
         walked = dock.step(walked, ActivityDirection::Next);
@@ -682,8 +716,8 @@ fn dock_arrows_visit_the_same_groups_with_items() {
     }
     let mut walked = ActivityGroup::Subagents;
     for expected in [
-        ActivityGroup::Goal,
         ActivityGroup::Library,
+        ActivityGroup::Goal,
         ActivityGroup::Factory,
         ActivityGroup::Bash,
         ActivityGroup::Heartbeats,

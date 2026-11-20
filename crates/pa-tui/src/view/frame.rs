@@ -77,9 +77,14 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(factory_view.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
-        } else if let Some(library_view) = self.library_view.as_ref() {
+        } else if let Some(library_view) = self.library_view.as_mut() {
             let mut dock = prompt_context;
-            dock.extend(library_view.render(&self.theme, width, self.editor.keybindings()));
+            dock.extend(library_view.render(
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+                info_viewport_rows,
+            ));
             Some(dock)
         } else if let Some(picker) = &self.heartbeats_picker {
             let mut dock = prompt_context;

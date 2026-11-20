@@ -332,12 +332,15 @@ pub(crate) struct SessionUi {
     /// Where background factory refreshes deliver the run graph (the run
     /// loop folds them into the open view).
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
-    /// Where the machine-library page's open-path list fetch delivers
-    /// (the library page's channel, the factory lane's sibling).
+    /// Where background machine-library list and graph fetches deliver.
     library_updates: mpsc::UnboundedSender<LibraryUpdate>,
     /// Monotonic id of the latest issued library list fetch; an older
     /// response never repaints a newer open's list.
     library_list_epoch: u64,
+    /// The durable session that mounted the library page.
+    library_view_session: Option<String>,
+    /// Each key or mount retires an in-flight drill-in.
+    library_detail_epoch: u64,
     /// The open view's selected run id: the refresh's watch target.
     factory_selected_run: Option<String>,
     /// The activity dock holds keyboard focus (and renders expanded).

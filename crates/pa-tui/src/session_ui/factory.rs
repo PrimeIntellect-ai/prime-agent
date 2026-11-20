@@ -76,6 +76,8 @@ impl super::SessionUi {
         // The mounted view belongs to this durable session: a later
         // rebind fold keeps it only across the SAME session's reattach.
         self.factory_view_session = Some(self.session_id.clone());
+        view.library_view = None;
+        self.library_view_session = None;
         // The mount holds the fold's malformed-reply contract: a cached
         // malformed lane mounts with its error line, never as a silent
         // fake empty state waiting for the first fold.

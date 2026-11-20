@@ -156,6 +156,8 @@ impl SessionUi {
             factory_updates: activity_updates.factory,
             library_updates: activity_updates.library,
             library_list_epoch: 0,
+            library_view_session: None,
+            library_detail_epoch: 0,
             factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
@@ -626,11 +628,21 @@ impl SessionUi {
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
             view.info_panel = None;
-            // The machine library page dies the same death: its open
-            // fetch is session-addressed (the lane rides the attached
-            // session's kernel), so the page reopens on the new session
-            // instead of keeping the old one's list.
-            view.library_view = None;
+            // Preserve the browser across same-session reattach, like the factory page.
+            if self
+                .library_view_session
+                .as_deref()
+                .is_some_and(|session| session != self.session_id)
+            {
+                view.library_view = None;
+                self.library_view_session = None;
+                self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
+                self.library_list_epoch = self.library_list_epoch.wrapping_add(1);
+            } else if view.library_view.is_some() {
+                // Retarget a list fetch that was pending on the old active-session id.
+                self.library_list_epoch = self.library_list_epoch.wrapping_add(1);
+                self.spawn_library_list_refresh();
+            }
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -838,17 +850,33 @@ mod backfill_tests {
     async fn mock_session(
         socket: &std::path::Path,
         backfill_tx: mpsc::UnboundedSender<TranscriptPageNote>,
-    ) -> (SessionUi, tokio::task::JoinHandle<()>) {
+    ) -> (
+        SessionUi,
+        tokio::task::JoinHandle<()>,
+        mpsc::UnboundedReceiver<Value>,
+    ) {
+        let (requests_tx, requests_rx) = mpsc::unbounded_channel();
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
-            write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[],\"clientId\":\"mock\"}\n").await.unwrap();
+            write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[\"factory_activity\"],\"clientId\":\"mock\"}\n").await.unwrap();
             let mut lines = BufReader::new(read).lines();
             while let Some(line) = lines.next_line().await.unwrap() {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let kind = request["command"]["type"].as_str().unwrap();
+                if kind == "factory_activity" && request["command"]["action"] == "library" {
+                    requests_tx.send(request["command"].clone()).unwrap();
+                    if request["command"]["specId"].is_string() {
+                        // A hanging graph sink must never hold the key handler.
+                        continue;
+                    }
+                }
                 let data = match kind {
+                    "factory_activity" => json!({"machines": [
+                        {"name": "first", "description": "first machine", "source": "repo"},
+                        {"name": "second", "description": "second machine", "source": "repo"},
+                    ]}),
                     "attach" => json!({
                         "activeSessionId": "s1", "snapshot": {
                             "activeSessionId": "s1", "summary": {"id": "s1", "cwd": "/tmp"},
@@ -899,7 +927,296 @@ mod backfill_tests {
         )
         .await
         .unwrap();
-        (session, server)
+        (session, server, requests_rx)
+    }
+
+    #[tokio::test]
+    async fn library_rebind_preserves_only_the_same_durable_session() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, mut requests) = mock_session(
+                &dir.path().join("library-rebind.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_library_page(&mut view);
+            assert_eq!(requests.recv().await.unwrap()["action"], "library");
+            view.library_view.as_mut().unwrap().apply_machines(
+                crate::factory_view::parse_library_machines(&json!({"machines": [
+                    {"name": "first", "description": "", "source": "repo"},
+                    {"name": "second", "description": "", "source": "repo"},
+                ]})),
+            );
+            let down = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            session
+                .handle_key(down, &mut view, &mut true)
+                .await
+                .unwrap();
+            session.attach_session("s1", DockFold::Held).await.unwrap();
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert_eq!(
+                requests.recv().await.unwrap()["action"],
+                "library",
+                "reattach retargets the list fetch"
+            );
+            assert_eq!(
+                view.library_view
+                    .as_ref()
+                    .unwrap()
+                    .selected_machine()
+                    .unwrap()
+                    .name,
+                "second"
+            );
+            session.session_id = "different-session".to_string();
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert!(view.library_view.is_none());
+            assert!(session.library_view_session.is_none());
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library session path completes within ten seconds");
+    }
+
+    #[tokio::test]
+    async fn library_navigation_dirties_selection_and_detail_back() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, _requests) = mock_session(
+                &dir.path().join("library-keys.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_library_page(&mut view);
+            view.library_view.as_mut().unwrap().apply_machines(
+                crate::factory_view::parse_library_machines(&json!({"machines": [
+                    {"name": "first", "description": "", "source": "repo"},
+                    {"name": "second", "description": "", "source": "repo"},
+                ]})),
+            );
+            session.dirty = false;
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Down,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            assert!(
+                session.dirty,
+                "selection navigation repaints without another event"
+            );
+            assert_eq!(
+                view.library_view
+                    .as_ref()
+                    .unwrap()
+                    .selected_machine()
+                    .unwrap()
+                    .name,
+                "second"
+            );
+            view.library_view
+                .as_mut()
+                .unwrap()
+                .apply_detail("second", &json!({"specId": "second", "machine": {}}));
+            session.dirty = false;
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Esc,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            assert!(session.dirty, "back from detail repaints the list");
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(text.contains("machine library"), "{text}");
+            assert!(!text.contains("machine: second"), "{text}");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library session path completes within ten seconds");
+    }
+
+    #[tokio::test]
+    async fn library_graph_never_blocks_keys_or_reopens_a_replaced_page() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, mut requests) = mock_session(
+                &dir.path().join("library-graph.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+            session.library_updates = updates_tx;
+            session.open_library_page(&mut view);
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.contains("Loading machines"),
+                "the open path mounts a loader: {text}"
+            );
+            let update = updates_rx.recv().await.unwrap();
+            session.apply_library_update(update, &mut view);
+            assert_eq!(requests.recv().await.unwrap()["action"], "library");
+            let enter = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                session.handle_key(enter, &mut view, &mut true),
+            )
+            .await
+            .expect("a hanging graph request cannot hold the input path")
+            .unwrap();
+            assert_eq!(requests.recv().await.unwrap()["specId"], "first");
+            let epoch = session.library_detail_epoch;
+            let stale = |session_id: String| crate::session_ui::LibraryUpdate::Graph {
+                session: session_id,
+                epoch,
+                name: "first".to_string(),
+                result: Ok(json!({"specId": "first", "machine": {}})),
+            };
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Down,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            session.dirty = false;
+            session.apply_library_update(stale(session.active_session_id.clone()), &mut view);
+            assert!(
+                !session.dirty,
+                "selection navigation retires the previous drill-in"
+            );
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Esc,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            assert!(
+                view.library_view.is_none(),
+                "Esc closes while the sink still hangs"
+            );
+            session.open_library_page(&mut view);
+            session.dirty = false;
+            session.apply_library_update(stale(session.active_session_id.clone()), &mut view);
+            assert!(!session.dirty, "a previous mount cannot reopen its detail");
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Graph {
+                    session: "old-active-session".to_string(),
+                    epoch: session.library_detail_epoch,
+                    name: "first".to_string(),
+                    result: Ok(json!({"specId": "first", "machine": {}})),
+                },
+                &mut view,
+            );
+            assert!(
+                !session.dirty,
+                "a foreign active session cannot deliver a graph"
+            );
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Graph {
+                    session: session.active_session_id.clone(),
+                    epoch: session.library_detail_epoch,
+                    name: "first".to_string(),
+                    result: Ok(json!({"specId": "first", "machine": {}})),
+                },
+                &mut view,
+            );
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.contains("machine: first"),
+                "a current reply mounts detail: {text}"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library session path completes within ten seconds");
+    }
+
+    #[tokio::test]
+    async fn dock_library_and_factory_replace_each_other_and_consume_paste() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, _requests) = mock_session(
+                &dir.path().join("library-pages.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_dock_group_from_click(crate::chrome::ActivityGroup::Factory, &mut view);
+            assert!(view.factory_view.is_some());
+            session.panel_returns_to_agents_view = true;
+            session.open_dock_group_from_click(crate::chrome::ActivityGroup::Library, &mut view);
+            assert!(view.factory_view.is_none());
+            assert!(view.library_view.is_some());
+            assert!(!session.panel_returns_to_agents_view);
+            view.editor.set_text("draft");
+            assert!(view.route_paste("unwanted hidden input"));
+            assert_eq!(view.editor.get_lines().join("\n"), "draft");
+            session.open_dock_group_from_click(crate::chrome::ActivityGroup::Factory, &mut view);
+            assert!(view.factory_view.is_some());
+            assert!(view.library_view.is_none());
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library session path completes within ten seconds");
     }
 
     /// A rebind that tears down an agents-view panel drops its return: a later dock-opened shells
@@ -909,7 +1226,8 @@ mod backfill_tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("panel.sock");
-            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let (mut session, server, _requests) =
+                mock_session(&socket, mpsc::unbounded_channel().0).await;
             let mut view = AgentView::new(crate::theme::Theme::builtin(
                 "prime",
                 crate::theme::ColorMode::TrueColor,
@@ -946,7 +1264,8 @@ mod backfill_tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("shell.sock");
-            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let (mut session, server, _requests) =
+                mock_session(&socket, mpsc::unbounded_channel().0).await;
             let shells = json!({"activities": [
                 {"id": "a", "command": "cargo build", "status": "running"},
                 {"id": "s2", "command": "sleep 600", "status": "running"},
@@ -1010,7 +1329,8 @@ mod backfill_tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("reconnect.sock");
-            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let (mut session, server, _requests) =
+                mock_session(&socket, mpsc::unbounded_channel().0).await;
             session.connection = crate::interactive::reconnect::Connection::SessionPlaneFailed(
                 "the session worker is gone".to_string(),
             );

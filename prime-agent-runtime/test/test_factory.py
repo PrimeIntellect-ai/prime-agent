@@ -8515,6 +8515,25 @@ class FactoryLibraryLaneTest(_ExecutorTestCase):
         )
 
     @async_test
+    async def test_activity_library_sheds_descriptions_before_losing_machine_rows(self) -> None:
+        machines = [
+            {"name": f"machine-{i}", "description": "x" * 1024, "source": "repo"}
+            for i in range(250)
+        ]
+        with (
+            patch.object(factory_module, "list_machines", return_value=machines),
+            patch("rlm.repl._send") as send,
+        ):
+            await factory_module._run_activity({"id": "library-list", "action": "library"})
+        frame = send.call_args.args[0]
+        self.assertEqual(frame["status"], "ok")
+        self.assertLessEqual(len(json.dumps(frame)), factory_module.FACTORY_FRAME_CAP)
+        self.assertEqual(
+            frame["result"]["machines"],
+            [{**machine, "description": ""} for machine in machines],
+        )
+
+    @async_test
     async def test_activity_library_serves_one_machines_graph_payload(self) -> None:
         graph = await factory_module.default_factory_executor().activity(
             {"action": "library", "specId": "sweep"}
@@ -9670,6 +9689,46 @@ class SpecToMermaidTest(unittest.TestCase):
 """,
         )
 
+    def test_guard_text_cannot_add_mermaid_syntax(self) -> None:
+        output = 'result;%%"\n'
+        machine = {
+            "states": [
+                {"id": "source", "entry": True, "subagent": "worker",
+                 "outputs": [{"name": output, "type": "json"}]},
+                {"id": "sink", "subagent": "worker"},
+            ],
+            "transitions": [{
+                "from": "source", "to": "sink",
+                "when": {"output": output, "path": "item;%%", "op": "eq", "value": "x;#<>&"},
+            }],
+        }
+        self.assertEqual(validate_factory_spec(machine), [])
+        self.assertEqual(
+            spec_to_mermaid(machine).splitlines()[-1],
+            "    source --> sink: result#59;#37;#37;#34;#10;.item#59;#37;#37; "
+            "eq #34;x#59;#35;#60;#62;#38;#34;",
+        )
+        self.assertEqual(len(spec_to_mermaid(machine).splitlines()), 5)
+
+    def test_foreach_text_cannot_close_its_mermaid_label(self) -> None:
+        over = 'items"]\nrogue-->node;%%'
+        dag = {"nodes": [
+            {"id": "source", "subagent": "worker",
+             "outputs": [{"name": "items", "type": "json"}]},
+            {"id": "review", "subagent": "worker",
+             "inputs": [{"name": over, "type": "json", "from": "source.items"}],
+             "foreach": {"over": over, "max": 2}},
+        ]}
+        self.assertEqual(validate_factory_spec(dag), [])
+        self.assertEqual(
+            spec_to_mermaid(dag),
+            'flowchart TB\n'
+            '    source\n'
+            '    review["review<br/>foreach: over '
+            'items#34;#93;#10;rogue--#62;node#59;#37;#37; (max 2)"]\n'
+            '    source --> review\n',
+        )
+
     def test_every_guard_shape_renders_its_own_label(self) -> None:
         rendered = spec_to_mermaid(valid_machine())
         self.assertIn("collect --> reviewing\n", rendered)
@@ -9814,6 +9873,19 @@ class MachineLibraryGraphTest(unittest.TestCase):
         self.assertEqual(graph["description"], "The repo machine.")
         graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
         self.assertEqual(graph["mermaid"], spec_to_mermaid(machine))
+
+    def test_listing_matches_graph_for_exact_directory_name_conflicts(self) -> None:
+        machine = {"states": [{"id": "a", "entry": True, "subagent": "worker"}]}
+        renamed = self.store(self.repo, "build", "Declared-name machine.", machine)
+        renamed.parent.rename(self.repo / "alias")
+        for root in (self.user, self.repo):
+            with self.subTest(exact_directory=root):
+                exact = self.store(root, "build", "Exact-directory machine.", machine)
+                listed = list_machines(repo_dir=self.repo, user_dir=self.user)
+                graph = library_graph("build", repo_dir=self.repo, user_dir=self.user)
+                self.assertEqual(listed[0]["path"], str(exact))
+                self.assertEqual(listed[0]["description"], graph["description"])
+                self.assertEqual(graph["description"], "Exact-directory machine.")
 
     def test_library_graph_serves_user_machines_the_repo_lacks(self) -> None:
         machine = {"nodes": [{"id": "a", "subagent": {"prompt": "P."}}]}
