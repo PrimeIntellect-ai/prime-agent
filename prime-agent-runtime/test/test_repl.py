@@ -4295,13 +4295,14 @@ class OwnerExitWaitTest(unittest.TestCase):
 
 
 class CellSpanGuardTest(unittest.TestCase):
-    """The in-cell span guard: a cell still running at the budget is
-    interrupted through the SIGINT path and settles as a teaching error
-    (CellSpanGuard); short cells run untouched, the kernel stays usable,
-    and `PRIME_AGENT_CELL_SPAN_GUARD_SECONDS=0` disables the guard."""
+    """The in-cell span guard runs on the host's own cell limit: a cell still
+    running at that limit is interrupted through the SIGINT path and settles
+    as a teaching error (CellSpanGuard). Short cells run untouched, the kernel
+    stays usable, and a request with no limit keeps the guard disarmed even
+    where the host wires completion notices."""
 
-    def guarded_repl(self, seconds: str) -> ReplProcess:
-        repl = ReplProcess(env={"PRIME_AGENT_CELL_SPAN_GUARD_SECONDS": seconds})
+    def guarded_repl(self) -> ReplProcess:
+        repl = ReplProcess()
         self.addCleanup(repl.close)
         repl.ready()
         # The guard arms only in sessions whose host wires completion
@@ -4314,15 +4315,23 @@ class CellSpanGuardTest(unittest.TestCase):
         )
         return repl
 
+    def execute_limited(self, repl: ReplProcess, rid: str, code: str, timeout_ms: int) -> list[dict]:
+        """One execute frame carrying the host's cell limit, the way the
+        manager sends it (`ExecuteOptions::cell_timeout_ms`)."""
+        repl.send({"type": "execute", "id": rid, "code": code, "timeout_ms": timeout_ms})
+        return repl.until_done(rid)
+
     def test_an_unwired_host_keeps_long_cells_untouched(self):
         # A host without completion notices has no [bash-done] wake, so the
         # guard's teaching promise cannot hold there: it stays disarmed and
-        # a long cell runs unbounded as on main (the wired twin interrupts
-        # the same shape at the budget).
-        repl = ReplProcess(env={"PRIME_AGENT_CELL_SPAN_GUARD_SECONDS": "0.5"})
+        # a cell past the limit runs unbounded as on main (the wired twin
+        # interrupts the same shape at the limit).
+        repl = ReplProcess()
         self.addCleanup(repl.close)
         repl.ready()
-        events = repl.execute("slow", "import time\ntime.sleep(2)\ndone = True")
+        events = self.execute_limited(
+            repl, "slow", "import time\ntime.sleep(1.5)\ndone = True", 400
+        )
         self.assertIsNone(one(events, "error"), f"events: {events}")
         self.assertEqual(one(events, "done")["status"], "ok")
         events = repl.execute("check", "done")
@@ -4332,13 +4341,15 @@ class CellSpanGuardTest(unittest.TestCase):
         # Pure compute: no banned shape, invisible to the discipline screen,
         # and blocking — exactly the single-giant-cell shape the boundary
         # notices cannot reach.
-        repl = self.guarded_repl("0.5")
-        repl.send({"type": "execute", "id": "long", "code": "n = 0\nwhile True:\n    n += 1"})
+        repl = self.guarded_repl()
+        repl.send(
+            {"type": "execute", "id": "long", "code": "n = 0\nwhile True:\n    n += 1", "timeout_ms": 500}
+        )
         events = repl.until_done("long")
         error = one(events, "error")
         self.assertIsNotNone(error)
         self.assertEqual(error["ename"], "CellSpanGuard")
-        self.assertIn("0.5s inline budget", error["evalue"])
+        self.assertIn("0.5s cell limit", error["evalue"])
         self.assertIn("[cell-span]", "\n".join(error["traceback"]))
         self.assertIn("bash()", "\n".join(error["traceback"]))
         self.assertEqual(one(events, "done")["status"], "error")
@@ -4348,9 +4359,29 @@ class CellSpanGuardTest(unittest.TestCase):
         self.assertEqual(one(events, "result")["text"], "True")
         self.assertEqual(one(events, "done")["status"], "ok")
 
-    def test_await_suspended_cell_is_interrupted_at_the_budget(self):
-        repl = self.guarded_repl("0.5")
-        repl.send({"type": "execute", "id": "parked", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
+    def test_a_bounded_cell_past_the_limit_settles_at_the_guard_not_at_its_end(self):
+        # The request's limit, not the cell, decides: 1.5s of work under a
+        # 400ms limit settles with the teaching error long before the cell
+        # would have ended.
+        repl = self.guarded_repl()
+        started = time.monotonic()
+        events = self.execute_limited(repl, "bounded", "import time\ntime.sleep(1.5)", 400)
+        elapsed = time.monotonic() - started
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertLess(elapsed, 1.0, "the guard fires at the request limit, not at the cell's end")
+
+    def test_await_suspended_cell_is_interrupted_at_the_limit(self):
+        repl = self.guarded_repl()
+        repl.send(
+            {
+                "type": "execute",
+                "id": "parked",
+                "code": "import asyncio\nawait asyncio.get_running_loop().create_future()",
+                "timeout_ms": 500,
+            }
+        )
         events = repl.until_done("parked")
         error = one(events, "error")
         self.assertIsNotNone(error)
@@ -4358,20 +4389,59 @@ class CellSpanGuardTest(unittest.TestCase):
         self.assertEqual(one(events, "done")["status"], "error")
 
     def test_short_cells_run_untouched(self):
-        repl = self.guarded_repl("1")
-        events = repl.execute("quick", "40 + 2")
+        repl = self.guarded_repl()
+        events = self.execute_limited(repl, "quick", "40 + 2", 1000)
         self.assertEqual(one(events, "result")["text"], "42")
         self.assertEqual(one(events, "done")["status"], "ok")
 
-    def test_zero_disables_the_guard(self):
-        repl = self.guarded_repl("0")
-        # 1.5s of sleep would clear the decline screen (literal sleeps under
-        # 5s) and outlive a 1s budget: only a disabled guard lets it finish.
-        events = repl.execute("slow", "import time\ntime.sleep(1.5)\nseen = True")
-        self.assertIsNone(one(events, "error"))
+    def test_no_announced_limit_keeps_the_guard_disarmed(self):
+        # An absent field and an explicit 0 both mean the session runs with
+        # no cell limit (the setting is off): the guard must not invent one.
+        repl = self.guarded_repl()
+        repl.send({"type": "execute", "id": "absent", "code": "import time\ntime.sleep(1.5)\nseen = True"})
+        events = repl.until_done("absent")
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = self.execute_limited(repl, "zero", "import time\ntime.sleep(1.5)\nseen = True", 0)
+        self.assertIsNone(one(events, "error"), f"events: {events}")
         self.assertEqual(one(events, "done")["status"], "ok")
         events = repl.execute("check", "seen")
         self.assertEqual(one(events, "result")["text"], "True")
+
+
+class SpanGuardBudgetTest(unittest.TestCase):
+    """The guard's clock arithmetic: the host's limit is the budget, the
+    timer sits a lead inside it (the watchdog's clock starts earlier, so a
+    guard at the bare limit loses the race), and no limit disarms it."""
+
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import rlm.repl as repl_module
+
+        self.repl_module = repl_module
+
+    def test_the_budget_is_the_host_limit_in_seconds(self):
+        self.assertEqual(self.repl_module._span_guard_budget(60_000), 60.0)
+        self.assertEqual(self.repl_module._span_guard_budget(400), 0.4)
+        self.assertEqual(self.repl_module._span_guard_budget(180_000), 180.0)
+
+    def test_no_limit_disarms_the_guard(self):
+        for raw in (None, 0, -1, "500", True):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.repl_module._span_guard_budget(raw), 0.0)
+
+    def test_the_timer_fires_inside_the_limit(self):
+        for budget in (0.4, 60.0, 180.0):
+            with self.subTest(budget=budget):
+                delay = self.repl_module._span_guard_delay(budget)
+                self.assertLess(delay, budget, "the guard must beat the watchdog's clock")
+                self.assertGreater(delay, 0.0)
+
+    def test_the_lead_is_a_quarter_second_bounded_by_a_quarter_of_the_limit(self):
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(60.0), 59.75)
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(180.0), 179.75)
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(0.4), 0.3)
 
 
 if __name__ == "__main__":
