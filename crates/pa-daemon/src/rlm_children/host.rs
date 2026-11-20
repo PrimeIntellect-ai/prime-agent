@@ -28,17 +28,6 @@ impl PromptWait {
             Self::Admission => run.prompt_admitted(),
         }
     }
-
-    fn stopped(self, record: &ChildRecord) -> bool {
-        match self {
-            Self::Release => false,
-            Self::Admission => {
-                !record.run.is_running()
-                    || record.retirement.closed_by_parent()
-                    || record.retirement.retiring()
-            }
-        }
-    }
 }
 
 pub(super) async fn wait_for_prompt_state(
@@ -56,7 +45,15 @@ pub(super) async fn wait_for_prompt_state(
             if wait_for.satisfied(&record.run) {
                 return true;
             }
-            if wait_for.stopped(&record) {
+            let stopped = match wait_for {
+                PromptWait::Release => false,
+                PromptWait::Admission => {
+                    !record.run.is_running()
+                        || record.retirement.closed_by_parent()
+                        || record.retirement.retiring()
+                }
+            };
+            if stopped {
                 return false;
             }
         }
@@ -320,7 +317,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         _ = wait_for_prompt_state(
                             &watcher_record,
                             PromptWait::Release,
-                            None,
+                            /*deadline*/ None,
                         ) => {}
                     }
                 }
@@ -609,8 +606,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // leaves its return alone.
                 let mut row = record.lock().await;
                 let was_running = row.run.is_running();
-                if was_running {
-                    row.retirement.apply(RetirementEvent::BeginDelete);
+                if was_running && row.retirement.apply(RetirementEvent::BeginDelete) {
+                    row.run.notifier().notify_waiters();
                 }
                 was_running
             };
@@ -626,11 +623,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     // The kill never landed: clear the mark so the
                     // still-live child stays watchable and a later cancel
                     // can still record the parent -> child edge.
-                    record
-                        .lock()
-                        .await
-                        .retirement
-                        .apply(RetirementEvent::KillRefused);
+                    let mut record = record.lock().await;
+                    if record.retirement.apply(RetirementEvent::KillRefused) {
+                        record.run.notifier().notify_waiters();
+                    }
                     return Err(error);
                 }
                 this.retain_retired_usage(&record, RetirementIntent::Delete { was_running })

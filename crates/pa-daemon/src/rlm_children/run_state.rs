@@ -274,6 +274,15 @@ mod tests {
             })
         }))
         .is_err());
+
+        let mut released = RunState::held();
+        released.apply(RunEvent::ReleasePrompt);
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            released.apply(RunEvent::IdleRead {
+                final_turn_error: None,
+            })
+        }))
+        .is_err());
     }
 
     #[test]
