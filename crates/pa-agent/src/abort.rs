@@ -261,22 +261,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn race_keep_result_keeps_a_result_that_aborts_in_its_poll() {
-        // The operation requests the abort in the poll that makes its result.
+    async fn race_keep_result_keeps_a_result_that_is_ready_with_the_abort() {
+        // The result and the abort both become ready before the second poll.
         // The operation branch is polled first and is not re-checked, so the
-        // result stands even though the signal is aborted when the race
-        // returns.
+        // result stands even though the signal is aborted.
         let controller = AbortController::new();
         let signal = controller.signal();
-        let result = race_keep_result(
-            async {
-                controller.abort();
-                7
-            },
-            &signal,
-        )
-        .await;
-        assert_eq!(result.unwrap(), 7);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut race = std::pin::pin!(race_keep_result(receiver, &signal));
+        let first = std::future::poll_fn(|cx| std::task::Poll::Ready(race.as_mut().poll(cx))).await;
+        assert!(first.is_pending());
+        sender.send(7).unwrap();
+        controller.abort();
+        assert_eq!(race.await.unwrap().unwrap(), 7);
     }
 
     #[tokio::test]
