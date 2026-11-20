@@ -65,7 +65,7 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
 
         async def host_request(payload):
             sent.append((clock.now, payload))
-            return next(replies)
+            return next(replies, {"status": "ok", "result": {"admitted": True}})
 
         namespace = dict(bash_module._waiting_keepalive_loop.__globals__)
         namespace.update(
@@ -96,7 +96,7 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
         handle = self.handle()
         sent = await self.run_ticks(
             {handle}, {}, [(1000.0, False)],
-            [{"status": "ok", "data": {"admitted": True}}],
+            [{"status": "ok", "result": {"admitted": True}}],
         )
         self.assertEqual(sent, [(1000.0, {
             "type": "bash.waiting", "pids": [42],
@@ -111,7 +111,7 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
         live = {ordinary}
         sent = await self.run_ticks(
             live, {"ordinary": ordinary, "persistent": persistent, "finished": finished},
-            [(1000.0, False)], [{"status": "ok", "data": {"admitted": True}}],
+            [(1000.0, False)], [{"status": "ok", "result": {"admitted": True}}],
         )
         self.assertEqual(len(sent), 1)
         self.assertEqual(set(sent[0][1]["pids"]), {42, 43})
@@ -123,7 +123,7 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
         handle = self.handle()
         sent = await self.run_ticks(
             {handle}, {}, [(1.0, True), (16.0, False), (31.0, False), (256.0, False)],
-            [{"status": "ok", "data": {"admitted": True}}] * 2,
+            [{"status": "ok", "result": {"admitted": True}}] * 2,
         )
         self.assertEqual([when for when, _ in sent], [16.0, 256.0])
 
@@ -131,7 +131,7 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
         handle = self.handle()
         sent = await self.run_ticks(
             {handle}, {}, [(1000.0, False), (1015.0, False), (1030.0, False), (1255.0, False)],
-            [{"status": "ok", "data": {"admitted": admitted}} for admitted in (False, True, True)],
+            [{"status": "ok", "result": {"admitted": admitted}} for admitted in (False, True, True)],
         )
         self.assertEqual([when for when, _ in sent], [1000.0, 1015.0, 1255.0])
 

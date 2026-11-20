@@ -227,7 +227,7 @@ async def _waiting_keepalive_loop() -> None:
         # window.
         if not isinstance(reply, dict) or reply.get("status") != "ok":
             return
-        if reply.get("data", {}).get("admitted") is True:
+        if reply.get("result", {}).get("admitted") is True:
             last_sent = time.monotonic()
 
 # bash(persistent=True): every session's persistent shells live in one home
