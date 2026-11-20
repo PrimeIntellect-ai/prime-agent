@@ -401,7 +401,6 @@ impl LibraryView {
                 theme.fg_span(ThemeColor::Muted, "  Loading machines...")
             ]);
         } else if self.machines.is_empty() && self.error.is_none() {
-            body.push(vec![Span::raw("")]);
             body.push(vec![
                 Span::raw("  "),
                 theme.fg_span(
@@ -443,11 +442,12 @@ impl LibraryView {
         ]);
         // Keep the selected machine before chrome when the dock is short.
         let budget = self.viewport_rows.max(1);
-        if header.len() + tail.len() + 1 > budget {
+        let minimum_body = usize::from(!body.is_empty());
+        if header.len() + tail.len() + minimum_body > budget {
             tail.retain(|row| row.iter().any(|span| !span.content.trim().is_empty()));
         }
-        header.truncate(budget.saturating_sub(tail.len() + 1));
-        tail.drain(..tail.len().saturating_sub(budget - 1));
+        header.truncate(budget.saturating_sub(tail.len() + minimum_body));
+        tail.truncate(budget.saturating_sub(minimum_body));
         let body_budget = budget.saturating_sub(header.len() + tail.len()).max(1);
         let start = if body.len() > body_budget {
             self.selected.saturating_sub(body_budget - 1)
@@ -711,6 +711,38 @@ mod tests {
         let grown = plain(&view.render_frame(100, 30));
         assert!(grown.contains("machine-12"), "{grown}");
         assert!(grown.contains("▸ machine-2"), "{grown}");
+    }
+
+    #[test]
+    fn the_compact_frame_keeps_list_outcomes_visible() {
+        let mut failed = LibraryView::loading(20);
+        failed.set_error(Some("offline".to_string()));
+        let mut retained = LibraryView::new(
+            vec![LibraryMachine {
+                name: "builder".to_string(),
+                description: String::new(),
+                source: "repo".to_string(),
+            }],
+            20,
+        );
+        retained.set_error(Some("offline".to_string()));
+        for (library, expected) in [
+            (LibraryView::loading(20), "Loading machines"),
+            (
+                LibraryView::new(Vec::new(), 20),
+                "No machines in the library",
+            ),
+            (failed, "Error: offline"),
+            (retained, "Error: offline"),
+        ] {
+            let mut view = crate::view::AgentView::new(theme());
+            view.set_terminal_rows(6);
+            view.chrome.speed_text = Some("42 tok/s".to_string());
+            view.library_view = Some(library);
+            let text = plain(&view.render_frame(100, 6));
+            assert!(text.contains(expected), "{expected}: {text}");
+            assert!(text.contains("42 tok/s"), "{text}");
+        }
     }
 
     #[test]
