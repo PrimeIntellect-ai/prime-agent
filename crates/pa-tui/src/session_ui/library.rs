@@ -243,8 +243,17 @@ impl super::SessionUi {
             match payload {
                 Ok(data) => {
                     if crate::factory_view::library_reply_lists_machines(&data) {
+                        let selected_before = library_view
+                            .selected_machine()
+                            .map(|machine| machine.name.clone());
                         library_view.set_error(None);
                         library_view.apply_machines(parse_library_machines(&data));
+                        let selected_after = library_view
+                            .selected_machine()
+                            .map(|machine| machine.name.as_str());
+                        if selected_before.as_deref() != selected_after {
+                            self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
+                        }
                     } else {
                         library_view.set_error(Some(MALFORMED_LIBRARY_REPLY_ERROR.to_string()));
                     }

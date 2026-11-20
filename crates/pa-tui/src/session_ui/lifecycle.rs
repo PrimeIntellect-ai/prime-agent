@@ -1312,6 +1312,98 @@ mod backfill_tests {
     }
 
     #[tokio::test]
+    async fn library_list_refresh_retires_graph_only_when_selected_machine_changes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, mut requests) = mock_session(
+                &dir.path().join("library-refresh-selection.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            let first = json!({"name": "first", "description": "", "source": "repo"});
+            let second = json!({"name": "second", "description": "", "source": "repo"});
+            for remove_selected in [true, false] {
+                for result in [
+                    Ok(json!({"specId": "first", "machine": {}})),
+                    Err("graph request failed".to_string()),
+                ] {
+                    view.library_view = Some(crate::factory_view::LibraryView::new(
+                        crate::factory_view::parse_library_machines(&json!({
+                            "machines": [first.clone(), second.clone()]
+                        })),
+                        20,
+                    ));
+                    session
+                        .handle_library_view_key(
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                            &mut view,
+                        )
+                        .unwrap();
+                    assert_eq!(requests.recv().await.unwrap()["specId"], "first");
+                    let epoch = session.library_detail_epoch;
+                    let refreshed = if remove_selected {
+                        vec![second.clone()]
+                    } else {
+                        vec![second.clone(), first.clone()]
+                    };
+                    session.apply_library_update(
+                        crate::session_ui::LibraryUpdate::Machines {
+                            session: session.active_session_id.clone(),
+                            epoch: session.library_list_epoch,
+                            data: json!({"machines": refreshed}),
+                        },
+                        &mut view,
+                    );
+                    assert_eq!(
+                        view.library_view
+                            .as_ref()
+                            .unwrap()
+                            .selected_machine()
+                            .unwrap()
+                            .name,
+                        if remove_selected { "second" } else { "first" }
+                    );
+                    let reply_text = if result.is_ok() {
+                        "machine: first"
+                    } else {
+                        "graph request failed"
+                    };
+                    session.apply_library_update(
+                        crate::session_ui::LibraryUpdate::Graph {
+                            session: session.session_id.clone(),
+                            epoch,
+                            name: "first".to_string(),
+                            result,
+                        },
+                        &mut view,
+                    );
+                    let frame = view.render_frame(100, 30);
+                    let text = frame
+                        .iter()
+                        .flatten()
+                        .map(|span| span.content.as_str())
+                        .collect::<String>();
+                    assert_eq!(
+                        text.contains(reply_text),
+                        !remove_selected,
+                        "list refresh must retire replies only when selection changes: {text}"
+                    );
+                }
+            }
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library list selection refresh completes within ten seconds");
+    }
+
+    #[tokio::test]
     async fn library_navigation_dirties_selection_and_detail_back() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let dir = tempfile::tempdir().unwrap();
