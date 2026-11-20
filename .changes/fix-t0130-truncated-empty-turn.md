@@ -1,0 +1,1 @@
+- Prevented reasoning-only truncated model turns from ending silently by retrying once and reporting a clear error if the retry is empty.

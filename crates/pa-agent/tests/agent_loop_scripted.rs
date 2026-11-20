@@ -10,12 +10,12 @@ use std::time::Duration;
 use pa_agent::abort::AbortSignal;
 use pa_agent::agent::{Agent, AgentOptions};
 use pa_agent::agent_loop::{run_agent_loop_continue, AgentEventSink, AgentLoopConfig};
-use pa_agent::scripted::ScriptedProvider;
+use pa_agent::scripted::{ScriptStep, ScriptedProvider, ScriptedTurn};
 use pa_agent::stream::AssistantMessageEvent;
 use pa_agent::types::{
     AgentContext, AgentEvent, AgentMessage, AgentTool, AgentToolResult, AgentToolUpdateCallback,
-    AssistantContent, AssistantMessage, Message, Model, StopReason, TextContent, ToolExecutionMode,
-    ToolResultContent, ToolResultMessage, UserContent,
+    AssistantContent, AssistantMessage, Message, Model, StopReason, TextContent, ThinkingContent,
+    ToolExecutionMode, ToolResultContent, ToolResultMessage, Usage, UserContent,
 };
 
 fn test_model() -> Model {
@@ -31,6 +31,33 @@ fn test_model() -> Model {
         max_tokens: 4_096,
         max_tokens_explicit: false,
     }
+}
+
+fn push_length_turn(provider: &ScriptedProvider, content: Vec<AssistantContent>) {
+    let model = test_model();
+    let message = AssistantMessage {
+        content,
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: Usage::zero(),
+        stop_reason: StopReason::Length,
+        stop_reason_raw: None,
+        error_message: None,
+        timestamp: 0,
+    };
+    provider.push_turn(ScriptedTurn::Events(vec![
+        ScriptStep::Event(Box::new(AssistantMessageEvent::Start {
+            partial: message.clone(),
+        })),
+        ScriptStep::Event(Box::new(AssistantMessageEvent::Done {
+            reason: StopReason::Length,
+            message,
+        })),
+    ]));
 }
 
 /// Echo tool: returns its `text` argument, optionally after a delay and/or
@@ -555,6 +582,109 @@ async fn provider_stream_failure_mid_turn_ends_run_and_retry_continues() {
             "agent_end",
         ]
     );
+}
+
+#[tokio::test]
+async fn truncated_empty_turn_retries_once_and_never_commits_silently() {
+    let run = |provider: Arc<ScriptedProvider>| async move {
+        let config = AgentLoopConfig::new(test_model(), AgentLoopConfig::default_convert_to_llm());
+        let context = AgentContext {
+            system_prompt: String::new(),
+            tools: Vec::new(),
+            messages: vec![AgentMessage::user("hello")],
+        };
+        let emit: AgentEventSink = Arc::new(|_| Box::pin(async { Ok(()) }));
+        let stream_fn = provider.stream_fn();
+        run_agent_loop_continue(context, &config, emit, None, Some(&stream_fn))
+            .await
+            .unwrap()
+    };
+
+    let failed_provider = Arc::new(ScriptedProvider::new(test_model()));
+    push_length_turn(
+        &failed_provider,
+        vec![AssistantContent::Thinking(ThinkingContent {
+            thinking: "reasoning only".into(),
+            thinking_signature: None,
+            redacted: None,
+        })],
+    );
+    push_length_turn(&failed_provider, Vec::new());
+    let failed_messages = run(Arc::clone(&failed_provider)).await;
+    assert_eq!(failed_provider.calls().len(), 2);
+    let failure = assistant_text(failed_messages.last().unwrap());
+    assert_eq!(failure.stop_reason, StopReason::Error);
+    assert!(failure
+        .error_message
+        .as_deref()
+        .unwrap()
+        .contains("truncated"));
+
+    let recovered_provider = Arc::new(ScriptedProvider::new(test_model()));
+    push_length_turn(
+        &recovered_provider,
+        vec![AssistantContent::Thinking(ThinkingContent {
+            thinking: "reasoning only".into(),
+            thinking_signature: None,
+            redacted: None,
+        })],
+    );
+    recovered_provider.push_text_turn("recovered output");
+    let recovered_messages = run(Arc::clone(&recovered_provider)).await;
+    assert_eq!(recovered_provider.calls().len(), 2);
+    assert!(matches!(
+        &assistant_text(recovered_messages.last().unwrap()).content[..],
+        [AssistantContent::Text(TextContent { text, .. })] if text == "recovered output"
+    ));
+    assert!(recovered_provider.calls()[1].messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::User(user)
+                if matches!(&user.content, UserContent::Text(text) if text == "Your previous output was cut off during reasoning. Produce your next action now.")
+        )
+    }));
+
+    let content_provider = Arc::new(ScriptedProvider::new(test_model()));
+    push_length_turn(
+        &content_provider,
+        vec![AssistantContent::Text(TextContent {
+            text: "partial but usable".into(),
+            text_signature: None,
+        })],
+    );
+    let content_messages = run(Arc::clone(&content_provider)).await;
+    assert_eq!(content_provider.calls().len(), 1);
+    assert_eq!(
+        assistant_text(&content_messages[0]).stop_reason,
+        StopReason::Length
+    );
+}
+
+#[tokio::test]
+async fn tool_call_response_does_not_retry_as_truncated_empty() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        None,
+        vec![("call-1", "echo", serde_json::json!({"text": "ok"}))],
+    );
+    provider.push_text_turn("done");
+    let tool = EchoTool::new("echo");
+    let config = AgentLoopConfig::new(test_model(), AgentLoopConfig::default_convert_to_llm());
+    let context = AgentContext {
+        system_prompt: String::new(),
+        tools: vec![tool],
+        messages: vec![AgentMessage::user("hello")],
+    };
+    let emit: AgentEventSink = Arc::new(|_| Box::pin(async { Ok(()) }));
+    let stream_fn = provider.stream_fn();
+    let _ = run_agent_loop_continue(context, &config, emit, None, Some(&stream_fn))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls().len(), 2);
+    assert!(!provider.calls()[1]
+        .messages
+        .iter()
+        .any(|message| matches!(message, Message::User(user) if matches!(&user.content, UserContent::Text(text) if text.contains("previous output was cut off")))));
 }
 
 #[tokio::test]
