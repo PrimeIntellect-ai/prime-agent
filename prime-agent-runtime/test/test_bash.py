@@ -1843,13 +1843,27 @@ class BashInventedKwargsTest(unittest.TestCase):
     parked-turn alternative, never a bare TypeError."""
 
     def test_invented_kwargs_teach_the_real_signature(self):
-        with self.assertRaises(TypeError) as ctx:
-            bash("echo hi", timeout=600)
+        with mock.patch.object(bash_module, "_completion_notices_wired", True):
+            with self.assertRaises(TypeError) as ctx:
+                bash("echo hi", timeout=600)
         message = str(ctx.exception)
         self.assertIn("command, persistent", message)
         self.assertIn("'timeout'", message)
         self.assertIn("[bash-done]", message)
         self.assertIn("end the turn", message)
+
+    def test_a_notice_less_session_is_told_its_await_waits(self):
+        # The decline must not promise a [bash-done] wake the host never
+        # sends: without completion notices an await runs to completion.
+        with mock.patch.object(bash_module, "_completion_notices_wired", False):
+            with self.assertRaises(TypeError) as ctx:
+                bash("echo hi", timeout=600)
+        message = str(ctx.exception)
+        self.assertIn("command, persistent", message)
+        self.assertIn("no [bash-done] notice", message)
+        self.assertNotIn("notification resumes you", message)
+        self.assertNotIn("always yields", message)
+        self.assertIn("waits until the command finishes", message)
 
     def test_the_contract_docstring_survives_the_decline(self):
         # The decline block sits after the docstring: help(bash) must keep
