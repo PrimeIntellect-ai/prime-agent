@@ -70,7 +70,10 @@ pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
-use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
+use config::{
+    GoalRuntimeHandles, ModelResolutionWarning, ProducerUsageSink, RestoredSessionModel,
+    StartupScope,
+};
 
 mod reload;
 mod session_engine_impl;
@@ -192,6 +195,7 @@ pub struct AgentSessionEngine {
     /// for: a revived session's saved model (or the fallback message); an
     /// explicit flag wins.
     restored_model: std::sync::Mutex<Option<RestoredSessionModel>>,
+    model_resolution_warning: std::sync::Mutex<ModelResolutionWarning>,
     /// The create-time `--models` scope (see [`config::StartupScope`]);
     /// `None` keeps the unscoped chain.
     startup_scope: std::sync::Mutex<Option<StartupScope>>,

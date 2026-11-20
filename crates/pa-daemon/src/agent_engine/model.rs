@@ -294,9 +294,32 @@ impl AgentSessionEngine {
         if let Some(error) = resolved.error {
             anyhow::bail!("{error}");
         }
+        self.model_resolution_warning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest = resolved.warning;
         resolved
             .model
             .ok_or_else(|| anyhow::anyhow!("No matching model found."))
+    }
+
+    /// The latest resolution's warning row, once: `None` when no turn owes it.
+    pub(super) fn take_unshown_model_resolution_warning(
+        &self,
+    ) -> Option<pa_types::session::CustomMessage> {
+        let mut guard = self
+            .model_resolution_warning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let warning = &mut *guard;
+        if warning.latest == warning.shown {
+            return None;
+        }
+        warning.shown.clone_from(&warning.latest);
+        warning
+            .latest
+            .as_deref()
+            .map(pa_core::session_engine::model_resolution_notice::notice_message)
     }
 
     /// Test seam: a scripted faux provider (same script contract as pa-cli's

@@ -78,6 +78,15 @@ pub(super) struct RestoredSessionModel {
     pub(super) fallback_message: Option<String>,
 }
 
+/// The flagged selection's latest resolution warning and the one a turn last
+/// showed: a warning row goes out once per distinct resolution, not per
+/// resolve call.
+#[derive(Default)]
+pub(super) struct ModelResolutionWarning {
+    pub(super) latest: Option<String>,
+    pub(super) shown: Option<String>,
+}
+
 /// A create command's session flags, under the TS `AgentSessionRuntimeConfig` names.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]

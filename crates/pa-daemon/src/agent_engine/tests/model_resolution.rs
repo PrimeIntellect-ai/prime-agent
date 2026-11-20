@@ -1404,3 +1404,78 @@ fn an_explicit_scope_with_no_matches_does_not_warn_about_an_excluded_default() {
         "explicitly excluded defaults do not imply an unavailable-model fallback"
     );
 }
+
+/// A flagged selection the catalog misses runs on a custom id: its warning
+/// shows as one display-only row across turns; an exact selection shows none.
+#[test]
+fn an_inexact_model_selection_shows_one_warning_row_across_turns() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            ..Default::default()
+        });
+    registration.set_repeat_last_response(true);
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "ok",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    for (model_id, expected_rows) in [("claude-opus-4-7", 0), ("no-such-model", 1)] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // The provider's default model is the template an unknown id rebuilds on.
+        std::fs::write(
+            agent_dir.join("models.json"),
+            json!({
+                "providers": {
+                    "anthropic": {
+                        "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-faux",
+                        "models": [{
+                            "id": "claude-opus-4-7", "name": "Opus",
+                            "contextWindow": 128_000, "maxTokens": 16384,
+                        }],
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let engine = Arc::new(
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir,
+                provider: Some("anthropic".to_string()),
+                model: Some(model_id.to_string()),
+                api_key: Some("sk-faux".to_string()),
+                thinking: None,
+                session_dir: None,
+                session_file: None,
+                faux_script: None,
+                supervisor_link: None,
+                telemetry_disabled: Some(true),
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap(),
+        );
+        engine.register_arc();
+        let mut events = Vec::new();
+        admit(&engine, "one".to_string(), &mut events);
+        admit(&engine, "two".to_string(), &mut events);
+        assert_eq!(assistant_texts(&events), vec!["ok", "ok"], "{model_id}");
+        let rows = events
+            .iter()
+            .filter(|event| {
+                matches!(event, EngineEvent::CustomMessage(row) if row["customType"]
+                    == pa_core::session_engine::model_resolution_notice::MODEL_RESOLUTION_WARNING_CUSTOM_TYPE)
+            })
+            .count();
+        assert_eq!(rows, expected_rows, "{model_id}");
+    }
+    registration.unregister();
+}
