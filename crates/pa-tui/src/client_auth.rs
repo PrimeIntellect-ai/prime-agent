@@ -1,5 +1,5 @@
 //! Client-side MCP auth commands: the interactive surface behind
-//! `/mcp login <name>` and `/mcp logout <name>` (the TS interactive
+//! The `/mcp` view’s connect and disconnect flows (the TS interactive
 //! client's MCP login/logout branches, which run the OAuth flow in the
 //! client process and persist through the shared auth store) plus the
 //! `/mcp` view's api-key credential flow (`key <id>`, the view's stored
@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// contract the pa-core login UI uses for dyn dispatch across crates).
 pub type AuthFuture = Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>>;
 
-/// `/mcp login` and `/mcp logout`, implemented by the composition root.
+/// MCP connect and disconnect flows, implemented by the composition root and opened from `/mcp`.
 pub trait ClientAuthCommands: Send + Sync {
     /// Run one interactive MCP OAuth login against the inline auth panel
     /// (the flow's progress, URL block, and prompts render there).
@@ -45,7 +45,7 @@ impl std::fmt::Debug for ClientAuthCommandsHandle {
     }
 }
 
-/// Run `/mcp login` / `/mcp key` / `/mcp logout` against the hook and
+/// Run MCP connect, key, or disconnect flows against the hook and
 /// return the note line to show (status, surfaced error, or the TS usage
 /// wording). Argument shapes and wording follow the TS interactive
 /// client's `handleMcpCommand` login/logout branches. The login, paste,
@@ -77,7 +77,7 @@ pub async fn run_mcp_auth_command(
             Err(error) => format!("{error:#}"),
         },
         (Some("login"), _, false) | (Some("login"), None, true) => {
-            "Usage: /mcp login <name> (e.g. /mcp login linear)".to_string()
+            "Open /mcp and select a service to connect it.".to_string()
         }
         (Some("paste"), _, false) | (Some("paste"), None, true) => {
             "Usage: /mcp paste <name> (a requires-setup token service)".to_string()
@@ -88,8 +88,7 @@ pub async fn run_mcp_auth_command(
         (Some("logout"), _, false) | (Some("logout"), None, true) => {
             "Usage: /mcp logout <name>".to_string()
         }
-        _ => "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name> | /mcp logout <name>"
-            .to_string(),
+        _ => "Open /mcp and select a service to connect it.".to_string(),
     }
 }
 
@@ -222,14 +221,14 @@ mod tests {
             run_mcp_auth_command(&auth, "key a b", panel()).await,
             "Usage: /mcp key <name> (an api-key credential)"
         );
-        // TS usage wording: missing server, extra args, unknown subcommand.
+        // Invalid internal auth arguments point users to the supported menu.
         assert_eq!(
             run_mcp_auth_command(&auth, "login", panel()).await,
-            "Usage: /mcp login <name> (e.g. /mcp login linear)"
+            "Open /mcp and select a service to connect it."
         );
         assert_eq!(
             run_mcp_auth_command(&auth, "login a b", panel()).await,
-            "Usage: /mcp login <name> (e.g. /mcp login linear)"
+            "Open /mcp and select a service to connect it."
         );
         assert_eq!(
             run_mcp_auth_command(&auth, "logout", panel()).await,
@@ -237,11 +236,11 @@ mod tests {
         );
         assert_eq!(
             run_mcp_auth_command(&auth, "", panel()).await,
-            "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name> | /mcp logout <name>"
+            "Open /mcp and select a service to connect it."
         );
         assert_eq!(
             run_mcp_auth_command(&auth, "add http://x", panel()).await,
-            "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name> | /mcp logout <name>"
+            "Open /mcp and select a service to connect it."
         );
         // Errors surface with their chain.
         assert_eq!(

@@ -1,5 +1,5 @@
 //! The composition root's MCP auth flows behind the TUI's
-//! `/mcp login <name>` and `/mcp logout <name>` plus the `/mcp` view's
+//! The `/mcp` view's connect/disconnect flows plus its
 //! api-key credential flow (`key <name>`): resolve the server through
 //! the settings + builtin catalog, run the pa-core OAuth login against
 //! the inline auth panel (the authorization URL block and the paste
