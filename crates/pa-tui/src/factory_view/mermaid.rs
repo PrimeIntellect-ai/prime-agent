@@ -72,7 +72,8 @@ impl Graph {
         self.edges.push(FactoryTransition {
             from: vec![from.to_string()],
             to: to.to_string(),
-            when: label,
+            when: label.clone(),
+            label,
         });
     }
 

@@ -441,7 +441,7 @@ fn agents_view_factory_panel_opens_on_the_run_list_and_returns() {
         outcome
             .frames
             .iter()
-            .any(|frame| frame.contains("solo-spec") && frame.contains("open \u{b7}")),
+            .any(|frame| frame.contains("factory: solo-spec")),
         "the factory page mounted on its run list"
     );
     assert!(

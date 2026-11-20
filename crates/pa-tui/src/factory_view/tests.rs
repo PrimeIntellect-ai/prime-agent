@@ -726,9 +726,7 @@ fn the_arrows_walk_headers_and_session_states_across_panels() {
     assert!(paints(ThemeColor::Dim) && !paints(ThemeColor::Accent));
 }
 
-/// Enter and → open the selected state's LATEST child (a retry overwrites
-/// the instance's child; a later entry's child wins); on a header they
-/// open nothing.
+/// Enter inspects the state. Right and o open its latest child.
 #[test]
 fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     let mut snapshot = scripted_snapshot();
@@ -750,6 +748,9 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
         state_id: state.to_string(),
         selector: None,
     };
+    let (hint, _) = view.hint(&kb());
+    assert!(hint.contains("Enter inspect"), "{hint}");
+    assert!(hint.contains("→/o open session"), "{hint}");
     assert_eq!(view.handle_key("enter", &kb()), open_node("collect"));
     // The session UI mounts the node view on OpenNode; once mounted, it
     // owns the keys — Esc steps back to the diagram (the unit harness
@@ -764,6 +765,23 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     // A state without a child still opens its node view.
     let _ = view.handle_key("down", &kb());
     assert_eq!(view.handle_key("enter", &kb()), open_node("fixing"));
+}
+
+#[test]
+fn node_errors_keep_the_footer_within_short_viewports() {
+    let mut view = FactoryView::new(Vec::new(), 20);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child open failed".to_string()));
+    let full = view.render(&theme(), 110, &kb());
+    let footer = full.last().unwrap().clone();
+    for budget in 0..=6 {
+        view.viewport_rows = budget;
+        let rows = view.render(&theme(), 110, &kb());
+        assert!(rows.len() <= budget, "budget {budget}: {rows:?}");
+        if budget > 0 {
+            assert_eq!(rows.last(), Some(&footer), "budget {budget}");
+        }
+    }
 }
 
 #[test]
@@ -1101,7 +1119,8 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     );
     // The key hint stays painted (the trailing chrome never truncates).
     assert!(
-        joined.contains("Enter/→ open"),
+        rows.last()
+            .is_some_and(|row| row.trim() == view.hint(&kb()).0),
         "the key hint stays painted: {joined}"
     );
     // The default selection is the newest run: its header stays visible
@@ -1127,7 +1146,8 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         "the view stays inside the budget: {joined}"
     );
     assert!(
-        joined.contains("Enter/→ open"),
+        rows.last()
+            .is_some_and(|row| row.trim() == selected_older.hint(&kb()).0),
         "the key hint stays painted: {joined}"
     );
     assert!(
@@ -1977,7 +1997,11 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         joined.contains("▸ factory: world-run-7 — running"),
         "{joined}"
     );
-    assert!(joined.contains("Enter/→ open"), "{joined}");
+    assert!(
+        rows.last()
+            .is_some_and(|row| row.trim() == view.hint(&kb()).0),
+        "{joined}"
+    );
     // The focused run vanishes mid-orchestration: the selection hands
     // back to the head, and the very next keypress resolves against
     // the folded batch — never a stale index.

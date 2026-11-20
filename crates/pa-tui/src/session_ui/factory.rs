@@ -105,9 +105,13 @@ impl super::SessionUi {
         state_id: &str,
         selector: Option<(u64, u64)>,
     ) {
-        if !self.factory_activity_supported() {
+        if !self.factory_activity_supported()
+            || !self
+                .client
+                .supports_server_capability("factory_node_activity")
+        {
             self.note(
-                "The node view needs a daemon that advertises the factory lane",
+                "The node view needs a daemon that supports node inspection",
                 view,
             );
             return;

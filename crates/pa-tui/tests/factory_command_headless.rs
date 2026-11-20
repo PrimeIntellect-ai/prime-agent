@@ -849,6 +849,34 @@ fn open_node_steps() -> Vec<HeadlessStep> {
 }
 
 #[test]
+fn factory_node_requires_node_specific_daemon_support() {
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "supports node inspection".to_string(),
+            timeout_ms: 5_000,
+        },
+    ];
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    let all = flat_text(&frames);
+    assert!(!all.contains("node: worker"), "{all}");
+}
+
+#[test]
 fn factory_node_navigation_fetches_the_selected_entry_and_instance() {
     let mut steps = open_node_steps();
     steps.extend([
@@ -859,7 +887,10 @@ fn factory_node_navigation_fetches_the_selected_entry_and_instance() {
         },
     ]);
     let frames = run_plan_config(
-        vec!["factory_activity".to_string()],
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
         Some(json!({"runs": [factory_node_run()]})),
         steps,
     );
@@ -874,7 +905,10 @@ fn factory_node_refreshes_the_mounted_document() {
         timeout_ms: 5_000,
     });
     let frames = run_plan_config(
-        vec!["factory_activity".to_string()],
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
         Some(json!({"runs": [factory_node_run()]})),
         steps,
     );
@@ -892,7 +926,10 @@ fn factory_node_renders_its_template_from_the_node_reply() {
         },
     ]);
     let frames = run_plan_config(
-        vec!["factory_activity".to_string()],
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
         Some(json!({"runs": [factory_node_run()]})),
         steps,
     );
@@ -922,7 +959,14 @@ fn factory_page_opens_and_renders_a_state_node_document() {
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(100),
     ];
-    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let frames = run_plan_config(
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
+        Some(graph),
+        steps,
+    );
     let all = flat_text(&frames);
     assert!(
         all.contains("node: worker"),

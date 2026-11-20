@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::markdown::{render_markdown, MarkdownStyle};
 use crate::theme::{Theme, ThemeColor};
-use crate::width::truncate_line;
+use crate::width::{truncate_line, wrap_line};
 use crate::{Line, Span};
 
 use super::diagram::node_glyph;
@@ -424,9 +424,10 @@ impl NodeView {
             } else {
                 return false;
             };
-            self.template_scroll = (self.template_scroll as isize + delta)
-                .clamp(0, total.saturating_sub(visible) as isize)
-                as usize;
+            let max_scroll = total.saturating_sub(visible);
+            self.template_scroll = self.template_scroll.min(max_scroll);
+            self.template_scroll =
+                (self.template_scroll as isize + delta).clamp(0, max_scroll as isize) as usize;
             return true;
         }
         if up {
@@ -466,7 +467,7 @@ impl NodeView {
                 .get()
                 .map_or(0, |size| size.0)
                 .saturating_sub(4)
-                .max(20);
+                .max(1);
             let total = self.document_lines(Some(&theme), width).len();
             let visible = visible_rows(viewport_rows, self.error.is_some());
             let max_scroll = total.saturating_sub(visible);
@@ -534,13 +535,12 @@ impl NodeView {
         };
         let code = |rows: &mut Vec<Line>, text: &str| {
             for line in text.lines() {
-                if let Some(theme) = theme {
-                    rows.push(vec![
-                        theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())
-                    ]);
+                let styled = if let Some(theme) = theme {
+                    vec![theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())]
                 } else {
-                    rows.push(vec![Span::raw(line.to_string())]);
-                }
+                    vec![Span::raw(line.to_string())]
+                };
+                rows.extend(wrap_line(&styled, width));
             }
         };
         let markdown = |rows: &mut Vec<Line>, text: &str| {
@@ -688,7 +688,7 @@ impl NodeView {
             return document;
         };
         let style = MarkdownStyle::from_theme(theme);
-        let inner = width.saturating_sub(4).max(20);
+        let inner = width.saturating_sub(4).max(1);
         for segment in split_mermaid_fences(template) {
             let rows = match segment {
                 FileSegment::Text(prose) => render_markdown(&prose, inner, &style),
@@ -730,7 +730,7 @@ impl NodeView {
         ));
         let mut rows = vec![header, vec![Span::raw("")]];
         self.last_viewport.set(Some((width, viewport_rows)));
-        let inner_width = width.saturating_sub(4).max(20);
+        let inner_width = width.saturating_sub(4).max(1);
 
         let (document, scroll) = if self.template_open {
             (self.template_document(theme, width), self.template_scroll)
@@ -780,7 +780,7 @@ impl NodeView {
         let esc = key("tui.select.cancel", "Esc");
         if self.template_open {
             return format!(
-                "{arrows}/{pages} scroll · {} back to the node · {esc} back to the diagram",
+                "{arrows}/{pages} scroll · {}/{esc} back to node document",
                 key("tui.select.confirm", "Enter")
             );
         }
@@ -852,11 +852,13 @@ mod tests {
         reply["instance"]["prompt"] = json!("long row\n".repeat(200));
         let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
         let kb = KeybindingsManager::new();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        node.render(&theme, 80, &kb, 20);
         node.scroll = 150;
         reply["instance"]["prompt"] = json!("short row\n".repeat(40));
         node.merge_reply(&reply);
         let visible = visible_rows(20, false);
-        let total = node.document_lines(None, 80).len();
+        let total = node.document_lines(Some(&theme), 76).len();
         let end = total.saturating_sub(visible);
         assert!(node.handle_key("pageup", &kb, 20));
         assert_eq!(node.scroll, end.saturating_sub(visible));
@@ -870,6 +872,84 @@ mod tests {
                 .saturating_sub(larger_visible)
                 .saturating_sub(larger_visible)
         );
+    }
+
+    #[test]
+    fn template_page_up_moves_from_the_clamped_end_after_refresh_or_resize() {
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        for refresh in [false, true] {
+            let mut reply = reply_with_instances(1);
+            reply["template"] = json!("# template row\n".repeat(100));
+            let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+            assert!(node.handle_key("enter", &kb, 12));
+            node.render(&theme, 80, &kb, 12);
+            node.template_scroll =
+                node.template_document(&theme, 80).len() - visible_rows(12, false);
+            if refresh {
+                reply["template"] = json!("# template row\n".repeat(40));
+                node.merge_reply(&reply);
+            }
+            let viewport_rows = 30;
+            node.render(&theme, 80, &kb, viewport_rows);
+            let visible = visible_rows(viewport_rows, false);
+            let end = node
+                .template_document(&theme, 80)
+                .len()
+                .saturating_sub(visible);
+            assert!(node.handle_key("pageup", &kb, viewport_rows));
+            assert_eq!(node.template_scroll, end.saturating_sub(visible));
+        }
+    }
+
+    #[test]
+    fn long_input_output_and_output_error_values_remain_readable() {
+        let input = format!("{}input_tail", "input_value".repeat(12));
+        let output = format!("{}output_tail", "output_value".repeat(12));
+        let output_error = format!("{}error_tail", "error_value".repeat(12));
+        let mut reply = reply_with_instances(1);
+        reply["instance"]["inputs"] = json!(format!("{{\"input\":\"{input}\"}}"));
+        reply["entry"]["outputs"] = json!(format!("{{\"output\":\"{output}\"}}"));
+        reply["entry"]["outputErrors"] = json!({"output": output_error});
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .render(&theme, 40, &KeybindingsManager::new(), 100)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        for value in [input, output, output_error] {
+            assert!(text.contains(&value), "clipped value: {value}");
+        }
+    }
+
+    #[test]
+    fn template_back_hint_matches_the_document_return_target() {
+        let mut reply = reply_with_instances(1);
+        reply["template"] = json!("template body");
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        assert!(node.handle_key("enter", &kb, 20));
+        let template_rows = node.render(&theme, 160, &kb, 20);
+        let hint = template_rows
+            .last()
+            .unwrap()
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(hint.contains("back to node document"));
+        assert!(node.step_back());
+        let document = node
+            .render(&theme, 160, &kb, 20)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(document.contains("old prompt"));
+        assert!(!document.contains("template body"));
+        assert!(!node.step_back());
     }
 
     #[test]

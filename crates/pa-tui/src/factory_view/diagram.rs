@@ -80,6 +80,8 @@ pub struct FactoryTransition {
     pub from: Vec<String>,
     pub to: String,
     pub when: Option<String>,
+    /// Display text, separate from the full guard used to match fired edges.
+    pub label: Option<String>,
 }
 
 impl FactoryTransition {
@@ -104,6 +106,18 @@ impl FactoryTransition {
                 .and_then(format_guard)
                 .map(|guard| scrubbed(&guard))
                 .filter(|guard| !guard.is_empty()),
+            label: value.get("when").and_then(|when| {
+                let guard = format_guard(when)?;
+                let label = if when.get("op").and_then(Value::as_str).unwrap_or("eq") == "eq" {
+                    when.get("value").and_then(|value| match value {
+                        Value::String(text) => Some(text.clone()),
+                        _ => serde_json::to_string(value).ok(),
+                    })
+                } else {
+                    None
+                };
+                Some(scrubbed(&label.unwrap_or(guard)))
+            }),
         })
     }
 

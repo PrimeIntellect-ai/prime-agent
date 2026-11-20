@@ -2,9 +2,9 @@
 //! diagram with live highlighting, the run's state, the instances
 //! running and queued, the budget consumed, and the milestone tail. The
 //! panels read NEWEST-FIRST (a run created after an existing one renders
-//! above it). The arrows walk the run headers and the states that ran a
-//! session, across panels; Enter/→ open the selected state's latest
-//! child session, ←/Esc close the page. Navigation never acts on a run:
+//! above it). The arrows walk run headers and states across panels.
+//! Enter inspects the selected state. Right/o open its latest child
+//! session; Left/Esc close the page. Navigation never acts on a run:
 //! the stop rides the agents view's two-press `app.agents.delete`
 //! grammar (a header stops its run, a state stops its running child),
 //! and `r` resumes a paused run.
@@ -618,9 +618,9 @@ impl FactoryView {
     }
 
     /// One key press. Navigation never acts on a run: the arrows (the
-    /// `tui.select.up`/`down` bindings) walk the rows, Enter/→ open the
-    /// selected state's session (inert on a header), ←/Esc/ctrl+c close
-    /// the page. The stop rides the agents view's two-press grammar on
+    /// `tui.select.up`/`down` bindings) walk the rows. Enter inspects the
+    /// selected state; →/o open its session (inert on a header). ←/Esc/ctrl+c
+    /// close the page. The stop rides the agents view's two-press grammar on
     /// `app.agents.delete`: the first press arms the selected row, a
     /// second press on it stops (the run on a header, the child on a
     /// state), and any other key only disarms. `r` resumes a paused run.
@@ -735,8 +735,7 @@ impl FactoryView {
         self.selected = Some(rows[next].clone());
     }
 
-    /// The selected state's latest child, as the open action; a header
-    /// opens nothing.
+    /// Inspect the selected state; a run header opens nothing.
     fn open_selected_node(&self) -> FactoryViewAction {
         self.selected
             .as_ref()
@@ -750,6 +749,7 @@ impl FactoryView {
             })
     }
 
+    /// Open the selected state's latest child; a run header opens nothing.
     fn open_selected(&self) -> FactoryViewAction {
         self.selected
             .as_ref()
@@ -822,6 +822,9 @@ impl FactoryView {
                         "",
                     ),
                 );
+            }
+            if rows.len() > self.viewport_rows {
+                rows.drain(..rows.len() - self.viewport_rows);
             }
             return rows;
         }
@@ -928,7 +931,8 @@ impl FactoryView {
                 key("tui.select.up", "\u{2191}"),
                 key("tui.select.down", "\u{2193}"),
             ),
-            format!("{}/\u{2192} open", key("tui.select.confirm", "Enter")),
+            format!("{} inspect", key("tui.select.confirm", "Enter")),
+            "\u{2192}/o open session".to_string(),
             "\u{2190} back".to_string(),
         ];
         if self
