@@ -19,7 +19,8 @@ static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
-        crate::utils_inner::tls::http_client_builder()
+        reqwest::Client::builder()
+            .tls_backend_preconfigured(crate::utils_inner::tls::tls_config(&[b"http/1.1"]))
             .http1_only()
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
@@ -431,5 +432,53 @@ mod tests {
             text.push_str(&chunk);
         }
         assert_eq!(text, "cut \u{FFFD}");
+    }
+
+    /// Each shared client offers exactly its own ALPN protocols: reqwest uses the preconfigured
+    /// TLS configuration as-is, so the client builders set them.
+    #[tokio::test]
+    async fn each_transport_offers_its_own_alpn_protocols() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut offered = Vec::new();
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let start = tokio_rustls::LazyConfigAcceptor::new(
+                    rustls::server::Acceptor::default(),
+                    socket,
+                )
+                .await
+                .unwrap();
+                let alpn = start
+                    .client_hello()
+                    .alpn()
+                    .map(|protocols| protocols.map(<[u8]>::to_vec).collect::<Vec<_>>());
+                offered.push(alpn);
+            }
+            offered
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        for transport in [Transport::Http1, Transport::H2Alpn] {
+            let mut request = RequestOptions::new(reqwest::Method::GET, url.clone());
+            request.transport = transport;
+            assert!(
+                tokio::time::timeout_at(deadline, send(request))
+                    .await
+                    .expect("request did not finish before the ALPN test deadline")
+                    .is_err(),
+                "the server never finishes the handshake"
+            );
+        }
+        assert_eq!(
+            tokio::time::timeout_at(deadline, server)
+                .await
+                .expect("server did not receive both ClientHellos before the ALPN test deadline")
+                .unwrap(),
+            vec![
+                Some(vec![b"http/1.1".to_vec()]),
+                Some(vec![b"h2".to_vec(), b"http/1.1".to_vec()]),
+            ]
+        );
     }
 }
