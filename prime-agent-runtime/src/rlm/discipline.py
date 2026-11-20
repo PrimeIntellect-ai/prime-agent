@@ -68,6 +68,9 @@ class _BindingCollector(ast.NodeVisitor):
         # The names a statement binds when it ends. The walk binds a walrus
         # target where the walrus runs.
         self.direct: set[str] = set()
+        # The names annotated without a value: such a name binds nothing, but
+        # a function body that annotates it makes it local.
+        self.annotated: set[str] = set()
 
     def made(self) -> dict[str, frozenset]:
         """The bindings in this scope. A declared name binds in another
@@ -124,6 +127,13 @@ class _BindingCollector(ast.NodeVisitor):
         self.visit(node.value)
         self._bind(node.target.id, None, walrus=True)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is None and isinstance(node.target, ast.Name):
+            self.annotated.add(node.target.id)
+            self.visit(node.annotation)
+        else:
+            self.generic_visit(node)
+
     def visit_Lambda(self, node: ast.Lambda) -> None:
         pass
 
@@ -145,7 +155,8 @@ def _bindings_of(nodes: Iterable[ast.AST]) -> dict[str, frozenset]:
 
 def _scope_bindings(node: ast.AST) -> dict[str, frozenset]:
     """The bindings a function, lambda, or comprehension introduces: its
-    parameters or targets, and every binding its body makes."""
+    parameters or targets, and every binding its body makes. A name the body
+    annotates without a value is local too, with no binding."""
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         arguments = node.args
         parameters = [
@@ -159,8 +170,11 @@ def _scope_bindings(node: ast.AST) -> dict[str, frozenset]:
             )
             if argument is not None
         ]
-        body = node.body if isinstance(node.body, list) else [node.body]
-        return {**dict.fromkeys(parameters, _SHADOW), **_bindings_of(body)}
+        collector = _BindingCollector()
+        for statement in node.body if isinstance(node.body, list) else [node.body]:
+            collector.visit(statement)
+        annotated = dict.fromkeys(collector.annotated - collector.declared.keys(), frozenset())
+        return {**dict.fromkeys(parameters, _SHADOW), **annotated, **collector.made()}
     # a comprehension binds its own targets
     return _bindings_of(generator.target for generator in node.generators)
 

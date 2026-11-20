@@ -888,6 +888,24 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
 
+    def test_discipline_screen_reads_annotations_without_values(self):
+        # An annotation without a value binds nothing in a module or class
+        # body, so the import stays. The flag keeps the cell from sleeping.
+        for rid, code in (
+            ("annotation-module", "import time as t\nflag = False\nt: int\nif flag:\n    t.sleep(5)\n"),
+            (
+                "annotation-class",
+                "import time as t\nflag = False\nclass C:\n    t: int\n    if flag:\n        t.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # In a function it makes the name an unbound local, not the import.
+        code = "import time\ndef f():\n    time: int\n    time.sleep(5)\nprint('defined')\n"
+        events = self.repl.execute("annotation-function", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+
     def test_discipline_screen_unbinds_deleted_names(self):
         # After `del`, a class lookup goes on to the enclosing scope.
         code = (
