@@ -230,7 +230,22 @@ impl Worker {
                 return response_success(None, command, Some(json!({ "queued": true })));
             }
         }
+        // The ACP steering arm's run tracking: a steer carrying a `runId`
+        // registers a settle sender, so the ACP layer can wait for (or
+        // probe) the run's own turn outcome.
+        let run_id = payload
+            .get("runId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let done = run_id
+            .as_deref()
+            .map(|run_id| self.steer_runs.register(run_id));
         let mut core = self.core.lock().unwrap();
+        // The receipt's busy flag: the ACP steering arm maps its
+        // injected/queued outcome from the worker's own turn state at the
+        // enqueue, not an ACP-side snapshot that races the prompt
+        // admission (the same lock serializes the flag with the enqueue).
+        let busy = core.busy;
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -245,7 +260,7 @@ impl Worker {
             queue_key: None,
             admission_id: None,
             images,
-            done: None,
+            done,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
@@ -273,7 +288,7 @@ impl Worker {
         } else {
             "follow_up"
         };
-        response_success(None, command, Some(json!({ "queued": true })))
+        response_success(None, command, Some(json!({ "queued": true, "busy": busy })))
     }
 
     /// Route one minted reserved child-status row into the session inbox
