@@ -31,6 +31,7 @@ pub(crate) enum LibraryUpdate {
         message: String,
     },
     Graph {
+        /// Durable session identity; a reattach may replace its wire id.
         session: String,
         epoch: u64,
         name: String,
@@ -123,13 +124,14 @@ impl super::SessionUi {
     /// Fetch a graph off the input path. Selection changes and page mounts fence its reply.
     fn spawn_library_graph_fetch(&self, name: String) {
         let client = self.client.clone();
-        let session = self.active_session_id.clone();
+        let active_session_id = self.active_session_id.clone();
+        let session = self.session_id.clone();
         let epoch = self.library_detail_epoch;
         let tx = self.library_updates.clone();
         tokio::spawn(async move {
             let fetched = client.request_ok(DaemonCommand::FactoryActivity {
                 id: None,
-                active_session_id: session.clone(),
+                active_session_id,
                 action: "library".to_string(),
                 run_id: None,
                 spec_id: Some(name.clone()),
@@ -210,7 +212,8 @@ impl super::SessionUi {
                 name,
                 result,
             } => {
-                if session != self.active_session_id || epoch != self.library_detail_epoch {
+                // Reattachment changes the wire id, not the mounted machine's owner.
+                if session != self.session_id || epoch != self.library_detail_epoch {
                     return;
                 }
                 if let Some(library_view) = view.library_view.as_mut() {

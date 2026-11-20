@@ -863,29 +863,34 @@ mod backfill_tests {
             let (read, mut write) = stream.into_split();
             write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[\"factory_activity\"],\"clientId\":\"mock\"}\n").await.unwrap();
             let mut lines = BufReader::new(read).lines();
+            let mut attach_count = 0;
+            let mut graph_replies = Vec::new();
             while let Some(line) = lines.next_line().await.unwrap() {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let kind = request["command"]["type"].as_str().unwrap();
                 if kind == "factory_activity" && request["command"]["action"] == "library" {
                     requests_tx.send(request["command"].clone()).unwrap();
-                    if request["command"]["specId"].is_string() {
-                        // A hanging graph sink must never hold the key handler.
-                        continue;
-                    }
                 }
                 let data = match kind {
+                    "factory_activity" if request["command"]["specId"].is_string() => {
+                        json!({"specId": request["command"]["specId"], "machine": {}})
+                    }
                     "factory_activity" => json!({"machines": [
                         {"name": "first", "description": "first machine", "source": "repo"},
                         {"name": "second", "description": "second machine", "source": "repo"},
                     ]}),
-                    "attach" => json!({
-                        "activeSessionId": "s1", "snapshot": {
-                            "activeSessionId": "s1", "summary": {"id": "s1", "cwd": "/tmp"},
-                            "state": {"sessionId": "s1", "cwd": "/tmp", "isStreaming": false},
-                            "messages": [], "historyBefore": 1, "lastEventSequence": 0,
-                        }, "replay": {"status": "complete", "toSequence": 0},
-                        "lastEventSequence": 0,
-                    }),
+                    "attach" => {
+                        attach_count += 1;
+                        let active_id = format!("active-{attach_count}");
+                        json!({
+                            "activeSessionId": active_id, "snapshot": {
+                                "activeSessionId": active_id, "summary": {"id": "s1", "cwd": "/tmp"},
+                                "state": {"sessionId": "s1", "cwd": "/tmp", "isStreaming": false},
+                                "messages": [], "historyBefore": 1, "lastEventSequence": 0,
+                            }, "replay": {"status": "complete", "toSequence": 0},
+                            "lastEventSequence": 0,
+                        })
+                    }
                     "get_messages" => {
                         json!({"messages": [{"role": "user", "content": "rebuilt transcript", "timestamp": 1}]})
                     }
@@ -897,7 +902,17 @@ mod backfill_tests {
                 }))
                 .unwrap();
                 reply.push(b'\n');
+                if kind == "factory_activity" && request["command"]["specId"].is_string() {
+                    // Hold graph replies until a reattach, without holding other requests.
+                    graph_replies.push(reply);
+                    continue;
+                }
                 write.write_all(&reply).await.unwrap();
+                if kind == "attach" {
+                    for graph_reply in graph_replies.drain(..) {
+                        write.write_all(&graph_reply).await.unwrap();
+                    }
+                }
             }
         });
         let mut options =
@@ -985,6 +1000,114 @@ mod backfill_tests {
         })
         .await
         .expect("library session path completes within ten seconds");
+    }
+
+    #[tokio::test]
+    async fn library_graph_reply_survives_same_session_rebind() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, mut requests) = mock_session(
+                &dir.path().join("library-rebind-graph.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+            session.library_updates = updates_tx;
+            session.open_library_page(&mut view);
+            assert_eq!(requests.recv().await.unwrap()["action"], "library");
+            session.apply_library_update(updates_rx.recv().await.unwrap(), &mut view);
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Enter,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            let graph_request = requests.recv().await.unwrap();
+            assert_eq!(graph_request["specId"], "first");
+            assert_eq!(graph_request["activeSessionId"], session.active_session_id);
+            let previous_active_id = session.active_session_id.clone();
+            let durable_id = session.session_id.clone();
+            session
+                .attach_session(&durable_id, DockFold::Held)
+                .await
+                .unwrap();
+            assert_ne!(session.active_session_id, previous_active_id);
+            assert_eq!(session.session_id, durable_id);
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            let (graph_session, graph_epoch) = loop {
+                let update = updates_rx.recv().await.unwrap();
+                let graph_identity = match &update {
+                    crate::session_ui::LibraryUpdate::Graph { session, epoch, .. } => {
+                        Some((session.clone(), *epoch))
+                    }
+                    crate::session_ui::LibraryUpdate::Machines { .. }
+                    | crate::session_ui::LibraryUpdate::Error { .. } => None,
+                };
+                session.apply_library_update(update, &mut view);
+                if let Some(identity) = graph_identity {
+                    break identity;
+                }
+            };
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.contains("machine: first"),
+                "the old attachment's pending graph opens after same-session rebind: {text}"
+            );
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Graph {
+                    session: graph_session.clone(),
+                    epoch: graph_epoch,
+                    name: "first".to_string(),
+                    result: Err("graph request failed before reattach".to_string()),
+                },
+                &mut view,
+            );
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.contains("graph request failed before reattach"),
+                "{text}"
+            );
+            session.session_id = "different-session".to_string();
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            session.open_library_page(&mut view);
+            session.dirty = false;
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Graph {
+                    session: graph_session,
+                    epoch: session.library_detail_epoch,
+                    name: "first".to_string(),
+                    result: Ok(json!({"specId": "first", "machine": {}})),
+                },
+                &mut view,
+            );
+            assert!(
+                !session.dirty,
+                "a different durable session rejects the graph"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library graph survives reattachment within ten seconds");
     }
 
     #[tokio::test]
@@ -1103,7 +1226,7 @@ mod backfill_tests {
                     };
                     session.apply_library_update(
                         crate::session_ui::LibraryUpdate::Graph {
-                            session: session.active_session_id.clone(),
+                            session: session.session_id.clone(),
                             epoch,
                             name: "first".to_string(),
                             result,
@@ -1161,7 +1284,7 @@ mod backfill_tests {
                 session.dirty = false;
                 session.apply_library_update(
                     crate::session_ui::LibraryUpdate::Graph {
-                        session: session.active_session_id.clone(),
+                        session: session.session_id.clone(),
                         epoch,
                         name: "first".to_string(),
                         result,
@@ -1325,7 +1448,7 @@ mod backfill_tests {
                 .await
                 .unwrap();
             session.dirty = false;
-            session.apply_library_update(stale(session.active_session_id.clone()), &mut view);
+            session.apply_library_update(stale(session.session_id.clone()), &mut view);
             assert!(
                 !session.dirty,
                 "selection navigation retires the previous drill-in"
@@ -1347,7 +1470,7 @@ mod backfill_tests {
             );
             session.open_library_page(&mut view);
             session.dirty = false;
-            session.apply_library_update(stale(session.active_session_id.clone()), &mut view);
+            session.apply_library_update(stale(session.session_id.clone()), &mut view);
             assert!(!session.dirty, "a previous mount cannot reopen its detail");
             session.apply_library_update(
                 crate::session_ui::LibraryUpdate::Graph {
@@ -1364,7 +1487,7 @@ mod backfill_tests {
             );
             session.apply_library_update(
                 crate::session_ui::LibraryUpdate::Graph {
-                    session: session.active_session_id.clone(),
+                    session: session.session_id.clone(),
                     epoch: session.library_detail_epoch,
                     name: "first".to_string(),
                     result: Ok(json!({"specId": "first", "machine": {}})),
