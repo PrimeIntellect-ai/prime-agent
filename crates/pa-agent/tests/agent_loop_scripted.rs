@@ -34,6 +34,15 @@ fn test_model() -> Model {
 }
 
 fn push_length_turn(provider: &ScriptedProvider, content: Vec<AssistantContent>) {
+    push_terminal_turn(provider, content, StopReason::Length, None);
+}
+
+fn push_terminal_turn(
+    provider: &ScriptedProvider,
+    content: Vec<AssistantContent>,
+    stop_reason: StopReason,
+    error_message: Option<&str>,
+) {
     let model = test_model();
     let message = AssistantMessage {
         content,
@@ -44,20 +53,69 @@ fn push_length_turn(provider: &ScriptedProvider, content: Vec<AssistantContent>)
         response_id: None,
         diagnostics: None,
         usage: Usage::zero(),
-        stop_reason: StopReason::Length,
+        stop_reason,
         stop_reason_raw: None,
-        error_message: None,
+        error_message: error_message.map(str::to_owned),
         timestamp: 0,
     };
+    let terminal = match stop_reason {
+        StopReason::Aborted | StopReason::Error => AssistantMessageEvent::Error {
+            reason: stop_reason,
+            error: message.clone(),
+        },
+        _ => AssistantMessageEvent::Done {
+            reason: stop_reason,
+            message: message.clone(),
+        },
+    };
     provider.push_turn(ScriptedTurn::Events(vec![
-        ScriptStep::Event(Box::new(AssistantMessageEvent::Start {
-            partial: message.clone(),
-        })),
-        ScriptStep::Event(Box::new(AssistantMessageEvent::Done {
-            reason: StopReason::Length,
-            message,
-        })),
+        ScriptStep::Event(Box::new(AssistantMessageEvent::Start { partial: message })),
+        ScriptStep::Event(Box::new(terminal)),
     ]));
+}
+
+fn push_truncated_empty_retry(
+    provider: &ScriptedProvider,
+    retry_reason: StopReason,
+    retry_error: Option<&str>,
+) {
+    push_length_turn(
+        provider,
+        vec![AssistantContent::Thinking(ThinkingContent {
+            thinking: "reasoning only".into(),
+            thinking_signature: None,
+            redacted: None,
+        })],
+    );
+    push_terminal_turn(provider, Vec::new(), retry_reason, retry_error);
+}
+
+async fn run_scripted_continue(
+    provider: &Arc<ScriptedProvider>,
+) -> (Vec<AgentMessage>, Vec<AgentEvent>) {
+    let config = AgentLoopConfig::new(test_model(), AgentLoopConfig::default_convert_to_llm());
+    let context = AgentContext {
+        system_prompt: String::new(),
+        tools: Vec::new(),
+        messages: vec![AgentMessage::user("hello")],
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emit: AgentEventSink = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            let events = Arc::clone(&events);
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            })
+        })
+    };
+    let stream_fn = provider.stream_fn();
+    let messages = run_agent_loop_continue(context, &config, emit, None, Some(&stream_fn))
+        .await
+        .unwrap();
+    let events = events.lock().unwrap().clone();
+    (messages, events)
 }
 
 /// Echo tool: returns its `text` argument, optionally after a delay and/or
@@ -658,6 +716,86 @@ async fn truncated_empty_turn_retries_once_and_never_commits_silently() {
         assistant_text(&content_messages[0]).stop_reason,
         StopReason::Length
     );
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_preserves_abort_and_provider_errors() {
+    for (reason, error) in [
+        (StopReason::Aborted, "provider cancelled the request"),
+        (StopReason::Error, "provider connection failed"),
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        push_truncated_empty_retry(&provider, reason, Some(error));
+
+        let (messages, events) = run_scripted_continue(&provider).await;
+        assert_eq!(provider.calls().len(), 2);
+        let terminal = assistant_text(messages.last().unwrap());
+        assert_eq!(terminal.stop_reason, reason);
+        assert_eq!(terminal.error_message.as_deref(), Some(error));
+        match events.last().unwrap() {
+            AgentEvent::AgentEnd {
+                messages: ended_messages,
+                aborted,
+            } => {
+                assert_eq!(assistant_text(ended_messages.last().unwrap()), terminal);
+                assert_eq!(*aborted, reason == StopReason::Aborted);
+            }
+            other => panic!("expected agent end, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn truncated_empty_retry_failure_is_consistent_across_messages_and_events() {
+    for retry_reason in [StopReason::Length, StopReason::Stop] {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        push_truncated_empty_retry(&provider, retry_reason, None);
+
+        let (messages, events) = run_scripted_continue(&provider).await;
+        assert_eq!(provider.calls().len(), 2);
+        let failure = assistant_text(messages.last().unwrap());
+        assert_eq!(failure.stop_reason, StopReason::Error);
+        assert!(failure
+            .error_message
+            .as_deref()
+            .is_some_and(|error| !error.is_empty()));
+
+        let message_ends: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::MessageEnd {
+                    message: AgentMessage::Standard(Message::Assistant(message)),
+                } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(message_ends.len(), 2);
+        assert_eq!(message_ends[1], failure);
+        let turn_ends: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnEnd { message, .. } => Some(assistant_text(message)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turn_ends, vec![failure]);
+        match events.last().unwrap() {
+            AgentEvent::AgentEnd { messages, aborted } => {
+                assert_eq!(assistant_text(messages.last().unwrap()), failure);
+                assert!(!aborted);
+            }
+            other => panic!("expected agent end, got {other:?}"),
+        }
+
+        let (agent, provider, _) = scripted_agent(vec![]).await;
+        push_truncated_empty_retry(&provider, retry_reason, None);
+        agent.prompt("hello").await.unwrap();
+        agent.wait_for_idle().await;
+        assert_eq!(provider.calls().len(), 2);
+        let state = agent.state().await;
+        assert_eq!(assistant_text(state.messages.last().unwrap()), failure);
+        assert_eq!(state.error_message, failure.error_message);
+    }
 }
 
 #[tokio::test]

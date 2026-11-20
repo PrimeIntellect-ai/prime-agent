@@ -6,18 +6,63 @@ use std::sync::Arc;
 
 use crate::abort::{is_abort_error, AbortSignal};
 use crate::stream::{LlmContext, StreamFn, StreamRequestOptions, ToolDefinition};
-use crate::types::{AgentContext, AgentEvent, AgentMessage, AssistantMessage};
+use crate::types::{
+    AgentContext, AgentEvent, AgentMessage, AssistantContent, AssistantMessage, StopReason,
+};
 
 use super::abort::{create_aborted_assistant_message, race_with_abort};
 use super::{AgentEventSink, AgentLoopConfig};
 
-pub(crate) async fn stream_assistant_response(
+pub(super) enum TurnOutcome {
+    Final(AssistantMessage),
+    ToolCalls(AssistantMessage),
+    TruncatedEmptyRetry(AssistantMessage),
+    TruncatedEmptyFailed(AssistantMessage),
+}
+
+impl TurnOutcome {
+    fn message(&self) -> &AssistantMessage {
+        match self {
+            Self::Final(message)
+            | Self::ToolCalls(message)
+            | Self::TruncatedEmptyRetry(message)
+            | Self::TruncatedEmptyFailed(message) => message,
+        }
+    }
+}
+
+fn classify_turn(mut message: AssistantMessage, retry_after_truncation: bool) -> TurnOutcome {
+    let has_output = message.content.iter().any(|content| match content {
+        AssistantContent::Text(text) => !text.text.is_empty(),
+        AssistantContent::ToolCall(_) => true,
+        AssistantContent::Thinking(_) => false,
+    });
+    if retry_after_truncation
+        && !has_output
+        && !matches!(message.stop_reason, StopReason::Aborted | StopReason::Error)
+    {
+        message.stop_reason = StopReason::Error;
+        message.error_message = Some(
+            "Model output was truncated during reasoning and the single retry returned no content or tool calls.".into(),
+        );
+        TurnOutcome::TruncatedEmptyFailed(message)
+    } else if message.stop_reason == StopReason::Length && !has_output {
+        TurnOutcome::TruncatedEmptyRetry(message)
+    } else if !message.tool_calls().is_empty() {
+        TurnOutcome::ToolCalls(message)
+    } else {
+        TurnOutcome::Final(message)
+    }
+}
+
+pub(super) async fn stream_assistant_response(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
     stream_fn: Option<&StreamFn>,
-) -> anyhow::Result<AssistantMessage> {
+    retry_after_truncation: bool,
+) -> anyhow::Result<TurnOutcome> {
     let mut partial_event: Option<Arc<crate::stream::AssistantMessageEvent>> = None;
     let mut added_partial = false;
 
@@ -54,6 +99,7 @@ pub(crate) async fn stream_assistant_response(
         signal,
         emit,
         stream_fn,
+        retry_after_truncation,
         &mut partial_event,
         &mut added_partial,
     )
@@ -63,7 +109,7 @@ pub(crate) async fn stream_assistant_response(
         Ok(message) => Ok(message),
         Err(error) => {
             if signal.is_some_and(AbortSignal::is_aborted) && is_abort_error(&error) {
-                return Ok(finish_aborted_message!());
+                return Ok(TurnOutcome::Final(finish_aborted_message!()));
             }
             Err(error)
         }
@@ -72,16 +118,17 @@ pub(crate) async fn stream_assistant_response(
 
 /// Inner body of `streamAssistantResponse`.
 // Direct port of the TS `try` block.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn stream_assistant_response_inner(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
     stream_fn: Option<&StreamFn>,
+    retry_after_truncation: bool,
     partial_event: &mut Option<Arc<crate::stream::AssistantMessageEvent>>,
     added_partial: &mut bool,
-) -> anyhow::Result<AssistantMessage> {
+) -> anyhow::Result<TurnOutcome> {
     crate::abort::throw_if_aborted_signal(signal)?;
 
     let mut messages: Vec<AgentMessage> = context.messages.clone();
@@ -202,6 +249,8 @@ async fn stream_assistant_response_inner(
                         }
                     }
                 }
+                let outcome = classify_turn(final_message, retry_after_truncation);
+                let final_message = outcome.message();
                 if *added_partial {
                     *context.messages.last_mut().unwrap() =
                         AgentMessage::from(final_message.clone());
@@ -220,7 +269,7 @@ async fn stream_assistant_response_inner(
                     message: AgentMessage::from(final_message.clone()),
                 })
                 .await?;
-                return Ok(final_message);
+                return Ok(outcome);
             }
             _ => {}
         }
@@ -229,6 +278,8 @@ async fn stream_assistant_response_inner(
     // Stream ended without a terminal event: resolve the final message (TS
     // awaits `response.result()` here too).
     let final_message = race_with_abort(response.result(), signal).await?;
+    let outcome = classify_turn(final_message, retry_after_truncation);
+    let final_message = outcome.message();
     if *added_partial {
         *context.messages.last_mut().unwrap() = AgentMessage::from(final_message.clone());
     } else {
@@ -244,7 +295,7 @@ async fn stream_assistant_response_inner(
         message: AgentMessage::from(final_message.clone()),
     })
     .await?;
-    Ok(final_message)
+    Ok(outcome)
 }
 
 fn event_partial(event: &crate::stream::AssistantMessageEvent) -> Option<&AssistantMessage> {

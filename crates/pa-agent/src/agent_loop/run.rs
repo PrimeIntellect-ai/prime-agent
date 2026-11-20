@@ -5,41 +5,16 @@
 use crate::abort::AbortSignal;
 use crate::stream::StreamFn;
 use crate::types::{
-    AgentContext, AgentEvent, AgentMessage, AssistantContent, AssistantMessage,
-    ShouldStopAfterTurnContext, StopReason, ToolCall, ToolResultMessage,
+    AgentContext, AgentEvent, AgentMessage, ShouldStopAfterTurnContext, StopReason, ToolCall,
+    ToolResultMessage,
 };
 
 use super::abort::{
     poll_messages_unless_aborted, race_with_abort, settle_post_turn, PostTurnResult,
 };
-use super::response::stream_assistant_response;
+use super::response::{stream_assistant_response, TurnOutcome};
 use super::tools::execute_tool_calls;
 use super::{AgentEventSink, AgentLoopConfig};
-
-enum TurnOutcome {
-    Final(AssistantMessage),
-    ToolCalls(AssistantMessage),
-    TruncatedEmptyRetry,
-    TruncatedEmptyFailed(AssistantMessage),
-}
-
-fn has_output(message: &AssistantMessage) -> bool {
-    message.content.iter().any(|content| match content {
-        AssistantContent::Text(text) => !text.text.is_empty(),
-        AssistantContent::ToolCall(_) => true,
-        AssistantContent::Thinking(_) => false,
-    })
-}
-
-fn classify_turn(message: AssistantMessage) -> TurnOutcome {
-    if message.stop_reason == StopReason::Length && !has_output(&message) {
-        TurnOutcome::TruncatedEmptyRetry
-    } else if !message.tool_calls().is_empty() {
-        TurnOutcome::ToolCalls(message)
-    } else {
-        TurnOutcome::Final(message)
-    }
-}
 
 // Direct port of the TS turn loop.
 #[allow(clippy::too_many_lines)]
@@ -94,16 +69,18 @@ pub(crate) async fn run_loop(
                 }
             }
 
-            let first_message =
-                stream_assistant_response(current_context, config, signal, emit, stream_fn).await?;
-            let outcome = match classify_turn(first_message) {
-                TurnOutcome::TruncatedEmptyRetry => {
-                    let truncated_message = current_context
-                        .messages
-                        .last()
-                        .expect("streamed response is the latest context message")
-                        .clone();
-                    new_messages.push(truncated_message);
+            let outcome = match stream_assistant_response(
+                current_context,
+                config,
+                signal,
+                emit,
+                stream_fn,
+                false,
+            )
+            .await?
+            {
+                TurnOutcome::TruncatedEmptyRetry(message) => {
+                    new_messages.push(AgentMessage::from(message));
                     let nudge = AgentMessage::user(
                         "Your previous output was cut off during reasoning. Produce your next action now.",
                     );
@@ -117,35 +94,15 @@ pub(crate) async fn run_loop(
                     .await?;
                     current_context.messages.push(nudge.clone());
                     new_messages.push(nudge);
-                    match classify_turn(
-                        stream_assistant_response(current_context, config, signal, emit, stream_fn)
-                            .await?,
-                    ) {
-                        TurnOutcome::TruncatedEmptyRetry => {
-                            let mut failed_message = match current_context.messages.last() {
-                                Some(AgentMessage::Standard(crate::types::Message::Assistant(
-                                    message,
-                                ))) => message.clone(),
-                                _ => {
-                                    unreachable!("assistant response is the latest context message")
-                                }
-                            };
-                            failed_message.stop_reason = StopReason::Error;
-                            failed_message.error_message = Some(
-                                "Model output was truncated during reasoning and the single retry returned no content or tool calls.".into(),
-                            );
-                            TurnOutcome::TruncatedEmptyFailed(failed_message)
-                        }
-                        TurnOutcome::Final(message) if !has_output(&message) => {
-                            let mut failed_message = message;
-                            failed_message.stop_reason = StopReason::Error;
-                            failed_message.error_message = Some(
-                                "Model output was truncated during reasoning and the single retry returned no content or tool calls.".into(),
-                            );
-                            TurnOutcome::TruncatedEmptyFailed(failed_message)
-                        }
-                        outcome => outcome,
-                    }
+                    stream_assistant_response(
+                        current_context,
+                        config,
+                        signal,
+                        emit,
+                        stream_fn,
+                        true,
+                    )
+                    .await?
                 }
                 outcome => outcome,
             };
@@ -161,7 +118,7 @@ pub(crate) async fn run_loop(
                         .cloned()
                         .collect::<Vec<ToolCall>>(),
                 ),
-                TurnOutcome::TruncatedEmptyRetry => {
+                TurnOutcome::TruncatedEmptyRetry(_) => {
                     unreachable!("retry outcome is handled above")
                 }
             };
