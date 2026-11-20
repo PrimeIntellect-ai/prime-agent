@@ -75,7 +75,7 @@ pub(crate) async fn run_loop(
                 signal,
                 emit,
                 stream_fn,
-                false,
+                /*retry_after_truncation*/ false,
             )
             .await?
             {
@@ -100,7 +100,7 @@ pub(crate) async fn run_loop(
                         signal,
                         emit,
                         stream_fn,
-                        true,
+                        /*retry_after_truncation*/ true,
                     )
                     .await?
                 }

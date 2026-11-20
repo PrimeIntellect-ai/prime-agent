@@ -118,6 +118,8 @@ pub(super) async fn stream_assistant_response(
 
 /// Inner body of `streamAssistantResponse`.
 // Direct port of the TS `try` block.
+// Pass the retry policy to finalization and borrow partial-stream state so the
+// outer abort path can settle the same response.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn stream_assistant_response_inner(
     context: &mut AgentContext,
