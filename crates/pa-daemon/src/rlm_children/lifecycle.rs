@@ -876,15 +876,22 @@ impl SupervisorChildSessionsInner {
             Ok(nonce) => nonce,
             Err(error) => {
                 eprintln!("pa-daemon: RLM child notice capability failed; retrying: {error}");
-                loop {
-                    tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
-                    if record.lock().await.retirement.closed_by_parent() {
-                        return;
+                let retry = async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                        if let Ok(nonce) = crate::child_status_notices::mint(&self.agent_dir) {
+                            return nonce;
+                        }
                     }
-                    if let Ok(nonce) = crate::child_status_notices::mint(&self.agent_dir) {
-                        break nonce;
-                    }
-                }
+                };
+                let Ok(nonce) =
+                    tokio::time::timeout(Duration::from_millis(NOTICE_DELIVERY_TIMEOUT_MS), retry)
+                        .await
+                else {
+                    eprintln!("pa-daemon: RLM child notice capability retry budget expired");
+                    return;
+                };
+                nonce
             }
         };
         let command = DaemonCommand::FollowUp {
