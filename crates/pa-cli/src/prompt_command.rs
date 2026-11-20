@@ -83,17 +83,52 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
 pub(crate) fn load_session_resources(
     cwd: &std::path::Path,
     agent_dir: &std::path::Path,
-) -> anyhow::Result<(LoadedResources, Vec<String>)> {
+) -> anyhow::Result<(SettingsManager, LoadedResources, Vec<String>)> {
     let settings = SettingsManager::create(cwd, agent_dir);
     let (skill_overrides, generic_servers, _manager) =
         pa_core::resources::mcp_gating(settings.global_settings(), agent_dir);
     let resources = load_resources(ResourceLoaderOptions {
-        settings: Some(settings),
+        settings: Some(settings.reopen()),
         extra_builtin_skill_overrides: skill_overrides,
         system_prompt: None,
         ..ResourceLoaderOptions::new(cwd, agent_dir)
     })?;
-    Ok((resources, generic_servers))
+    Ok((settings, resources, generic_servers))
+}
+
+/// The model a fresh daemon session runs on: `--model` resolved like the
+/// CLI flag, else the daemon's startup chain (the saved default, then the
+/// featured default, then the first available or catalog model).
+fn session_model(
+    selector: Option<&str>,
+    settings: &SettingsManager,
+    agent_dir: &std::path::Path,
+) -> anyhow::Result<pa_types::ai::Model> {
+    let registry = pa_core::models::ModelRegistry::create(
+        pa_core::auth::AuthStorage::create(agent_dir),
+        agent_dir.join("models.json"),
+    );
+    let all = registry.get_all();
+    if let Some(selector) = selector {
+        let resolved = pa_core::models::resolve_cli_model(None, selector, all);
+        return resolved
+            .model
+            .ok_or_else(|| anyhow::anyhow!(resolved.error.unwrap_or_default()));
+    }
+    let available: Vec<pa_types::ai::Model> =
+        registry.get_available().into_iter().cloned().collect();
+    pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
+        cli_provider: None,
+        cli_model: None,
+        scoped_models: &[],
+        is_continuing: false,
+        default_provider: settings.get_default_provider(),
+        default_model_id: settings.get_default_model(),
+        all_models: all,
+        available_models: &available,
+    })
+    .or_else(|| all.first().cloned())
+    .ok_or_else(|| anyhow::anyhow!("No models available."))
 }
 
 fn assemble_breakdown(
@@ -101,28 +136,33 @@ fn assemble_breakdown(
     model: Option<&str>,
 ) -> anyhow::Result<(pa_core::prompts::SystemPromptBreakdown, Vec<String>)> {
     let agent_dir = get_agent_dir();
-    let model_prompts = pa_core::prompts::model_prompts::load_model_prompts(model, &agent_dir);
-    let (resources, generic_servers) = load_session_resources(cwd, &agent_dir)?;
+    let (settings, resources, generic_servers) = load_session_resources(cwd, &agent_dir)?;
+    let model = session_model(model, &settings, &agent_dir)?;
+    let model_prompts = pa_core::prompts::model_prompts::load_model_prompts(
+        Some(&format!("{}/{}", model.provider, model.id)),
+        &agent_dir,
+    );
     let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
+            settings: &settings,
+            resources: &resources,
+            // A daemon worker registers the host request of every
+            // controller-backed skill, so all loaded skills stay visible.
+            skills: &resources.skills,
+            // The shipped model-tool surface: `python_repl` only; bash/edit are kernel-resident
+            // programmatic tools.
+            selected_tools: vec![pa_types::ai::PYTHON_TOOL_NAME],
+            model_prompt_extras: model_prompts.extras.as_deref(),
+            model_input: &model.input,
             cwd: cwd.display().to_string(),
             // A dump has no session file; the tail states the value it uses.
             messages_path: None,
-            custom_prompt: resources.system_prompt.clone(),
-            context_files: resources
-                .agents_files
-                .iter()
-                .map(|file| (file.path.display().to_string(), file.content.clone()))
-                .collect(),
-            skills: resources.skills.clone(),
-            // The shipped model-tool surface: `python_repl` only; bash/edit are kernel-resident
-            // programmatic tools.
-            selected_tools: Some(vec![pa_types::ai::PYTHON_TOOL_NAME]),
-            allow_recursion: Some(true),
             generic_mcp_servers: generic_servers,
-            rlm_depth: Some(0),
-            model_prompt_extras: model_prompts.extras.as_deref(),
-            ..Default::default()
+            // A fresh daemon root session.
+            rlm_depth: 0,
+            factory_child: false,
+            daemonless: false,
+            can_spawn: true,
         },
     );
     Ok((breakdown, model_prompts.errors))
@@ -217,10 +257,13 @@ mod tests {
         assert_eq!(run_prompt_command(&["--help".to_string()]), 0);
     }
 
+    /// A catalog model without image input.
+    const TEXT_MODEL: &str = "prime-inference/z-ai/glm-5.3";
+
     #[test]
     fn assembles_the_layered_prompt_for_a_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let (breakdown, errors) = assemble_breakdown(dir.path(), Some("mock/mock-1")).unwrap();
+        let (breakdown, errors) = assemble_breakdown(dir.path(), Some(TEXT_MODEL)).unwrap();
         assert!(errors.is_empty());
         assert!(breakdown.assembled.starts_with("# prime-agent harness"));
         assert!(breakdown
@@ -229,6 +272,9 @@ mod tests {
         assert!(breakdown
             .assembled
             .contains("Conversation log: not persisted"));
+        assert!(breakdown
+            .assembled
+            .contains("Image input: this model cannot see images"));
         // Every static segment sits inside the cached prefix.
         for segment in &breakdown.segments {
             let inside = breakdown
@@ -242,5 +288,22 @@ mod tests {
                 segment.name
             );
         }
+    }
+
+    #[test]
+    fn the_dump_carries_the_discovered_appended_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(pa_core::settings::CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("APPEND_SYSTEM.md"), "Project appendix.").unwrap();
+        let (breakdown, _) = assemble_breakdown(dir.path(), Some(TEXT_MODEL)).unwrap();
+        assert!(breakdown.assembled.ends_with("Project appendix."));
+    }
+
+    #[test]
+    fn an_unknown_model_fails_like_the_cli_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = assemble_breakdown(dir.path(), Some("no-such-model-anywhere")).unwrap_err();
+        assert!(error.to_string().contains("not found"), "{error}");
     }
 }
