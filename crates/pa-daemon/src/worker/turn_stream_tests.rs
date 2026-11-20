@@ -222,6 +222,7 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
         let core = Arc::clone(&runner.core);
         core.lock().unwrap().busy = true;
         let work_notify = Arc::clone(&runner.work_notify);
+        let recovery = Arc::clone(&runner.recovery);
         let custom_message = pacing_only.then(|| {
             crate::session_commands::custom_message_value(
                 &crate::engine::KernelNotice::turn_held(60_000).row,
@@ -256,6 +257,22 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
         });
         started_rx.await.unwrap();
         tokio::task::yield_now().await;
+        let checkpoint_blocker = (held_past_window && !pacing_only).then(|| {
+            let recovery = Arc::clone(&recovery);
+            let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = std::thread::spawn(move || {
+                let _guard = recovery.lock().unwrap();
+                locked_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .is_ok()
+            });
+            locked_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            (release_tx, blocker)
+        });
         if held_past_window {
             tokio::time::advance(std::time::Duration::from_secs(59)).await;
             tokio::task::yield_now().await;
@@ -266,10 +283,24 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
                 assert!(core.lock().unwrap().steering.is_empty());
                 assert!(futures::FutureExt::now_or_never(work_notify.notified()).is_none());
             } else {
+                let (release_tx, blocker) = checkpoint_blocker.unwrap();
+                while core.lock().unwrap().steering.is_empty() {
+                    assert!(
+                        !blocker.is_finished(),
+                        "admission never reached the checkpoint"
+                    );
+                    tokio::task::yield_now().await;
+                }
                 assert!(
-                    futures::FutureExt::now_or_never(work_notify.notified()).is_some(),
-                    "a held delivery must receive its pacing notice"
+                    release_tx.send(()).is_ok(),
+                    "the journal checkpoint must not block the executor"
                 );
+                assert!(blocker.join().unwrap());
+                tokio::time::resume();
+                tokio::time::timeout(std::time::Duration::from_secs(1), work_notify.notified())
+                    .await
+                    .expect("a held delivery must receive its pacing notice");
+                tokio::time::pause();
                 let mut core = core.lock().unwrap();
                 assert_eq!(core.steering.len(), 1);
                 let row = core.steering[0].custom_message.as_ref().unwrap();

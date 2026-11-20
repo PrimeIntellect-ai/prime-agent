@@ -345,7 +345,7 @@ impl TurnRunner {
                 .and_then(Value::as_str)
                 == Some(pa_core::session_engine::messages::TURN_HELD_NOTICE_CUSTOM_TYPE)
         });
-        if !pacing_only {
+        let turn_held_window = (!pacing_only).then(|| {
             let delivery = turn_held_delivery.clone();
             let core = Arc::clone(&self.core);
             let recovery = Arc::clone(&self.recovery);
@@ -355,19 +355,21 @@ impl TurnRunner {
                 tokio::select! {
                     () = delivery.cancelled() => {}
                     () = window => {
-                        admit_turn_held_notice(
-                            &recovery,
-                            &core,
-                            &work_notify,
-                            pa_core::session_engine::bash_notices::KernelNotice::turn_held(
-                                TURN_HELD_WINDOW.as_millis() as u64,
-                            ),
-                            &delivery,
-                        );
+                        let _ = tokio::task::spawn_blocking(move || {
+                            admit_turn_held_notice(
+                                &recovery,
+                                &core,
+                                &work_notify,
+                                pa_core::session_engine::bash_notices::KernelNotice::turn_held(
+                                    TURN_HELD_WINDOW.as_millis() as u64,
+                                ),
+                                &delivery,
+                            );
+                        }).await;
                     }
                 }
-            });
-        }
+            })
+        });
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
         engine.on_turn_start();
@@ -1152,6 +1154,10 @@ impl TurnRunner {
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
         // Revoke admission before settling and stop a still-sleeping timer.
         turn_held_delivery.cancel();
+        // Finish admission before the next delivery can start.
+        if let Some(window) = turn_held_window {
+            let _ = window.await;
+        }
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
