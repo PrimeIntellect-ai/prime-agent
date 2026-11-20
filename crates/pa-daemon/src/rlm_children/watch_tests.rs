@@ -40,6 +40,9 @@ enum FakeChild {
     /// The worker leaves right after the settle answer is captured:
     /// every later child read fails.
     LeavesAfterSettle,
+    /// The worker leaves after its final turn, before the settle's answer
+    /// capture: the capture fails and only the durable file holds the answer.
+    LeavesBeforeAnswerCapture,
     /// Unreachable; the watcher's give-up poll parks until the test
     /// lands a reader's verdict.
     UnreachableUntilVerdict,
@@ -192,6 +195,16 @@ async fn spawn_fake_supervisor(
                                 )
                                 .unwrap();
                             }
+                            if matches!(child, FakeChild::LeavesBeforeAnswerCapture) {
+                                use super::lifecycle::exit_capture_tests::assistant_row_ending;
+                                let answer = assistant_row_ending(
+                                    "the child final answer",
+                                    pa_types::ai::StopReason::Stop,
+                                    None,
+                                );
+                                std::fs::write(&*child_session_file, format!("{answer}\n"))
+                                    .unwrap();
+                            }
                             if let Some(gate) = child_subagents
                                 .prompt_gate
                                 .as_ref()
@@ -244,6 +257,17 @@ async fn spawn_fake_supervisor(
                                 Some(&id),
                                 command_type,
                                 Some(json!({ "peers": snapshot })),
+                            )
+                        }
+                        "get_last_assistant_text"
+                            if matches!(child, FakeChild::LeavesBeforeAnswerCapture) =>
+                        {
+                            gone.store(true, Ordering::SeqCst);
+                            response_failure(
+                                Some(&id),
+                                command_type,
+                                "Unknown active session: child-live",
+                                None,
                             )
                         }
                         "get_last_assistant_text" => {
@@ -1024,6 +1048,35 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
     let notice = follow_up_rx
         .try_recv()
         .expect("the no-reply notice is still owed");
+    assert!(notice["customMessage"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("the child final answer")));
+}
+
+#[tokio::test]
+async fn a_worker_leaving_before_the_answer_capture_settles_with_the_file_answer() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) = sessions_with_fake_supervisor(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::LeavesBeforeAnswerCapture,
+    )
+    .await;
+    let settled = sessions.settle_notified();
+    spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the settle funnel fires although the worker left");
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "completed");
+    assert_eq!(
+        roster[0].answer_preview.as_deref(),
+        Some("the child final answer")
+    );
+    let notice = follow_up_rx.try_recv().expect("the no-reply notice");
     assert!(notice["customMessage"]["content"]
         .as_str()
         .is_some_and(|content| content.contains("the child final answer")));
