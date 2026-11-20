@@ -321,12 +321,29 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         ) => {}
                     }
                 }
-                // The parent closed before the prompt admitted: the
-                // child is closed with it, so the detached task prompt
-                // never fires.
-                if watcher_record.lock().await.retirement.closed_by_parent() {
-                    return;
-                }
+                // Share the rename/delete gate through prompt admission. A
+                // delete that wins this gate must finish (or refuse its kill)
+                // before a queued kickoff can reach the worker.
+                let rename_lock = watcher_record.lock().await.rename_lock.clone();
+                let prompt_guard = loop {
+                    let signal = watcher_record.lock().await.run.notifier();
+                    let wake = signal.notified();
+                    tokio::pin!(wake);
+                    let _ = wake.as_mut().enable();
+                    let guard = rename_lock.lock().await;
+                    let record = watcher_record.lock().await;
+                    if record.retirement.closed_by_parent() {
+                        return;
+                    }
+                    if !record.retirement.retiring() {
+                        break guard;
+                    }
+                    // An interrupted delete still owns admission. A later
+                    // refused kill wakes this sender and leaves it runnable.
+                    drop(record);
+                    drop(guard);
+                    wake.await;
+                };
                 watcher_record
                     .lock()
                     .await
@@ -360,6 +377,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .await
                     };
                     if let Err(retry_error) = retried {
+                        drop(prompt_guard);
                         eprintln!(
                             "pa-daemon: RLM child task prompt failed for {child_log_id}: {error:#}; retry failed: {retry_error:#}"
                         );
@@ -379,6 +397,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     .await
                     .run
                     .apply(RunEvent::PromptAdmitted);
+                drop(prompt_guard);
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {

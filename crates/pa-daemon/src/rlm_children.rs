@@ -214,7 +214,7 @@ struct ChildRecord {
     /// Serializes usage emissions for this child without holding the record lock across them.
     emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_emitted_status: Option<&'static str>,
-    /// Serializes parent-directed rename and delete for this child.
+    /// Serializes kickoff admission, rename, and retirement for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 

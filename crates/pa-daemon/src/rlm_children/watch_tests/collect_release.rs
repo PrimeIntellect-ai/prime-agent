@@ -211,9 +211,56 @@ async fn a_blocking_collect_does_not_release_a_prompt_during_delete() {
     assert_eq!(deleted.outcome, Some("deleted"));
 }
 
-/// An admission waiter wakes when a later delete begins.
+/// A collect waiting behind another child operation wakes when deletion starts.
 #[tokio::test]
 async fn a_blocking_collect_waiter_wakes_when_delete_begins() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, mut kill_rx) = sessions_with_fake_supervisor(
+        follow_up_tx,
+        0,
+        FakeKill::SuccessAfterMs(1_500),
+        FakeChild::Healthy,
+    )
+    .await;
+    sessions.notify_turn_started();
+    let handle = spawn_child(&sessions).await;
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    let rename_lock = record.lock().await.rename_lock.clone();
+    let held = rename_lock.lock().await;
+    let mut delete = sessions.delete_subagent(handle.rlm_child_id.clone());
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(delete.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let mut collect = sessions.collect(vec![handle.rlm_child_id], 5_000);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(collect.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(record.lock().await.run.prompt_released());
+    assert!(!record.lock().await.run.prompt_admitted());
+
+    let delete = tokio::spawn(delete);
+    let collect = tokio::spawn(collect);
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(10), kill_rx.recv())
+        .await
+        .expect("delete reaches its delayed kill")
+        .expect("kill receiver remains open");
+    let result = tokio::time::timeout(Duration::from_millis(500), collect)
+        .await
+        .expect("collect wakes before kill confirmation")
+        .expect("collect task remains alive")
+        .expect("collect succeeds");
+    assert_eq!((result[0].status, result[0].settled), ("running", false));
+    delete.await.unwrap().expect("delete succeeds");
+}
+
+/// A delete cannot overtake a kickoff whose admission already owns the gate.
+#[tokio::test]
+async fn delete_waits_for_an_in_flight_prompt_admission() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let gate = Arc::new(FakePeerGate {
         armed: AtomicBool::new(true),
@@ -222,7 +269,7 @@ async fn a_blocking_collect_waiter_wakes_when_delete_begins() {
     let (sessions, mut kill_rx) = sessions_with_fake_child_subagents(
         follow_up_tx,
         0,
-        FakeKill::SuccessAfterMs(1_500),
+        FakeKill::Success,
         FakeChild::Healthy,
         Arc::new(FakeChildSubagents {
             prompt_gate: Some(Arc::clone(&gate)),
@@ -230,48 +277,129 @@ async fn a_blocking_collect_waiter_wakes_when_delete_begins() {
         }),
     )
     .await;
-    sessions.notify_turn_started();
     let handle = spawn_child(&sessions).await;
-    let collect_sessions = sessions.clone();
-    let collect_id = handle.rlm_child_id.clone();
-    let mut collect =
-        tokio::spawn(async move { collect_sessions.collect(vec![collect_id], 5_000).await });
     tokio::time::timeout(Duration::from_secs(10), gate.copied.notified())
         .await
-        .expect("collect releases the prompt");
+        .expect("the kickoff reaches prompt admission");
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    let mut delete = sessions.delete_subagent(handle.rlm_child_id);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(delete.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut collect)
-            .await
-            .is_err(),
-        "collect remains pending while prompt admission is held"
+        !record.lock().await.retirement.retiring(),
+        "BeginDelete must not overtake an in-flight prompt admission"
     );
+    assert!(kill_rx.try_recv().is_err());
 
-    let delete_sessions = sessions.clone();
-    let delete_id = handle.rlm_child_id.clone();
-    let delete = tokio::spawn(async move { delete_sessions.delete_subagent(delete_id).await });
-    let kill = tokio::time::timeout(Duration::from_secs(10), kill_rx.recv())
-        .await
-        .expect("delete reaches its delayed kill")
-        .expect("kill receiver remains open");
-    assert_eq!(kill["type"], "kill");
-
-    let collect_result = tokio::time::timeout(Duration::from_millis(500), &mut collect)
-        .await
-        .expect("collect wakes when retirement starts, before kill confirmation")
-        .expect("collect task remains alive")
-        .expect("collect succeeds");
-    assert_eq!(
-        (collect_result[0].status, collect_result[0].settled),
-        ("running", false)
-    );
-
-    let deleted = tokio::time::timeout(Duration::from_secs(5), delete)
-        .await
-        .expect("delayed delete completes")
-        .expect("delete task remains alive")
-        .expect("delete succeeds");
-    assert_eq!(deleted.outcome, Some("deleted"));
     gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), delete)
+        .await
+        .expect("delete proceeds after prompt admission")
+        .expect("delete succeeds");
+    assert_eq!(kill_rx.recv().await.unwrap()["type"], "kill");
+}
+
+/// A released sender cannot admit a task while a delete owns the child.
+#[tokio::test]
+async fn a_queued_prompt_does_not_start_during_delete() {
+    for kill_fails in [false, true] {
+        for interrupted in [false, true] {
+            let kill_gate = Arc::new(FakePeerGate::default());
+            let kill = if kill_fails {
+                FakeKill::Failure
+            } else {
+                FakeKill::Success
+            };
+            let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+            let gate = Arc::new(FakePeerGate {
+                armed: AtomicBool::new(true),
+                ..FakePeerGate::default()
+            });
+            let (sessions, mut kill_rx) = sessions_with_fake_child_subagents(
+                follow_up_tx,
+                0,
+                kill,
+                FakeChild::Healthy,
+                Arc::new(FakeChildSubagents {
+                    prompt_gate: Some(Arc::clone(&gate)),
+                    kill_gate: Some(Arc::clone(&kill_gate)),
+                    ..FakeChildSubagents::default()
+                }),
+            )
+            .await;
+            sessions.notify_turn_started();
+            let handle = spawn_child(&sessions).await;
+            let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+            let delete_sessions = sessions.clone();
+            let child_id = handle.rlm_child_id.clone();
+            let mut delete =
+                tokio::spawn(async move { delete_sessions.delete_subagent(child_id).await });
+            tokio::time::timeout(Duration::from_secs(10), kill_rx.recv())
+                .await
+                .expect("delete sends its kill")
+                .expect("kill receiver stays open");
+            assert!(record.lock().await.retirement.retiring());
+
+            sessions.notify_turn_done();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), gate.copied.notified())
+                    .await
+                    .is_err(),
+                "the queued kickoff must not reach the worker during deletion"
+            );
+            if interrupted {
+                delete.abort();
+                assert!(delete.await.unwrap_err().is_cancelled());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), gate.copied.notified())
+                        .await
+                        .is_err(),
+                    "an interrupted delete still prevents kickoff admission"
+                );
+                let retry_sessions = sessions.clone();
+                delete = tokio::spawn(async move {
+                    retry_sessions.delete_subagent(handle.rlm_child_id).await
+                });
+                tokio::time::timeout(Duration::from_secs(10), kill_rx.recv())
+                    .await
+                    .expect("the retry sends its kill")
+                    .expect("kill receiver stays open");
+            }
+            kill_gate.release.notify_waiters();
+            let deleted = delete.await.unwrap();
+            if kill_fails {
+                assert!(deleted.is_err());
+                tokio::time::timeout(Duration::from_secs(10), gate.copied.notified())
+                    .await
+                    .expect("a refused kill leaves the kickoff runnable");
+                gate.release.notify_one();
+                tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+                    .await
+                    .expect("the surviving child completes")
+                    .expect("follow-up receiver stays open");
+            } else {
+                deleted.expect("delete succeeds");
+                let released = Arc::downgrade(&record);
+                drop(record);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while released.strong_count() != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("retirement releases the detached kickoff owner");
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), gate.copied.notified())
+                        .await
+                        .is_err(),
+                    "the confirmed delete must discard the queued kickoff"
+                );
+            }
+        }
+    }
 }
 
 /// A failed task prompt wakes a positive collect instead of consuming its

@@ -310,6 +310,9 @@ async fn spawn_fake_supervisor(
                         }
                         "kill" => {
                             let _ = kill_tx.send(command.clone());
+                            if let Some(gate) = &child_subagents.kill_gate {
+                                gate.release.notified().await;
+                            }
                             match *kill_behavior {
                                 FakeKill::Success => {
                                     response_success(Some(&id), command_type, None)
@@ -396,6 +399,8 @@ struct FakeChildSubagents {
     peer_gate: Option<Arc<FakePeerGate>>,
     /// Holds the task `prompt` in flight: the worker has not accepted it yet.
     prompt_gate: Option<Arc<FakePeerGate>>,
+    /// Holds kill confirmation so tests control the retirement window.
+    kill_gate: Option<Arc<FakePeerGate>>,
 }
 
 #[derive(Default)]
