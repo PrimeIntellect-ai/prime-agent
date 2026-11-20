@@ -5,8 +5,8 @@ the summary's scope-aware partition audit.
 
 The contracts, pinned on the REAL workspace enumeration (cargo metadata
 only - no builds):
-  - the stable crc32 assignment is untouched by --crates: a narrowed run's
-    unit lands in the same shard the full run assigns it;
+  - the measured static assignment is untouched by --crates: a narrowed
+    run's unit lands in the same shard the full run assigns it;
   - the full selection is the default (push waves) and audits green;
   - a crate selection narrows the universe; the union of the shards' runs
     must cover EXACTLY the selection - a narrowed run can never
@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -83,14 +84,23 @@ class EnumerationTestCase(unittest.TestCase):
         return selection
 
     def test_the_assignment_is_stable_under_the_selection(self):
-        """The narrowed universe never moves a unit between shards: crc32
-        mod 8 is computed on the unit id, not the selection."""
+        """The narrowed universe never moves a unit between shards."""
         for unit in self.units:
             shard = SHARD.shard_of(unit["id"], TOTAL)
             self.assertEqual(unit["id"],
                              [u["id"] for u in self.units
                               if SHARD.shard_of(u["id"], TOTAL) == shard
                               and u["id"] == unit["id"]][0])
+
+    def test_recorded_durations_balance_the_eight_way_partition(self):
+        data = SHARD._DURATION_DATA
+        loads = [0.0] * data["total"]
+        crc32_loads = [0.0] * data["total"]
+        self.assertEqual(set(data["assignments"]), set(data["unit_seconds"]))
+        for unit_id, seconds in data["unit_seconds"].items():
+            loads[data["assignments"][unit_id] - 1] += seconds
+            crc32_loads[zlib.crc32(unit_id.encode("utf-8")) % data["total"]] += seconds
+        self.assertLess(max(loads), max(crc32_loads))
 
     def test_crate_selection_covers_exactly_that_crates_units(self):
         crate = sorted(p for p in self.packages if p != "pa-agent")[0]

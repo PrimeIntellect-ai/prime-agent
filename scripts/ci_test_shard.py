@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Stable-hash test sharding for the ci.yml mandatory test gate.
+"""Duration-balanced test sharding for the ci.yml mandatory test gate.
 
 `cargo test --workspace` runs every test binary serially in one job; at the
 current suite size that phase alone bills ~13 minutes per push and per PR.
 This script enumerates the workspace's test units the same way cargo does
 (via `cargo metadata --no-deps`, no build) and runs the subset assigned to one
-shard of N by a STABLE hash: every unit id is mapped with crc32(unit) % N,
-so a unit lands in exactly one shard on every run — binaries never move
-between shards when the suite grows or shrinks, keeping flake attribution
-stable.
+shard of N. The 8-way assignment uses measured unit durations recorded in
+`ci_test_shard_durations.json` and a static partition map; units added later
+fall back to a stable crc32 assignment until their timings are recorded.
+A unit always lands in exactly one shard, keeping flake attribution stable.
 
 Unit kinds (the exact set `cargo test --workspace` builds and runs; every
 target honors its manifest `test` flag exactly as cargo does, so a target
@@ -36,9 +36,9 @@ silently regress when targets are added or renamed.
 The PR smoke gate narrows the selection, never the partition: `--crates
 a,b` restricts the units this wave runs to the named packages' (a PR's
 runtime smoke covers what it touched; the push wave runs the full union —
-main is the authority). The stable crc32 assignment is untouched — a unit
-still lands in exactly one shard of N — so flake attribution stays put and
-the narrow and full runs of a unit are the same leg. Every shard records the
+main is the authority). The measured 8-way assignment is untouched — a unit
+still lands in exactly one shard — so the narrow and full runs of a unit are
+the same leg. Every shard records the
 selection scope in its manifest, and the summary job audits the union
 against the SELECTED set: coverage can never silently regress, and a
 narrowed run can never masquerade as a full one.
@@ -93,7 +93,13 @@ def _unit_id(package: str, kind: str, name: str | None) -> str:
     return f"{package}#{kind}:{name}"
 
 
+_DURATION_MAP_PATH = Path(__file__).with_name("ci_test_shard_durations.json")
+_DURATION_DATA = json.loads(_DURATION_MAP_PATH.read_text(encoding="utf-8"))
+
+
 def shard_of(unit_id: str, total: int) -> int:
+    if total == _DURATION_DATA["total"] and unit_id in _DURATION_DATA["assignments"]:
+        return _DURATION_DATA["assignments"][unit_id] - 1
     return zlib.crc32(unit_id.encode("utf-8")) % total
 
 
