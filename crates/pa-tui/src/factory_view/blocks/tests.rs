@@ -197,6 +197,23 @@ fn incoming_guards_stay_with_their_source_before_merging() {
 }
 
 #[test]
+fn dense_diagrams_do_not_allocate_an_unbounded_canvas() {
+    let states: Vec<_> = (0..40).map(|i| state(&format!("s{i}"), i == 0)).collect();
+    let transitions: Vec<_> = (0..states.len())
+        .flat_map(|from| (from + 1..states.len()).map(move |to| (from, to)))
+        .map(|(from, to)| transition(&[&states[from].id], &states[to].id, None))
+        .collect();
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    );
+    assert_eq!(diagram.lines.len(), 1);
+    assert!(diagram.node_rows.is_empty());
+    assert!(plain(&diagram).contains("40 states, 780 transitions"));
+}
+
+#[test]
 fn dense_dag_ordering_finishes_without_scanning_unrelated_segments() {
     // Exercise ordering alone: a dense rendered canvas is a different cost.
     let n = 20;
