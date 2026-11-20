@@ -326,6 +326,7 @@ impl AgentSessionEngine {
                 })
                 .await
         };
+        let subscription = TurnSubscription(Some(subscription));
         // Admit the turn without blocking the forwarding loop: the admission
         // future settles only when the whole turn settles, while the loop
         // hands each streamed event to `emit` the moment it arrives (buffering
@@ -466,6 +467,29 @@ impl AgentSessionEngine {
             }
         }
         Ok(TurnOnce::None)
+    }
+}
+
+/// The turn's listener, removed on every exit path: an `emit` panic unwinds
+/// past the awaited unsubscribe, and a listener left behind would forward and
+/// account (`account_message`, goal usage) every later run's events again.
+struct TurnSubscription(Option<pa_agent::agent::Subscription>);
+
+impl TurnSubscription {
+    async fn unsubscribe(mut self) {
+        if let Some(subscription) = self.0.take() {
+            subscription.unsubscribe().await;
+        }
+    }
+}
+
+impl Drop for TurnSubscription {
+    fn drop(&mut self) {
+        if let (Some(subscription), Ok(runtime)) =
+            (self.0.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(subscription.unsubscribe());
+        }
     }
 }
 
