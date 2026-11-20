@@ -477,7 +477,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
 
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
-async fn a_nonce_write_failure_retries_without_sending_an_invalid_notice() {
+async fn nonce_retries_preserve_delete_notices_and_bound_settlement() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
     let (mut sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
@@ -485,10 +485,24 @@ async fn a_nonce_write_failure_retries_without_sending_an_invalid_notice() {
     Arc::get_mut(&mut sessions.inner).unwrap().agent_dir = dir.path().to_path_buf();
     let _handle = spawn_child(&sessions).await;
     let record = sessions.inner.children.lock().await[0].clone();
-    record.lock().await.notice_delivered = true;
+    {
+        let mut row = record.lock().await;
+        row.notice_delivered = true;
+        row.retirement
+            .apply(super::retirement::RetirementEvent::KillConfirmed(
+                super::retirement::RetirementIntent::Delete { was_running: true },
+            ));
+    }
     let store = dir.path().join("rlm-notice-nonces");
     std::fs::write(&store, "blocked").unwrap();
-    let message = create_rlm_child_failure_message("child", "lane", "error", 1);
+    let message = create_rlm_child_terminal_notice(
+        &RlmChildTerminalNotice::Cancelled {
+            child_id: "child".to_string(),
+            session_name: "lane".to_string(),
+            reason: None,
+        },
+        1,
+    );
     let delivery = sessions.inner.deliver_terminal_notice(&record, message);
     tokio::pin!(delivery);
     assert!(futures::poll!(&mut delivery).is_pending());
@@ -498,7 +512,13 @@ async fn a_nonce_write_failure_retries_without_sending_an_invalid_notice() {
     ));
     std::fs::remove_file(&store).unwrap();
     delivery.await;
-    let command = follow_up_rx.recv().await.unwrap();
+    let command = tokio::time::timeout(
+        Duration::from_millis(WATCH_POLL_INTERVAL_MS * 2),
+        follow_up_rx.recv(),
+    )
+    .await
+    .expect("the delete notice is delivered after the store recovers")
+    .unwrap();
     assert!(crate::child_status_notices::consume(
         dir.path(),
         command["rlmNoticeNonce"].as_str(),
@@ -507,21 +527,19 @@ async fn a_nonce_write_failure_retries_without_sending_an_invalid_notice() {
         follow_up_rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
-    // A permanent store failure must not keep the task after parent close.
+    // Notice failure must not hold the caller's settlement hook forever.
     std::fs::remove_dir(&store).unwrap();
     std::fs::write(&store, "blocked").unwrap();
     let message = create_rlm_child_failure_message("child", "lane", "error", 2);
     let closing = sessions.inner.deliver_terminal_notice(&record, message);
     tokio::pin!(closing);
     assert!(futures::poll!(&mut closing).is_pending());
-    record
-        .lock()
-        .await
-        .retirement
-        .apply(super::retirement::RetirementEvent::BeginClose);
-    tokio::time::timeout(Duration::from_millis(WATCH_POLL_INTERVAL_MS * 2), closing)
-        .await
-        .expect("parent close stops mint retries");
+    tokio::time::timeout(
+        Duration::from_millis(NOTICE_DELIVERY_TIMEOUT_MS + WATCH_POLL_INTERVAL_MS),
+        closing,
+    )
+    .await
+    .expect("notice retries stop within the delivery budget");
     assert!(matches!(
         follow_up_rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
