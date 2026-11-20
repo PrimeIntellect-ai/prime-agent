@@ -110,6 +110,10 @@ impl TurnRunner {
                 }
                 self.push_roster_delta();
                 self.run_turn(engine, lane, items).await;
+                // A refine reply that parked during the turn applies at
+                // this park boundary, before any queued turn starts: the
+                // next turn must see the applied harness.
+                self.apply_parked_refine_reply().await;
             } else {
                 // The parked refine child reply applies at this idle
                 // boundary: the runner owns turn admission, so the apply's

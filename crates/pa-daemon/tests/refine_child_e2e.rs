@@ -1106,6 +1106,87 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
     }
 }
 
+/// A queued follow-up sees the parked refinement before its own turn: the
+/// runner applies the parked reply at each turn's park boundary, not only
+/// when the queue drains. Red when the apply lives only in the idle
+/// branch: the follow-up turn runs first and the outcome row lands after
+/// its rows.
+#[test]
+fn a_queued_follow_up_sees_the_parked_apply_before_its_turn() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &dir.path().join("daemon.stderr"));
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    // The child plans (PLAN_DELAY_MS) while the parent runs a turn the
+    // mock holds open for TURN_DELAY_MS; the follow-up is queued during
+    // that turn, before the child's reply parks.
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    assert_eq!(response["data"]["refinementChildSpawned"], true);
+    mock.set_turn_delay_ms(TURN_DELAY_MS);
+    client.send_command(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": session_id,
+            "message": "second turn",
+        }),
+    );
+    client.send_command(
+        "f1",
+        &json!({
+            "type": "follow_up",
+            "activeSessionId": session_id,
+            "message": "queued follow",
+        }),
+    );
+    let follow = client.read_response("f1");
+    assert_eq!(follow["success"], true, "follow_up failed: {follow}");
+    let second = client.read_response("p1");
+    assert_eq!(second["success"], true, "second turn failed: {second}");
+
+    // The follow-up turn starts after the park boundary: its user row must
+    // surface after the refinement outcome row.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let follow_index = loop {
+        if let Some(index) = client.events.iter().position(|(event, _)| {
+            event["type"] == "message_end"
+                && event["message"]["role"] == "user"
+                && event["message"]["content"][0]["text"] == "queued follow"
+        }) {
+            break index;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queued follow-up turn never started"
+        );
+        client.drain_events(100);
+    };
+    let outcome_index = client
+        .events
+        .iter()
+        .position(|(event, _)| {
+            event["type"] == "message_end" && event["message"]["customType"] == "refinement_outcome"
+        })
+        .expect("the refinement outcome row surfaced");
+    assert!(
+        outcome_index < follow_index,
+        "the refinement outcome (index {outcome_index}) must precede the queued follow-up turn (index {follow_index})"
+    );
+    assert_eq!(
+        local_harness_state(&session_dir)["entries"]["memory"]["m1"]["title"],
+        "Tactic",
+        "the parked reply's apply wrote the harness state"
+    );
+}
+
 /// A branch move abandons the in-flight refinement child: the move cancels
 /// the child while its planning call is still open and drops its lane, so
 /// no proposal applies to the moved-to branch and no late reply reaches the
