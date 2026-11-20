@@ -233,6 +233,10 @@ pub struct AgentSessionEngine {
     /// interleaves with a running turn's rows.
     pub(crate) pending_refine_reply:
         std::sync::Mutex<Option<crate::refine_children::PendingRefineReply>>,
+    /// The active session id of the refinement child that the last branch
+    /// move or replacement abandoned. The cancel cannot recall a reply that
+    /// is already in delivery, so the park drops that late reply.
+    pub(crate) abandoned_refine_child: std::sync::Mutex<Option<String>>,
     /// Serializes refinement-child admissions: the dead-round release, the
     /// in-flight check, the prepare, and the flight's record run as one
     /// atomic spawn, so concurrent callers cannot double-spawn.

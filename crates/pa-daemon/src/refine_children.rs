@@ -146,7 +146,10 @@ impl AgentSessionEngine {
     /// the refinement child plans on: the child is cancelled first, then
     /// its lane drops — the flight, or the reply it parked meanwhile. The
     /// proposal never applies to the moved-to conversation, and the lane
-    /// never holds off a later `/refine`.
+    /// never holds off a later `/refine`. The cancel cannot recall a reply
+    /// that is already in delivery: the abandoned child's id stays
+    /// recorded, so the park drops that late reply and it never lands as
+    /// an agent message.
     pub(crate) async fn abandon_refine_child(&self) {
         let _spawn = self.refine_spawn_lock.lock().await;
         let running = self
@@ -166,7 +169,12 @@ impl AgentSessionEngine {
             .pending_refine_reply
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *flight = None;
+        if let Some(abandoned) = flight.take() {
+            *self
+                .abandoned_refine_child
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(abandoned.active_session_id);
+        }
         *pending = None;
     }
 
@@ -241,10 +249,11 @@ impl AgentSessionEngine {
     }
 
     /// The wake's first half: park the refinement child's reply for the
-    /// idle-boundary apply. `None` when the sender is not this session's
-    /// in-flight refine child; otherwise the reply is parked and the
+    /// idle-boundary apply. The in-flight child's reply parks and the
     /// delivery is answered at once — the child's send never waits on the
-    /// parent's apply.
+    /// parent's apply. The late reply of the child that a branch move or a
+    /// replacement abandoned is consumed and dropped. `None` for any other
+    /// sender.
     pub(crate) fn park_refine_child_reply(
         &self,
         sender_active_session_id: &str,
@@ -259,9 +268,15 @@ impl AgentSessionEngine {
             .refine_flight
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let current = flight.as_ref()?;
-        if current.active_session_id != sender_active_session_id {
-            return None;
+        let in_flight = flight
+            .as_ref()
+            .is_some_and(|current| current.active_session_id == sender_active_session_id);
+        if !in_flight {
+            let abandoned = self
+                .abandoned_refine_child
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            return (abandoned.as_deref() == Some(sender_active_session_id)).then_some(());
         }
         let taken = flight.take()?;
         *self
@@ -635,9 +650,12 @@ mod tests {
 
     /// A branch move and a replacement teardown abandon the conversation
     /// the refinement child planned on: the move drops the in-flight
-    /// flight, so the abandoned child's late reply never parks, and the
-    /// teardown drops a reply parked before it, so nothing applies to the
-    /// moved-to conversation. Red when either seam keeps the lane.
+    /// flight, and the teardown drops a reply parked before it, so nothing
+    /// applies to the moved-to conversation. The abandoned child's late
+    /// reply (already in delivery when the cancel ran) is consumed without
+    /// a park, so it never falls through to the agent-message path. Red
+    /// when either seam keeps the lane, or when the late reply is not
+    /// consumed.
     #[test]
     fn a_branch_move_and_a_replacement_drop_the_abandoned_refine_lane() {
         let _faux = FAUX_TEST_LOCK
@@ -658,10 +676,13 @@ mod tests {
             )
             .expect("the branch move");
         assert!(!flight_some(&engine), "the branch move dropped the flight");
+        assert_eq!(
+            engine.park_refine_child_reply("active-1", PROPOSAL),
+            Some(()),
+            "the abandoned child's late reply is consumed, not delivered as an agent message"
+        );
         assert!(
-            engine
-                .park_refine_child_reply("active-1", PROPOSAL)
-                .is_none(),
+            !pending_some(&engine),
             "the abandoned child's late reply never parks"
         );
         park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
@@ -686,5 +707,21 @@ mod tests {
             serde_json::Value::Null,
             "no abandoned proposal reached the harness store"
         );
+        // A replacement with the child still in flight: its late reply is
+        // consumed the same way.
+        park_flight(
+            &engine,
+            RefineChildFlight {
+                active_session_id: "active-2".to_string(),
+                ..flight_for(dir.path(), RefinementSource::User)
+            },
+        );
+        engine.runtime.block_on(engine.teardown_for_replacement());
+        assert_eq!(
+            engine.park_refine_child_reply("active-2", PROPOSAL),
+            Some(()),
+            "the replaced conversation's late refine reply is consumed"
+        );
+        assert!(!pending_some(&engine), "the late reply never parks");
     }
 }
