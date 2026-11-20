@@ -258,7 +258,7 @@ class SelectionReportingTestCase(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "ci_test_shard.py"),
              "--shard", str(empty_shard), "--total", str(TOTAL),
-             "--crates", "pa-ai"],
+             "--crates", "pa-ai", "--print-selection"],
             capture_output=True, text=True, env=env, cwd=REPO, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("units=0", output.read_text())
