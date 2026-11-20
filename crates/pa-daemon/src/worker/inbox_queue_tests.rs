@@ -2015,8 +2015,8 @@ async fn a_minted_child_notice_routes_into_the_inbox() {
     assert_eq!(follow_up.len(), 1, "one coalesced wake row: {follow_up:?}");
     let (wake, queue_key, custom_type) = &follow_up[0];
     assert!(
-        wake.contains("1 new message (child-failed from lane)"),
-        "the wake counts the class and names the child: {wake}"
+        wake.contains("1 new message (child-failed)"),
+        "the wake counts the class: {wake}"
     );
     assert_eq!(queue_key.as_deref(), Some(INBOX_ARRIVAL_QUEUE_KEY));
     assert_eq!(

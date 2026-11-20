@@ -807,12 +807,10 @@ pub fn utc_hh_mm(ms: u64) -> String {
 
 /// The arrival notice for one batch of messages: the short steering row
 /// that replaces the notices' full rows. One count row per batch: a
-/// single arrival names its class ("1 new message (bash-done)"), a same
+/// single arrival names its class ("1 new bash-done message"), a same
 /// class burst its count ("3 new bash-done messages"), a mixed burst
 /// the per-class breakdown ("3 new messages (2 bash-done, 1
-/// child-exited)"). An agent-message or child class whose messages in
-/// the batch share one sender names it ("1 new message (agent-message
-/// from crew-mgr)"). The signature is the latest arrival's time; a
+/// child-exited)"). The signature is the latest arrival's time; a
 /// wider batch carries the arrival window.
 #[must_use]
 pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, String) {
@@ -820,46 +818,25 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
         return (String::new(), String::new());
     };
     let signature = utc_hh_mm(last.arrived_at_ms);
-    // (class, count, the sender every message of the class shares)
-    let mut classes: Vec<(&str, u64, Option<&str>)> = Vec::new();
+    let mut classes: Vec<(&str, u64)> = Vec::new();
     for message in batch {
-        let sender = message.sender.as_deref().filter(|_| {
-            matches!(
-                message.class.as_str(),
-                INBOX_CLASS_AGENT_MESSAGE | INBOX_CLASS_CHILD_EXITED | INBOX_CLASS_CHILD_FAILED
-            )
-        });
         match classes
             .iter_mut()
-            .find(|(class, _, _)| class == &message.class.as_str())
+            .find(|(class, _)| class == &message.class.as_str())
         {
-            Some((_, count, shared)) => {
-                *count += 1;
-                if *shared != sender {
-                    *shared = None;
-                }
-            }
-            None => classes.push((&message.class, 1, sender)),
+            Some((_, count)) => *count += 1,
+            None => classes.push((&message.class, 1)),
         }
     }
-    let from = |sender: Option<&str>| {
-        sender
-            .map(|name| format!(" from {name}"))
-            .unwrap_or_default()
-    };
     let count = batch.len();
     let summary = if count == 1 {
-        format!("1 new message ({}{})", last.class, from(classes[0].2))
+        format!("1 new message ({})", last.class)
     } else if classes.len() == 1 {
-        format!(
-            "{count} new {} messages{}",
-            classes[0].0,
-            from(classes[0].2)
-        )
+        format!("{count} new {} messages", classes[0].0)
     } else {
         let breakdown = classes
             .iter()
-            .map(|(class, class_count, sender)| format!("{class_count} {class}{}", from(*sender)))
+            .map(|(class, class_count)| format!("{class_count} {class}"))
             .collect::<Vec<_>>()
             .join(", ");
         format!("{count} new messages ({breakdown})")
