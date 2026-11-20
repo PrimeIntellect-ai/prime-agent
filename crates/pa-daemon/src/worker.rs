@@ -653,25 +653,10 @@ impl Worker {
                 let arrivals_for_consumed = std::sync::Arc::clone(&arrivals_for_sink);
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
-                        return;
+                        return false;
                     };
                     if engine.session_is_closed() {
-                        return;
-                    }
-                    // A [waiting] keepalive is only for the parked session: a
-                    // busy session's own turn keeps its clocks warm, and a
-                    // queued waiting row would only add boundary noise. The
-                    // kernel skips in-flight ticks too; this closes the race.
-                    if notice.row.custom_type
-                        == pa_core::session_engine::messages::BASH_WAITING_NOTICE_CUSTOM_TYPE
-                    {
-                        let busy = {
-                            let core = notice_core.lock().unwrap();
-                            core.busy || core.compacting
-                        };
-                        if busy {
-                            return;
-                        }
+                        return false;
                     }
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
@@ -694,7 +679,7 @@ impl Worker {
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {
-                                return;
+                                return true;
                             }
                             // The store moved on between the capture and
                             // the identity-checked push (a replacement
@@ -708,7 +693,7 @@ impl Worker {
                         &notice_notify,
                         notice,
                         closed,
-                    );
+                    )
                 });
                 crate::agent_inbox::spawn_inbox_reminder(
                     std::sync::Arc::downgrade(concrete),

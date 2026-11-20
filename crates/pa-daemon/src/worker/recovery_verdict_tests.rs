@@ -342,6 +342,63 @@ async fn a_bash_waiting_notice_queues_on_the_steering_lane() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
+#[tokio::test]
+async fn waiting_admission_rechecks_parked_state_after_taking_the_queue_lock() {
+    for compacting in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("recovery.jsonl");
+        let recovery = Arc::new(Mutex::new(Some(
+            WorkerRecoveryJournal::open(&journal_path).unwrap(),
+        )));
+        let core = Arc::new(Mutex::new(SessionCore::test_core(None, String::new())));
+        let notify = Arc::new(Notify::new());
+        let admission = {
+            let mut guard = core.lock().unwrap();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let admission_core = Arc::clone(&core);
+            let admission_recovery = Arc::clone(&recovery);
+            let admission_notify = Arc::clone(&notify);
+            let admission = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                admit_kernel_notice(
+                    &admission_recovery,
+                    &admission_core,
+                    &admission_notify,
+                    crate::engine::KernelNotice::bash_waiting(&[42], &["build".into()], 1),
+                    || false,
+                )
+            });
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            guard.busy = !compacting;
+            guard.compacting = compacting;
+            admission
+        };
+        assert!(!admission.await.unwrap());
+        assert!(core.lock().unwrap().steering.is_empty());
+        assert!(!WorkerRecoveryJournal::read_interrupted(&journal_path));
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, notify.notified())
+                .await
+                .is_err()
+        );
+        {
+            let mut guard = core.lock().unwrap();
+            guard.busy = false;
+            guard.compacting = false;
+        }
+        assert!(admit_kernel_notice(
+            &recovery,
+            &core,
+            &notify,
+            crate::engine::KernelNotice::bash_waiting(&[42], &["build".into()], 1),
+            || false,
+        ));
+        assert_eq!(core.lock().unwrap().steering.len(), 1);
+    }
+}
+
 /// The withdrawal settles the busy evidence so the journal never promises a replay.
 #[tokio::test]
 async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {

@@ -157,7 +157,7 @@ _hook_lock = threading.Lock()
 # While any handle is live and no request is in flight, pace one [waiting]
 # notice per window so the session's activity clock stays fresh and the
 # parked-turn contract stays taught — the model stops inventing watcher
-# loops to keep its own session alive. `0` (or unparsable) disables.
+# loops to keep its own session alive. `0` disables; invalid values use 240 seconds.
 try:
     _WAITING_KEEPALIVE_SECONDS = max(
         0.0, float(os.environ.get("PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS", "240"))
@@ -192,22 +192,24 @@ async def _waiting_keepalive_loop() -> None:
     from . import repl
 
     tick = min(_WAITING_TICK_SECONDS, _WAITING_KEEPALIVE_SECONDS / 4.0)
-    last_sent = 0.0
+    last_sent: float | None = None
     while True:
         await asyncio.sleep(tick)
-        live = []
         with _live_lock:
-            live = [handle for handle in _live_handles if handle.running]
+            live = [
+                handle
+                for handle in _live_handles | set(_activity_handles.values())
+                if not handle._reaped
+            ]
         if not live:
             continue
         if repl.request_in_flight():
             continue
         now = time.monotonic()
-        if now - last_sent < _WAITING_KEEPALIVE_SECONDS:
+        if last_sent is not None and now - last_sent < _WAITING_KEEPALIVE_SECONDS:
             continue
-        last_sent = now
         shown = live[:_COMPLETION_NOTICE_COMMAND_CAP]
-        pids = [handle.pid for handle in shown]
+        pids = [handle._pid for handle in shown]
         commands = [_capped(handle.command) for handle in shown]
         try:
             reply = await repl.host_request(
@@ -225,6 +227,8 @@ async def _waiting_keepalive_loop() -> None:
         # window.
         if not isinstance(reply, dict) or reply.get("status") != "ok":
             return
+        if reply.get("data", {}).get("admitted") is True:
+            last_sent = time.monotonic()
 
 # bash(persistent=True): every session's persistent shells live in one home
 # under the agent dir (the cross-language contract pa-daemon reads): per shell
@@ -1373,6 +1377,7 @@ class PersistentBashHandle(BashHandle):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        _start_waiting_keepalive()
         loop.create_task(self._notify_completion()).add_done_callback(_consume_notice_task)
 
     async def _notify_completion(self) -> None:

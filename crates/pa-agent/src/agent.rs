@@ -1048,6 +1048,20 @@ impl Agent {
             .enqueue(message.into());
     }
 
+    /// Queue steering only when no run owns the agent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a queue or run mutex is poisoned.
+    pub fn steer_if_idle(&self, message: impl Into<AgentMessageBatch>) -> bool {
+        let run = self.inner.run.lock().unwrap();
+        if run.is_some() {
+            return false;
+        }
+        self.steer(message);
+        true
+    }
+
     /// Queue a message batch to run only after the agent would otherwise stop.
     ///
     /// # Panics
@@ -1379,6 +1393,17 @@ impl Clone for Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_only_steering_refuses_a_claimed_run() {
+        let agent = Agent::new(AgentOptions::default());
+        let _claim = agent.inner.claim_run().await.unwrap();
+        assert!(!agent.steer_if_idle(AgentMessage::user("waiting")));
+        assert!(!agent.has_queued_messages());
+        agent.inner.release_run();
+        assert!(agent.steer_if_idle(AgentMessage::user("waiting")));
+        assert_eq!(agent.remove_queued_messages(|_| true).len(), 1);
+    }
 
     #[test]
     fn pending_message_queue_all_mode_flattens() {
