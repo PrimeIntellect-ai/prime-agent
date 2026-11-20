@@ -1365,14 +1365,23 @@ def bash(
         # Invented wait parameters (`timeout=`) are the recurring failure the
         # eval traces show: the model reaches for a common API shape, loses the
         # cell to a bare TypeError, and flails. Decline with the real
-        # signature and the parked-turn alternative instead.
+        # signature and the route this session can deliver: the parked-turn
+        # notice exists only where the host wires it, and a notice-less await
+        # waits for the command to finish.
+        route = (
+            "launch the command (bash() returns immediately and "
+            "auto-backgrounds it) and end the turn; a [bash-done] "
+            "notification resumes you. An await always yields after 1 second."
+            if _completion_notices_are_wired()
+            else "launch the command (bash() returns immediately) and read "
+            "the handle in a later cell; this session has no [bash-done] "
+            "notice, so an await waits until the command finishes."
+        )
         raise TypeError(
             "bash() takes command, persistent — not "
             + ", ".join(f"{name!r}" for name in sorted(unknown))
-            + ". There is no wait or timeout parameter: launch the command "
-            "(bash() returns immediately and auto-backgrounds it) and end "
-            "the turn; a [bash-done] notification resumes you. An await "
-            "always yields after 1 second."
+            + ". There is no wait or timeout parameter: "
+            + route
         )
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
