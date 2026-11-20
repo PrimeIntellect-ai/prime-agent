@@ -1532,6 +1532,47 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("5", stream_text(events, "stdout"))
 
+    def test_discipline_screen_binds_assignment_targets_in_order(self):
+        for target, value in (
+            ("t, items[t.sleep(5)]", "helper, 42"),
+            ("[t, [items[t.sleep(5)]]]", "[helper, [42]]"),
+            ("t, *items[t.sleep(5)]", "helper, 42"),
+            ("t = items[t.sleep(5)]", "helper"),
+        ):
+            with self.subTest(target=target):
+                code = (
+                    "import time as t, types\n"
+                    "helper = types.SimpleNamespace(sleep=lambda seconds: 0)\n"
+                    "items = {}\n"
+                    f"{target} = {value}\n"
+                    "print('ran')"
+                )
+                events = self.repl.execute("target-order", code)
+                self.assertIsNone(one(events, "error"))
+                self.assertEqual(one(events, "done")["status"], "ok")
+                self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_stops_binding_after_return(self):
+        code = (
+            "import types\n"
+            "def f(t, flag):\n"
+            "    if flag:\n"
+            "        return\n"
+            "        import time as t\n"
+            "    t.sleep(5)\n"
+            "helper = types.SimpleNamespace(sleep=lambda seconds: print(seconds))\n"
+            "f(helper, True)\n"
+            "f(helper, False)\n"
+        )
+        events = self.repl.execute("return-import", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("5", stream_text(events, "stdout"))
+        events = self.repl.execute(
+            "return-value", "from time import sleep as pause\ndef f():\n    return pause(5)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
     def test_discipline_screen_binds_walrus_targets_in_evaluation_order(self):
         # A walrus binds before the rest of its statement runs.
         clock = "import time, types\nclock = types.SimpleNamespace(sleep=print)\n"

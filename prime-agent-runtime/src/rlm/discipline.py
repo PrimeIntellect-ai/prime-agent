@@ -531,6 +531,8 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             walk(statement, scope)
             if not isinstance(statement, _SUITE_STATEMENTS):
                 apply(scope, statement)
+            if isinstance(statement, ast.Return):
+                break
 
     def walk_suite(
         start: dict[str, frozenset], statements: object, scope: _Scope
@@ -588,6 +590,16 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
         if _jumps(loop, ast.Break):
             scope.bindings = _join(scope.bindings, jumped)
 
+    def walk_target(target: ast.AST, scope: _Scope) -> None:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                walk_target(element, scope)
+        elif isinstance(target, ast.Starred):
+            walk_target(target.value, scope)
+        else:
+            walk(target, scope)
+            apply(scope, target)
+
     def walk(node: ast.AST, scope: _Scope) -> None:
         if isinstance(node, ast.Call):
             func = node.func
@@ -632,11 +644,11 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             if node.value is not None:
                 walk(node.value, scope)
             if isinstance(node, ast.Assign):
-                targets = node.targets
+                for target in node.targets:
+                    walk_target(target, scope)
             else:
-                targets = [node.target, node.annotation]
-            for target in targets:
-                walk(target, scope)
+                walk(node.target, scope)
+                walk(node.annotation, scope)
             return
         if isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values):
