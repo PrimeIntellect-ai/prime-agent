@@ -33,8 +33,6 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::{Line, Span};
 
-// PR A exposes the block engine for the machines detail view added by PR B.
-#[allow(dead_code)]
 mod blocks;
 mod diagram;
 mod library;
@@ -417,6 +415,7 @@ pub enum FactoryViewAction {
     OpenNode {
         run_id: String,
         state_id: String,
+        selector: Option<(u64, u64)>,
     },
     /// Stop the selected run (a confirmed stop on its header).
     Stop {
@@ -628,7 +627,25 @@ impl FactoryView {
     #[must_use]
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
         if let Some(node) = self.node.as_mut() {
-            if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") || key == "left" {
+            if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
+                if !node.step_back() {
+                    self.node = None;
+                }
+                return FactoryViewAction::None;
+            }
+            if node.handle_key(key, kb, self.viewport_rows) {
+                let selected = node.selected_selector();
+                let fetched = node.document_selector();
+                if selected.is_some() && selected != fetched {
+                    return FactoryViewAction::OpenNode {
+                        run_id: node.run_id.clone(),
+                        state_id: node.state_id.clone(),
+                        selector: selected,
+                    };
+                }
+                return FactoryViewAction::None;
+            }
+            if key == "left" {
                 if !node.step_back() {
                     self.node = None;
                 }
@@ -642,18 +659,6 @@ impl FactoryView {
                             child_id: child_id.to_string(),
                         }
                     });
-            }
-            let handled = node.handle_key(key, kb, self.viewport_rows);
-            if handled {
-                let selected = node.selected_selector();
-                let fetched = node.document_selector();
-                if selected.is_some() && selected != fetched {
-                    return FactoryViewAction::OpenNode {
-                        run_id: node.run_id.clone(),
-                        state_id: node.state_id.clone(),
-                    };
-                }
-                return FactoryViewAction::None;
             }
             return FactoryViewAction::None;
         }
@@ -736,6 +741,7 @@ impl FactoryView {
                 FactoryViewAction::OpenNode {
                     run_id: row.run_id.clone(),
                     state_id: state_id.clone(),
+                    selector: None,
                 }
             })
     }

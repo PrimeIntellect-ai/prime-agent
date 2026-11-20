@@ -32,13 +32,7 @@ fn transition(from: &[&str], to: &str, when: Option<serde_json::Value>) -> Facto
 
 #[test]
 fn an_empty_machine_has_no_diagram_rows() {
-    let diagram = block_diagram(
-        &Theme::builtin("prime", ColorMode::TrueColor),
-        &[],
-        &[],
-        None,
-        None,
-    );
+    let diagram = block_diagram(&Theme::builtin("prime", ColorMode::TrueColor), &[], &[]);
     assert!(diagram.lines.is_empty());
     assert!(diagram.node_rows.is_empty());
 }
@@ -65,12 +59,12 @@ fn draws_boxes_forward_edges_back_edges_and_labels() {
         ),
     ];
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
-    let diagram = block_diagram(&theme, &states, &transitions, Some(1), None);
+    let diagram = block_diagram(&theme, &states, &transitions);
     let text = plain(&diagram);
     for needle in [
         "▼ start",
         "│ plan",
-        "┃ review",
+        "│ review",
         "agent · claude-opus-5.5",
         "python · triage.decide",
         "▼ ship",
@@ -101,7 +95,7 @@ fn a_join_fans_in_and_a_long_edge_runs_through_the_skipped_layers() {
         transition(&["a"], "d", Some(json!({"output": "skip", "op": "exists"}))),
     ];
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
-    let text = plain(&block_diagram(&theme, &states, &transitions, None, None));
+    let text = plain(&block_diagram(&theme, &states, &transitions));
     assert!(text.contains("▼ join"), "{text}");
     assert!(
         text.contains("skip exists"),

@@ -748,6 +748,7 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     let open_node = |state: &str| FactoryViewAction::OpenNode {
         run_id: "run-abc12345".to_string(),
         state_id: state.to_string(),
+        selector: None,
     };
     assert_eq!(view.handle_key("enter", &kb()), open_node("collect"));
     // The session UI mounts the node view on OpenNode; once mounted, it
@@ -765,13 +766,20 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     assert_eq!(view.handle_key("enter", &kb()), open_node("fixing"));
 }
 
-/// The accident this page had: on a live run, repeated navigation —
-/// →→, Enter Enter, on the header or a running state — never stops or
-/// resumes anything (paused, so both run actions are on offer).
+#[test]
+fn the_node_view_honors_rebound_confirm_before_literal_shortcuts() {
+    for key in ["right", "left", "o"] {
+        let rebound = KeybindingsManager::with_user_bindings(
+            serde_json::from_value(json!({"tui.select.confirm": [key]})).unwrap(),
+        );
+        let mut view = FactoryView::new(Vec::new(), 40);
+        view.node = Some(node::NodeView::loading("run", "worker"));
+        assert_eq!(view.handle_key(key, &rebound), FactoryViewAction::None);
+        assert!(view.node.as_mut().unwrap().step_back(), "{key} opens files");
+    }
+}
 
-/// The accident this page had: on a live run, repeated navigation —
-/// →→, Enter Enter, on the header or a running state — never stops or
-/// resumes anything (paused, so both run actions are on offer).
+/// Repeated navigation on a header or running state never stops or resumes a run.
 #[test]
 fn navigation_never_stops_or_resumes_a_run() {
     let mut runs = parse_factory_runs(&runs_response(&scripted_snapshot()));

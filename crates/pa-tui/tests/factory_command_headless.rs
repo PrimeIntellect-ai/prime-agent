@@ -94,6 +94,7 @@ impl MockSupervisor {
         // A page stop also stops the mock's session: the daemon's `session_closed` follows the
         // stop's reply, and the closed session's graph lane answers a refusal from then on.
         let mut session_closed = false;
+        let mut node_requests = 0;
         serve_connection(
             stream,
             &capabilities,
@@ -164,30 +165,43 @@ impl MockSupervisor {
                             command.get("action").and_then(Value::as_str),
                         ) {
                             (Some(runs), Some("graph")) => runs.clone(),
-                            (_, Some("node")) => json!({
-                                "name": "node-run",
-                                "specId": "sw",
-                                "state": {
-                                    "id": "worker",
-                                    "status": "running",
-                                    "instances": [{
-                                        "index": 0,
-                                        "entry": 0,
+                            (_, Some("node")) => {
+                                node_requests += 1;
+                                let entry =
+                                    command.get("entry").and_then(Value::as_u64).unwrap_or(1);
+                                let index =
+                                    command.get("instance").and_then(Value::as_u64).unwrap_or(1);
+                                json!({
+                                    "name": "node-run",
+                                    "specId": "sw",
+                                    "state": {
+                                        "id": "worker",
                                         "status": "running",
-                                        "child": "child-1",
-                                    }],
-                                },
-                                "entry": {"index": 0, "status": "running"},
-                                "instance": {
-                                    "index": 0,
-                                    "entry": 0,
-                                    "status": "running",
-                                    "child": "child-1",
-                                    "prompt": "Node prompt fixture",
-                                    "inputs": "{}",
-                                    "answer": "Node answer fixture",
-                                },
-                            }),
+                                        "instances": [
+                                            {"index": 0, "entry": 0, "status": "done", "child": "child-0"},
+                                            {"index": 1, "entry": 1, "status": "running", "child": "child-1"},
+                                        ],
+                                    },
+                                    "entry": {"index": entry, "status": "running"},
+                                    "instance": {
+                                        "index": index,
+                                        "entry": entry,
+                                        "status": "running",
+                                        "child": format!("child-{index}"),
+                                        "prompt": if index == 0 { "Earlier node prompt" } else if node_requests > 1 { "Updated node prompt" } else { "Node prompt fixture" },
+                                        "inputs": "{}",
+                                        "answer": if node_requests > 1 { "Updated node answer" } else { "Node answer fixture" },
+                                    },
+                                })
+                            }
+                            (_, Some("library"))
+                                if command.get("specId").and_then(Value::as_str) == Some("sw") =>
+                            {
+                                json!({
+                                    "files": [{"path": "worker.md", "text": "Template body from library"}],
+                                    "stateFiles": [{"state": "worker", "paths": ["worker.md"]}],
+                                })
+                            }
                             _ => json!({}),
                         };
                         write_json(
@@ -818,6 +832,77 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
         all.contains("\u{25b8} factory: first-run"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
     );
+}
+
+fn open_node_steps() -> Vec<HeadlessStep> {
+    vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Node prompt fixture".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]
+}
+
+#[test]
+fn factory_node_navigation_fetches_the_selected_entry_and_instance() {
+    let mut steps = open_node_steps();
+    steps.extend([
+        HeadlessStep::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        HeadlessStep::WaitRender {
+            needle: "Earlier node prompt".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]);
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Earlier node prompt"));
+}
+
+#[test]
+fn factory_node_refreshes_the_mounted_document() {
+    let mut steps = open_node_steps();
+    steps.push(HeadlessStep::WaitRender {
+        needle: "Updated node prompt".to_string(),
+        timeout_ms: 5_000,
+    });
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Updated node prompt"));
+}
+
+#[test]
+fn factory_node_fetches_its_template_files_from_the_library() {
+    let mut steps = open_node_steps();
+    steps.extend([
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Template body from library".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]);
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Template body from library"));
 }
 
 #[test]
