@@ -49,10 +49,10 @@ def _win_spawn(procs=None, resume=True):
 
 
 class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
-    async def run_ticks(self, live_handles, activity_handles, ticks, replies):
+    async def run_ticks(self, live_handles, activity_handles, ticks, replies, *, started=0.0):
         from rlm import repl
 
-        clock = SimpleNamespace(now=0.0, busy=False)
+        clock = SimpleNamespace(now=started, busy=False)
         ticks = iter(ticks)
         replies = iter(replies)
         sent = []
@@ -119,13 +119,20 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0][1]["count"], 2)
         self.assertEqual(live, {ordinary})
 
-    async def test_waiting_first_idle_tick_does_not_depend_on_uptime(self):
-        handle = self.handle()
-        sent = await self.run_ticks(
-            {handle}, {}, [(1.0, True), (16.0, False), (31.0, False), (256.0, False)],
-            [{"status": "ok", "result": {"admitted": True}}] * 2,
-        )
-        self.assertEqual([when for when, _ in sent], [16.0, 256.0])
+    async def test_waiting_first_notice_waits_one_window_independent_of_uptime(self):
+        for started in (0.0, 1_000_000.0):
+            with self.subTest(started=started):
+                handle = self.handle()
+                ticks = [(started + offset, busy) for offset, busy in (
+                    (1.0, True), (16.0, False), (239.0, False),
+                    (240.0, False), (255.0, False), (480.0, False),
+                )]
+                sent = await self.run_ticks(
+                    {handle}, {}, ticks,
+                    [{"status": "ok", "result": {"admitted": True}}] * 2,
+                    started=started,
+                )
+                self.assertEqual([when - started for when, _ in sent], [240.0, 480.0])
 
     async def test_waiting_rejected_notice_does_not_delay_next_idle_tick(self):
         handle = self.handle()
