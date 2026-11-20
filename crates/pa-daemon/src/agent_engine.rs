@@ -265,6 +265,11 @@ pub struct AgentSessionEngine {
     /// in-flight check, the prepare, and the flight's record run as one
     /// atomic spawn, so concurrent callers cannot double-spawn.
     pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
+    /// Test seam: fires on the thread that is about to wait for the spawn
+    /// lock, so a test can prove the wait before it reads the trigger.
+    #[cfg(test)]
+    pub(crate) refine_spawn_lock_wait_probe:
+        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// The worker-installed summary-delta sink, adopted onto every built
     /// session. `None` without a worker pump.
     compaction_summary_sink:

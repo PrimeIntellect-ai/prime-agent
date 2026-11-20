@@ -612,7 +612,6 @@ fn kind_name(kind: RefinementKind) -> &'static str {
     }
 }
 
-// --- main's newer planner surface (kept by the merge) ---
 /// Byte-based input token bound (one token per UTF-8 byte).
 fn refinement_input_token_bound(text: &str) -> u64 {
     text.len() as u64

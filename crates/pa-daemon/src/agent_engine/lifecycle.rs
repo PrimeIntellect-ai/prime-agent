@@ -177,6 +177,8 @@ impl AgentSessionEngine {
             pending_refine_reply: std::sync::Mutex::new(None),
             abandoned_refine_children: std::sync::Mutex::default(),
             refine_spawn_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            refine_spawn_lock_wait_probe: std::sync::Mutex::new(None),
             usage_producer: std::sync::Mutex::new(None),
             rlm_usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),

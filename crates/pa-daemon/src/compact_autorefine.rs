@@ -54,6 +54,19 @@ impl AgentSessionEngine {
         }
     }
 
+    /// Arm the test seam that fires when the round body is about to wait
+    /// for the spawn lock.
+    #[cfg(test)]
+    pub(crate) fn set_refine_spawn_lock_wait_probe(
+        &self,
+        probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        *self
+            .refine_spawn_lock_wait_probe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = probe;
+    }
+
     /// The shared round body (the `compact` command path and the turn
     /// settle both run it): the pending pre-check, the TS busy gates, the
     /// pa-core round take, then the refinement child's spawn. The gates
@@ -98,6 +111,16 @@ impl AgentSessionEngine {
         // parked for the idle apply) keeps the trigger armed for a later
         // boundary.
         let outcome = self.runtime.block_on(async {
+            #[cfg(test)]
+            let wait_probe = self
+                .refine_spawn_lock_wait_probe
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            #[cfg(test)]
+            if let Some(probe) = wait_probe {
+                probe();
+            }
             let _spawn = self.refine_spawn_lock.lock().await;
             self.release_dead_refine_child_round().await;
             {
@@ -350,9 +373,17 @@ mod tests {
         let held = engine
             .runtime
             .block_on(async { engine.refine_spawn_lock.lock().await });
+        // Readiness is the consumer's own signal from the spawn-lock wait,
+        // not a fixed sleep: the held lock pins the take until the drop.
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        engine.set_refine_spawn_lock_wait_probe(Some(std::sync::Arc::new(move || {
+            let _ = waiting_tx.send(());
+        })));
         std::thread::scope(|scope| {
             let consuming = scope.spawn(|| engine.consume_compact_auto_refine_round());
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            waiting_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("the consumer reached the spawn lock");
             assert!(
                 engine.compact_auto_refine_pending(),
                 "the armed round must not be consumed while the spawn lock is held"

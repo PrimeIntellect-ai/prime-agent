@@ -349,7 +349,6 @@ pub fn apply_refinement_plan(
     )
 }
 
-// --- main's newer executor surface (kept by the merge) ---
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct AutoRefineReview {
     pub should_refine: bool,
