@@ -588,9 +588,8 @@ pub(crate) fn admit_kernel_notice(
 }
 
 /// Admit one turn-held pacing notice: the same steering-lane admission as a
-/// kernel notice, but the daemon-side held gate — the delivery is still
-/// busy, nothing is queued to cut it already, not compacting, not shutting
-/// down — runs inside the ONE lock section with the push. The gate must
+/// kernel notice, but the daemon-side held gate checks the delivery token
+/// and worker state inside the same lock section as the push. The gate must
 /// never arrive as the `session_is_closed` closure: that seam is invoked
 /// while the admission already holds the core lock, so a re-locking closure
 /// self-deadlocks the session.
@@ -599,6 +598,7 @@ pub(crate) fn admit_turn_held_notice(
     core: &Arc<Mutex<SessionCore>>,
     work_notify: &Arc<Notify>,
     notice: crate::engine::KernelNotice,
+    delivery: &tokio_util::sync::CancellationToken,
 ) {
     let crate::engine::KernelNotice { row, preview_label } = notice;
     let content = match &row.content {
@@ -606,8 +606,10 @@ pub(crate) fn admit_turn_held_notice(
         pa_types::ai::UserContent::Blocks(_) => String::new(),
     };
     let mut core_guard = core.lock().unwrap();
-    if !core_guard.busy
+    if delivery.is_cancelled()
+        || !core_guard.busy
         || !core_guard.steering.is_empty()
+        || core_guard.abort_requested
         || core_guard.compacting
         || core_guard.shutdown_requested
     {

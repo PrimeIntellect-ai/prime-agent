@@ -335,9 +335,11 @@ impl TurnRunner {
         // never through a re-locking closed-check closure, which would
         // self-deadlock the session. A queued row stops the held turn at
         // its next boundary (the queued-steering probe) and delivers as
-        // the next turn's prompt; the timer dies with the delivery at the
-        // join.
+        // the next turn's prompt. The delivery revokes admission before
+        // it settles.
+        let turn_held_delivery = tokio_util::sync::CancellationToken::new();
         let turn_held_window = {
+            let delivery = turn_held_delivery.clone();
             let core = Arc::clone(&self.core);
             let recovery = Arc::clone(&self.recovery);
             let work_notify = Arc::clone(&self.work_notify);
@@ -350,6 +352,7 @@ impl TurnRunner {
                     pa_core::session_engine::bash_notices::KernelNotice::turn_held(
                         TURN_HELD_WINDOW.as_millis() as u64,
                     ),
+                    &delivery,
                 );
             })
         };
@@ -1135,9 +1138,9 @@ impl TurnRunner {
         });
         let held_run_end = turn.await.ok().flatten();
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
-        // The delivery's end disarms its [turn-held] pacing window: a
-        // timer that never fired must not cut a later delivery, and one
-        // mid-admission completes atomically (the admission's lock section).
+        // Revoke admission before settling. Aborting alone cannot stop a
+        // timer already waiting for the core lock from cutting a later turn.
+        turn_held_delivery.cancel();
         turn_held_window.abort();
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.

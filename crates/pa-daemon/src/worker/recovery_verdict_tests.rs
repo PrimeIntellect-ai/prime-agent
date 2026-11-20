@@ -173,6 +173,7 @@ async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle()
         &worker.core,
         &notify,
         crate::engine::KernelNotice::turn_held(60_000),
+        &tokio_util::sync::CancellationToken::new(),
     );
     let core = worker.core.lock().unwrap();
     let item = core
@@ -205,6 +206,7 @@ async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle()
         &worker.core,
         &notify,
         crate::engine::KernelNotice::turn_held(60_000),
+        &tokio_util::sync::CancellationToken::new(),
     );
     let core = worker.core.lock().unwrap();
     assert_eq!(
@@ -213,6 +215,82 @@ async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle()
         "the idle session refuses the pacing notice"
     );
     drop(core);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn a_turn_held_notice_from_a_settled_delivery_cannot_cut_the_next_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("recovery.jsonl");
+    let recovery = Arc::new(Mutex::new(Some(
+        WorkerRecoveryJournal::open(&journal_path).unwrap(),
+    )));
+    let core = Arc::new(Mutex::new(SessionCore::test_core(None, String::new())));
+    let delivery = tokio_util::sync::CancellationToken::new();
+    let timer_delivery = delivery.clone();
+    let notify = Arc::new(Notify::new());
+    let timer = {
+        // The timer has finished sleeping but cannot take the admission lock.
+        let mut guard = core.lock().unwrap();
+        guard.busy = true;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let timer_core = Arc::clone(&core);
+        let timer_recovery = Arc::clone(&recovery);
+        let timer = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            admit_turn_held_notice(
+                &timer_recovery,
+                &timer_core,
+                &notify,
+                crate::engine::KernelNotice::turn_held(60_000),
+                &timer_delivery,
+            );
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        delivery.cancel();
+        // Abort cannot preempt synchronous admission. The next delivery
+        // also has busy=true when the old timer gets the lock.
+        timer.abort();
+        timer
+    };
+    timer.await.unwrap();
+    assert!(
+        core.lock().unwrap().steering.is_empty(),
+        "the previous delivery must not queue a pacing turn"
+    );
+    assert!(
+        !WorkerRecoveryJournal::read_interrupted(&journal_path),
+        "a stale timer must not create recovery work"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_held_notice_stays_quiet_during_an_abort() {
+    let worker = created_worker_with_journal().await;
+    worker.dispatch("clear_queue", &json!({})).await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.abort_requested = true;
+    }
+    let notify = Arc::new(Notify::new());
+    admit_turn_held_notice(
+        &worker.recovery,
+        &worker.core,
+        &notify,
+        crate::engine::KernelNotice::turn_held(60_000),
+        &tokio_util::sync::CancellationToken::new(),
+    );
+    assert!(
+        worker.core.lock().unwrap().steering.is_empty(),
+        "an aborted delivery must not queue a pacing turn"
+    );
+    assert!(
+        !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "a refused pacing notice must not create recovery work"
+    );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
