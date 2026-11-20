@@ -1132,7 +1132,8 @@ mod tests {
                                             pa_types::ai::UserContentBlock::Image(_) => {
                                                 text.push_str("<image>");
                                             }
-                                            pa_types::ai::UserContentBlock::Raw(_) => {}
+                                            pa_types::ai::UserContentBlock::Raw(_)
+                                            | pa_types::ai::UserContentBlock::Video(_) => {}
                                         }
                                     }
                                 }

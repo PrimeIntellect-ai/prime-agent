@@ -494,6 +494,7 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
+            streaming_behavior: None,
         };
         // Cancellation arrives while the decision call runs: the check
         // before the call passes, the flag flips for every later one.
@@ -606,6 +607,7 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
+            streaming_behavior: None,
         };
         let started = std::time::Instant::now();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -663,6 +665,7 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
+            streaming_behavior: None,
         };
         let aborted = || false;
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -827,6 +830,7 @@ mod tests {
                 agent_message_id: None,
                 custom_message: None,
                 batch: Vec::new(),
+                streaming_behavior: None,
             };
             let mut events: Vec<EngineEvent> = Vec::new();
             engine.run_prompt(0, request, &|| false, &mut |event| {
@@ -1022,6 +1026,7 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
+            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &|| false, &mut |event| {
@@ -1156,6 +1161,7 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
+            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &|| false, &mut |event| {
@@ -1243,6 +1249,7 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
+            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &|| false, &mut |event| {
