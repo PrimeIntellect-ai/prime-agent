@@ -714,6 +714,15 @@ def _span_guard_event(rid: str, exc: BaseException, budget: float) -> dict[str, 
     }
 
 
+def _cell_span_error(rid: str, exc: BaseException) -> dict[str, Any]:
+    """One request's interrupt event: the span teaching when the guard marked
+    this rid, else the plain cell error for the same exception."""
+    budget = _span_guard_fired.get(rid)
+    if budget is None:
+        return _error_event(rid, exc)
+    return _span_guard_event(rid, exc, budget)
+
+
 def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
     """A declined cell's error event: the failed-cell header the host's result
     rendering carries, with the decline's teaching message as the exception
@@ -824,37 +833,45 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         task = _loop.create_task(_run_codes(codes, ns))
         execution.owner = task
         # The in-cell span guard: armed where the session's host wires
-        # completion notices, disarmed at settle. Protocol repair's internal
+        # completion notices, disarmed before the protocol sends. It stays
+        # armed through result rendering and the drain: a slow `__repr__` is
+        # still this cell's span, and its interrupt must reach the span
+        # teaching, not a bare KeyboardInterrupt. Protocol repair's internal
         # executes pass through here too (the runtime bootstrap): the decline
         # screen applies to them, benignly today — the bootstrap carries no
         # banned shape — and the guard disarms until the flag flips.
         span_guard = _arm_span_guard(cell_id, _span_guard_budget(req.get("timeout_ms")))
         try:
             status, value, error = await _run_guarded(task, cell_id)
-        finally:
-            if span_guard is not None:
-                span_guard.cancel()
+        except KeyboardInterrupt as exc:
+            # The task settled but the handler raised in this frame: report the
+            # request's own outcome instead of escaping without a done frame.
+            status, value, error = "error", None, _cell_span_error(cell_id, exc)
         result_text: str | None = None
         try:
             if _consume_handoff_interrupt() and status == "ok":
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
-                budget = _span_guard_fired.get(cell_id)
-                status, error = "error", (
-                    _span_guard_event(cell_id, KeyboardInterrupt(), budget)
-                    if budget is not None
-                    else _error_event(cell_id, KeyboardInterrupt())
-                )
+                status, error = "error", _cell_span_error(cell_id, KeyboardInterrupt())
             if status == "ok" and has_trailing and value is not None:
                 try:
                     ns["_"] = value
                     result_text = repr(value)
                 except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
-                    status, error = "error", _error_event(cell_id, exc)
+                    status, error = "error", _cell_span_error(cell_id, exc)
             if result_text is not None:
                 result_text = _cap_text(result_text)
             _drain_output()
+        except KeyboardInterrupt as exc:
+            # The guard fired during the render or the drain: the cell's value
+            # is not reported, and the teaching replaces the bare interrupt.
+            status, error, result_text = "error", _cell_span_error(cell_id, exc), None
         finally:
+            # Disarm before the interrupt window closes: a timer that fires
+            # after _finish_request would be dropped anyway, and the sends
+            # below must not race a span interrupt.
+            if span_guard is not None:
+                span_guard.cancel()
             # Close the interrupt window before the protocol sends so a
             # handler-raised KeyboardInterrupt can never tear a frame mid-_send.
             _finish_request(cell_id)
