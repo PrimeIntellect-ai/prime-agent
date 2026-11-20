@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use pa_types::ai::{
     CompatKind, Model, ModelCompat, ModelCost, ModelInput, ModelServing, ModelThinkingLevel,
     OpenAiCompletionsCompat, ThinkingFormat, ThinkingLevelMap,
@@ -739,7 +739,11 @@ mod tests {
         let c = scope_key("key-a", "team-2");
         assert_ne!(a, b);
         assert_ne!(a, c);
-        assert_eq!(a.len(), 64, "hex sha256");
+        // HMAC-SHA256(key-a, prefix || team-1), computed independently with Python's hmac module.
+        assert_eq!(
+            a,
+            "7e096109859d5e296cb2b307b0b272639499dca9d98f8ca8417e0a506b072ad6"
+        );
     }
 
     #[test]

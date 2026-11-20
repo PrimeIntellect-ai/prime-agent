@@ -14,7 +14,7 @@ pub(crate) struct BootstrapPythonSkill {
 
 pub(super) fn file_content_hash(path: &Path) -> String {
     match std::fs::read(path) {
-        Ok(bytes) => format!("sha256:{:x}", sha2::Sha256::digest(&bytes)),
+        Ok(bytes) => format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes))),
         Err(_) => "unreadable".to_string(),
     }
 }

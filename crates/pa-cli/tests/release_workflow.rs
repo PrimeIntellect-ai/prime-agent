@@ -208,7 +208,7 @@ fn assert_failure(output: &Output, step: &str) -> String {
 fn sha256_file(path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(fs::read(path).expect("read the fixture archive"));
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// An extractable release archive with authentic historical installer assets.

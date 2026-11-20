@@ -2,7 +2,7 @@
 //! keeps its own copy (TS duplicates the helper per module the same way).
 
 use base64::Engine as _;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 
 /// A PKCE pair: the verifier is the token-exchange secret, the
@@ -15,7 +15,7 @@ pub fn generate_pkce() -> (String, String) {
 
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
-    rand::thread_rng().fill(&mut bytes[..]);
+    rand::rng().fill(&mut bytes[..]);
     bytes
 }
 

@@ -387,7 +387,7 @@ fn hash_untracked_files(cwd: &Path, status: &str) -> String {
         aggregate.update(hash_untracked_path(&cwd.join(path)).as_bytes());
         aggregate.update([0]);
     }
-    format!("{:x}", aggregate.finalize())
+    hex::encode(aggregate.finalize())
 }
 
 fn untracked_paths_from_status(status: &str) -> Vec<String> {
@@ -428,7 +428,7 @@ fn hash_untracked_path(path: &Path) -> String {
         Ok(bytes) => {
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
-            format!("file:{:x}", hasher.finalize())
+            format!("file:{}", hex::encode(hasher.finalize()))
         }
         Err(error) => format!("error:{error}"),
     }
@@ -1001,6 +1001,18 @@ mod tests {
         assert_eq!(
             captured,
             ("a".repeat(MAX_CHILD_PROCESS_OUTPUT_BYTES - 1), true)
+        );
+    }
+
+    /// The untracked-file witness keeps its lowercase-hex format. The expected digest was
+    /// computed independently with Python's hashlib.
+    #[test]
+    fn untracked_file_hash_is_lowercase_hex() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), "abc").unwrap();
+        assert_eq!(
+            hash_untracked_files(temp.path(), "?? a.txt\0"),
+            "a80e42b568fb112d91344bea46a9caa102407cc618d085a434f955ff5766fd09"
         );
     }
 }
