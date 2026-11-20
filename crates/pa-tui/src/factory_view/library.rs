@@ -136,6 +136,7 @@ pub struct LibraryView {
     /// The open drill-in; `None` is the list mode.
     detail: Option<LibraryDetail>,
     error: Option<String>,
+    list_error: Option<String>,
     loading: bool,
     /// The detail document window's first row (0 = the top).
     detail_scroll: usize,
@@ -157,6 +158,7 @@ impl LibraryView {
             selected: 0,
             detail: None,
             error: None,
+            list_error: None,
             loading: false,
             detail_scroll: 0,
             viewport_rows,
@@ -178,13 +180,24 @@ impl LibraryView {
         self.machines.get(self.selected)
     }
 
-    /// Record one fetch/error line from the session UI (daemon-provided
-    /// text painted on the view's error row, so it scrubs).
+    /// Record a drill-in error without changing the list fetch outcome.
     pub fn set_error(&mut self, error: Option<String>) {
         if error.is_some() {
             self.loading = false;
         }
         self.error = error.map(|text| crate::menu_panel::scrub_controls(&text));
+    }
+
+    /// Record a list fetch outcome without clearing a failed drill-in.
+    pub fn set_list_error(&mut self, error: Option<String>) {
+        if error.is_some() {
+            self.loading = false;
+        }
+        self.list_error = error.map(|text| crate::menu_panel::scrub_controls(&text));
+    }
+
+    fn visible_error(&self) -> Option<&str> {
+        self.error.as_deref().or(self.list_error.as_deref())
     }
 
     /// Apply one refreshed list batch: the machines replace the rows and
@@ -291,7 +304,7 @@ impl LibraryView {
     /// geometry the render draws, so the scroll math and the paint never
     /// disagree.
     fn detail_visible_rows(&self, total: usize) -> usize {
-        let pinned = DETAIL_PINNED_ROWS + usize::from(self.error.is_some());
+        let pinned = DETAIL_PINNED_ROWS + usize::from(self.visible_error().is_some());
         self.viewport_rows
             .saturating_sub(pinned)
             .max(1)
@@ -367,7 +380,7 @@ impl LibraryView {
             .skip(self.detail_scroll)
             .take(visible)
             .collect();
-        if let Some(error) = &self.error {
+        if let Some(error) = self.visible_error() {
             rows.push(vec![
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Error, format!("Error: {error}")),
@@ -402,7 +415,7 @@ impl LibraryView {
             body.push(vec![
                 theme.fg_span(ThemeColor::Muted, "  Loading machines...")
             ]);
-        } else if self.machines.is_empty() && self.error.is_none() {
+        } else if self.machines.is_empty() && self.visible_error().is_none() {
             body.push(vec![
                 Span::raw("  "),
                 theme.fg_span(
@@ -427,7 +440,7 @@ impl LibraryView {
             body.push(truncate_line(&row, width, ""));
         }
         let mut tail: Vec<Line> = Vec::new();
-        if let Some(error) = &self.error {
+        if let Some(error) = self.visible_error() {
             tail.push(vec![Span::raw("")]);
             tail.push(vec![
                 Span::raw("  "),

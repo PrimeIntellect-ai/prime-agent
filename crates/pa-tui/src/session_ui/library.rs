@@ -246,20 +246,22 @@ impl super::SessionUi {
                         let selected_before = library_view
                             .selected_machine()
                             .map(|machine| machine.name.clone());
-                        library_view.set_error(None);
+                        library_view.set_list_error(None);
                         library_view.apply_machines(parse_library_machines(&data));
                         let selected_after = library_view
                             .selected_machine()
                             .map(|machine| machine.name.as_str());
                         if selected_before.as_deref() != selected_after {
+                            library_view.set_error(None);
                             self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
                         }
                     } else {
-                        library_view.set_error(Some(MALFORMED_LIBRARY_REPLY_ERROR.to_string()));
+                        library_view
+                            .set_list_error(Some(MALFORMED_LIBRARY_REPLY_ERROR.to_string()));
                     }
                 }
                 Err(message) => {
-                    library_view.set_error(Some(message));
+                    library_view.set_list_error(Some(message));
                 }
             }
         }
