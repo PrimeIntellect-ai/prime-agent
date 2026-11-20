@@ -294,43 +294,33 @@ impl AgentSessionEngine {
         if let Some(error) = resolved.error {
             anyhow::bail!("{error}");
         }
-        let mut warning = self
-            .model_resolution_warning
+        self.model_resolution_warning
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if warning.latest != resolved.warning {
-            warning.latest = resolved.warning;
-            warning.shown = false;
-        }
-        drop(warning);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest = resolved.warning;
         resolved
             .model
             .ok_or_else(|| anyhow::anyhow!("No matching model found."))
     }
 
-    /// The latest resolution's warning row while no turn has emitted it.
-    pub(super) fn unshown_model_resolution_warning(
-        &self,
-    ) -> Option<pa_types::session::CustomMessage> {
+    /// The latest resolution's warning while no turn has emitted it.
+    pub(super) fn unshown_model_resolution_warning(&self) -> Option<String> {
         let warning = self
             .model_resolution_warning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if warning.shown {
+        if warning.latest == warning.shown {
             return None;
         }
-        warning
-            .latest
-            .as_deref()
-            .map(pa_core::session_engine::model_resolution_notice::notice_message)
+        warning.latest.clone()
     }
 
-    /// Record that a turn emitted the latest resolution's warning row.
-    pub(super) fn mark_model_resolution_warning_shown(&self) {
+    /// Record the warning a turn emitted as a row.
+    pub(super) fn mark_model_resolution_warning_shown(&self, warning: String) {
         self.model_resolution_warning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .shown = true;
+            .shown = Some(warning);
     }
 
     /// Test seam: a scripted faux provider (same script contract as pa-cli's

@@ -33,13 +33,14 @@ impl AgentSessionEngine {
                 };
             }
         };
-        if let Some(row) = self.unshown_model_resolution_warning() {
+        if let Some(warning) = self.unshown_model_resolution_warning() {
+            let row = pa_core::session_engine::model_resolution_notice::notice_message(&warning);
             if !emit(EngineEvent::CustomMessage(
                 crate::session_commands::custom_message_value(&row),
             )) {
                 return TurnResult::Aborted;
             }
-            self.mark_model_resolution_warning_shown();
+            self.mark_model_resolution_warning_shown(warning);
         }
         // The preflight validates the model SERVING the run: a model whose
         // provider has no configured credential fails the run before the
