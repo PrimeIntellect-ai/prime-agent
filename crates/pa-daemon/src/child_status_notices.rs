@@ -77,13 +77,12 @@ fn well_formed_nonce(nonce: &str) -> bool {
 
 /// Record the capability in the shared, private Unix store.
 #[cfg(unix)]
-fn write_nonce_file(agent_dir: &Path, nonce: &str) {
+fn write_nonce_file(agent_dir: &Path, nonce: &str) -> std::io::Result<()> {
     use pa_core::platform::perms::{create_dir_all_private, restrict_dir, set_private_mode};
 
     let directory = nonce_dir(agent_dir);
-    if create_dir_all_private(&directory).is_err() || restrict_dir(&directory).is_err() {
-        return;
-    }
+    create_dir_all_private(&directory)?;
+    restrict_dir(&directory)?;
     // Sweep abandoned mints after the same window as the in-process store.
     if let Ok(entries) = std::fs::read_dir(&directory) {
         let now = std::time::SystemTime::now();
@@ -100,7 +99,8 @@ fn write_nonce_file(agent_dir: &Path, nonce: &str) {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     set_private_mode(&mut options);
-    let _ = options.open(directory.join(nonce));
+    options.open(directory.join(nonce))?;
+    Ok(())
 }
 
 /// Claim the capability exactly once through an atomic unlink.
@@ -114,10 +114,10 @@ fn consume_nonce_file(agent_dir: &Path, nonce: &str) -> bool {
 
 /// Mint a one-shot notice capability. Unix workers share a private file
 /// store. Other platforms use the same-process registry.
-pub(crate) fn mint(agent_dir: &Path) -> String {
+pub(crate) fn mint(agent_dir: &Path) -> std::io::Result<String> {
     let nonce = uuid::Uuid::new_v4().to_string();
     #[cfg(unix)]
-    write_nonce_file(agent_dir, &nonce);
+    write_nonce_file(agent_dir, &nonce)?;
     #[cfg(not(unix))]
     {
         let _ = agent_dir;
@@ -126,7 +126,7 @@ pub(crate) fn mint(agent_dir: &Path) -> String {
         registry.retain(|_, minted| now.duration_since(*minted) < MINT_TTL);
         registry.insert(nonce.clone(), now);
     }
-    nonce
+    Ok(nonce)
 }
 
 /// Consume a minted capability exactly once: the queue admission of a
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn a_mint_consumes_exactly_once() {
         let dir = agent_dir();
-        let nonce = mint(dir.path());
+        let nonce = mint(dir.path()).expect("mint notice");
         assert!(consume(dir.path(), Some(&nonce)), "a fresh mint consumes");
         assert!(
             !consume(dir.path(), Some(&nonce)),
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn an_external_claim_prevents_a_local_replay() {
         let dir = agent_dir();
-        let nonce = mint(dir.path());
+        let nonce = mint(dir.path()).expect("mint notice");
         assert!(nonce_dir(dir.path()).join(&nonce).is_file());
         // Another process can only claim the shared file.
         assert!(consume_nonce_file(dir.path(), &nonce));
@@ -189,14 +189,26 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = agent_dir();
-        let nonce = mint(dir.path());
+        let nonce = mint(dir.path()).expect("mint notice");
         let store = nonce_dir(dir.path());
         assert_eq!(file_mode(&store), Some(0o700));
         assert_eq!(file_mode(&store.join(&nonce)), Some(0o600));
         std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let second = mint(dir.path());
+        let second = mint(dir.path()).expect("mint notice");
         assert_eq!(file_mode(&store), Some(0o700));
         assert_eq!(file_mode(&store.join(&second)), Some(0o600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_store_write_returns_an_error() {
+        let dir = agent_dir();
+        let store = nonce_dir(dir.path());
+        std::fs::write(&store, "blocked").unwrap();
+        assert!(mint(dir.path()).is_err());
+        std::fs::remove_file(&store).unwrap();
+        let nonce = mint(dir.path()).expect("retry after restoring the store");
+        assert!(consume(dir.path(), Some(&nonce)));
     }
 
     #[test]

@@ -475,6 +475,63 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
         .expect("spawn must succeed against the fake supervisor")
 }
 
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_nonce_write_failure_retries_without_sending_an_invalid_notice() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (mut sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let dir = tempfile::tempdir().unwrap();
+    Arc::get_mut(&mut sessions.inner).unwrap().agent_dir = dir.path().to_path_buf();
+    let _handle = spawn_child(&sessions).await;
+    let record = sessions.inner.children.lock().await[0].clone();
+    record.lock().await.notice_delivered = true;
+    let store = dir.path().join("rlm-notice-nonces");
+    std::fs::write(&store, "blocked").unwrap();
+    let message = create_rlm_child_failure_message("child", "lane", "error", 1);
+    let delivery = sessions.inner.deliver_terminal_notice(&record, message);
+    tokio::pin!(delivery);
+    assert!(futures::poll!(&mut delivery).is_pending());
+    assert!(matches!(
+        follow_up_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    std::fs::remove_file(&store).unwrap();
+    delivery.await;
+    let command = follow_up_rx.recv().await.unwrap();
+    assert!(crate::child_status_notices::consume(
+        dir.path(),
+        command["rlmNoticeNonce"].as_str(),
+    ));
+    assert!(matches!(
+        follow_up_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    // A permanent store failure must not keep the task after parent close.
+    std::fs::remove_dir(&store).unwrap();
+    std::fs::write(&store, "blocked").unwrap();
+    let message = create_rlm_child_failure_message("child", "lane", "error", 2);
+    let closing = sessions.inner.deliver_terminal_notice(&record, message);
+    tokio::pin!(closing);
+    assert!(futures::poll!(&mut closing).is_pending());
+    record
+        .lock()
+        .await
+        .retirement
+        .apply(super::retirement::RetirementEvent::BeginClose);
+    tokio::time::timeout(Duration::from_millis(WATCH_POLL_INTERVAL_MS * 2), closing)
+        .await
+        .expect("parent close stops mint retries");
+    assert!(matches!(
+        follow_up_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    sessions
+        .close_children(ChildCloseReason::Killed)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn a_factory_child_settles_without_a_parent_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();

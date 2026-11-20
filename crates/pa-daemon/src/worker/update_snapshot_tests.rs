@@ -219,7 +219,7 @@ async fn the_action_snapshot_flags_parked_child_status_notices() {
 async fn a_follow_up_notice_parks_with_typed_provenance() {
     let (worker, _) = snapshot_after_create().await;
     let content = "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
-    let nonce = crate::child_status_notices::mint(&worker.config.agent_dir);
+    let nonce = crate::child_status_notices::mint(&worker.config.agent_dir).expect("mint notice");
     let notice = worker
         .dispatch(
             "follow_up",

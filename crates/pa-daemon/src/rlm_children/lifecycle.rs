@@ -886,7 +886,21 @@ impl SupervisorChildSessionsInner {
         };
         let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message))
             .unwrap_or(Value::Null);
-        let nonce = crate::child_status_notices::mint(&self.agent_dir);
+        let nonce = match crate::child_status_notices::mint(&self.agent_dir) {
+            Ok(nonce) => nonce,
+            Err(error) => {
+                eprintln!("pa-daemon: RLM child notice capability failed; retrying: {error}");
+                loop {
+                    tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                    if record.lock().await.retirement.closed_by_parent() {
+                        return;
+                    }
+                    if let Ok(nonce) = crate::child_status_notices::mint(&self.agent_dir) {
+                        break nonce;
+                    }
+                }
+            }
+        };
         let command = DaemonCommand::FollowUp {
             id: None,
             active_session_id: self.parent_active_session_id.clone(),
