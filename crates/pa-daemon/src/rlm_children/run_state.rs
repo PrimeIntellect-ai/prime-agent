@@ -1,21 +1,33 @@
-//! One child's run status: running, a verdict, or settled once the settle
-//! funnel fired. [`RunState::apply`] is its only writer.
+//! One child's run and task-prompt state. [`RunState::apply`] is their only writer.
+
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 #[derive(Debug)]
-pub(super) struct RunState(RunPhase);
+pub(super) struct RunState {
+    phase: RunPhase,
+    changed: Arc<Notify>,
+}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+enum PromptPhase {
+    Held,
+    Released,
+    Admitted,
+}
+
+#[derive(Debug, Clone)]
 enum RunPhase {
-    Running,
+    Running(PromptPhase),
     /// A verdict landed; the settle funnel has not fired yet (the terminal
     /// notice window).
-    Verdict(RunVerdict),
+    Verdict(RunVerdict, PromptPhase),
     /// The settle funnel fired: the quiescence predicate counts the run as done.
-    Settled(RunVerdict),
+    Settled(RunVerdict, PromptPhase),
 }
 
 /// How a run ended.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum RunVerdict {
     Done,
     /// The failure text; `None` only on a reseeded row (a restart relists a
@@ -26,6 +38,10 @@ pub(super) enum RunVerdict {
 }
 
 pub(super) enum RunEvent {
+    /// Release the detached task sender from the parent's turn boundary.
+    ReleasePrompt,
+    /// The child worker admitted its task prompt.
+    PromptAdmitted,
     /// The worker read idle past the settle grace: `done`, or `error` when the
     /// run's final turn failed.
     IdleRead { final_turn_error: Option<String> },
@@ -42,54 +58,146 @@ pub(super) enum RunEvent {
 }
 
 impl RunState {
-    pub(super) fn running() -> Self {
-        Self(RunPhase::Running)
+    pub(super) fn held() -> Self {
+        Self {
+            phase: RunPhase::Running(PromptPhase::Held),
+            changed: Arc::new(Notify::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn admitted() -> Self {
+        Self {
+            phase: RunPhase::Running(PromptPhase::Admitted),
+            changed: Arc::new(Notify::new()),
+        }
     }
 
     /// A row rebuilt from the spawn ledger: settled, nothing owed.
     pub(super) fn reseeded(verdict: RunVerdict) -> Self {
-        Self(RunPhase::Settled(verdict))
+        Self {
+            phase: RunPhase::Settled(verdict, PromptPhase::Admitted),
+            changed: Arc::new(Notify::new()),
+        }
     }
 
     /// Apply one transition and return whether it changed the state; an event
-    /// that does not apply in the current phase changes nothing.
+    /// that is illegal for the current prompt phase panics rather than hiding
+    /// an admission-ordering bug.
     pub(super) fn apply(&mut self, event: RunEvent) -> bool {
-        let (next, changed) = match (std::mem::replace(&mut self.0, RunPhase::Running), event) {
-            (RunPhase::Running, RunEvent::IdleRead { final_turn_error }) => (
-                RunPhase::Verdict(match final_turn_error {
-                    Some(error) => RunVerdict::Error(Some(error)),
-                    None => RunVerdict::Done,
-                }),
+        let (next, changed) = match (self.phase.clone(), event) {
+            (RunPhase::Running(PromptPhase::Held), RunEvent::ReleasePrompt) => {
+                (RunPhase::Running(PromptPhase::Released), true)
+            }
+            (RunPhase::Verdict(verdict, PromptPhase::Held), RunEvent::ReleasePrompt) => {
+                (RunPhase::Verdict(verdict, PromptPhase::Released), true)
+            }
+            (RunPhase::Settled(verdict, PromptPhase::Held), RunEvent::ReleasePrompt) => {
+                (RunPhase::Settled(verdict, PromptPhase::Released), true)
+            }
+            (RunPhase::Running(PromptPhase::Released), RunEvent::PromptAdmitted) => {
+                (RunPhase::Running(PromptPhase::Admitted), true)
+            }
+            (RunPhase::Verdict(verdict, PromptPhase::Released), RunEvent::PromptAdmitted) => {
+                (RunPhase::Verdict(verdict, PromptPhase::Admitted), true)
+            }
+            (RunPhase::Settled(verdict, PromptPhase::Released), RunEvent::PromptAdmitted) => {
+                (RunPhase::Settled(verdict, PromptPhase::Admitted), true)
+            }
+            (
+                RunPhase::Running(PromptPhase::Held)
+                | RunPhase::Verdict(_, PromptPhase::Held)
+                | RunPhase::Settled(_, PromptPhase::Held),
+                RunEvent::PromptAdmitted,
+            ) => panic!("task prompt admitted before it was released"),
+            (
+                RunPhase::Running(PromptPhase::Admitted)
+                | RunPhase::Verdict(_, PromptPhase::Admitted)
+                | RunPhase::Settled(_, PromptPhase::Admitted),
+                RunEvent::PromptAdmitted,
+            ) => panic!("task prompt admitted more than once"),
+
+            (RunPhase::Running(PromptPhase::Admitted), RunEvent::IdleRead { final_turn_error }) => {
+                (
+                    RunPhase::Verdict(
+                        match final_turn_error {
+                            Some(error) => RunVerdict::Error(Some(error)),
+                            None => RunVerdict::Done,
+                        },
+                        PromptPhase::Admitted,
+                    ),
+                    true,
+                )
+            }
+            (
+                RunPhase::Running(PromptPhase::Held | PromptPhase::Released),
+                RunEvent::IdleRead { .. },
+            ) => {
+                panic!("child read idle before its task prompt was accepted")
+            }
+            (RunPhase::Running(prompt), RunEvent::Failed(error)) => (
+                RunPhase::Verdict(RunVerdict::Error(Some(error)), prompt),
                 true,
             ),
-            (RunPhase::Running, RunEvent::Failed(error)) => {
-                (RunPhase::Verdict(RunVerdict::Error(Some(error))), true)
+            (RunPhase::Running(prompt), RunEvent::Cancel { reason }) => (
+                RunPhase::Verdict(RunVerdict::Cancelled(reason), prompt),
+                true,
+            ),
+            (RunPhase::Verdict(RunVerdict::Cancelled(_), prompt), RunEvent::CancelRefused) => {
+                (RunPhase::Running(prompt), true)
             }
-            (RunPhase::Running, RunEvent::Cancel { reason }) => {
-                (RunPhase::Verdict(RunVerdict::Cancelled(reason)), true)
+            (RunPhase::Running(prompt) | RunPhase::Verdict(_, prompt), RunEvent::DeleteCancel) => {
+                (RunPhase::Verdict(deleted_by_parent(), prompt), true)
             }
-            (RunPhase::Verdict(RunVerdict::Cancelled(_)), RunEvent::CancelRefused) => {
-                (RunPhase::Running, true)
+            (RunPhase::Settled(_, prompt), RunEvent::DeleteCancel) => {
+                (RunPhase::Settled(deleted_by_parent(), prompt), true)
             }
-            (RunPhase::Running | RunPhase::Verdict(_), RunEvent::DeleteCancel) => {
-                (RunPhase::Verdict(deleted_by_parent()), true)
+            (RunPhase::Verdict(verdict, prompt), RunEvent::Funnel) => {
+                (RunPhase::Settled(verdict, prompt), true)
             }
-            (RunPhase::Settled(_), RunEvent::DeleteCancel) => {
-                (RunPhase::Settled(deleted_by_parent()), true)
-            }
-            (RunPhase::Verdict(verdict), RunEvent::Funnel) => (RunPhase::Settled(verdict), true),
-            (phase @ RunPhase::Running, RunEvent::CancelRefused | RunEvent::Funnel)
+            (
+                phase @ (RunPhase::Running(PromptPhase::Released | PromptPhase::Admitted)
+                | RunPhase::Verdict(_, PromptPhase::Released | PromptPhase::Admitted)
+                | RunPhase::Settled(_, PromptPhase::Released | PromptPhase::Admitted)),
+                RunEvent::ReleasePrompt,
+            )
+            | (phase @ RunPhase::Running(_), RunEvent::CancelRefused | RunEvent::Funnel)
             | (
-                phase @ (RunPhase::Verdict(_) | RunPhase::Settled(_)),
+                phase @ (RunPhase::Verdict(_, _) | RunPhase::Settled(_, _)),
                 RunEvent::IdleRead { .. }
                 | RunEvent::Failed(_)
                 | RunEvent::Cancel { .. }
                 | RunEvent::CancelRefused,
             )
-            | (phase @ RunPhase::Settled(_), RunEvent::Funnel) => (phase, false),
+            | (phase @ RunPhase::Settled(_, _), RunEvent::Funnel) => (phase, false),
         };
-        self.0 = next;
+        if changed {
+            self.phase = next;
+            self.changed.notify_waiters();
+        }
         changed
+    }
+
+    pub(super) fn notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.changed)
+    }
+
+    pub(super) fn prompt_released(&self) -> bool {
+        matches!(
+            &self.phase,
+            RunPhase::Running(PromptPhase::Released | PromptPhase::Admitted)
+                | RunPhase::Verdict(_, PromptPhase::Released | PromptPhase::Admitted)
+                | RunPhase::Settled(_, PromptPhase::Released | PromptPhase::Admitted)
+        )
+    }
+
+    pub(super) fn prompt_admitted(&self) -> bool {
+        matches!(
+            &self.phase,
+            RunPhase::Running(PromptPhase::Admitted)
+                | RunPhase::Verdict(_, PromptPhase::Admitted)
+                | RunPhase::Settled(_, PromptPhase::Admitted)
+        )
     }
 
     pub(super) fn status(&self) -> &'static str {
@@ -102,18 +210,18 @@ impl RunState {
     }
 
     pub(super) fn is_running(&self) -> bool {
-        matches!(self.0, RunPhase::Running)
+        matches!(&self.phase, RunPhase::Running(_))
     }
 
     pub(super) fn verdict(&self) -> Option<&RunVerdict> {
-        match &self.0 {
-            RunPhase::Running => None,
-            RunPhase::Verdict(verdict) | RunPhase::Settled(verdict) => Some(verdict),
+        match &self.phase {
+            RunPhase::Running(_) => None,
+            RunPhase::Verdict(verdict, _) | RunPhase::Settled(verdict, _) => Some(verdict),
         }
     }
 
     pub(super) fn funnel_fired(&self) -> bool {
-        matches!(self.0, RunPhase::Settled(_))
+        matches!(&self.phase, RunPhase::Settled(_, _))
     }
 
     /// The verdict's text: the failure text or the cancel reason.
@@ -127,4 +235,69 @@ impl RunState {
 
 fn deleted_by_parent() -> RunVerdict {
     RunVerdict::Cancelled(Some("Deleted by parent orchestrator".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+
+    #[test]
+    fn prompt_release_is_idempotent_and_admission_is_one_shot() {
+        let mut run = RunState::held();
+        assert!(run.apply(RunEvent::ReleasePrompt));
+        assert!(!run.apply(RunEvent::ReleasePrompt));
+        assert!(run.prompt_released());
+        assert!(!run.prompt_admitted());
+
+        assert!(run.apply(RunEvent::PromptAdmitted));
+        assert!(run.prompt_admitted());
+        assert!(!run.apply(RunEvent::ReleasePrompt));
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run.apply(RunEvent::PromptAdmitted)
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn admission_before_release_and_idle_before_admission_are_rejected() {
+        let mut held = RunState::held();
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            held.apply(RunEvent::PromptAdmitted)
+        }))
+        .is_err());
+
+        let mut held = RunState::held();
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            held.apply(RunEvent::IdleRead {
+                final_turn_error: None,
+            })
+        }))
+        .is_err());
+
+        let mut released = RunState::held();
+        released.apply(RunEvent::ReleasePrompt);
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            released.apply(RunEvent::IdleRead {
+                final_turn_error: None,
+            })
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn late_admission_and_cancel_refusal_preserve_the_cancelled_verdict() {
+        let mut run = RunState::held();
+        run.apply(RunEvent::ReleasePrompt);
+        assert!(run.apply(RunEvent::Cancel { reason: None }));
+        assert_eq!(run.status(), "cancelled");
+
+        assert!(run.apply(RunEvent::PromptAdmitted));
+        assert_eq!(run.status(), "cancelled");
+        assert!(run.prompt_admitted());
+
+        assert!(run.apply(RunEvent::CancelRefused));
+        assert!(run.is_running());
+        assert!(run.prompt_admitted());
+    }
 }
