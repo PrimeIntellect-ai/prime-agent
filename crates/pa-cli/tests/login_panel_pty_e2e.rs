@@ -441,15 +441,15 @@ fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
     );
     assert!(
         find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_none(),
-        "the /mcp login never leaves the alternate screen"
+        "the /mcp connect flow never leaves the alternate screen"
     );
     assert!(
         find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_none(),
-        "the /mcp login never clears the screen"
+        "the /mcp connect flow never clears the screen"
     );
     assert!(
         find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_none(),
-        "the /mcp login never releases the mouse tracking (the old suspend bracket)"
+        "the /mcp connect flow never releases the mouse tracking (the old suspend bracket)"
     );
 
     harness.finish();

@@ -442,7 +442,7 @@ impl SessionUi {
                     view.editor.set_text("");
                 }
                 // Enter runs the connection's login flow through the internal auth seam
-                // (no submitted `/mcp login <name>` string).
+                // without submitting a typed slash-command argument.
                 self.pending_mcp_auth = Some(McpAuthIntent {
                     args: format!("login {server}"),
                     title: format!("Login to {label}"),

@@ -35,7 +35,7 @@ app or API key first — say so honestly instead of promising one-click.
 
 If a task would benefit from an unconnected service, name the real catalog
 entry (e.g. "Connecting Notion would let me search your workspace directly")
-and tell the user to open `/plugins` (or run `/mcp login <service>`) to connect.
+and tell the user to open `/plugins` (or open `/mcp` and select the service) to connect.
 Recommendations and catalog lookups never install anything, open a browser,
 use credentials, or request extra scopes. There is no agent-initiated connect
 call in this slice; if the user connects mid-task, the connection activates on
@@ -102,7 +102,7 @@ print(len(args["requests"]), hashlib.sha256(src.read_bytes()).hexdigest()[:12])
   (broken pagination). No partial inventory is published; re-run, and ask the
   user to reconnect if it persists.
 - `RuntimeError` — credentials are not available (`McpCredentialsUnavailable`:
-  ask the user to connect via `/plugins` or `/mcp login <service>`, never via
+  ask the user to connect via `/plugins` or open `/mcp` and select the service, never via
   environment variables), a refresh failed, or the host bridge is unavailable.
 - `McpToolError` — the server flagged the call as an error. Surface the
   message; don't blindly retry a write that may have already happened.

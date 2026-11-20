@@ -21,7 +21,7 @@ recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prim
 - Retrying a session whose worker crashed now relaunches the worker instead of reporting success while the worker is dead.
 - `/update` and `prime-agent update` now describe the update as installing the latest version, without mentioning the TypeScript version or the Rust build.
 - Session HTML exports now escape the `read` tool's line range, so a crafted `offset` in a tool call can no longer inject HTML or script into the exported page.
-- `/mcp login` and MCP OAuth token refresh now give up after 8 seconds on an unresponsive authorization server instead of hanging, which also blocked other processes waiting on the same refresh.
+- The `/mcp` connection flow and MCP OAuth token refresh now give up after 8 seconds on an unresponsive authorization server instead of hanging, which also blocked other processes waiting on the same refresh.
 - The agents view's Model column now widens to fit the longest model name when the terminal has room, instead of cutting names at 32 characters. In narrow terminals the model name is shortened first, and the Session column keeps at least half of the shared space.
 - Sessions created with `rlm.create_session` now keep the parent's telemetry opt-out (`DO_NOT_TRACK`, `PI_OFFLINE`, `PRIME_AGENT_TELEMETRY`).
 - The TUI no longer turns raw OSC 8 terminal-link sequences in model output, tool arguments, file contents, agent messages, or background shell output into clickable links; only links the TUI renders itself (such as markdown links) stay clickable.

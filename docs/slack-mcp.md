@@ -1,7 +1,7 @@
 # Slack MCP connector
 
-Open `/mcp` (or `/plugins`), search for **Slack**, and connect. You can also
-run `/mcp login slack` inside Prime Agent. Complete Slack's consent screen in
+Open `/mcp` (or `/plugins`), search for **Slack**, and select it to connect.
+Complete Slack's consent screen in
 your browser. The connection becomes available to the current session through
 the generic `mcp` Python API:
 
