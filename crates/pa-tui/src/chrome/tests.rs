@@ -17,7 +17,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ☰ machines"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ▤ machines"
     );
     let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
     assert_eq!(
@@ -145,7 +145,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ☰ machines  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ▤ machines  ·  Pursuing goal (0s)"
     );
     // The operator's 2026-09-24 color-coding directive.
     let success = theme.fg_style(ThemeColor::Success).fg;
@@ -195,7 +195,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
+        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ▤ machines"
     );
     // The all-zero dock renders its own empty state — the zero
     // readout — and the zero segments stay neutral, never green. The
@@ -212,7 +212,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory  \u{b7}  \u{2630} machines"
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory  \u{b7}  \u{25a4} machines"
     );
     assert!(frame[1]
         .iter()
@@ -290,6 +290,8 @@ fn the_collapsed_dock_counts_paused_factory_runs_apart_from_running_ones() {
             ("⚙ 0 factory".to_string(), muted),
             (" · ".to_string(), dim),
             ("◐ 1 paused".to_string(), warning),
+            ("  ·  ".to_string(), dim),
+            ("▤ machines".to_string(), muted),
         ]
     );
     let mixed = ActivityDock {
@@ -306,6 +308,8 @@ fn the_collapsed_dock_counts_paused_factory_runs_apart_from_running_ones() {
             ("⚙ 1 factory".to_string(), success),
             (" · ".to_string(), dim),
             ("◐ 1 paused".to_string(), warning),
+            ("  ·  ".to_string(), dim),
+            ("▤ machines".to_string(), muted),
         ]
     );
 }
@@ -328,7 +332,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
+        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ▤ machines"
     );
     // Two running children plus seven running descendants: ONE
     // number — the summed total, never the pair, never the
@@ -346,7 +350,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
+        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ▤ machines"
     );
     assert!(!text.contains("2,"), "no direct/nested pair: {text}");
     assert!(!text.contains("idle"), "no category breakdown: {text}");
@@ -367,7 +371,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ▤ machines"
     );
 }
 
@@ -416,6 +420,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
             " ◷ heartbeats  5m lane canary",
             " ▸ shells      1 running · 0 persistent  ·  cargo test · 12.0s",
             " ⚙ factory     2 factories · 0 running · 1 paused  ·  nightly paused",
+            " ▤ machines",
             " Pursuing goal (0s)",
         ]
     );
@@ -431,10 +436,10 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         focused: false,
         ..dock
     };
-    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 120));
+    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 160));
     assert_eq!(
         texts[1..],
-        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)"]
+        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  ▤ machines  ·  Pursuing goal (0s)"]
     );
 }
 
@@ -519,7 +524,7 @@ fn the_expanded_factory_row_counts_stored_specs_without_runs() {
         ..dock
     };
     let texts = line_texts(&render_activity_dock(&collapsed, &theme, 80));
-    assert!(texts[1].ends_with("⚙ 0 factory"), "{texts:?}");
+    assert!(texts[1].ends_with("▤ machines"), "{texts:?}");
 }
 
 /// A large activity list fits by terminal cells, including a multi-digit omitted count.

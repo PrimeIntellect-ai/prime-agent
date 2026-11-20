@@ -1,4 +1,4 @@
-//! The machine library page: the activity dock's `☰ machines` group's
+//! The machine library page: the activity dock's `▤ machines` group's
 //! destination — every machine the kernel library resolves (name,
 //! description, source), one drill-in per machine. The page is pure
 //! presentation and selection on the activity pages' picker keyset

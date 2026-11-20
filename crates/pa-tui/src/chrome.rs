@@ -842,7 +842,7 @@ pub fn render_activity_dock_segments(
             // live number to poll for it — the row reads like the goal
             // group's label-only row, and the page lists the machines.
             ActivityGroup::Library => {
-                line.push(theme.fg_span(ThemeColor::Muted, "☰ machines".to_string()));
+                line.push(theme.fg_span(ThemeColor::Muted, "▤ machines".to_string()));
             }
             ActivityGroup::Goal => line.push(goal_span(dock, theme)),
         }
@@ -969,7 +969,7 @@ fn render_expanded_dock_row(
         }
         // The library row is label-only: no count to read, no items to
         // list (the page carries the machines).
-        ActivityGroup::Library => expanded_group_row(theme, width, ("☰", "machines"), 0, &[]),
+        ActivityGroup::Library => expanded_group_row(theme, width, ("▤", "machines"), 0, &[]),
         ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],
     };
     let mut row = truncate_spans_to_width(&row, width);
