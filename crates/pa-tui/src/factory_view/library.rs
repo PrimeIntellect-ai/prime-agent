@@ -441,9 +441,13 @@ impl LibraryView {
                 list_hint(kb, "move", "close", Some("open")),
             ),
         ]);
-        // The machine window follows the selection: the header and the
-        // tail stay pinned, and the body keeps the selected row in view.
-        let budget = self.viewport_rows.max(header.len() + tail.len() + 1);
+        // Keep the selected machine before chrome when the dock is short.
+        let budget = self.viewport_rows.max(1);
+        if header.len() + tail.len() + 1 > budget {
+            tail.retain(|row| row.iter().any(|span| !span.content.trim().is_empty()));
+        }
+        header.truncate(budget.saturating_sub(tail.len() + 1));
+        tail.drain(..tail.len().saturating_sub(budget - 1));
         let body_budget = budget.saturating_sub(header.len() + tail.len()).max(1);
         let start = if body.len() > body_budget {
             self.selected.saturating_sub(body_budget - 1)
@@ -707,6 +711,51 @@ mod tests {
         let grown = plain(&view.render_frame(100, 30));
         assert!(grown.contains("machine-12"), "{grown}");
         assert!(grown.contains("▸ machine-2"), "{grown}");
+    }
+
+    #[test]
+    fn the_frame_keeps_the_enter_target_visible_above_the_speed_footer() {
+        let machines = (0..13)
+            .map(|index| LibraryMachine {
+                name: format!("machine-{index}"),
+                description: String::new(),
+                source: "repo".to_string(),
+            })
+            .collect();
+        let mut view = crate::view::AgentView::new(theme());
+        view.library_view = Some(LibraryView::new(machines, 20));
+        view.chrome.speed_text = Some("42 tok/s".to_string());
+        for _ in 0..12 {
+            let action = view
+                .library_view
+                .as_mut()
+                .unwrap()
+                .handle_key("down", &kb());
+            assert_eq!(action, LibraryViewAction::None);
+        }
+        for (terminal_rows, height) in [(6, 6), (30, 6), (30, 30)] {
+            // The frame size also wins while the cached terminal size catches up after resize.
+            view.set_terminal_rows(terminal_rows);
+            let frame = view.render_frame(100, height);
+            let text = plain(&frame);
+            assert_eq!(frame.len(), height, "{text}");
+            assert!(text.contains("▸ machine-12"), "height {height}: {text}");
+            assert!(text.contains("42 tok/s"), "height {height}: {text}");
+            assert_eq!(
+                view.library_view
+                    .as_mut()
+                    .unwrap()
+                    .handle_key("enter", &kb()),
+                LibraryViewAction::DrillIn {
+                    name: "machine-12".to_string(),
+                }
+            );
+            if height == 30 {
+                assert!(text.contains("machine library"), "{text}");
+                assert!(text.contains("machine-0"), "{text}");
+                assert!(text.contains("Esc close"), "{text}");
+            }
+        }
     }
 
     #[test]
