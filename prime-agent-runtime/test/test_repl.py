@@ -906,6 +906,33 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
 
+    def test_discipline_screen_unbinds_handler_names_on_the_next_pass(self):
+        # The handler deletes the class name, so the next pass reads the
+        # module's import. The function is never called.
+        code = (
+            "import time as t\n"
+            "def f():\n"
+            "    class C:\n"
+            "        t = None\n"
+            "        for i in range(2):\n"
+            "            if i:\n"
+            "                t.sleep(5)\n"
+            "            try:\n"
+            "                raise ValueError\n"
+            "            except ValueError as t:\n"
+            "                pass\n"
+        )
+        events = self.repl.execute("handler-next-pass", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_lets_a_cell_too_deep_to_read_run(self):
+        # The parser and the compiler take this chain; the screen's walk runs
+        # out of depth, so it declines nothing.
+        code = "x = " + "+".join(["1"] * 600) + "\nprint(x)\n"
+        events = self.repl.execute("deep-chain", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("600", stream_text(events, "stdout"))
+
     def test_discipline_screen_unbinds_deleted_names(self):
         # After `del`, a class lookup goes on to the enclosing scope.
         code = (
@@ -1040,6 +1067,20 @@ class ReplTest(unittest.TestCase):
         for rid, code in (
             ("fn-local-before-shadow", "import time\ndef f():\n    time.sleep(5)\n    time = None\n"),
             ("fn-local-before-import", "def f():\n    t.sleep(5)\n    import time as t\n"),
+            # A handler name and a match capture are locals too.
+            (
+                "fn-local-before-handler",
+                "import time\ndef f():\n    time.sleep(5)\n    try:\n        pass\n"
+                "    except Exception as time:\n        pass\n",
+            ),
+            (
+                "fn-local-before-capture",
+                "import time\ndef f(x):\n    time.sleep(5)\n    match x:\n        case time:\n            pass\n",
+            ),
+            (
+                "fn-local-in-case-body",
+                "import time\ndef f(x):\n    time.sleep(5)\n    match x:\n        case 1:\n            time = None\n",
+            ),
         ):
             events = self.repl.execute(rid, code + "print('defined')")
             self.assertIsNone(one(events, "error"), rid)
@@ -1278,6 +1319,18 @@ class ReplTest(unittest.TestCase):
                 "class-global",
                 "class C:\n    global t\n    import time as t\ndef wait():\n    t.sleep(5)\n",
             ),
+            # A global name in a nested scope reads the module after the
+            # outermost definition.
+            (
+                "nested-global",
+                "def f():\n    def g():\n        global t\n        t.sleep(5)\n    return g\nimport time as t\n",
+            ),
+            (
+                "class-global-in-function",
+                "def f():\n    class C:\n        global t\n        t.sleep(5)\nimport time as t\n",
+            ),
+            # A method reads the module after its class, never the class body.
+            ("method-late-import", "class C:\n    def m(self):\n        t.sleep(5)\nimport time as t\n"),
             # A nonlocal declaration puts the import in the enclosing function.
             (
                 "nonlocal-escape",
@@ -1327,6 +1380,59 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("global-elsewhere", code)
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
+        # A nested function reads a global or nonlocal name through the
+        # function that declares it: that function's binding at the nested
+        # definition, and every later binding of the name. A call can rebind
+        # it too.
+        view = "def f():\n    global t\n    t = None\n    def g():\n        t.sleep(5)\n    return g\n"
+        for rid, code in (
+            ("global-view-rebound", view + "g = f()\nimport time as t\n"),
+            (
+                "nonlocal-view-rebound",
+                "def e():\n    t = None\n    def f():\n        nonlocal t\n        t = None\n"
+                "        def g():\n            t.sleep(5)\n        import time as t\n        return g\n    return f\n",
+            ),
+            (
+                "global-call-in-function",
+                "def init():\n    global t\n    import time as t\n"
+                "def f():\n    global t\n    t = None\n    init()\n    t.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        events = self.repl.execute("global-view", "import time as t\n" + view + "print('defined')\n")
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+        # A method that declares a name global reads the module after its class.
+        code = "class C:\n    def m(self):\n        global t\n        t.sleep(5)\nimport time as t\n"
+        events = self.repl.execute("method-global", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # A body that runs later sees the bindings its scope has at the
+        # definition and the ones it can make after it, not the ones replaced
+        # before it.
+        clock = "import time, types\ntime = types.SimpleNamespace(sleep=print)\n"
+        for rid, code in (
+            ("shadow-before-def", "def f():\n    time.sleep(5)\nf()\n"),
+            ("shadow-before-lambda", "g = lambda: time.sleep(5)\ng()\n"),
+            ("shadow-before-generator", "list(time.sleep(5) for _ in range(1))\n"),
+            ("lambda-in-comprehension", "fs = [(lambda: time.sleep(5)) for _ in range(1)]\nfs[0]()\n"),
+            ("comprehension-target", "import time as t\n[t.sleep(5) for t in [time]]\n"),
+        ):
+            events = self.repl.execute(rid, clock + code)
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
+        # In a loop, every binding of the loop can come after the definition.
+        for rid, body in (
+            ("loop-import-after-def", "        def f():\n            t.sleep(5)\n        import time as t\n"),
+            (
+                "loop-import-before-def",
+                "        import time as t\n        g()\n        t = None\n"
+                "        def f():\n            t.sleep(5)\n        g = f\n",
+            ),
+        ):
+            code = "def outer(g):\n    for i in range(2):\n" + body
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
         # A nonlocal import binds in the nearest function that binds the name,
         # not in the functions around that one.
         code = (

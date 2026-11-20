@@ -127,6 +127,19 @@ class _BindingCollector(ast.NodeVisitor):
         self.visit(node.value)
         self._bind(node.target.id, None, walrus=True)
 
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            # The handler binds the name, and Python deletes it afterwards.
+            self._bind(node.name, None)
+            self._bind(node.name, _UNBOUND)
+        self.generic_visit(node)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        for case in node.cases:
+            for name in _pattern_names(case.pattern):
+                self._bind(name, None)
+        self.generic_visit(node)
+
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if node.value is None and isinstance(node.target, ast.Name):
             self.annotated.add(node.target.id)
@@ -202,6 +215,70 @@ def _jumps(loop: ast.For | ast.AsyncFor | ast.While, kind: type) -> bool:
     return False
 
 
+class _EventCollector(_BindingCollector):
+    """The bindings one scope body makes with the place of each one, and the
+    spans of its loops from the header to the end of the body."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple[tuple[int, int], str, object]] = []
+        self.loops: list[tuple[tuple[int, int], tuple[int, int]]] = []
+        self._at = (0, 0)
+
+    def visit(self, node: ast.AST) -> None:
+        saved = self._at
+        if isinstance(node, (ast.stmt, ast.expr, ast.excepthandler, ast.alias, ast.pattern)):
+            self._at = (node.lineno, node.col_offset)
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            last = node.body[-1]
+            self.loops.append((self._at, (last.end_lineno, last.end_col_offset)))
+        super().visit(node)
+        self._at = saved
+
+    def _bind(self, name: str, binding: object, walrus: bool = False) -> None:
+        self.events.append((self._at, name, binding))
+
+
+def _index(scope: ast.AST) -> tuple[dict[str, list], list]:
+    """The binding events of one function or module body by name, and the
+    spans of its loops."""
+    collector = _EventCollector()
+    for statement in scope.body if isinstance(scope.body, list) else [scope.body]:
+        collector.visit(statement)
+    events: dict[str, list] = {}
+    for at, name, binding in collector.events:
+        events.setdefault(name, []).append((at, binding))
+    return events, collector.loops
+
+
+class _After:
+    """The bindings an indexed scope body can make after one node: the ones
+    later in the source, and every one in a loop around the node, which can
+    run again. A lookup reads the events of its own name only."""
+
+    __slots__ = ("index", "start", "end")
+
+    def __init__(self, index: tuple[dict[str, list], list], start: tuple, end: tuple) -> None:
+        self.index = index
+        self.start = start
+        self.end = end
+
+    def get(self, name: str) -> frozenset:
+        events, loops = self.index
+        made = events.get(name)
+        if not made:
+            return frozenset()
+        around = [(first, last) for first, last in loops if first <= self.start and self.end <= last]
+        return frozenset(
+            binding
+            for at, binding in made
+            if at > self.end or any(first <= at <= last for first, last in around)
+        )
+
+
+_NO_AFTER = _After(({}, []), (0, 0), (0, 0))
+
+
 def _has_walrus(nodes: list[ast.AST]) -> bool:
     """Whether a walrus in the expressions can bind a name."""
     return any(isinstance(inner, ast.NamedExpr) for node in nodes for inner in ast.walk(node))
@@ -269,26 +346,29 @@ def _pattern_names(pattern: ast.AST | None) -> set[str]:
 
 
 class _Scope:
-    """One lexical scope: its bindings at the walk's point, every binding the
-    scope makes, the bindings nested bodies make in it through `global` or
-    `nonlocal`, the names it declares global, and the scope that encloses
-    it."""
+    """One lexical scope: its node, its bindings at the walk's point, the
+    bindings nested bodies make in it through `global` or `nonlocal`, the
+    names it declares global, the bindings its nearest looked-up enclosing
+    scope can make after this scope's definition, and the scope that
+    encloses it."""
 
-    __slots__ = ("kind", "bindings", "body_bindings", "escaped", "global_names", "parent")
+    __slots__ = ("kind", "node", "bindings", "escaped", "global_names", "after", "parent")
 
     def __init__(
         self,
         kind: str,
+        node: ast.AST,
         parent: "_Scope | None" = None,
-        body_bindings: dict[str, frozenset] | None = None,
         escaped: dict[str, frozenset] | None = None,
         global_names: frozenset[str] = frozenset(),
+        after: _After = _NO_AFTER,
     ) -> None:
         self.kind = kind
+        self.node = node
         self.bindings: dict[str, frozenset] = {}
-        self.body_bindings = body_bindings or {}
         self.escaped = escaped or {}
         self.global_names = global_names
+        self.after = after
         self.parent = parent
 
 
@@ -298,27 +378,41 @@ def _resolve(scope: _Scope, name: str) -> frozenset:
     A scope passes the lookup on to its enclosing scope on the paths where
     it leaves the name unbound, or to the module scope when it declares the
     name global. A function body runs later than its definition, so past a
-    function boundary a scope can hold any binding it makes, and any binding
-    a nested body makes in it. A class namespace is not part of a nested
-    scope's lookup chain, so only the immediate scope counts when it is a
-    class.
+    function boundary a scope can also hold the bindings it can make after
+    that definition, and the bindings nested bodies make in it. A nested
+    lookup of a name that a function declares global reads the function's
+    binding at the nested definition in place of the module's. A class
+    namespace is not part of a nested scope's lookup chain, so only the
+    immediate scope counts when it is a class.
     """
     found: set[object] = set()
     current: _Scope | None = scope
+    after = _NO_AFTER
+    view: frozenset | None = None
     later = False
     while current is not None:
         parent = current.parent
         if current is scope or current.kind != "class":
-            possible = current.bindings.get(name, _FALLTHROUGH)
-            if later:
-                possible = possible | current.body_bindings.get(name, frozenset())
-                possible = possible | current.escaped.get(name, frozenset())
-            found |= possible - _FALLTHROUGH
-            if _UNBOUND not in possible:
-                return frozenset(found)
-            if name in current.global_names:
-                while parent is not None and parent.parent is not None:
-                    parent = parent.parent
+            declared_global = name in current.global_names
+            if declared_global and current is not scope:
+                view = current.bindings.get(name)
+            else:
+                possible = current.bindings.get(name, _FALLTHROUGH) if view is None else view
+                if later:
+                    possible = possible | after.get(name)
+                    possible = possible | current.escaped.get(name, frozenset())
+                found |= possible - _FALLTHROUGH
+                if _UNBOUND not in possible:
+                    return frozenset(found)
+            after = current.after
+            if declared_global:
+                # The lookup goes on in the module scope.
+                top = current
+                while top.parent is not None and top.parent.parent is not None:
+                    top = top.parent
+                    later = later or top.kind == "function"
+                after = top.after
+                parent = top.parent
         later = later or current.kind == "function"
         current = parent
     return frozenset(found | _FALLTHROUGH)
@@ -362,9 +456,11 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
     where it runs, before the rest of its statement, and only on the paths
     that run it. A call can run a body that binds a name through `global`
     or `nonlocal`. A name a function body binds is local to the whole body,
-    as Python resolves it: unbound until its binding runs. A function's
-    defaults, decorators, and annotations run in the scope that defines it.
-    A call the walk reaches twice keeps the bindings of both visits.
+    as Python resolves it: unbound until its binding runs. A function body
+    sees the bindings its enclosing scopes have at its definition and the
+    ones they can make after it. A function's defaults, decorators, and
+    annotations run in the scope that defines it. A call the walk reaches
+    twice keeps the bindings of both visits.
     """
     bindings_by_call: dict[int, frozenset] = {}
 
@@ -379,6 +475,21 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
                 possible = _SHADOW
             scope.bindings[name] = possible
 
+    indexes: dict[int, tuple[dict[str, list], list]] = {}
+
+    def later_bindings(scope: _Scope, node: ast.AST) -> _After:
+        # The bindings the nearest looked-up scope around `node` can make
+        # after `node`.
+        while scope.kind == "class":
+            scope = scope.parent  # type: ignore[assignment]
+        if isinstance(scope.node, _COMPREHENSIONS):
+            # A comprehension's table holds its targets from the start.
+            return _NO_AFTER
+        if id(scope.node) not in indexes:
+            indexes[id(scope.node)] = _index(scope.node)
+        start = (node.lineno, node.col_offset)
+        return _After(indexes[id(scope.node)], start, (node.end_lineno, node.end_col_offset))
+
     def escape(scope: _Scope) -> None:
         # A call can run a body that binds a name through `global` or
         # `nonlocal`. The nearest function or module scope runs the call now.
@@ -386,6 +497,15 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             scope = scope.parent  # type: ignore[assignment]
         if scope.escaped:
             scope.bindings = _add(scope.bindings, scope.escaped)
+        if scope.global_names:
+            # The call can also bind a name this function declares global.
+            module = scope
+            while module.parent is not None:
+                module = module.parent
+            rebound = {
+                name: made for name, made in module.escaped.items() if name in scope.global_names
+            }
+            scope.bindings = _add(scope.bindings, rebound)
 
     def walk_block(statements: object, scope: _Scope) -> None:
         for statement in statements:  # type: ignore[union-attr]
@@ -511,14 +631,15 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             body = node.body if isinstance(node.body, list) else [node.body]
             inner = _Scope(
                 "function",
+                node,
                 scope,
-                _scope_bindings(node),
                 _escaped_bindings(node, ast.Nonlocal),
                 _global_names(body),
+                later_bindings(scope, node),
             )
             # A parameter is bound on entry; every other local is unbound
             # until its binding runs. Neither is the enclosing scope's name.
-            inner.bindings = dict.fromkeys(inner.body_bindings, _SHADOW)
+            inner.bindings = dict.fromkeys(_scope_bindings(node), _SHADOW)
             walk_block(body, inner)
             return
         if isinstance(node, ast.ClassDef):
@@ -526,17 +647,19 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
                 walk(expression, scope)
             for keyword in node.keywords:
                 walk(keyword.value, scope)
-            walk_block(node.body, _Scope("class", scope, global_names=_global_names(node.body)))
+            inner = _Scope(
+                "class",
+                node,
+                scope,
+                global_names=_global_names(node.body),
+                after=later_bindings(scope, node),
+            )
+            walk_block(node.body, inner)
             # The class body runs now and can bind a name through `global`.
             escape(scope)
             return
         if isinstance(node, ast.Module):
-            module = _Scope(
-                "module",
-                body_bindings=_bindings_of(node.body),
-                escaped=_escaped_bindings(node, ast.Global),
-            )
-            walk_block(node.body, module)
+            walk_block(node.body, _Scope("module", node, escaped=_escaped_bindings(node, ast.Global)))
             return
         if isinstance(node, _COMPREHENSIONS):
             # The first iterable runs in the enclosing scope, before the
@@ -546,8 +669,8 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             # A generator expression runs as it is consumed, later than its
             # definition.
             kind = "function" if isinstance(node, ast.GeneratorExp) else "comprehension"
-            inner = _Scope(kind, scope, _scope_bindings(node))
-            inner.bindings = dict(inner.body_bindings)
+            inner = _Scope(kind, node, scope, after=later_bindings(scope, node))
+            inner.bindings = dict(_scope_bindings(node))
             for index, generator in enumerate(node.generators):
                 if index:
                     walk(generator.iter, inner)
@@ -667,7 +790,7 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
         for child in ast.iter_child_nodes(node):
             walk(child, scope)
 
-    walk(tree, _Scope("module"))
+    walk(tree, _Scope("module", tree))
     return bindings_by_call
 
 
@@ -701,13 +824,14 @@ def declined_reason(code: str) -> CellDeclinedError | None:
     can hold a banned binding on any path that reaches it, and a parameter or
     an assignment that shadows an import name on every path is not the
     imported call. A cell that does not parse declines nothing: the compile
-    step reports the SyntaxError.
+    step reports the SyntaxError. A cell that nests too deep for the walk
+    declines nothing too, and the compile step runs it or reports the error.
     """
     try:
         tree = ast.parse(code)
-    except (SyntaxError, ValueError):
+        call_bindings = _call_bindings(tree)
+    except (SyntaxError, ValueError, RecursionError):
         return None
-    call_bindings = _call_bindings(tree)
     subprocess_import = _subprocess_import(tree)
 
     def head(node: ast.AST) -> str:
