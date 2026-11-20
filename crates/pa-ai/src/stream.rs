@@ -70,8 +70,7 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .map(|block| match block {
             crate::types::UserOrToolContent::Text(text) => text.text.chars().count() as u64,
             crate::types::UserOrToolContent::Image(_) => 4_800,
-            // Four images' worth (~4,800 tokens): a short clip at the attach-video size cap.
-            crate::types::UserOrToolContent::Video(_) => 19_200,
+            crate::types::UserOrToolContent::Video(_) => pa_types::ai::VIDEO_ESTIMATED_TOKENS * 4,
             crate::types::UserOrToolContent::Raw(value) => {
                 serde_json::to_string(value).map_or(0, |json| json.chars().count() as u64)
             }
@@ -278,6 +277,34 @@ mod tests {
             estimated_input_tokens(&context),
             (3_000 + serialized.chars().count() as u64).div_ceil(4)
         );
+    }
+
+    #[test]
+    fn video_budget_leaves_room_for_the_measured_longest_clip() {
+        let model = test_model(64_000, 32_000);
+        for role in ["user", "toolResult"] {
+            let mut context = text_context(80_000); // 20K text tokens
+            context.messages.push(
+                serde_json::from_value(json!({
+                    "role": role, "toolCallId": "c", "toolName": "python_repl", "isError": false,
+                    "content": [{"type": "video", "data": "AAAA", "mimeType": "video/mp4"}],
+                    "timestamp": 0,
+                }))
+                .expect("video message"),
+            );
+            let mut options = StreamOptions {
+                max_tokens: Some(32_000),
+                ..Default::default()
+            };
+            clamp_output_budget(&model, &context, Some(&mut options));
+            // The old 4,800-token estimate left 32K output tokens, which cannot fit even the
+            // measured 12.3K-token clip. The fixed budget reserves more than that workload.
+            let output = options.max_tokens.expect("output budget");
+            assert!(
+                output > 0 && output <= 64_000 - 20_000 - 12_300,
+                "{role}: {output}"
+            );
+        }
     }
 
     #[test]

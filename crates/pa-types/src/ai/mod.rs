@@ -261,6 +261,11 @@ pub struct VideoContent {
     pub rest: JsonMap,
 }
 
+/// Fixed video budget shared by request clamping and context compaction. This exceeds the
+/// measured 12.3K-token short-clip workload; duration/frame-aware budgeting remains a follow-up.
+/// File size alone cannot provide a universal upper bound on provider video tokenization.
+pub const VIDEO_ESTIMATED_TOKENS: u64 = 32_768;
+
 pub const PYTHON_TOOL_NAME: &str = "python_repl";
 
 #[must_use]

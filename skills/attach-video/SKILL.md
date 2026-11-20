@@ -1,6 +1,6 @@
 ---
 name: attach-video
-description: Load an on-disk video clip (MP4, WebM) into the model's context as a viewable attachment so the model can directly WATCH it — for screen recordings, gameplay captures, or short camera clips. Use this when you need to perceive what happens over time in a video. Requires a model that declares video input (`"video"` in its model `input`) on an OpenAI-compatible chat-completions provider; errors clearly otherwise.
+description: Load an on-disk video clip (MP4, WebM) into the model's context as a viewable attachment so the model can directly WATCH it — for screen recordings, gameplay captures, or short camera clips. Use this when you need to perceive what happens over time in a video. Requires a model that declares video input (`"video"` in its model `input`). Only OpenAI-compatible chat-completions providers receive the video; other providers receive an omission placeholder.
 ---
 
 # Attach Video
@@ -38,8 +38,21 @@ limit for one attachment); trim or downscale longer recordings first (for exampl
 replayed to the model on every later turn, so prefer short, low-resolution
 clips.
 
-Supported formats: MP4, WebM. The skill errors if a file is not a supported
-video, is too large, or if the current model does not declare video input
+Supported formats: MP4, WebM. Before attaching, the skill checks MP4 box
+boundaries and requires `ftyp`, `moov`, and a video track handler. For WebM it
+checks EBML element boundaries, the `webm` DocType, and a video track in the
+Segment's Tracks metadata. Truncated declared lengths and missing video tracks
+produce a local error.
+
+These are structural checks, not a full decode. The skill does not inspect
+compressed frames, MP4 sample tables, or WebM Cluster contents. Unknown-length
+WebM Segments and Clusters are allowed; an unknown-length Cluster consumes the
+remaining bytes, so Tracks must appear before it. The provider can still reject
+an unsupported codec, missing media data, or damaged frames. No transcoder or
+external media probe is required.
+
+The skill errors if a file is not a supported video, is too large, or if the
+current model does not declare video input
 (`"input": ["text", "image", "video"]` in `models.json`). Only
 OpenAI-compatible chat-completions providers receive the video itself; other
 providers, and models without declared video input, see a placeholder saying

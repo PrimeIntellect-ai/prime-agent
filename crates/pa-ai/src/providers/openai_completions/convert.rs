@@ -701,133 +701,90 @@ mod tests {
         assert!((usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
     }
 
-    fn video_model() -> Model {
+    fn video_context(model: &Model, role: &str) -> Context {
+        let video = json!({"type": "video", "data": "AAAA", "mimeType": "video/mp4"});
+        let mut messages = Vec::new();
+        if role == "toolResult" {
+            let mut assistant = crate::event_stream::initial_assistant_message(
+                &model.api,
+                &model.provider,
+                &model.id,
+            );
+            assistant.content = vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_1".into(),
+                name: "python_repl".into(),
+                arguments: Map::default(),
+                thought_signature: None,
+                rest: Map::default(),
+            })];
+            assistant.stop_reason = StopReason::ToolUse;
+            messages.push(crate::types::Message::Assistant(assistant));
+        }
+        messages.push(
+            serde_json::from_value(json!({
+                "role": role, "toolCallId": "call_1", "toolName": "python_repl", "isError": false,
+                "content": [{"type": "text", "text": "Watch clip"}, video], "timestamp": 1,
+            }))
+            .expect("video message"),
+        );
+        Context {
+            system_prompt: None,
+            messages,
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn video_is_serialized_from_user_and_tool_result_messages() {
         let mut model = model("intercept", 0.0, 0.0);
-        model.input = vec![ModelInput::Text, ModelInput::Image, ModelInput::Video];
-        model
+        model.input.push(ModelInput::Video);
+        for role in ["user", "toolResult"] {
+            let params = convert_messages(
+                &model,
+                &video_context(&model, role),
+                &crate::providers::openai_completions::get_compat(&model),
+            );
+            let mut content = vec![
+                json!({"type": "text", "text": "Watch clip"}),
+                json!({"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}}),
+            ];
+            if role == "toolResult" {
+                assert_eq!(
+                    params[params.len() - 2],
+                    json!({
+                        "role": "tool", "content": "Watch clip", "tool_call_id": "call_1",
+                    })
+                );
+                content[0] = json!({"type": "text", "text": "Attached media from tool result:"});
+            }
+            assert_eq!(
+                params.last(),
+                Some(&json!({"role": "user", "content": content}))
+            );
+        }
     }
 
-    fn context(messages: &Value) -> Context {
-        serde_json::from_value(json!({ "messages": messages })).expect("context parses")
-    }
-
-    fn user_video_context() -> Context {
-        context(&json!([{
-            "role": "user",
-            "content": [
-                { "type": "text", "text": "What happens?" },
-                { "type": "video", "data": "AAAA", "mimeType": "video/mp4" },
-            ],
-            "timestamp": 1,
-        }]))
-    }
-
-    fn tool_result_video_context() -> Context {
-        context(&json!([
-            { "role": "user", "content": "Watch clip.mp4", "timestamp": 1 },
-            {
-                "role": "assistant",
-                "content": [{
-                    "type": "toolCall",
-                    "id": "call_1",
-                    "name": "python_repl",
-                    "arguments": { "code": "await attach_video('clip.mp4')" },
-                }],
-                "api": "openai-completions",
-                "provider": "intercept",
-                "model": "m",
-                "usage": {
-                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
-                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
-                },
-                "stopReason": "toolUse",
-                "timestamp": 2,
-            },
-            {
-                "role": "toolResult",
-                "toolCallId": "call_1",
-                "toolName": "python_repl",
-                "content": [
-                    { "type": "text", "text": "Loaded 1 video(s) into context: clip.mp4" },
-                    { "type": "video", "data": "AAAA", "mimeType": "video/mp4" },
-                ],
-                "isError": false,
-                "timestamp": 3,
-            },
-        ]))
-    }
-
-    fn convert(model: &Model, context: &Context) -> Vec<Value> {
-        convert_messages(
-            model,
-            context,
-            &crate::providers::openai_completions::get_compat(model),
-        )
-    }
-
-    #[test]
-    fn user_video_block_serializes_as_a_video_url_part() {
-        assert_eq!(
-            convert(&video_model(), &user_video_context()),
-            vec![json!({
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": "What happens?" },
-                    { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,AAAA" } },
-                ],
-            })]
-        );
-    }
-
-    /// Tool messages carry text only, so a tool-result video rides in the follow-up user message,
-    /// the same bridge tool-result images take.
-    #[test]
-    fn tool_result_video_is_attached_in_a_follow_up_user_message() {
-        let params = convert(&video_model(), &tool_result_video_context());
-        assert_eq!(
-            params[params.len() - 2..],
-            [
-                json!({
-                    "role": "tool",
-                    "content": "Loaded 1 video(s) into context: clip.mp4",
-                    "tool_call_id": "call_1",
-                }),
-                json!({
-                    "role": "user",
-                    "content": [
-                        { "type": "text", "text": "Attached media from tool result:" },
-                        { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,AAAA" } },
-                    ],
-                }),
-            ]
-        );
-    }
-
-    /// A vision model that does not declare `"video"` input never receives a video part: user and
-    /// tool-result videos become placeholders, like images on a non-vision model.
     #[test]
     fn videos_become_placeholders_without_declared_video_input() {
-        let mut model = video_model();
-        model.input = vec![ModelInput::Text, ModelInput::Image];
-        assert_eq!(
-            convert(&model, &user_video_context()),
-            vec![json!({
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": "What happens?" },
-                    { "type": "text", "text": "(video omitted: model does not support video)" },
-                ],
-            })]
-        );
-        let params = convert(&model, &tool_result_video_context());
-        assert_eq!(
-            params.last(),
-            Some(&json!({
-                "role": "tool",
-                "content": "Loaded 1 video(s) into context: clip.mp4\n(tool video omitted: model does not support video)",
-                "tool_call_id": "call_1",
-            }))
-        );
-        assert!(!Value::Array(params).to_string().contains("video_url"));
+        let mut model = model("intercept", 0.0, 0.0);
+        model.input.push(ModelInput::Image); // Image capability alone does not permit video.
+        for role in ["user", "toolResult"] {
+            let params = convert_messages(
+                &model,
+                &video_context(&model, role),
+                &crate::providers::openai_completions::get_compat(&model),
+            );
+            let expected = if role == "user" {
+                json!({"role": "user", "content": [
+                    {"type": "text", "text": "Watch clip"},
+                    {"type": "text", "text": "(video omitted: model does not support video)"}]})
+            } else {
+                json!({"role": "tool", "tool_call_id": "call_1",
+                    "content": "Watch clip
+(tool video omitted: model does not support video)"})
+            };
+            assert_eq!(params.last(), Some(&expected));
+            assert!(!Value::Array(params).to_string().contains("video_url"));
+        }
     }
 }

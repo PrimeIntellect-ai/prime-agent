@@ -295,7 +295,10 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     .iter()
                     .filter_map(|block| match block {
                         UserOrToolContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
+                        UserOrToolContent::Video(_) => {
+                            Some(crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER.to_string())
+                        }
+                        UserOrToolContent::Image(_) | UserOrToolContent::Raw(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -673,5 +676,46 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    #[test]
+    fn tool_result_video_becomes_placeholder_for_video_model() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "gemini-3-pro", "name": "Gemini",
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://example.invalid", "reasoning": false,
+            "input": ["text", "video"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 8192,
+        }))
+        .unwrap();
+        let context: Context = serde_json::from_value(json!({ "messages": [
+            {
+                "role": "assistant",
+                "content": [{ "type": "toolCall", "id": "call_1", "name": "python_repl", "arguments": {} }],
+                "api": model.api, "provider": model.provider, "model": model.id,
+                "usage": crate::types::Usage::default(), "stopReason": "toolUse", "timestamp": 0,
+            },
+            {
+                "role": "toolResult", "toolCallId": "call_1", "toolName": "python_repl",
+                "content": [
+                    { "type": "text", "text": "Loaded clip.mp4" },
+                    { "type": "video", "data": "AAAA", "mimeType": "video/mp4" },
+                ],
+                "isError": false, "timestamp": 0,
+            },
+        ] }))
+        .unwrap();
+
+        assert_eq!(
+            convert_messages(&model, &context),
+            vec![
+                json!({ "role": "model", "parts": [{ "functionCall": { "name": "python_repl", "args": {} } }] }),
+                json!({ "role": "user", "parts": [{ "functionResponse": {
+                    "name": "python_repl",
+                    "response": { "output": format!("Loaded clip.mp4\n{}", crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER) },
+                } }] }),
+            ]
+        );
     }
 }

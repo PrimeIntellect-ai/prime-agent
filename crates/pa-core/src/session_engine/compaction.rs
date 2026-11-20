@@ -90,6 +90,9 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
                     .iter()
                     .filter_map(|block| match block {
                         pa_types::ai::UserContentBlock::Text(text) => Some(chars(&text.text)),
+                        pa_types::ai::UserContentBlock::Video(_) => {
+                            Some(pa_types::ai::VIDEO_ESTIMATED_TOKENS * 4)
+                        }
                         _ => None,
                     })
                     .sum(),
@@ -120,7 +123,9 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
                     .map(|block| match block {
                         pa_types::ai::UserContentBlock::Text(text) => chars(&text.text),
                         pa_types::ai::UserContentBlock::Image(_) => 4_800, // ~1200 tokens
-                        pa_types::ai::UserContentBlock::Video(_) => 19_200, // ~4800 tokens
+                        pa_types::ai::UserContentBlock::Video(_) => {
+                            pa_types::ai::VIDEO_ESTIMATED_TOKENS * 4
+                        }
                         // Un-modeled blocks have no modeled size; TS sizes
                         // only typed blocks, so estimate zero.
                         pa_types::ai::UserContentBlock::Raw(_) => 0,
@@ -135,7 +140,9 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
                 .map(|block| match block {
                     pa_types::ai::UserContentBlock::Text(text) => chars(&text.text),
                     pa_types::ai::UserContentBlock::Image(_) => 4_800,
-                    pa_types::ai::UserContentBlock::Video(_) => 19_200,
+                    pa_types::ai::UserContentBlock::Video(_) => {
+                        pa_types::ai::VIDEO_ESTIMATED_TOKENS * 4
+                    }
                     pa_types::ai::UserContentBlock::Raw(_) => 0,
                 })
                 .sum(),
@@ -607,6 +614,26 @@ mod tests {
             harness_state_fingerprint: None,
             timestamp,
         })
+    }
+
+    #[test]
+    fn a_video_triggers_compaction_before_the_measured_clip_can_overflow() {
+        for role in ["user", "custom", "toolResult"] {
+            let video: AgentMessage = serde_json::from_value(serde_json::json!({
+                "role": role, "customType": "video", "display": false,
+                "toolCallId": "c", "toolName": "python_repl", "isError": false,
+                "content": [{"type": "video", "data": "AAAA", "mimeType": "video/mp4"}],
+                "timestamp": 1,
+            }))
+            .expect("video message");
+            let messages = vec![assistant_message(90_000, 0), video];
+            // 4,800 tokens delayed compaction past this point; the conservative fixed budget
+            // triggers before replaying the measured 12.3K clip plus the output/reserve budgets.
+            assert!(
+                threshold_compaction_due(&messages, 128_000, 8_192, &CompactionSettings::default()),
+                "{role}"
+            );
+        }
     }
 
     #[test]

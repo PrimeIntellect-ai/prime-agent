@@ -303,7 +303,10 @@ pub fn convert_responses_messages(
                     .iter()
                     .filter_map(|block| match block {
                         UserOrToolContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
+                        UserOrToolContent::Video(_) => {
+                            Some(crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER.to_string())
+                        }
+                        UserOrToolContent::Image(_) | UserOrToolContent::Raw(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -663,5 +666,35 @@ mod tests {
             panic!("missing message item in {items:?}");
         };
         assert_eq!(message.get("id"), Some(&json!("msg_1")));
+    }
+
+    #[test]
+    fn tool_result_video_becomes_placeholder_for_video_model() {
+        let mut model = codex_model();
+        model.input.push(crate::types::ModelInput::Video);
+        let mut result = tool_result("call_x");
+        let Message::ToolResult(tool_result) = &mut result else {
+            unreachable!();
+        };
+        tool_result.content.push(
+            serde_json::from_value(json!({
+                "type": "video", "data": "AAAA", "mimeType": "video/mp4",
+            }))
+            .unwrap(),
+        );
+
+        assert_eq!(
+            convert(
+                &model,
+                vec![assistant(vec![tool_call("call_x")], &model.id), result]
+            ),
+            vec![
+                json!({ "type": "function_call", "call_id": "call_x", "name": "bash", "arguments": "{\"cmd\":\"ls\"}" }),
+                json!({
+                    "type": "function_call_output", "call_id": "call_x",
+                    "output": format!("ok\n{}", crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER),
+                }),
+            ]
+        );
     }
 }
