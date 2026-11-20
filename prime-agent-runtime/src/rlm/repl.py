@@ -841,14 +841,16 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         # screen applies to them, benignly today — the bootstrap carries no
         # banned shape — and the guard disarms until the flag flips.
         span_guard = _arm_span_guard(cell_id, _span_guard_budget(req.get("timeout_ms")))
-        try:
-            status, value, error = await _run_guarded(task, cell_id)
-        except KeyboardInterrupt as exc:
-            # The task settled but the handler raised in this frame: report the
-            # request's own outcome instead of escaping without a done frame.
-            status, value, error = "error", None, _cell_span_error(cell_id, exc)
         result_text: str | None = None
+        closed = False
         try:
+            try:
+                status, value, error = await _run_guarded(task, cell_id)
+            except KeyboardInterrupt as exc:
+                # The task settled but the handler raised in this frame: report
+                # the request's own outcome instead of escaping without a done
+                # frame.
+                status, value, error = "error", None, _cell_span_error(cell_id, exc)
             if _consume_handoff_interrupt() and status == "ok":
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
@@ -862,19 +864,28 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             if result_text is not None:
                 result_text = _cap_text(result_text)
             _drain_output()
-        except KeyboardInterrupt as exc:
-            # The guard fired during the render or the drain: the cell's value
-            # is not reported, and the teaching replaces the bare interrupt.
-            status, error, result_text = "error", _cell_span_error(cell_id, exc), None
-        finally:
-            # Disarm before the interrupt window closes: a timer that fires
-            # after _finish_request would be dropped anyway, and the sends
-            # below must not race a span interrupt.
+            # Disarm first, then close the interrupt window inside this same
+            # guarded region: a span interrupt that lands on the bookkeeping
+            # still becomes the teaching, and the retry below finishes a
+            # half-run close. Closing before the sends keeps a handler-raised
+            # KeyboardInterrupt out of a frame mid-_send.
             if span_guard is not None:
                 span_guard.cancel()
-            # Close the interrupt window before the protocol sends so a
-            # handler-raised KeyboardInterrupt can never tear a frame mid-_send.
             _finish_request(cell_id)
+            closed = True
+        except KeyboardInterrupt as exc:
+            # The guard fired during the render, the drain, or the close: the
+            # cell's value is not reported, and the teaching replaces the bare
+            # interrupt.
+            status, error, result_text = "error", _cell_span_error(cell_id, exc), None
+        finally:
+            if not closed:
+                # The close above was interrupted or never reached: finish it
+                # (idempotent) so this request owns no interrupt target.
+                if span_guard is not None:
+                    span_guard.cancel()
+                _finish_request(cell_id)
+
         if result_text is not None:
             _send({"event": "result", "id": cell_id, "text": result_text})
         if error is not None:
