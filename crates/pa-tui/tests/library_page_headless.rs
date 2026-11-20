@@ -1,4 +1,4 @@
-//! Headless e2e for the machine library page (the activity dock's `☰
+//! Headless e2e for the machine library page (the activity dock's `▤
 //! machines` group): a daemon that advertises the `factory_activity`
 //! lane mounts the group beside the factory group, the dock's arrows
 //! reach it, and Enter opens the page over the lane's `library` action
@@ -572,7 +572,7 @@ fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
 
-/// The lane-advertised battery: the dock mounts the `☰ machines` group,
+/// The lane-advertised battery: the dock mounts the `▤ machines` group,
 /// the dock's arrows reach it, Enter opens the page, and the open
 /// fetch lists every machine; the arrows walk the list, Enter drills
 /// into `pr-manager` for its ANSI diagram and its mermaid panel (the
@@ -630,7 +630,7 @@ fn library_page_lists_machines_drills_in_and_escs_back() {
     assert!(!frames.is_empty(), "frames were captured");
     let all = flat_text(&frames);
     assert!(
-        all.contains("\u{2630} machines"),
+        all.contains("\u{25a4} machines"),
         "the dock mounted the machine-library group:\n{all}"
     );
     // The list: every machine row with its source.
@@ -699,7 +699,7 @@ fn an_unadvertised_lane_mounts_no_machines_group() {
     assert!(!frames.is_empty(), "frames were captured");
     let joined = frames.join("\n");
     assert!(
-        !joined.contains('\u{2630}'),
+        !joined.contains('\u{25a4}'),
         "no machine-library group renders while the lane is unadvertised:\n{joined}"
     );
     assert!(
