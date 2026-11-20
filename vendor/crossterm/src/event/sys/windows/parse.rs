@@ -256,6 +256,10 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
         _ => {
             let utf16 = key_event.u_char;
             match utf16 {
+                // A raw ESC byte: ConPTY synthesizes a key record with no virtual key for the
+                // bytes a terminal writes as input (CSI-u sequences, a pasted escape). It is the
+                // Esc key, and without this the record is dropped.
+                0x1b if virtual_key_code == 0 => Some(KeyCode::Esc),
                 0x00..=0x1f => {
                     // Some key combinations generate either no u_char value or generate control
                     // codes. To deliver back a KeyCode::Char(...) event we want to know which

@@ -35,6 +35,14 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
     let super_key = key.modifiers.contains(KeyModifiers::SUPER);
     let base = match key.code {
         KeyCode::Char(c) => {
+            // Windows reports an AltGr character as CONTROL+ALT and carries the produced
+            // character as the code (`/` on ABNT2 arrives as AltGr+Q with `Char('/')`). The
+            // character is the text, the same rule `printable_text` applies to a paste; a
+            // Ctrl+Alt ASCII letter or digit stays a binding. Without this the id becomes
+            // `ctrl+alt+/`, `decode_printable` refuses it, and the character is dropped.
+            if ctrl && alt && !super_key && !c.is_ascii_alphanumeric() && !c.is_control() {
+                return Some(c.to_string());
+            }
             if ctrl {
                 return Some(ctrl_char_id(c, alt, shift, super_key));
             }
@@ -335,6 +343,30 @@ mod tests {
     fn shift_modified_base_key_keeps_the_base_character() {
         let event = KeyEvent::new(KeyCode::Char('='), KeyModifiers::SHIFT);
         assert_eq!(key_event_to_id(&event).as_deref(), Some("="));
+    }
+
+    /// The Windows console reports an AltGr character as CONTROL+ALT and carries the produced
+    /// character (`/` on ABNT2 is AltGr+Q with `Char('/')`). The id must be the plain character so
+    /// the editor inserts it and the slash menu opens.
+    #[test]
+    fn altgr_characters_map_to_their_text() {
+        for produced in ['/', '?', '€', 'ą'] {
+            let event = KeyEvent::new(
+                KeyCode::Char(produced),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            );
+            assert_eq!(
+                key_event_to_id(&event).as_deref(),
+                Some(produced.to_string().as_str()),
+                "AltGr {produced:?} must reach the editor as text"
+            );
+        }
+        // A Ctrl+Alt ASCII letter stays a binding, not text.
+        let letter = KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(key_event_to_id(&letter).as_deref(), Some("ctrl+alt+q"));
     }
 
     /// The shifted range inserts through the editor: each event decodes to the produced character.
