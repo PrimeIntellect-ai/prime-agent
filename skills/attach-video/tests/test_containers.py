@@ -1,9 +1,12 @@
 """Container checks intentionally use synthetic metadata, not codec fixtures."""
 
+import base64
+import importlib
 import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from attach_video.attach_video import _validate_video
 
@@ -87,6 +90,31 @@ class ContainerTests(unittest.TestCase):
         data += element(bytes.fromhex("18538067"), element(b"\xec", b"webm"))
         with self.assertRaisesRegex(ValueError, "DocType"):
             self.validate(data)
+
+
+class AttachmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_emits_validated_bytes_when_file_changes(self):
+        skill = importlib.import_module("attach_video.attach_video")
+        original = mp4()
+        validate = skill._validate_video
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(original)
+
+            def validate_then_replace(filename):
+                validated = validate(filename)
+                path.write_bytes(b"not a video")
+                return validated
+
+            with patch.object(skill, "_validate_video", side_effect=validate_then_replace), \
+                    patch("rlm.host_request", new=AsyncMock(return_value={"input": ["video"]})), \
+                    patch("rlm.emit") as emit:
+                await skill.run(str(path))
+
+            emit.assert_called_once()
+            attachment = emit.call_args.args[0][skill._ATTACHMENT_DISPLAY_MIME]
+            self.assertEqual(base64.b64decode(attachment["data"]), original)
+            self.assertEqual(attachment["mime_type"], "video/mp4")
 
 
 if __name__ == "__main__":

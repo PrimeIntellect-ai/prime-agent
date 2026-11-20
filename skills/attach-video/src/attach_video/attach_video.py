@@ -142,7 +142,7 @@ def _validate_webm(data: memoryview) -> None:
         raise ValueError("WebM has no video track")
 
 
-def _validate_video(path: str) -> tuple[Path, str, int]:
+def _validate_video(path: str) -> tuple[Path, str, bytes]:
     filepath = Path(path).expanduser()
     if not filepath.is_file():
         raise FileNotFoundError(f"{path} is not an existing regular file")
@@ -173,13 +173,13 @@ def _validate_video(path: str) -> tuple[Path, str, int]:
             _validate_webm(memoryview(data))
     except ValueError as error:
         raise ValueError(f"{path} is not a structurally valid video: {error}") from error
-    return filepath, mime, len(data)
+    return filepath, mime, data
 
 
-def _emit_attachment(filepath: Path, mime_type: str) -> None:
+def _emit_attachment(filepath: Path, mime_type: str, data: bytes) -> None:
     from rlm import emit
 
-    data_b64 = base64.b64encode(filepath.read_bytes()).decode("ascii")
+    data_b64 = base64.b64encode(data).decode("ascii")
     emit(
         {
             _ATTACHMENT_DISPLAY_MIME: {"mime_type": mime_type, "data": data_b64, "path": str(filepath)},
@@ -228,8 +228,8 @@ async def run(*paths: str) -> str:
     # Validate every path before emitting anything, so a later failure never
     # leaves a partial subset injected.
     validated = [_validate_video(path) for path in paths]
-    for filepath, mime, _size in validated:
-        _emit_attachment(filepath, mime)
+    for filepath, mime, data in validated:
+        _emit_attachment(filepath, mime, data)
 
-    sizes = ", ".join(f"{filepath.name} {size / 1_000_000:.1f}MB" for filepath, _mime, size in validated)
+    sizes = ", ".join(f"{filepath.name} {len(data) / 1_000_000:.1f}MB" for filepath, _mime, data in validated)
     return f"Loaded {len(validated)} video(s) into context: {', '.join(paths)} ({sizes})"
