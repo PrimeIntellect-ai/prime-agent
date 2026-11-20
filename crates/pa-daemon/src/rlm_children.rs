@@ -190,9 +190,6 @@ struct ChildRecord {
     /// A factory state's child: the factory reads its settle through
     /// collect, so no terminal notice reaches the parent conversation.
     factory: bool,
-    /// The task prompt was admitted; never settle a pre-prompt child (it
-    /// is idle with an empty queue by construction).
-    prompt_admitted: bool,
     /// The delete or close of this child, kept apart from `run` so a live run
     /// is never faked settled during a delete's kill.
     retirement: Retirement,
@@ -729,7 +726,7 @@ impl SupervisorChildSessions {
                 model: String::new(),
                 label: String::new(),
                 started_at_ms: 0,
-                run: RunState::running(),
+                run: RunState::admitted(),
                 answer_preview: None,
                 answer_text: None,
                 answer_captured: false,
@@ -740,7 +737,6 @@ impl SupervisorChildSessions {
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 factory: false,
-                prompt_admitted: true,
                 retirement: Retirement::live(),
                 usage_registration_forgotten: false,
                 session_file: None,

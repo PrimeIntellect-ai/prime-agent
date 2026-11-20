@@ -3,7 +3,7 @@
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
 use super::retirement::{Retirement, RetirementEvent, RetirementIntent};
-use super::run_state::RunState;
+use super::run_state::{RunEvent, RunState};
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_cwd, resolve_child_model, rlm_child_label, rlm_depth_limit_error,
@@ -14,6 +14,44 @@ use super::{
     SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
     RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
 };
+
+async fn wait_for_prompt_release(record: &Arc<Mutex<ChildRecord>>) {
+    loop {
+        let signal = record.lock().await.run.notifier();
+        let wake = signal.notified();
+        tokio::pin!(wake);
+        let _ = wake.as_mut().enable();
+        if record.lock().await.run.prompt_released() {
+            return;
+        }
+        wake.await;
+    }
+}
+
+async fn wait_for_prompt_admission(record: &Arc<Mutex<ChildRecord>>, deadline: Instant) -> bool {
+    loop {
+        let signal = record.lock().await.run.notifier();
+        let wake = signal.notified();
+        tokio::pin!(wake);
+        let _ = wake.as_mut().enable();
+        {
+            let record = record.lock().await;
+            if record.run.prompt_admitted() {
+                return true;
+            }
+            if !record.run.is_running() || record.retirement.closed_by_parent() {
+                return false;
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return record.lock().await.run.prompt_admitted();
+        }
+        if tokio::time::timeout(remaining, wake).await.is_err() {
+            return record.lock().await.run.prompt_admitted();
+        }
+    }
+}
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
 /// the typed error and the `model refused` event; the settings read runs on the blocking pool.
@@ -188,7 +226,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     factory: request.factory.is_some(),
-                    prompt_admitted: false,
                     retirement: Retirement::live(),
                     usage_registration_forgotten: false,
                     session_file: created.session_file.clone(),
@@ -252,19 +289,20 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
-            // Capture the spawning turn before detaching: a spawn admitted
-            // mid-turn prompts after that turn completes, so the parent's
-            // continuation request reaches the provider first (see
-            // `wait_turn_done`). A spawn admitted while the parent is idle
-            // (a background kernel task, e.g. a factory run) has no turn
-            // to wait for.
+            // Capture the spawning turn before detaching: an ordinary spawn
+            // admitted mid-turn waits for that turn to complete, so the parent's
+            // continuation reaches the provider first. A positive collect can
+            // release this child earlier. An idle parent has no turn to wait for.
             let spawning_turn = {
                 let turn = *this.parent_turn.borrow();
                 turn.running.then_some(turn.completed)
             };
             tokio::spawn(async move {
                 if let Some(generation) = spawning_turn {
-                    watcher_this.wait_turn_done(generation).await;
+                    tokio::select! {
+                        () = watcher_this.wait_turn_done(generation) => {}
+                        () = wait_for_prompt_release(&watcher_record) => {}
+                    }
                 }
                 // The parent closed before the prompt admitted: the
                 // child is closed with it, so the detached task prompt
@@ -272,6 +310,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 if watcher_record.lock().await.retirement.closed_by_parent() {
                     return;
                 }
+                watcher_record
+                    .lock()
+                    .await
+                    .run
+                    .apply(RunEvent::ReleasePrompt);
                 if let Err(error) = watcher_this
                     .prompt_child(
                         &child_active_session_id,
@@ -314,7 +357,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 }
                 // The worker accepted the task: from here an idle read is a
                 // finished run, never the pre-prompt idle worker.
-                watcher_record.lock().await.prompt_admitted = true;
+                watcher_record
+                    .lock()
+                    .await
+                    .run
+                    .apply(RunEvent::PromptAccepted);
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
@@ -631,26 +678,40 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 records.push(record);
             }
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-            let mut results = Vec::with_capacity(records.len());
-            for record in &records {
-                this.refresh_record(record).await;
-                // A settled child that is busy again runs a follow-up turn:
-                // re-arm usage observation (the task-run watcher retired at
-                // its settle).
-                if !record.lock().await.run.is_running() {
-                    let active_session_id = record.lock().await.active_session_id.clone();
-                    if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
-                        SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
+            if timeout_ms > 0 {
+                // Resolve every selector before this point, then release the
+                // selected live prompts as one batch before waiting on a child.
+                for record in &records {
+                    let mut record = record.lock().await;
+                    if record.run.is_running() && !record.retirement.closed_by_parent() {
+                        record.run.apply(RunEvent::ReleasePrompt);
                     }
                 }
-                let still_running = record.lock().await.run.is_running();
-                if still_running {
-                    // Wait inside the shared budget, then re-read the child:
-                    // a timeout yields the current snapshot, never an error.
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let active_session_id = record.lock().await.active_session_id.clone();
-                    this.wait_for_child(&active_session_id, remaining).await;
+            }
+            let mut results = Vec::with_capacity(records.len());
+            for record in &records {
+                let admission_ready =
+                    timeout_ms == 0 || wait_for_prompt_admission(record, deadline).await;
+                if admission_ready {
                     this.refresh_record(record).await;
+                    // A settled child that is busy again runs a follow-up turn:
+                    // re-arm usage observation (the task-run watcher retired at
+                    // its settle).
+                    if !record.lock().await.run.is_running() {
+                        let active_session_id = record.lock().await.active_session_id.clone();
+                        if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
+                            SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
+                        }
+                    }
+                    let still_running = record.lock().await.run.is_running();
+                    if still_running {
+                        // Wait inside the shared budget, then re-read the child:
+                        // a timeout yields the current snapshot, never an error.
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let active_session_id = record.lock().await.active_session_id.clone();
+                        this.wait_for_child(&active_session_id, remaining).await;
+                        this.refresh_record(record).await;
+                    }
                 }
                 let result = {
                     let record = record.lock().await;

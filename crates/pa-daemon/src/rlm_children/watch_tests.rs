@@ -916,6 +916,117 @@ async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
     gate.release.notify_one();
 }
 
+/// A positive collect releases only its selected child while the parent
+/// turn remains active, then waits for prompt acceptance and completion.
+#[tokio::test]
+async fn a_blocking_collect_mid_turn_releases_the_held_task_prompt() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.notify_turn_started();
+    let handle = spawn_child(&sessions).await;
+
+    let poll = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("zero-timeout collect is a snapshot");
+    assert_eq!((poll[0].status, poll[0].settled), ("running", false));
+
+    let collect_sessions = sessions.clone();
+    let child_id = handle.rlm_child_id.clone();
+    let collect =
+        tokio::spawn(async move { collect_sessions.collect(vec![child_id], 5_000).await });
+    tokio::time::timeout(Duration::from_secs(10), gate.copied.notified())
+        .await
+        .expect("the positive collect releases the selected prompt");
+    let in_flight = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("zero poll while prompt acceptance is held");
+    assert_eq!(
+        (in_flight[0].status, in_flight[0].settled),
+        ("running", false)
+    );
+    assert!(
+        !collect.is_finished(),
+        "collect waits for prompt acceptance"
+    );
+    let turn = *sessions.inner.parent_turn.borrow();
+    assert!(turn.running, "collect must not end the parent turn");
+    assert_eq!(turn.completed, 0);
+
+    gate.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(10), collect)
+        .await
+        .expect("collect completes after prompt acceptance")
+        .expect("collect task remains alive")
+        .expect("collect succeeds");
+    assert_eq!((result[0].status, result[0].settled), ("done", true));
+    assert_eq!(
+        result[0].answer_text.as_deref(),
+        Some("the child final answer")
+    );
+    let turn = *sessions.inner.parent_turn.borrow();
+    assert!(turn.running, "collect leaves the parent turn active");
+    assert_eq!(turn.completed, 0);
+}
+
+/// A collect whose shared deadline expires before prompt acceptance returns
+/// the current running snapshot without waiting for the idle worker.
+#[tokio::test]
+async fn a_blocking_collect_timeout_keeps_an_unadmitted_child_unsettled() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.notify_turn_started();
+    let handle = spawn_child(&sessions).await;
+    let collect_sessions = sessions.clone();
+    let child_id = handle.rlm_child_id.clone();
+    let collect = tokio::spawn(async move { collect_sessions.collect(vec![child_id], 40).await });
+    tokio::time::timeout(Duration::from_secs(10), gate.copied.notified())
+        .await
+        .expect("collect released the child prompt");
+
+    let result = tokio::time::timeout(Duration::from_secs(2), collect)
+        .await
+        .expect("collect uses its admission deadline")
+        .expect("collect task remains alive")
+        .expect("collect succeeds");
+    assert_eq!((result[0].status, result[0].settled), ("running", false));
+
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the detached prompt owner still completes after collect times out")
+        .expect("follow_up channel stays open");
+}
+
 /// A `collect` that lands while the task prompt is still in flight reads
 /// the child's pre-prompt idle worker: the child is still running, never a
 /// `done` settle with no answer (the factory settled its verifier before
@@ -1002,9 +1113,18 @@ async fn a_collect_reading_the_admission_idle_window_keeps_the_child_running() {
     let handle = spawn_child(&sessions).await;
     let record = Arc::clone(&sessions.inner.children.lock().await[0]);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !record.lock().await.prompt_admitted {
-        assert!(Instant::now() < deadline, "the task prompt never admitted");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    loop {
+        let signal = record.lock().await.run.notifier();
+        let wake = signal.notified();
+        tokio::pin!(wake);
+        let _ = wake.as_mut().enable();
+        if record.lock().await.run.prompt_admitted() {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::timeout(remaining, wake)
+            .await
+            .expect("the task prompt never admitted");
     }
 
     let results = sessions
@@ -2941,7 +3061,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
-        run: RunState::running(),
+        run: RunState::admitted(),
         answer_preview: None,
         answer_text: None,
         answer_captured: false,
@@ -2952,7 +3072,6 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
-        prompt_admitted: true,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: None,
@@ -3013,7 +3132,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
-        run: RunState::running(),
+        run: RunState::admitted(),
         answer_preview: Some("the captured say".to_string()),
         answer_text: Some("the captured say".to_string()),
         answer_captured: true,
@@ -3024,7 +3143,6 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
-        prompt_admitted: true,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(
