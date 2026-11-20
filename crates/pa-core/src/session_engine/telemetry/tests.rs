@@ -529,6 +529,7 @@ async fn video_attachments_count_into_session_ended() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
