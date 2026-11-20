@@ -20,9 +20,7 @@ use crate::engine::{
     CompactionRequest, EngineEvent, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
 };
-use pa_core::session_engine::agent_messaging::{
-    AgentFamilyRelationship, AgentMessageController, AgentMessageSendInput,
-};
+use pa_core::session_engine::agent_messaging::{AgentFamilyRelationship, AgentMessageSendInput};
 use pa_core::session_engine::decision_api::{RefusedDecisionReply, ResolvedDecisionModel};
 use pa_core::session_engine::side_question::SideQuestionSink;
 
@@ -97,7 +95,10 @@ impl DecisionEngine {
     /// fetches the family roster just to find it. The reply rides the
     /// follow-up lane: it lands as a queued row the parent reads at its
     /// next wake instead of steering (interrupting) its running turn.
-    fn send_reply(&self, message: &Value) -> anyhow::Result<()> {
+    /// Delivery is cancellation-aware: a cancel that lands after the
+    /// turn's last check still stops the send before either delivery leg,
+    /// including the supervisor fallback after a refused direct ticket.
+    fn send_reply(&self, message: &Value, aborted: &dyn Fn() -> bool) -> anyhow::Result<()> {
         let summary = self
             .own_summary
             .lock()
@@ -120,12 +121,15 @@ impl DecisionEngine {
         let message = message.to_string();
         self.runtime.block_on(async move {
             sender
-                .send_agent_message(AgentMessageSendInput {
-                    target,
-                    message,
-                    receiver_role: Some(AgentFamilyRelationship::Parent),
-                    delivery_mode: Some("follow_up"),
-                })
+                .send_agent_message_cancellable(
+                    AgentMessageSendInput {
+                        target,
+                        message,
+                        receiver_role: Some(AgentFamilyRelationship::Parent),
+                        delivery_mode: Some("follow_up"),
+                    },
+                    aborted,
+                )
                 .await
                 .map(|_| ())
         })
@@ -334,11 +338,19 @@ impl SessionEngine for DecisionEngine {
             // one less parent run — and the caller learns the child serves.
             // The reply is best-effort: a child whose parent edge is not
             // known yet still readies (the notice is the fallback).
-            let _ = self.send_reply(&json!({
-                "type": "decision_api.decision",
-                "seq": Value::Null,
-                "note": "Decision child ready.",
-            }));
+            let reply = self.send_reply(
+                &json!({
+                    "type": "decision_api.decision",
+                    "seq": Value::Null,
+                    "note": "Decision child ready.",
+                }),
+                aborted,
+            );
+            if aborted() {
+                emit(cancelled());
+                return;
+            }
+            let _ = reply;
             emit(EngineEvent::Done(Ok(())));
             return;
         }
@@ -392,7 +404,11 @@ impl SessionEngine for DecisionEngine {
                     "model": envelope["model"].clone(),
                     "decision": envelope["answers"]["action"].clone(),
                 });
-                if let Err(error) = self.send_reply(&reply) {
+                if let Err(error) = self.send_reply(&reply, aborted) {
+                    if aborted() {
+                        emit(cancelled());
+                        return;
+                    }
                     emit(EngineEvent::Done(Err(format!(
                         "the decision reply could not reach the parent: {error:#}"
                     ))));
@@ -447,7 +463,12 @@ impl SessionEngine for DecisionEngine {
                     "seq": seq,
                     "error": format!("{error:#}"),
                 });
-                let _ = self.send_reply(&reply);
+                let reply = self.send_reply(&reply, aborted);
+                if aborted() {
+                    emit(cancelled());
+                    return;
+                }
+                let _ = reply;
                 emit(EngineEvent::Done(Err(format!(
                     "the decision failed: {error:#}"
                 ))));
@@ -515,6 +536,108 @@ mod tests {
             events.last(),
             Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
             "the cancelled turn must not settle with a decision outcome: {events:?}"
+        );
+    }
+
+    /// The reply cancellation window, pinned: a cancel that lands after the
+    /// last `run_prompt` check — inside the reply's transport lookup — must
+    /// stop the send before the supervisor fallback posts it. The stub flips
+    /// the worker's abort flag when the ticket probe arrives; the refused
+    /// ticket would otherwise route the reply to `send_message`.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancellation_during_the_reply_lookup_sends_no_reply() {
+        // A private api name: the faux provider registry is global, so a
+        // shared name would race the other decision tests' response queues.
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("faux-decision-reply-cancel".to_string()),
+                provider: Some("fixture-decisions".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "decision-model".to_string(),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                r#"{"action": {"choice": "left"}}"#,
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            json!({ "decisionModel": "decision-model" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{ "providers": { "fixture-decisions": {
+                "baseUrl": "https://fixture.example", "apiKey": "fixture-key",
+                "api": "faux-decision-reply-cancel", "models": [
+                    { "id": "decision-model", "input": ["text"] }
+                ]
+            } } }"#,
+        )
+        .unwrap();
+        let socket = dir.path().join("supervisor.sock");
+        let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let commands = stub_supervisor_cancelling_on_ticket(&socket, Arc::clone(&abort));
+        let engine = DecisionEngine::new(
+            dir.path(),
+            dir.path(),
+            Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+            "decision-child".to_string(),
+            "token".to_string(),
+        );
+        engine.set_session_summary(json!({ "parentActiveSessionId": "parent-live-1" }));
+        let body = json!({
+            "seq": 7,
+            "state": {"observation": 1},
+            "questions": {"action": {
+                "type": "choice", "criteria": {"left": "go left", "right": "go right"}
+            }}
+        });
+        let request = PromptRequest {
+            message: body.to_string(),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+            batch: Vec::new(),
+            streaming_behavior: None,
+        };
+        let mut events: Vec<EngineEvent> = Vec::new();
+        engine.run_prompt(
+            0,
+            request,
+            &|| abort.load(std::sync::atomic::Ordering::SeqCst),
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        // The decision call itself ran: the cancel lands in the reply's
+        // transport lookup, past the last pre-reply check.
+        assert_eq!(
+            events.last(),
+            Some(&EngineEvent::Done(Err("prompt cancelled".to_string()))),
+            "a cancel during the reply lookup settles the turn cancelled: {events:?}"
+        );
+        let commands = commands.lock().unwrap().clone();
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["type"].as_str() == Some("get_worker_peer_transport")),
+            "the reply must start its transport lookup: {commands:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| command["type"].as_str() != Some("send_message")),
+            "a cancelled decision must not fall back to a reply send: {commands:?}"
         );
     }
 
@@ -704,6 +827,72 @@ mod tests {
             })
             .collect();
         assert_eq!(answered, ["Decision child ready.".to_string()]);
+    }
+
+    /// A stub supervisor for the reply-cancellation test: it flips the
+    /// worker's abort flag when the reply's transport probe arrives, then
+    /// refuses the ticket. The refusal would route the reply to the
+    /// supervisor fallback unless the send rechecks the cancel. Every
+    /// later connection is recorded, so a fallback send is visible.
+    #[cfg(unix)]
+    fn stub_supervisor_cancelling_on_ticket(
+        socket: &std::path::Path,
+        abort: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<Mutex<Vec<Value>>> {
+        let commands: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let stub_commands = Arc::clone(&commands);
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    return;
+                };
+                let Ok(mut writer) = stream.try_clone() else {
+                    return;
+                };
+                let mut reader = std::io::BufReader::new(stream);
+                writer
+                    .write_all(
+                        b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n",
+                    )
+                    .unwrap();
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
+                let envelope: Value = match serde_json::from_str(line.trim()) {
+                    Ok(envelope) => envelope,
+                    Err(_) => return,
+                };
+                let id = envelope["id"].as_str().unwrap_or_default().to_string();
+                let command = envelope["command"].clone();
+                stub_commands.lock().unwrap().push(command.clone());
+                let response = match command["type"].as_str().unwrap_or_default() {
+                    "get_worker_peer_transport" => {
+                        // The cancel lands inside the reply send, after the
+                        // decision call and its last pre-reply check.
+                        abort.store(true, std::sync::atomic::Ordering::SeqCst);
+                        json!({
+                            "id": id, "command": "get_worker_peer_transport",
+                            "success": false, "error": "no direct transport",
+                        })
+                    }
+                    other => json!({
+                        "id": id, "command": other, "success": true,
+                        "data": {
+                            "id": "m1",
+                            "target": { "activeSessionId": command["targetActiveSessionId"] },
+                            "deliveryStatus": "delivered",
+                        },
+                    }),
+                };
+                writer
+                    .write_all(format!("{response}\n").as_bytes())
+                    .unwrap();
+            }
+        });
+        commands
     }
 
     /// A stub supervisor over `socket`: it answers each command on its own
@@ -924,8 +1113,12 @@ mod tests {
         );
         // No pushed summary: no known parent id, so the reply fails fast —
         // the roster fetch the old path made would dial the link first.
+        let never_aborted = || false;
         let error = engine
-            .send_reply(&json!({"type": "decision_api.decision", "seq": 1}))
+            .send_reply(
+                &json!({"type": "decision_api.decision", "seq": 1}),
+                &never_aborted,
+            )
             .unwrap_err();
         assert!(
             error.to_string().contains("no parent edge"),
@@ -940,7 +1133,10 @@ mod tests {
             "parentSessionId": "parent-persisted-1",
         }));
         engine
-            .send_reply(&json!({"type": "decision_api.decision", "seq": 2}))
+            .send_reply(
+                &json!({"type": "decision_api.decision", "seq": 2}),
+                &never_aborted,
+            )
             .expect("the reply must deliver through the stub supervisor");
         let captured = commands.lock().unwrap().clone();
         for command in &captured {
