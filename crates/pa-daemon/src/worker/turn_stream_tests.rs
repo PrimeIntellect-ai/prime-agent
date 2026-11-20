@@ -206,7 +206,7 @@ impl SessionEngine for GateProbeEngine {
 
 #[tokio::test]
 async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
-    for held_past_window in [false, true] {
+    for (held_past_window, pacing_only) in [(false, false), (true, false), (true, true)] {
         let (started_tx, started_rx) = oneshot::channel();
         let started_tx = Mutex::new(Some(started_tx));
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
@@ -222,6 +222,15 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
         let core = Arc::clone(&runner.core);
         core.lock().unwrap().busy = true;
         let work_notify = Arc::clone(&runner.work_notify);
+        let custom_message = pacing_only.then(|| {
+            crate::session_commands::custom_message_value(
+                &crate::engine::KernelNotice::turn_held(60_000).row,
+            )
+        });
+        let message = custom_message
+            .as_ref()
+            .map_or("timer probe", |row| row["content"].as_str().unwrap())
+            .to_string();
         tokio::time::pause();
         let turn = tokio::spawn(async move {
             runner
@@ -231,8 +240,8 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
                     vec![QueuedItem {
                         priority: QueuePriority::Human,
                         preview: None,
-                        message: "timer probe".to_string(),
-                        custom_message: None,
+                        message,
+                        custom_message,
                         agent_message: None,
                         queue_key: None,
                         admission_id: None,
@@ -253,11 +262,14 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
             assert!(core.lock().unwrap().steering.is_empty());
             tokio::time::advance(std::time::Duration::from_secs(2)).await;
             tokio::task::yield_now().await;
-            assert!(
-                futures::FutureExt::now_or_never(work_notify.notified()).is_some(),
-                "a held delivery must receive its pacing notice"
-            );
-            {
+            if pacing_only {
+                assert!(core.lock().unwrap().steering.is_empty());
+                assert!(futures::FutureExt::now_or_never(work_notify.notified()).is_none());
+            } else {
+                assert!(
+                    futures::FutureExt::now_or_never(work_notify.notified()).is_some(),
+                    "a held delivery must receive its pacing notice"
+                );
                 let mut core = core.lock().unwrap();
                 assert_eq!(core.steering.len(), 1);
                 let row = core.steering[0].custom_message.as_ref().unwrap();

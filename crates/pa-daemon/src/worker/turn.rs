@@ -11,7 +11,7 @@ use super::{
 
 use std::sync::{Arc, Mutex};
 
-/// The `[turn-held]` pacing window: one delivery held busy past this bound
+/// The `[turn-held]` pacing window: a non-pacing delivery held past this bound
 /// admits a single `[turn-held]` teaching notice on the steering lane, so the
 /// queued row cuts the held turn at its next boundary and delivers as the
 /// next turn's prompt. Matches the default python cell budget
@@ -328,7 +328,7 @@ impl TurnRunner {
         };
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
-        // The `[turn-held]` pacing window: exactly one notice per delivery
+        // The `[turn-held]` pacing window: one notice per non-pacing delivery
         // held busy past [`TURN_HELD_WINDOW`]. The admission's held gate
         // (same delivery still busy, nothing queued to cut it already, not
         // compacting or shutting down) runs inside its ONE lock section —
@@ -338,7 +338,14 @@ impl TurnRunner {
         // the next turn's prompt. The delivery revokes admission before
         // it settles.
         let turn_held_delivery = tokio_util::sync::CancellationToken::new();
-        {
+        let pacing_only = items.iter().all(|item| {
+            item.custom_message
+                .as_ref()
+                .and_then(|row| row.get("customType"))
+                .and_then(Value::as_str)
+                == Some(pa_core::session_engine::messages::TURN_HELD_NOTICE_CUSTOM_TYPE)
+        });
+        if !pacing_only {
             let delivery = turn_held_delivery.clone();
             let core = Arc::clone(&self.core);
             let recovery = Arc::clone(&self.recovery);
