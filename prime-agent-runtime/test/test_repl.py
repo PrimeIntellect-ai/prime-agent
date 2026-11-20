@@ -4208,5 +4208,48 @@ class SpanGuardBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(self.repl_module._span_guard_delay(0.4), 0.3)
 
 
+class ProtocolFrameAtomicityTest(unittest.TestCase):
+    """An interrupt raised by the handler must not tear a protocol frame: the
+    write blocks SIGINT on the main thread, so the signal lands after the last
+    byte instead of splitting the frame the host is parsing."""
+
+    def test_interrupt_during_a_display_write_keeps_the_frame_whole(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        cell = "\n".join(
+            [
+                "import os",
+                "import rlm.repl as repl_module",
+                "real_write = repl_module.os.write",
+                "armed = []",
+                "def write(fd, data):",
+                "    if fd == repl_module._protocol_fd and len(data) > 4096 and not armed:",
+                "        armed.append(True)",
+                "        sent = real_write(fd, bytes(data[:4096]))",
+                # The span guard's own path: mark the rid, then SIGINT the
+                # main thread while the frame is only partly on the wire.
+                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        return sent",
+                "    return real_write(fd, data)",
+                "repl_module.os.write = write",
+                "try:",
+                "    repl_module.emit({'text/plain': 'x' * 200000})",
+                "finally:",
+                "    repl_module.os.write = real_write",
+            ]
+        )
+        repl.send({"type": "execute", "id": "tear", "code": cell})
+        events = repl.until_done("tear")
+        display = one(events, "display")
+        self.assertIsNotNone(display, f"events: {events}")
+        self.assertEqual(len(display["data"]["text/plain"]), 200000)
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
+
+
 if __name__ == "__main__":
     unittest.main()
