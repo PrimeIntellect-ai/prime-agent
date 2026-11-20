@@ -722,6 +722,33 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
             self.assertEqual(one(events, "done")["status"], "error", rid)
 
+    def test_discipline_screen_declines_star_imported_calls(self):
+        for rid, code in (
+            ("star-time", "from time import *\nsleep(5)"),
+            ("star-asyncio", "from asyncio import *\nawait sleep(5)"),
+            ("star-system", "from os import *\nsystem('true')"),
+            ("star-popen", "from os import *\npopen('true')"),
+            ("star-pty", "from pty import *\nspawn('true')"),
+        ):
+            with self.subTest(rid=rid):
+                events = self.repl.execute(rid, "print('ran')\n" + code)
+                self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+                self.assertEqual(one(events, "done")["status"], "error")
+                self.assertNotIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_spares_allowed_star_imports(self):
+        for rid, code in (
+            ("star-short", "from time import *\nsleep(0.01)"),
+            ("star-unused", "from os import *"),
+            ("star-shadowed", "from time import *\nsleep = print\nsleep(5)"),
+            ("star-submodule", "system = print\nfrom os.path import *\nsystem(5)"),
+        ):
+            with self.subTest(rid=rid):
+                events = self.repl.execute(rid, code + "\nprint('ran')")
+                self.assertIsNone(one(events, "error"))
+                self.assertEqual(one(events, "done")["status"], "ok")
+                self.assertIn("ran", stream_text(events, "stdout"))
+
     def test_discipline_screen_declines_subprocess_family(self):
         for rid, code in (
             ("imp", "import subprocess"),

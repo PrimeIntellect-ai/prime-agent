@@ -30,6 +30,15 @@ _SUBPROCESS_CALLS = (
     "getstatusoutput",
 )
 
+# A star import binds the charged members under their exported names.
+_STAR_MEMBERS = {
+    "time": ("sleep",),
+    "asyncio": ("sleep",),
+    "subprocess": _SUBPROCESS_CALLS,
+    "os": ("system", "popen"),
+    "pty": ("spawn",),
+}
+
 # A name's binding at a point is the set of what the name can hold on the
 # paths that reach the point: a watched import (`("module", "time")` for
 # `import time as t`, `("member", "os", "system")` for `from os import
@@ -102,7 +111,11 @@ class _BindingCollector(ast.NodeVisitor):
         # library module of the same name.
         root = "" if node.level else (node.module or "").split(".")[0]
         for alias in node.names:
-            self._import(alias, root, alias.name)
+            if alias.name == "*" and not node.level:
+                for member in _STAR_MEMBERS.get(node.module, ()):
+                    self._bind(member, ("member", root, member))
+            else:
+                self._import(alias, root, alias.name)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._bind(node.name, None)
