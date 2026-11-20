@@ -652,6 +652,288 @@ async fn prompt_injected_message_persists_one_custom_row() {
     );
 }
 
+/// The busy-delivery pins (the inbox-notice injection class): a message
+/// admitted while the agent streams must QUEUE with its streaming
+/// behavior — steer or follow-up — report the parked outcome
+/// ([`PromptOutcome::Queued`]), and carry every batched co-delivered row
+/// in the same batch; the streamingBehavior rejection stays only for the
+/// no-behavior call (the exact live failure text). Mutation: reverting
+/// the behavior-carrying admission to the busy bail turns the queue pins
+/// red; dropping the batch walk turns the batch pin red; reporting
+/// `Prompt` from the busy branch turns the outcome pins red; dropping the
+/// no-behavior bail turns the rejection pins red.
+#[tokio::test]
+async fn a_busy_session_queues_deliveries_with_a_behavior_and_rejects_without_one() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_stalled_turn("holding the turn");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Arc::new(
+        AgentSession::new(
+            Arc::new(Agent::new(options)),
+            SessionManager::in_memory(tmp.path()),
+            vec![],
+        )
+        .await
+        .unwrap(),
+    );
+    // Start the stalled run and wait until the session streams.
+    let held = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let _ = session
+                .prompt("hold the turn", PromptOptions::default())
+                .await;
+        })
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.agent().state().await.is_streaming {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stalled run never registered"
+        );
+        tokio::task::yield_now().await;
+    }
+    let notice = |text: &str| pa_types::session::CustomMessage {
+        custom_type: "inbox_notice".to_string(),
+        content: pa_types::ai::UserContent::Text(text.to_string()),
+        display: true,
+        details: None,
+        timestamp: 0,
+        rest: serde_json::Map::default(),
+    };
+
+    // The injected notice class queues by the delivery's behavior, and
+    // the outcome says so: a parked row is never reported as a finished
+    // turn (the daemon's delivery seat keys its drain off `Queued`).
+    let outcome = session
+        .prompt_injected_message_with_behavior(&notice("steer notice"), StreamingBehavior::Steer)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        PromptOutcome::Queued,
+        "a busy injected delivery reports the parked outcome"
+    );
+    let outcome = session
+        .prompt_injected_message_with_behavior(
+            &notice("follow-up notice"),
+            StreamingBehavior::FollowUp,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, PromptOutcome::Queued);
+    // A custom row previews as an empty string, so the queue COUNTS are
+    // the observable: each behavior landed one batch on its queue.
+    assert_eq!(
+        session.agent().steering_previews().len(),
+        1,
+        "the steer delivery queues on the steering queue"
+    );
+    assert_eq!(
+        session.agent().follow_up_previews().len(),
+        1,
+        "the follow-up delivery queues behind the run"
+    );
+
+    // A user message with the steer behavior queues the same way (the
+    // operator ruling: user messages steer, never fail the delivery).
+    let outcome = session
+        .prompt(
+            "continue",
+            PromptOptions {
+                streaming_behavior: Some(StreamingBehavior::Steer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, PromptOutcome::Queued);
+    assert_eq!(
+        session
+            .agent()
+            .steering_previews()
+            .iter()
+            .filter(|preview| preview.contains("continue"))
+            .count(),
+        1,
+        "the user's steer rides the steering queue"
+    );
+
+    // The batched co-delivery rows ride the busy branch too (the accepted
+    // rows a batched turn already persisted must reach the agent): ONE
+    // batch, primary first, the rows in delivery order.
+    let outcome = session
+        .prompt(
+            "batched primary",
+            PromptOptions {
+                streaming_behavior: Some(StreamingBehavior::Steer),
+                batch: vec![
+                    super::PromptBatchRow {
+                        text: "batch row one".to_string(),
+                        images: Vec::new(),
+                    },
+                    super::PromptBatchRow {
+                        text: "batch row two".to_string(),
+                        images: Vec::new(),
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, PromptOutcome::Queued);
+    assert_eq!(
+        session
+            .agent()
+            .steering_previews()
+            .last()
+            .map(String::as_str),
+        Some("batched primary batch row one batch row two"),
+        "the whole batch queues as one batch, primary first: {:?}",
+        session.agent().steering_previews()
+    );
+
+    // Without a behavior the busy rejection stays LOUD, both classes.
+    let rejection = "Agent is already processing. \
+Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+    let error = session
+        .prompt_injected_message(&notice("no behavior"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), rejection);
+    let error = session
+        .prompt("plain continue", PromptOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), rejection);
+
+    // Cleanup: abort the stalled run and let everything unwind.
+    session.agent().abort();
+    session.agent().wait_for_idle().await;
+    let _ = held.await;
+}
+
+/// A busy image delivery never re-routes a live episode: while the run
+/// streams, the busy branch queues the batch without consulting the
+/// router seam (the streaming run keeps its own target; the steered
+/// rows join the live episode, so the routing decision belongs to the
+/// run that actually serves them). The router records every call, so
+/// the pin goes red the moment the busy branch touches routing while
+/// `is_streaming` holds. Mutation: dropping the `!state.is_streaming`
+/// guard in the busy branch routes this delivery mid-episode — `decide`
+/// and `swap_target` both record.
+#[tokio::test]
+async fn a_busy_streaming_image_delivery_never_touches_the_router() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_stalled_turn("holding the turn");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut session = AgentSession::new(
+        Arc::new(Agent::new(options)),
+        SessionManager::in_memory(tmp.path()),
+        vec![],
+    )
+    .await
+    .unwrap();
+    // The recording router: every `decide` and `swap_target` call counts.
+    let decide_calls = Arc::new(std::sync::Mutex::new(0u32));
+    let swap_calls = Arc::new(std::sync::Mutex::new(0u32));
+    session.set_image_model_router(Some(image_model_routing::ImageModelRouter {
+        decide: {
+            let decide_calls = Arc::clone(&decide_calls);
+            Arc::new(move |_carries_images, _level| {
+                *decide_calls.lock().unwrap() += 1;
+                Ok(None)
+            })
+        },
+        swap_target: {
+            let swap_calls = Arc::clone(&swap_calls);
+            Arc::new(move |_target| {
+                *swap_calls.lock().unwrap() += 1;
+            })
+        },
+    }));
+    let session = Arc::new(session);
+    // Start the stalled run and wait until the session streams.
+    let held = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let _ = session
+                .prompt("hold the turn", PromptOptions::default())
+                .await;
+        })
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.agent().state().await.is_streaming {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stalled run never registered"
+        );
+        tokio::task::yield_now().await;
+    }
+    // The stalled run's own idle admission legitimately consulted the
+    // router at its dispatch; zero the recorders so the pins below count
+    // only the busy delivery's calls.
+    *decide_calls.lock().unwrap() = 0;
+    *swap_calls.lock().unwrap() = 0;
+    let images = vec![pa_agent::types::ImageContent {
+        data: "aGk=".to_string(),
+        mime_type: "image/png".to_string(),
+    }];
+    let outcome = session
+        .prompt_with_images(
+            "describe this",
+            images,
+            PromptOptions {
+                streaming_behavior: Some(StreamingBehavior::Steer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        PromptOutcome::Queued,
+        "the image delivery queues behind the run"
+    );
+    assert_eq!(
+        *decide_calls.lock().unwrap(),
+        0,
+        "the busy branch never consults routing while the run streams"
+    );
+    assert_eq!(
+        *swap_calls.lock().unwrap(),
+        0,
+        "the live episode keeps its own serving target"
+    );
+    assert_eq!(
+        session.agent().steering_previews().len(),
+        1,
+        "the image delivery parked its row on the steering lane"
+    );
+
+    // Cleanup: abort the stalled run and let everything unwind.
+    session.agent().abort();
+    session.agent().wait_for_idle().await;
+    let _ = held.await;
+}
+
 /// The comparison covers the whole request - system prompt, tools, and
 /// every message row - with only the per-run timestamps normalized.
 #[tokio::test]

@@ -1,0 +1,2132 @@
+//! The agent inbox: the daemon-owned store where machine-generated
+//! kernel notices (`bash.completed`, `factory.progress`, agent
+//! messages, child lifecycle terminals, and heartbeat fires) accumulate
+//! per session instead of steering their full rows, plus the
+//! `rlm.inbox.read`/`rlm.inbox.count` host requests the agent reads
+//! them with. The durable journal (`inbox.jsonl` under the session dir)
+//! replays on open, so a daemon restart keeps unread messages. A bash
+//! completion the kernel collected through its handle withdraws its
+//! message (`bash.consumed`), so a collected job leaves nothing
+//! waiting.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use serde_json::{json, Value};
+
+use crate::kernel::shared::{host_handler, HostRequestHandlers};
+
+use super::bash_notices::KernelNotice;
+use super::messages::{ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE};
+use pa_types::ai::UserContent;
+use pa_types::session::CustomMessage;
+
+/// The kernel host request that drains and returns the waiting messages
+/// (all of them, or the subset a targeted-read filter narrows to).
+pub const INBOX_READ_REQUEST_TYPE: &str = "rlm.inbox.read";
+/// The kernel host request that counts the waiting messages.
+pub const INBOX_COUNT_REQUEST_TYPE: &str = "rlm.inbox.count";
+/// The journal file one session's inbox appends under its session dir.
+pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
+/// The notice clause while the journal's last write failed: the inbox
+/// stays memory-only until a write succeeds again (nano-rlm's
+/// `inbox_error` visibility — the notice names the degradation).
+pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
+    "(inbox persistence failed; messages are memory-only)";
+
+/// The `bash.completed` notice class label.
+pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
+/// The `factory.progress` notice class label.
+pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
+/// The agent-message class label: one delivered `agent_message.send`
+/// row (parent/sibling/child traffic) routed into the inbox.
+pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
+/// The child-exit class label: one `rlm_child_terminal_notice` row (a
+/// child that ended without a reply or was cancelled).
+pub const INBOX_CLASS_CHILD_EXITED: &str = "child-exited";
+/// The child-failure class label: one `rlm_child_failure` row.
+pub const INBOX_CLASS_CHILD_FAILED: &str = "child-failed";
+/// The heartbeat class label: one fired scheduled heartbeat's prompt.
+pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
+
+/// The coalescing batch state the daemon's notice sink owns: the
+/// arrivals the currently queued short-notice row covers (reset when the
+/// row delivers or clears).
+pub type InboxArrivals = std::sync::Arc<std::sync::Mutex<Vec<InboxMessage>>>;
+
+/// The daemon's post-drain seam: every successful `rlm.inbox.read` runs
+/// it so the queued wake rows can retract or re-render over what is left
+/// (a drained store leaves no stale notice or reminder behind).
+pub type InboxReadHook = std::sync::Arc<dyn Fn(&std::sync::Arc<SessionInbox>) + Send + Sync>;
+
+/// One inbox message: the same text the notice row carries, its arrival
+/// time, and the notice's metadata. The wire and journal shapes are one
+/// (camelCase, like the TS-era notice rows).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxMessage {
+    pub id: String,
+    pub class: String,
+    /// Epoch milliseconds of the message's arrival.
+    pub arrived_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub meta: Value,
+}
+
+/// The inbox projection of one routed kernel notice: the class label, the
+/// sender (the command for a bash completion, the run id for a factory
+/// milestone), the row's text, and its metadata. `None` for rows the
+/// inbox does not route.
+#[derive(Debug, Clone)]
+pub struct InboxNotice {
+    pub class: &'static str,
+    pub sender: Option<String>,
+    pub text: String,
+    pub meta: Value,
+}
+
+/// The targeted-read filter for `rlm.inbox.read` (`rlm.inbox.read()` in
+/// Python): every set field narrows the read (`ANDed`), an all-`None`
+/// filter reads everything. The wire shape is camelCase, like the
+/// message rows.
+///
+/// The shape is STRICT: an unknown field is a request error, never a
+/// silently empty filter that would drain the whole inbox — a typo has
+/// to fail closed. `type` is reserved for the host-request envelope's
+/// routing key (the read handler strips it), so no filter field may
+/// ever take that name.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct InboxReadFilter {
+    /// Exact sender match (the command, the run id, or the agent name).
+    pub sender: Option<String>,
+    /// Exact class match (`bash-done`, `factory-progress`, `agent-message`).
+    pub class: Option<String>,
+    /// Arrival lower bound, inclusive (epoch milliseconds).
+    pub since_ms: Option<u64>,
+    /// Arrival upper bound, exclusive (epoch milliseconds).
+    pub before_ms: Option<u64>,
+}
+
+impl InboxReadFilter {
+    /// Whether the filter narrows the read at all (an all-`None` filter
+    /// is the unfiltered drain).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sender.is_none()
+            && self.class.is_none()
+            && self.since_ms.is_none()
+            && self.before_ms.is_none()
+    }
+
+    fn matches(&self, message: &InboxMessage) -> bool {
+        self.sender
+            .as_deref()
+            .is_none_or(|sender| message.sender.as_deref() == Some(sender))
+            && self
+                .class
+                .as_deref()
+                .is_none_or(|class| message.class == class)
+            && self
+                .since_ms
+                .is_none_or(|since| message.arrived_at_ms >= since)
+            && self
+                .before_ms
+                .is_none_or(|before| message.arrived_at_ms < before)
+    }
+}
+
+/// Which inbox class a kernel notice's custom type routes to, if any.
+#[must_use]
+pub fn inbox_class_for_custom_type(custom_type: &str) -> Option<&'static str> {
+    match custom_type {
+        ASYNC_BASH_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_BASH_DONE),
+        FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE => Some(INBOX_CLASS_FACTORY_PROGRESS),
+        _ => None,
+    }
+}
+
+/// The inbox fields of one `bash.completed` or `factory.progress` notice.
+#[must_use]
+pub fn inbox_notice_fields(notice: &KernelNotice) -> Option<InboxNotice> {
+    let class = inbox_class_for_custom_type(&notice.row.custom_type)?;
+    let text = match &notice.row.content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Blocks(_) => return None,
+    };
+    let mut meta = notice.row.details.clone().unwrap_or(Value::Null);
+    // The bash event's exit class rides beside the raw code: the handle
+    // identity (pid + command) plus one word a targeted read can act on
+    // without decoding the code.
+    if class == INBOX_CLASS_BASH_DONE && meta.is_object() {
+        if let Some(exit_class) = meta.get("exitCode").and_then(Value::as_i64).map(|code| {
+            if code == 0 {
+                "success"
+            } else {
+                "failure"
+            }
+        }) {
+            meta["exitClass"] = json!(exit_class);
+        }
+    }
+    let sender = match class {
+        INBOX_CLASS_BASH_DONE => meta.get("command").and_then(Value::as_str),
+        INBOX_CLASS_FACTORY_PROGRESS => meta.get("runId").and_then(Value::as_str),
+        _ => None,
+    };
+    Some(InboxNotice {
+        class,
+        sender: sender.map(str::to_string),
+        text,
+        meta,
+    })
+}
+
+/// The inbox projection of one reserved child-status custom row (the
+/// daemon's `rlm_child_terminal_notice`/`rlm_child_failure` wire forms):
+/// the lifecycle class, the child's session name as the sender, the
+/// row's text as the message, and the row's details as the metadata.
+/// `None` for any row that is not a reserved child-status kind or that
+/// carries no text content.
+#[must_use]
+pub fn child_status_notice_fields(custom: &Value) -> Option<InboxNotice> {
+    let class = match custom.get("customType").and_then(Value::as_str)? {
+        super::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => INBOX_CLASS_CHILD_EXITED,
+        super::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE => INBOX_CLASS_CHILD_FAILED,
+        _ => return None,
+    };
+    let text = match custom.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        _ => return None,
+    };
+    let meta = custom.get("details").cloned().unwrap_or(Value::Null);
+    let sender = meta
+        .get("sessionName")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(InboxNotice {
+        class,
+        sender,
+        text,
+        meta,
+    })
+}
+
+/// The inbox projection of one fired heartbeat's delivery row (the
+/// scheduled turn the fire would have injected): the `heartbeat` class,
+/// the job id as the sender, and the delivery row's text and details.
+#[must_use]
+pub fn heartbeat_notice_fields(job_id: &str, row: &CustomMessage) -> Option<InboxNotice> {
+    let text = match &row.content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Blocks(_) => return None,
+    };
+    Some(InboxNotice {
+        class: INBOX_CLASS_HEARTBEAT,
+        sender: Some(job_id.to_string()),
+        text,
+        meta: row.details.clone().unwrap_or(Value::Null),
+    })
+}
+
+#[derive(Debug, Default)]
+struct InboxState {
+    messages: Vec<InboxMessage>,
+    next_id: u64,
+}
+
+/// The per-session inbox store: the in-memory waiting messages plus the
+/// durable journal under the session dir. `read` drains; `count`
+/// summarizes; every push and drain appends one journal record, and
+/// `open` replays the journal so a daemon restart keeps unread
+/// messages.
+pub struct SessionInbox {
+    journal: Option<PathBuf>,
+    state: Mutex<InboxState>,
+    /// The journal's degradation, surfaced in the notice text (the
+    /// [`INBOX_PERSISTENCE_ERROR_CLAUSE`] rides it): a failed append sets
+    /// it and only a full rewrite that re-persists the pending set clears
+    /// it (an unreadable journal never rewrites, so its instance keeps
+    /// the slot). `append_journal` owns it; a separate slot because it
+    /// runs under the state lock.
+    persistence_error: Mutex<Option<String>>,
+    /// The daemon's post-drain seam (set once at session build): every
+    /// successful read runs it so the queued wake rows can retract or
+    /// re-render over what is left.
+    read_hook: Mutex<Option<InboxReadHook>>,
+}
+
+impl std::fmt::Debug for SessionInbox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionInbox")
+            .field("journal", &self.journal)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One journal record: a message arrival, a drain marker, one
+/// message's withdrawal (the consumed-bash path), or the id counter's
+/// high-water mark (compaction persists it so a drained restart never
+/// reuses a spent id).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum InboxRecord {
+    Message(InboxMessage),
+    Drained,
+    /// The id of one withdrawn message.
+    Withdrawn {
+        id: String,
+    },
+    /// A targeted read's taken ids: replay drops exactly these, so a
+    /// partial drain never clears the messages it did not return.
+    #[serde(rename_all = "camelCase")]
+    Read {
+        ids: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Counter {
+        next_id: u64,
+    },
+}
+
+impl SessionInbox {
+    /// Open the inbox over one session dir: replay the journal and
+    /// rewrite it compacted to the pending messages (bounded growth
+    /// across restarts). A missing journal starts empty; a journal
+    /// that cannot be read starts empty but stays untouched — and the
+    /// instance stays memory-only, never appending, so nothing it does
+    /// can obscure the records a later open reads; journal write
+    /// failures degrade to in-process durability only.
+    #[must_use]
+    pub fn open(dir: Option<&Path>) -> Self {
+        // The artifact dir may not exist yet on a fresh session; the
+        // journal append creates the file but never the directory.
+        if let Some(dir) = dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let journal = dir.map(|dir| dir.join(INBOX_JOURNAL_FILE));
+        let (messages, next_id, readable) = journal
+            .as_deref()
+            .map_or((Vec::new(), 0, true), replay_journal);
+        // Unreadable records are out of reach: a drain appended now
+        // would erase them for a future readable replay, so the
+        // memory-only instance detaches from the path entirely (the
+        // open's compaction is the one write an unreadable journal
+        // would have taken, and it is skipped the same way).
+        // The detached instance can never persist, so the degradation is
+        // named from the first notice on (only a full rewrite clears the
+        // slot, and an unreadable journal never rewrites).
+        let unreadable_error = (!readable).then(|| {
+            journal.as_ref().map_or_else(
+                || "inbox journal unreadable".to_string(),
+                |path| format!("{}: unreadable", path.display()),
+            )
+        });
+        let inbox = Self {
+            journal: if readable { journal } else { None },
+            state: Mutex::new(InboxState { messages, next_id }),
+            persistence_error: Mutex::new(unreadable_error),
+            read_hook: Mutex::new(None),
+        };
+        if readable {
+            inbox.compact_journal();
+        }
+        inbox
+    }
+
+    /// The journal path this store writes (the reopen/reuse seam).
+    #[must_use]
+    pub fn journal_path(&self) -> Option<PathBuf> {
+        self.journal.clone()
+    }
+
+    /// Open the store for one session dir, REUSING the existing store
+    /// when it already serves the same journal: a failed build can leave
+    /// its published store writable while the next attempt reopens the
+    /// same journal, and a fresh open's compaction would race those
+    /// appends. A different journal (or none) opens fresh.
+    #[must_use]
+    pub fn open_or_reuse(
+        existing: Option<&std::sync::Arc<SessionInbox>>,
+        dir: Option<&Path>,
+    ) -> std::sync::Arc<SessionInbox> {
+        let wanted = dir.map(|dir| dir.join(INBOX_JOURNAL_FILE));
+        if let (Some(existing), Some(wanted)) = (existing, wanted.as_deref()) {
+            if existing.journal_path().as_deref() == Some(wanted) {
+                return std::sync::Arc::clone(existing);
+            }
+        }
+        std::sync::Arc::new(Self::open(dir))
+    }
+
+    /// Install the daemon's post-drain seam (the worker's wake-row
+    /// refresh); the kernel's read handler runs it after every drain.
+    pub fn set_read_hook(&self, hook: InboxReadHook) {
+        *self
+            .read_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// The installed post-drain seam, when one is set.
+    #[must_use]
+    pub fn read_hook(&self) -> Option<InboxReadHook> {
+        self.read_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The in-memory inbox (no journal).
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self {
+            journal: None,
+            state: Mutex::new(InboxState::default()),
+            read_hook: Mutex::new(None),
+            persistence_error: Mutex::new(None),
+        }
+    }
+
+    /// The journal's last write failure, while the inbox is memory-only:
+    /// the notice texts carry the [`INBOX_PERSISTENCE_ERROR_CLAUSE`]
+    /// until a write succeeds again.
+    #[must_use]
+    pub fn persistence_error(&self) -> Option<String> {
+        self.persistence_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// One notice text with the degradation named while the journal's
+    /// last write failed (the arrival, reminder, and withdrawal
+    /// re-render sites share this decoration, so a re-rendered queued row
+    /// never loses the clause its row was queued with).
+    #[must_use]
+    pub fn with_persistence_error_clause(&self, text: String) -> String {
+        if self.persistence_error().is_some() {
+            format!("{text} {INBOX_PERSISTENCE_ERROR_CLAUSE}")
+        } else {
+            text
+        }
+    }
+
+    /// Append one message: durable journal first, then the store. The
+    /// id is a fresh monotonic `inbox-<n>`.
+    pub fn push(&self, notice: InboxNotice, arrived_at_ms: u64) -> InboxMessage {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.next_id += 1;
+        let message = InboxMessage {
+            id: format!("inbox-{}", state.next_id),
+            class: notice.class.to_string(),
+            arrived_at_ms,
+            sender: notice.sender,
+            text: notice.text,
+            meta: notice.meta,
+        };
+        self.append_journal(
+            &serde_json::to_value(InboxRecord::Message(message.clone())).unwrap_or(Value::Null),
+        );
+        state.messages.push(message.clone());
+        message
+    }
+
+    /// Withdraw one bash completion: the kernel read the finished
+    /// command's result through its handle (`bash.consumed`), so the
+    /// message the collection already answered leaves the store (and
+    /// the journal's pending set) instead of waiting for a `read`. Pids
+    /// are reused, so the command disambiguates — the same pair the
+    /// queued-row withdrawal matches. Journal first, then the store
+    /// (the push/drain order): a crash between them never resurrects
+    /// a collected message.
+    pub fn withdraw_bash_completion(&self, pid: u32, command: &str) -> Option<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let position = state.messages.iter().position(|message| {
+            message.class == INBOX_CLASS_BASH_DONE
+                && message.meta.get("pid").and_then(Value::as_u64) == Some(u64::from(pid))
+                && message.meta.get("command").and_then(Value::as_str) == Some(command)
+        })?;
+        let id = state.messages[position].id.clone();
+        self.append_journal(
+            &serde_json::to_value(InboxRecord::Withdrawn { id }).unwrap_or(Value::Null),
+        );
+        Some(state.messages.remove(position))
+    }
+
+    /// Read drains: the waiting messages return in arrival order and
+    /// leave the store (and the journal's pending set).
+    pub fn drain(&self) -> Vec<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.append_journal(&serde_json::to_value(InboxRecord::Drained).unwrap_or(Value::Null));
+        std::mem::take(&mut state.messages)
+    }
+
+    /// A targeted read: only the messages matching the filter return
+    /// (in arrival order) and leave the store; the rest stay waiting.
+    /// The journal records the taken ids (`Read`), never the full
+    /// `Drained` marker, so a restart keeps the untouched messages.
+    pub fn drain_matching(&self, filter: &InboxReadFilter) -> Vec<InboxMessage> {
+        if filter.is_empty() {
+            return self.drain();
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut taken = Vec::new();
+        let mut remaining = Vec::new();
+        for message in std::mem::take(&mut state.messages) {
+            if filter.matches(&message) {
+                taken.push(message);
+            } else {
+                remaining.push(message);
+            }
+        }
+        if !taken.is_empty() {
+            let ids = taken
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>();
+            self.append_journal(
+                &serde_json::to_value(InboxRecord::Read { ids }).unwrap_or(Value::Null),
+            );
+        }
+        state.messages = remaining;
+        taken
+    }
+
+    /// Withdraw every waiting message of one class: the same journal-first,
+    /// then-store order the drained reads use, with one `Withdrawn` record
+    /// per removed id, so a restart keeps the withdrawal. Returns the
+    /// removed messages in arrival order.
+    pub fn withdraw_class(&self, class: &str) -> Vec<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut removed = Vec::new();
+        let mut remaining = Vec::new();
+        for message in std::mem::take(&mut state.messages) {
+            if message.class == class {
+                removed.push(message);
+            } else {
+                remaining.push(message);
+            }
+        }
+        for message in &removed {
+            self.append_journal(
+                &serde_json::to_value(InboxRecord::Withdrawn {
+                    id: message.id.clone(),
+                })
+                .unwrap_or(Value::Null),
+            );
+        }
+        state.messages = remaining;
+        removed
+    }
+
+    /// Withdraw one heartbeat job's waiting fires: the management hook's
+    /// drop-queued withdrawal (pause/stop/delete/rewrite) must not leave a
+    /// durable prompt for a job that no longer runs. Matches the
+    /// `heartbeat` class and the job's id (the notice's sender); the same
+    /// journal-first, then-store order the class withdrawal uses. Returns
+    /// the removed messages in arrival order.
+    pub fn withdraw_heartbeat(&self, job_id: &str) -> Vec<InboxMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut removed = Vec::new();
+        let mut remaining = Vec::new();
+        for message in std::mem::take(&mut state.messages) {
+            if message.class == INBOX_CLASS_HEARTBEAT && message.sender.as_deref() == Some(job_id) {
+                removed.push(message);
+            } else {
+                remaining.push(message);
+            }
+        }
+        for message in &removed {
+            self.append_journal(
+                &serde_json::to_value(InboxRecord::Withdrawn {
+                    id: message.id.clone(),
+                })
+                .unwrap_or(Value::Null),
+            );
+        }
+        state.messages = remaining;
+        removed
+    }
+
+    /// The waiting messages in arrival order: the wake-row refresh
+    /// rebuilds an unknown recovered batch from them.
+    #[must_use]
+    pub fn waiting_messages(&self) -> Vec<InboxMessage> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.messages.clone()
+    }
+
+    /// The waiting message ids: the wake-row refresh trims its covered
+    /// batches against the live set.
+    #[must_use]
+    pub fn waiting_ids(&self) -> std::collections::BTreeSet<String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect()
+    }
+
+    /// The waiting count, its oldest arrival time, and the per-class
+    /// breakdown.
+    pub fn count(&self) -> (usize, Option<u64>, BTreeMap<String, u64>) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut classes: BTreeMap<String, u64> = BTreeMap::new();
+        for message in &state.messages {
+            *classes.entry(message.class.clone()).or_default() += 1;
+        }
+        (
+            state.messages.len(),
+            state.messages.first().map(|message| message.arrived_at_ms),
+            classes,
+        )
+    }
+
+    fn append_journal(&self, record: &Value) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let line = serde_json::to_string(record).unwrap_or_default();
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).append(true);
+        crate::platform::perms::set_private_mode(&mut options);
+        let write = options.open(journal).and_then(|mut file| {
+            use std::io::{Read as _, Seek as _, Write as _};
+            let start = file.metadata().map(|meta| meta.len()).ok();
+            // One record per line: the append must start on a fresh
+            // line. A fragment left by an interrupted append (a
+            // failed write, a crash, a failed compaction) would
+            // otherwise concatenate with this record and replay
+            // would drop both lines. The guard writes the missing
+            // newline first, so the fragment stays a complete
+            // (unparseable, skipped) line of its own.
+            if start.is_some_and(|len| len > 0) {
+                let mut last = [0u8; 1];
+                let ends_clean = file
+                    .seek(std::io::SeekFrom::End(-1))
+                    .and_then(|_| file.read_exact(&mut last))
+                    .is_ok()
+                    && last[0] == b'\n';
+                if !ends_clean {
+                    file.write_all(b"\n")?;
+                }
+            }
+            let written = file
+                .write_all(line.as_bytes())
+                .and_then(|()| file.write_all(b"\n"));
+            if written.is_err() {
+                // Drop this attempt's partial bytes: the failure
+                // never extends the torn fragment it may have left.
+                if let Some(start) = start {
+                    let _ = file.set_len(start);
+                }
+            }
+            written
+        });
+        // Journal failures degrade durability only: the in-process
+        // surface stays truthful, and the error slot names the
+        // degradation in the notices until a full rewrite re-persists
+        // the pending set. A successful append never clears it: the
+        // journal is append-only, so a later write does not persist the
+        // records whose appends failed, and the clause must not vanish
+        // while those unread rows can still be lost on restart.
+        match write {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: inbox journal append failed ({}): {error}",
+                    journal.display()
+                );
+                *self
+                    .persistence_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(format!("{}: {error}", journal.display()));
+            }
+        }
+    }
+
+    /// Rewrite the journal to the id counter and the pending messages
+    /// (called at open, so drained history never outlives a restart
+    /// and the counter never resets to zero on a drained restart).
+    fn compact_journal(&self) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut lines = String::new();
+        let counter = serde_json::to_value(InboxRecord::Counter {
+            next_id: state.next_id,
+        })
+        .unwrap_or(Value::Null);
+        lines.push_str(&serde_json::to_string(&counter).unwrap_or_default());
+        lines.push('\n');
+        for message in &state.messages {
+            let record =
+                serde_json::to_value(InboxRecord::Message(message.clone())).unwrap_or(Value::Null);
+            lines.push_str(&serde_json::to_string(&record).unwrap_or_default());
+            lines.push('\n');
+        }
+        // The rewrite replaces every pending record: it must be durable
+        // before the rename can drop the old file on a crash, so this
+        // call site opts into the atomic write's pre-rename fsync and
+        // the post-rename directory sync.
+        let rewrite = crate::settings::storage::atomic_write_with(
+            journal,
+            &lines,
+            crate::settings::storage::AtomicWriteOptions { fsync: true },
+        );
+        match rewrite {
+            Ok(()) => {
+                // The rewrite re-persisted every pending message: the
+                // degradation epoch is over (the only append-only-safe
+                // clear).
+                *self
+                    .persistence_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: inbox journal compaction failed ({}): {error}",
+                    journal.display()
+                );
+                *self
+                    .persistence_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(format!("{}: {error}", journal.display()));
+            }
+        }
+    }
+}
+
+/// Replay one journal: apply every complete record in order. A torn
+/// tail (a crash mid-append) degrades to the records that parse — the
+/// compacted rewrite that follows drops the fragment. A journal that
+/// cannot be read at all returns unreadable so the open never compacts
+/// over it. Returns the pending messages, the id counter's high-water
+/// mark, and whether the journal was readable.
+fn replay_journal(journal: &Path) -> (Vec<InboxMessage>, u64, bool) {
+    let bytes = match std::fs::read(journal) {
+        Ok(bytes) => bytes,
+        // A missing journal starts fresh; the open's compaction
+        // creates it. Any other read failure starts memory-only and
+        // keeps the journal untouched, like the write failures below.
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "pa-daemon: inbox journal read failed ({}): {error}",
+                journal.display()
+            );
+            return (Vec::new(), 0, false);
+        }
+        Err(_) => return (Vec::new(), 0, true),
+    };
+    let mut messages = Vec::new();
+    let mut next_id = 0;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<InboxRecord>(line.trim()) else {
+            continue;
+        };
+        match record {
+            InboxRecord::Message(message) => {
+                next_id = next_id.max(
+                    message
+                        .id
+                        .rsplit('-')
+                        .next()
+                        .and_then(|id| id.parse().ok())
+                        .unwrap_or(next_id),
+                );
+                messages.push(message);
+            }
+            InboxRecord::Drained => messages.clear(),
+            InboxRecord::Withdrawn { id } => {
+                messages.retain(|message| message.id != id);
+            }
+            InboxRecord::Read { ids } => {
+                messages.retain(|message| !ids.contains(&message.id));
+            }
+            InboxRecord::Counter { next_id: high } => next_id = next_id.max(high),
+        }
+    }
+    (messages, next_id, true)
+}
+
+/// UTC `HH:MM` of one epoch-ms timestamp (the notice time signature).
+#[must_use]
+pub fn utc_hh_mm(ms: u64) -> String {
+    let seconds_of_day = (ms / 1000) % 86_400;
+    format!(
+        "{:02}:{:02}",
+        seconds_of_day / 3600,
+        (seconds_of_day % 3600) / 60
+    )
+}
+
+/// The arrival notice for one batch of messages: the short steering row
+/// that replaces the notices' full rows. One count row per batch: a
+/// single arrival names its class ("1 new bash-done message"), a same
+/// class burst its count ("3 new bash-done messages"), a mixed burst
+/// the per-class breakdown ("3 new messages (2 bash-done, 1
+/// child-exited)"). The signature is the latest arrival's time; a
+/// wider batch carries the arrival window.
+#[must_use]
+pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, String) {
+    let Some(last) = batch.last() else {
+        return (String::new(), String::new());
+    };
+    let signature = utc_hh_mm(last.arrived_at_ms);
+    let mut classes: Vec<(&str, u64)> = Vec::new();
+    for message in batch {
+        match classes
+            .iter_mut()
+            .find(|(class, _)| class == &message.class.as_str())
+        {
+            Some((_, count)) => *count += 1,
+            None => classes.push((&message.class, 1)),
+        }
+    }
+    let count = batch.len();
+    let summary = if count == 1 {
+        format!("1 new message ({})", last.class)
+    } else if classes.len() == 1 {
+        format!("{count} new {} messages", classes[0].0)
+    } else {
+        let breakdown = classes
+            .iter()
+            .map(|(class, class_count)| format!("{class_count} {class}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{count} new messages ({breakdown})")
+    };
+    let window = if count == 1 {
+        signature
+    } else {
+        format!("{}-{}", utc_hh_mm(batch[0].arrived_at_ms), signature)
+    };
+    (
+        format!("Inbox: {summary}"),
+        format!(
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with rlm.inbox.read()."
+        ),
+    )
+}
+
+/// The periodic reminder text while the inbox stays unread: a minimal
+/// count-only nudge (the oldest-wait detail stays on `count()`).
+#[must_use]
+pub fn reminder_notice(count: usize) -> String {
+    let noun = if count == 1 { "message" } else { "messages" };
+    format!("[inbox reminder] {count} {noun} still waiting — rlm.inbox.read()")
+}
+
+// The notice rows' wire vocabulary — the customType, the notice-class
+// words, and the sender identity — lives in `pa_types::inbox_notice`: ONE
+// definition the daemon's queue lanes and the TUI's decode import too
+// (the TUI cannot import the session engine, so a twin constant would
+// drift silently); this module keeps only its own private use.
+use pa_types::inbox_notice::{INBOX_NOTICE_CUSTOM_TYPE, INBOX_NOTICE_SENDER};
+
+/// The `role: "custom"` inbox-notice row one queued notice delivers as,
+/// mirroring `create_agent_session_message_row`: `content` IS the notice
+/// text, so the turn's model context stays byte-identical to the
+/// plain-prompt delivery, while the details carry the inbox-system sender
+/// and the notice class for the transcript's own row class.
+#[must_use]
+pub fn create_inbox_notice_row(text: &str, class: &str, timestamp: u64) -> Value {
+    json!({
+        "role": "custom",
+        "customType": INBOX_NOTICE_CUSTOM_TYPE,
+        "content": text,
+        "display": true,
+        "details": {
+            "sender": INBOX_NOTICE_SENDER,
+            "class": class,
+        },
+        "timestamp": timestamp,
+    })
+}
+
+/// Register the `rlm.inbox.read`/`rlm.inbox.count` host handlers over
+/// one session's store. `read` drains and returns the waiting messages
+/// (an optional `{sender, class, sinceMs, beforeMs}` filter narrows the
+/// drain) and then runs the daemon's `read_hook`, so the queued wake
+/// rows can retract or re-render over what is left; `count` returns the
+/// count, the oldest arrival, and the per-class breakdown.
+pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut HostRequestHandlers) {
+    let read_inbox = Arc::clone(inbox);
+    handlers.register(
+        INBOX_READ_REQUEST_TYPE,
+        host_handler(move |payload| {
+            let inbox = Arc::clone(&read_inbox);
+            Box::pin(async move {
+                // The host-request envelope routes on its `type` key and the
+                // kernel manager hands the handler the whole request object,
+                // so the transport's routing key rides beside the filter
+                // fields; it is never filter data (the runtime puts the
+                // request type last, so a caller-supplied `type` was already
+                // overwritten before the wire).
+                let mut data = payload.data;
+                if let Some(fields) = data.as_object_mut() {
+                    fields.remove("type");
+                }
+                let filter: InboxReadFilter = if data.is_null() {
+                    InboxReadFilter::default()
+                } else {
+                    serde_json::from_value(data)?
+                };
+                let messages = inbox.drain_matching(&filter);
+                let drained_count = messages.len();
+                if let Some(hook) = inbox.read_hook() {
+                    hook(&inbox);
+                }
+                Ok(json!({ "messages": messages, "drainedCount": drained_count }))
+            })
+        }),
+    );
+    let count_inbox = Arc::clone(inbox);
+    handlers.register(
+        INBOX_COUNT_REQUEST_TYPE,
+        host_handler(move |_payload| {
+            let inbox = Arc::clone(&count_inbox);
+            Box::pin(async move {
+                let (count, oldest_arrived_at_ms, classes) = inbox.count();
+                Ok(json!({
+                    "count": count,
+                    "oldestArrivedAtMs": oldest_arrived_at_ms,
+                    "classes": classes,
+                }))
+            })
+        }),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::shared::HostRequestPayload;
+    use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER};
+    use std::io::Write as _;
+
+    fn message(id: &str, class: &str, arrived_at_ms: u64, text: &str) -> InboxMessage {
+        InboxMessage {
+            id: id.to_string(),
+            class: class.to_string(),
+            arrived_at_ms,
+            sender: None,
+            text: text.to_string(),
+            meta: Value::Null,
+        }
+    }
+
+    fn notice(sender: &str, class: &'static str, text: &str, meta: Value) -> InboxNotice {
+        InboxNotice {
+            class,
+            sender: Some(sender.to_string()),
+            text: text.to_string(),
+            meta,
+        }
+    }
+
+    /// Push, drain, and count round-trip through the store's in-memory
+    /// surface; ids stay monotonic across a drain.
+    #[test]
+    fn push_drain_and_count_round_trip() {
+        let inbox = SessionInbox::in_memory();
+        assert_eq!(inbox.count(), (0, None, BTreeMap::new()));
+        let first = inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "done", json!({"pid": 1})),
+            1_000,
+        );
+        let second = inbox.push(
+            notice(
+                "r1",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "milestone",
+                json!({"runId": "r1"}),
+            ),
+            2_000,
+        );
+        assert_eq!(first.id, "inbox-1");
+        assert_eq!(second.id, "inbox-2");
+        let (count, oldest, classes) = inbox.count();
+        assert_eq!(count, 2);
+        assert_eq!(oldest, Some(1_000));
+        assert_eq!(
+            classes,
+            BTreeMap::from([
+                (INBOX_CLASS_BASH_DONE.to_string(), 1),
+                (INBOX_CLASS_FACTORY_PROGRESS.to_string(), 1),
+            ])
+        );
+        let drained = inbox.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].text, "done");
+        assert_eq!(drained[0].meta, json!({"pid": 1}));
+        assert_eq!(drained[0].arrived_at_ms, 1_000);
+        assert_eq!(inbox.count(), (0, None, BTreeMap::new()));
+        // Ids keep counting after a drain.
+        let third = inbox.push(
+            notice("echo 4", INBOX_CLASS_BASH_DONE, "next", json!({})),
+            3_000,
+        );
+        assert_eq!(third.id, "inbox-3");
+    }
+
+    /// A collected bash completion withdraws its own message: the
+    /// pid+command pair matches (pids are reused), a different command
+    /// under the same pid stays, and an unknown pair withdraws nothing.
+    #[test]
+    fn withdraw_bash_completion_drains_only_the_matching_message() {
+        let inbox = SessionInbox::in_memory();
+        inbox.push(
+            notice(
+                "sleep 1",
+                INBOX_CLASS_BASH_DONE,
+                "first",
+                json!({"pid": 11, "command": "sleep 1", "exitCode": 0}),
+            ),
+            1_000,
+        );
+        let second = inbox.push(
+            notice(
+                "sleep 2",
+                INBOX_CLASS_BASH_DONE,
+                "second",
+                json!({"pid": 11, "command": "sleep 2", "exitCode": 0}),
+            ),
+            2_000,
+        );
+        let kept = inbox.push(
+            notice(
+                "r1",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "milestone",
+                json!({"pid": 11, "runId": "r1"}),
+            ),
+            3_000,
+        );
+        assert_eq!(second.id, "inbox-2");
+        assert!(
+            inbox.withdraw_bash_completion(11, "make targets").is_none(),
+            "an unmatched pair withdraws nothing"
+        );
+        let withdrawn = inbox
+            .withdraw_bash_completion(11, "sleep 1")
+            .expect("the matching pair withdraws");
+        assert_eq!(withdrawn.text, "first");
+        assert_eq!(
+            withdrawn.meta,
+            json!({"pid": 11, "command": "sleep 1", "exitCode": 0})
+        );
+        let drained = inbox.drain();
+        assert_eq!(
+            drained,
+            vec![second, kept],
+            "only the matching pair withdrew"
+        );
+    }
+
+    /// A withdrawn message does not survive a restart: the journal's
+    /// withdrawal record removes it from the replayed pending set, and
+    /// the id counter keeps counting past it.
+    #[test]
+    fn a_withdrawn_message_does_not_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice(
+                    "sleep 1",
+                    INBOX_CLASS_BASH_DONE,
+                    "collected",
+                    json!({"pid": 11, "command": "sleep 1"}),
+                ),
+                1_000,
+            );
+            inbox.push(
+                notice(
+                    "sleep 2",
+                    INBOX_CLASS_BASH_DONE,
+                    "waiting",
+                    json!({"pid": 12, "command": "sleep 2"}),
+                ),
+                2_000,
+            );
+            let withdrawn = inbox
+                .withdraw_bash_completion(11, "sleep 1")
+                .expect("the collected message withdraws");
+            assert_eq!(withdrawn.id, "inbox-1");
+        }
+        let inbox = SessionInbox::open(Some(dir.path()));
+        let drained = inbox.drain();
+        let replayed = InboxMessage {
+            id: "inbox-2".to_string(),
+            class: INBOX_CLASS_BASH_DONE.to_string(),
+            arrived_at_ms: 2_000,
+            sender: Some("sleep 2".to_string()),
+            text: "waiting".to_string(),
+            meta: json!({"pid": 12, "command": "sleep 2"}),
+        };
+        assert_eq!(
+            drained,
+            vec![replayed],
+            "the restart replayed only the unwithdrawn message"
+        );
+        let next = inbox.push(
+            notice("echo", INBOX_CLASS_BASH_DONE, "next", json!({})),
+            3_000,
+        );
+        assert_eq!(next.id, "inbox-3", "the id counter replayed");
+    }
+
+    /// The withdrawal's crash window is the order of its two steps: the
+    /// Withdrawn record must be durable before the store drops the
+    /// message (the push/drain order), because a torn write between
+    /// them resurrects the collected bash-done on restart. The window
+    /// has no runtime seam — both steps run under the state lock, and
+    /// a failed append leaves the same journal either way — so the pin
+    /// holds the function's own source order and goes red when the
+    /// remove moves ahead of the journal append.
+    #[test]
+    fn the_withdrawal_journals_before_the_store_remove() {
+        let source = include_str!("inbox.rs");
+        let function = source
+            .split_once("pub fn withdraw_bash_completion")
+            .expect("the source names the withdrawal");
+        let body = function
+            .1
+            .split_once("\n    }\n")
+            .expect("the withdrawal closes its section")
+            .0;
+        let journal = body
+            .find("append_journal")
+            .expect("the withdrawal journals");
+        let remove = body
+            .find("state.messages.remove(position)")
+            .expect("the withdrawal removes from the store");
+        assert!(
+            journal < remove,
+            "the Withdrawn record must reach the journal before the store removes the message"
+        );
+    }
+
+    /// A journal write failure degrades to memory-only and says so: the
+    /// error slot holds the failure across later successful appends too
+    /// (the append-only journal never re-persists the failed records)
+    /// until a full rewrite re-persists the pending set.
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_write_failure_surfaces_until_a_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        let inbox = SessionInbox::open(Some(dir.path()));
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({"pid": 1})),
+            1_000,
+        );
+        assert_eq!(inbox.persistence_error(), None, "the first write succeeded");
+        // A directory in the journal's place fails the append even when
+        // the tests run as root (chmod alone does not).
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        inbox.push(
+            notice(
+                "sleep 2",
+                INBOX_CLASS_BASH_DONE,
+                "second",
+                json!({"pid": 2}),
+            ),
+            2_000,
+        );
+        let error = inbox
+            .persistence_error()
+            .expect("the failed append surfaced");
+        assert!(
+            error.contains("inbox.jsonl"),
+            "the error names the journal: {error}"
+        );
+        // The in-process surface stays truthful: both messages wait.
+        assert_eq!(inbox.count().0, 2);
+        std::fs::remove_dir(&journal).unwrap();
+        inbox.push(
+            notice("sleep 3", INBOX_CLASS_BASH_DONE, "third", json!({"pid": 3})),
+            3_000,
+        );
+        assert!(
+            inbox.persistence_error().is_some(),
+            "a later append never re-persists the failed record: the clause stays"
+        );
+        // The next full rewrite re-persists every pending message: the
+        // only append-only-safe clear.
+        inbox.compact_journal();
+        assert_eq!(
+            inbox.persistence_error(),
+            None,
+            "the rewrite re-persisted the pending set"
+        );
+    }
+
+    /// The journal appends one line per push and drain, and an open
+    /// replays the messages in order with the id counter caught up.
+    #[test]
+    fn journal_appends_and_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice(
+                    "sleep 1",
+                    INBOX_CLASS_BASH_DONE,
+                    "first",
+                    json!({"pid": 11}),
+                ),
+                1_000,
+            );
+            inbox.push(
+                notice(
+                    "r",
+                    INBOX_CLASS_FACTORY_PROGRESS,
+                    "second",
+                    json!({"runId": "r"}),
+                ),
+                2_000,
+            );
+        }
+        // The in-process compaction rewrote the journal to the id
+        // counter record plus the pending messages: one line each.
+        let content = std::fs::read_to_string(&journal).unwrap();
+        assert_eq!(content.lines().count(), 3, "journal: {content}");
+        assert!(
+            content.starts_with("{\"kind\":\"counter\""),
+            "the counter record leads: {content}"
+        );
+        // The simulated restart: a fresh open replays both messages.
+        let inbox = SessionInbox::open(Some(dir.path()));
+        let (count, oldest, classes) = inbox.count();
+        assert_eq!(count, 2);
+        assert_eq!(oldest, Some(1_000));
+        assert_eq!(classes[INBOX_CLASS_BASH_DONE], 1);
+        assert_eq!(classes[INBOX_CLASS_FACTORY_PROGRESS], 1);
+        let drained = inbox.drain();
+        assert_eq!(drained[0].id, "inbox-1");
+        assert_eq!(drained[0].text, "first");
+        assert_eq!(drained[1].text, "second");
+        // The drain marker survives a restart as an empty inbox.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        assert_eq!(reopened.count(), (0, None, BTreeMap::new()));
+        let next = reopened.push(
+            notice("echo 3", INBOX_CLASS_BASH_DONE, "third", json!({})),
+            3_000,
+        );
+        assert_eq!(next.id, "inbox-3", "the id counter replayed");
+    }
+
+    /// A torn journal tail degrades to the readable records.
+    #[test]
+    fn a_torn_journal_tail_degrades_to_the_readable_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        let mut file = std::fs::File::create(&journal).unwrap();
+        let record = serde_json::to_value(InboxRecord::Message(message(
+            "inbox-1",
+            INBOX_CLASS_BASH_DONE,
+            1_000,
+            "done",
+        )))
+        .unwrap();
+        writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+        writeln!(file, "{{\"kind\":\"message\"").unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        let (count, _, _) = inbox.count();
+        assert_eq!(count, 1, "the torn tail is skipped, the record replays");
+    }
+
+    /// A torn append ending in invalid UTF-8 (a crash mid-write of a
+    /// multi-byte character) still replays the complete records: the
+    /// journal is replayed per record, never decoded as one string, and
+    /// the compaction rewrites it without the fragment.
+    #[test]
+    fn a_torn_tail_with_invalid_utf8_replays_the_complete_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        let mut file = std::fs::File::create(&journal).unwrap();
+        let record = serde_json::to_value(InboxRecord::Message(message(
+            "inbox-1",
+            INBOX_CLASS_BASH_DONE,
+            1_000,
+            "done",
+        )))
+        .unwrap();
+        writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+        // The torn tail: a partial record whose last write stopped mid
+        // multi-byte character (invalid UTF-8, no newline).
+        file.write_all(b"{\"kind\":\"message\",\"id\":\"inbox-2\",\"text\":\"ca")
+            .unwrap();
+        file.write_all(&[0xc3]).unwrap();
+        drop(file);
+        let inbox = SessionInbox::open(Some(dir.path()));
+        let (count, _, _) = inbox.count();
+        assert_eq!(count, 1, "the complete record replays");
+        // The compaction dropped the fragment: the journal is valid
+        // UTF-8 again, holding the counter record and the message.
+        let content = std::fs::read_to_string(&journal).unwrap();
+        assert_eq!(content.lines().count(), 2, "journal: {content}");
+        assert!(
+            content.starts_with("{\"kind\":\"counter\"") && content.contains("\"inbox-1\""),
+            "the rewrite kept the record and dropped the fragment: {content}"
+        );
+    }
+
+    /// A journal that cannot be read at all (here: the path is a
+    /// directory) starts empty but is never compacted over: the open
+    /// leaves the unread journal and its records untouched.
+    #[test]
+    fn an_unreadable_journal_is_never_compacted_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        std::fs::create_dir(&journal).unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        assert_eq!(inbox.count(), (0, None, BTreeMap::new()));
+        assert!(
+            inbox.persistence_error().is_some(),
+            "the unreadable journal names its degradation from the start"
+        );
+        assert!(journal.is_dir(), "the unread journal is left untouched");
+        assert!(
+            !std::fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("inbox.jsonl.tmp")
+                }),
+            "the skipped compaction wrote no throwaway tmp"
+        );
+    }
+
+    /// An unreadable journal detaches the instance from the path:
+    /// nothing it does can erase the records a later open replays, even
+    /// after the read failure clears (without the detach, the drain's
+    /// `Drained` marker would erase the unseen record).
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_journal_detaches_the_instance_from_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        // The unreadable cause: a symlink loop (root-safe).
+        std::os::unix::fs::symlink(&journal, &journal).unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        assert_eq!(inbox.count().0, 0, "the unreadable journal starts empty");
+        assert!(
+            inbox.persistence_error().is_some(),
+            "the detached instance keeps the unreadable degradation"
+        );
+        // The cause clears: the path becomes a real journal with one
+        // unread record the instance never saw.
+        std::fs::remove_file(&journal).unwrap();
+        let record = serde_json::to_value(InboxRecord::Message(message(
+            "inbox-1",
+            INBOX_CLASS_BASH_DONE,
+            1_000,
+            "kept",
+        )))
+        .unwrap();
+        std::fs::write(
+            &journal,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        // The detached instance's push and drain stay in memory; the
+        // path stays untouched.
+        inbox.push(
+            notice("echo 1", INBOX_CLASS_BASH_DONE, "memory only", json!({})),
+            2_000,
+        );
+        assert_eq!(inbox.drain().len(), 1);
+        // A later open replays the record the detached instance never
+        // saw (no drain marker sits over it).
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let drained = reopened.drain();
+        assert_eq!(drained.len(), 1, "the unseen record survives");
+        assert_eq!(drained[0].text, "kept");
+        assert_eq!(drained[0].id, "inbox-1");
+    }
+
+    /// A class withdrawal removes exactly that class, journals one
+    /// `Withdrawn` record per id, and replays as removed (the clear/pause
+    /// sweep of the durable store).
+    #[test]
+    fn withdraw_class_removes_one_class_and_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({})),
+                1_000,
+            );
+            inbox.push(
+                notice("peer", INBOX_CLASS_AGENT_MESSAGE, "second", json!({})),
+                2_000,
+            );
+            inbox.push(
+                notice("peer", INBOX_CLASS_AGENT_MESSAGE, "third", json!({})),
+                3_000,
+            );
+            let removed = inbox.withdraw_class(INBOX_CLASS_AGENT_MESSAGE);
+            assert_eq!(
+                removed.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+                ["second", "third"]
+            );
+            let (count, _, classes) = inbox.count();
+            assert_eq!(count, 1);
+            assert_eq!(classes[INBOX_CLASS_BASH_DONE], 1);
+        }
+        // The withdrawal replays: the removed ids stay gone, the other
+        // class survives, and a fresh id never collides.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let drained = reopened.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].text, "first");
+        let next = reopened.push(
+            notice("echo", INBOX_CLASS_BASH_DONE, "later", json!({})),
+            4_000,
+        );
+        assert_eq!(next.id, "inbox-4", "the id counter keeps counting");
+    }
+
+    /// The compaction opts into the atomic write's fsync: the rewrite
+    /// must be durable before it can replace the journal.
+    #[test]
+    fn the_compaction_opts_into_the_fsync() {
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = SessionInbox::open(Some(dir.path()));
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "once", json!({})),
+            1_000,
+        );
+        let _ = SessionInbox::open(Some(dir.path()));
+        assert!(
+            crate::settings::storage::opt_in_fsync_calls() > before,
+            "the compaction's rewrite synced the temp file before the rename"
+        );
+    }
+
+    /// The rebuild seam reuses a store over the same journal, so a failed
+    /// build's published appends never race a fresh open's compaction;
+    /// another journal opens fresh.
+    #[test]
+    fn the_rebuild_seam_reuses_the_same_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = std::sync::Arc::new(SessionInbox::open(Some(dir.path())));
+        first.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "kept", json!({})),
+            1_000,
+        );
+        let reused = SessionInbox::open_or_reuse(Some(&first), Some(dir.path()));
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &reused),
+            "the same journal reuses the live store"
+        );
+        assert_eq!(reused.count().0, 1, "the published append stays visible");
+        let other = tempfile::tempdir().unwrap();
+        let fresh = SessionInbox::open_or_reuse(Some(&first), Some(other.path()));
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &fresh),
+            "another journal opens fresh"
+        );
+        assert_eq!(fresh.count(), (0, None, BTreeMap::new()));
+        let reopened = SessionInbox::open_or_reuse(None, Some(dir.path()));
+        assert_eq!(reopened.count().0, 1, "a fresh open replays the journal");
+    }
+
+    /// The id counter survives a drained restart: the compacted journal
+    /// carries the counter record, so a fresh replay keeps ids monotonic
+    /// instead of reissuing a spent id.
+    #[test]
+    fn the_id_counter_survives_a_drained_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({"pid": 1})),
+                1_000,
+            );
+            inbox.push(
+                notice(
+                    "sleep 2",
+                    INBOX_CLASS_BASH_DONE,
+                    "second",
+                    json!({"pid": 2}),
+                ),
+                2_000,
+            );
+            inbox.drain();
+        }
+        {
+            // The reopen replays the drain and compacts: only the
+            // counter record remains (the high-water mark, not zero).
+            let reopened = SessionInbox::open(Some(dir.path()));
+            assert_eq!(reopened.count(), (0, None, BTreeMap::new()));
+            let content = std::fs::read_to_string(&journal).unwrap();
+            assert_eq!(content.lines().count(), 1, "journal: {content}");
+            assert!(
+                content.contains("\"counter\"") && content.contains("\"nextId\":2"),
+                "the counter record persists: {content}"
+            );
+        }
+        // The restart over the drained journal still counts past the
+        // spent ids.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let next = reopened.push(
+            notice("echo 3", INBOX_CLASS_BASH_DONE, "third", json!({})),
+            3_000,
+        );
+        assert_eq!(next.id, "inbox-3", "the drained counter replayed");
+    }
+
+    /// The notice fields project one bash completion and one factory
+    /// milestone; other custom rows stay unrouted.
+    #[test]
+    fn inbox_notice_fields_route_by_custom_type() {
+        let bash = KernelNotice::bash_completion(4321, "sleep 1", 7);
+        let fields = inbox_notice_fields(&bash).expect("the completion routes");
+        assert_eq!(fields.class, INBOX_CLASS_BASH_DONE);
+        assert_eq!(fields.sender.as_deref(), Some("sleep 1"));
+        assert!(fields.text.contains("[bash-done pid:4321 exit:7]"));
+        assert_eq!(
+            fields.meta,
+            json!({"pid": 4321, "command": "sleep 1", "exitCode": 7, "exitClass": "failure"})
+        );
+        let progress = KernelNotice {
+            row: super::super::messages::create_factory_progress_message(
+                "run-7",
+                "budget_exceeded",
+                None,
+                "run budget_ms 2000 exceeded",
+                1_000,
+            ),
+            preview_label: "Factory progress",
+        };
+        let fields = inbox_notice_fields(&progress).expect("the milestone routes");
+        assert_eq!(fields.class, INBOX_CLASS_FACTORY_PROGRESS);
+        assert_eq!(fields.sender.as_deref(), Some("run-7"));
+        assert!(fields.text.contains("budget-exceeded"));
+    }
+
+    /// The arrival notice: one count row per batch. One message names
+    /// its class and the total waiting; a same-class burst its count; a
+    /// mixed burst the window and the per-class breakdown.
+    #[test]
+    fn arrival_notice_covers_the_batch() {
+        // 14:03:00 UTC: one new message, two waiting before it.
+        let at = (14 * 3600 + 3 * 60) * 1000u64;
+        let single = message("inbox-3", INBOX_CLASS_BASH_DONE, at, "done");
+        let (preview, text) = arrival_notice(std::slice::from_ref(&single), 3);
+        assert_eq!(preview, "Inbox: 1 new message (bash-done)");
+        assert_eq!(
+            text,
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read()."
+        );
+        let same_class = [
+            message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
+            message("inbox-2", INBOX_CLASS_BASH_DONE, at, "b"),
+        ];
+        let (preview, text) = arrival_notice(&same_class, 2);
+        assert_eq!(preview, "Inbox: 2 new bash-done messages");
+        assert_eq!(
+            text,
+            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with rlm.inbox.read()."
+        );
+        let batch = [
+            message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
+            message("inbox-2", INBOX_CLASS_FACTORY_PROGRESS, at - 30_000, "b"),
+            message("inbox-3", INBOX_CLASS_BASH_DONE, at, "c"),
+        ];
+        let (preview, text) = arrival_notice(&batch, 3);
+        assert_eq!(
+            preview,
+            "Inbox: 3 new messages (2 bash-done, 1 factory-progress)"
+        );
+        assert_eq!(
+            text,
+            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with rlm.inbox.read()."
+        );
+    }
+
+    /// The child-status projection: the terminal notice routes as
+    /// `child-exited` (the child's session name as sender, the row's
+    /// details as metadata) and the failure row as `child-failed`;
+    /// other custom rows stay unrouted.
+    #[test]
+    fn child_status_notice_fields_route_the_lifecycle_rows() {
+        let terminal = serde_json::to_value(pa_types::session::AgentMessage::Custom(
+            super::super::rlm_notices::create_rlm_child_terminal_notice(
+                &super::super::rlm_notices::RlmChildTerminalNotice::CompletedWithoutReply {
+                    child_id: "sub-8fb5284a".to_string(),
+                    session_name: "f20-worker".to_string(),
+                    last_assistant_text_preview: Some("done with the task".to_string()),
+                },
+                1_000,
+            ),
+        ))
+        .unwrap();
+        let fields = child_status_notice_fields(&terminal).expect("the terminal routes");
+        assert_eq!(fields.class, INBOX_CLASS_CHILD_EXITED);
+        assert_eq!(fields.sender.as_deref(), Some("f20-worker"));
+        assert!(fields
+            .text
+            .contains("[child-exited: no-reply child:f20-worker]"));
+        assert!(fields.text.contains("done with the task"));
+        assert_eq!(fields.meta["kind"], "completed_without_reply");
+        assert_eq!(fields.meta["childId"], "sub-8fb5284a");
+        let cancelled = serde_json::to_value(pa_types::session::AgentMessage::Custom(
+            super::super::rlm_notices::create_rlm_child_terminal_notice(
+                &super::super::rlm_notices::RlmChildTerminalNotice::Cancelled {
+                    child_id: "sub-1".to_string(),
+                    session_name: "lane".to_string(),
+                    reason: Some("Deleted by parent orchestrator".to_string()),
+                },
+                2_000,
+            ),
+        ))
+        .unwrap();
+        let fields = child_status_notice_fields(&cancelled).expect("the cancel routes");
+        assert_eq!(fields.class, INBOX_CLASS_CHILD_EXITED);
+        assert_eq!(fields.sender.as_deref(), Some("lane"));
+        assert_eq!(fields.meta["kind"], "cancelled");
+        let failure = serde_json::to_value(pa_types::session::AgentMessage::Custom(
+            super::super::rlm_notices::create_rlm_child_failure_message(
+                "sub-9", "lane", "boom", 3_000,
+            ),
+        ))
+        .unwrap();
+        let fields = child_status_notice_fields(&failure).expect("the failure routes");
+        assert_eq!(fields.class, INBOX_CLASS_CHILD_FAILED);
+        assert_eq!(fields.sender.as_deref(), Some("lane"));
+        assert!(fields.text.contains("[child-failed child:lane]"));
+        assert_eq!(fields.meta["error"], "boom");
+        assert!(
+            child_status_notice_fields(&json!({"customType": "agent_message"})).is_none(),
+            "a non-lifecycle row stays unrouted"
+        );
+    }
+
+    /// The heartbeat projection: the fired delivery row routes as the
+    /// `heartbeat` class with the job id as sender and the row's details
+    /// as metadata.
+    #[test]
+    fn heartbeat_notice_fields_route_the_fired_prompt() {
+        let job = pa_core_cron_job();
+        let row = super::super::messages::create_heartbeat_prompt_message(&job, 4_000);
+        let fields = heartbeat_notice_fields(&job.id, &row).expect("the fire routes");
+        assert_eq!(fields.class, INBOX_CLASS_HEARTBEAT);
+        assert_eq!(fields.sender.as_deref(), Some("hb-1"));
+        assert!(fields.text.contains("[heartbeat: every 10m run#3]"));
+        assert!(fields.text.contains("nudge the mission"));
+        assert_eq!(fields.meta["jobId"], "hb-1");
+        assert_eq!(fields.meta["runCount"], 3);
+    }
+
+    fn pa_core_cron_job() -> crate::cron::AgentCronJob {
+        crate::cron::AgentCronJob {
+            id: "hb-1".to_string(),
+            status: crate::cron::JobStatus::Active,
+            source: Some("rlm_heartbeat".to_string()),
+            runtime_kind: None,
+            delivery_mode: Some(crate::cron::DeliveryMode::Steer),
+            active_session_id: "a1".to_string(),
+            session_id: "s1".to_string(),
+            session_file: String::new(),
+            cwd: "/w".to_string(),
+            label: None,
+            prompt: "nudge the mission".to_string(),
+            schedule: crate::cron::AgentCronSchedule {
+                kind: crate::cron::ScheduleKind::Interval,
+                expression: "every 10m".to_string(),
+                interval_ms: Some(600_000),
+            },
+            created_at: "2026-11-12T18:00:00.000Z".to_string(),
+            updated_at: "2026-11-12T18:00:00.000Z".to_string(),
+            next_run_at: Some("2026-11-12T18:20:00.000Z".to_string()),
+            last_run_at: None,
+            last_skipped_at: None,
+            last_error: None,
+            run_count: 3,
+        }
+    }
+
+    /// The reminder names the waiting count only (a minimal nudge, no
+    /// content and no oldest-wait detail).
+    #[test]
+    fn reminder_notice_names_the_wait() {
+        assert_eq!(
+            reminder_notice(3),
+            "[inbox reminder] 3 messages still waiting — rlm.inbox.read()"
+        );
+        assert_eq!(
+            reminder_notice(1),
+            "[inbox reminder] 1 message still waiting — rlm.inbox.read()"
+        );
+    }
+
+    /// A targeted read takes exactly the messages the filter matches
+    /// (class, sender, and arrival window, `ANDed`) and leaves the rest
+    /// waiting; the journal replays exactly the taken ids, so a restart
+    /// keeps the untouched messages.
+    #[test]
+    fn a_targeted_read_takes_only_the_matching_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = SessionInbox::open(Some(dir.path()));
+            inbox.push(
+                notice("sleep 1", INBOX_CLASS_BASH_DONE, "first", json!({})),
+                1_000,
+            );
+            inbox.push(
+                notice("peer", INBOX_CLASS_AGENT_MESSAGE, "second", json!({})),
+                2_000,
+            );
+            inbox.push(
+                notice("sleep 2", INBOX_CLASS_BASH_DONE, "third", json!({})),
+                3_000,
+            );
+            // Class: the two bash-done messages leave, the agent message
+            // stays.
+            let taken = inbox.drain_matching(&InboxReadFilter {
+                class: Some(INBOX_CLASS_BASH_DONE.to_string()),
+                ..Default::default()
+            });
+            assert_eq!(
+                taken.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+                ["first", "third"]
+            );
+            // An empty window and an unknown sender take nothing.
+            assert!(inbox
+                .drain_matching(&InboxReadFilter {
+                    since_ms: Some(10_000),
+                    ..Default::default()
+                })
+                .is_empty());
+            assert!(inbox
+                .drain_matching(&InboxReadFilter {
+                    sender: Some("nobody".to_string()),
+                    ..Default::default()
+                })
+                .is_empty());
+            assert_eq!(inbox.count().0, 1, "the unmatched message stays");
+        }
+        // The partial read replays: exactly the taken ids are gone, the
+        // untouched agent message survives the restart.
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let (count, _, classes) = reopened.count();
+        assert_eq!(count, 1);
+        assert_eq!(classes[INBOX_CLASS_AGENT_MESSAGE], 1);
+        // Sender plus arrival window (ANDed) then takes it.
+        let taken = reopened.drain_matching(&InboxReadFilter {
+            sender: Some("peer".to_string()),
+            since_ms: Some(2_000),
+            before_ms: Some(2_001),
+            ..Default::default()
+        });
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].text, "second");
+        assert_eq!(reopened.count().0, 0);
+    }
+
+    /// A fragment left by an interrupted append never swallows the next
+    /// record: the next append writes the missing line boundary first,
+    /// so the fragment stays its own (skipped) line.
+    #[test]
+    fn a_fragment_never_swallows_the_next_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(INBOX_JOURNAL_FILE);
+        {
+            let mut file = std::fs::File::create(&journal).unwrap();
+            file.write_all(b"{\"kind\":\"message\",\"id\":\"inbox-1\",\"te")
+                .unwrap();
+        }
+        // The store attaches straight over the fragment (the shape an
+        // interrupted append leaves mid-session; a fresh open would have
+        // compacted it away instead).
+        let store = SessionInbox {
+            journal: Some(journal),
+            state: Mutex::new(InboxState::default()),
+            persistence_error: Mutex::new(None),
+            read_hook: Mutex::new(None),
+        };
+        store.push(
+            notice(
+                "echo 1",
+                INBOX_CLASS_BASH_DONE,
+                "after the fragment",
+                json!({}),
+            ),
+            1_000,
+        );
+        drop(store);
+        let reopened = SessionInbox::open(Some(dir.path()));
+        let (count, _, _) = reopened.count();
+        assert_eq!(count, 1, "the record after the fragment replays");
+        let drained = reopened.drain();
+        assert_eq!(drained[0].text, "after the fragment");
+    }
+
+    /// The notice row: `content` is the notice text byte-identical (the
+    /// persistence clause included), the details carry the inbox-system
+    /// sender and the notice class, and the row parses as the engine's
+    /// injected-turn shape (`AgentMessage::Custom`), so a delivered turn's
+    /// model context is exactly the notice text.
+    #[test]
+    fn inbox_notice_row_carries_the_text_and_the_sender_identity() {
+        let arrival = format!(
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
+        );
+        let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
+        for (class, text) in [
+            (INBOX_NOTICE_CLASS_ARRIVAL, arrival),
+            (INBOX_NOTICE_CLASS_REMINDER, reminder),
+        ] {
+            let row = create_inbox_notice_row(&text, class, 1_730_000_000_000);
+            // Whole-object equality: the exact wire shape, no extra keys,
+            // every field present at once.
+            let expected = json!({
+                "role": "custom",
+                "customType": INBOX_NOTICE_CUSTOM_TYPE,
+                "content": text.clone(),
+                "display": true,
+                "details": { "sender": INBOX_NOTICE_SENDER, "class": class },
+                "timestamp": 1_730_000_000_000u64,
+            });
+            assert_eq!(row, expected, "the {class} notice row");
+            match serde_json::from_value::<pa_types::session::AgentMessage>(expected) {
+                Ok(pa_types::session::AgentMessage::Custom(custom)) => {
+                    assert_eq!(custom.content.text(), text);
+                }
+                other => panic!("the notice row must parse as AgentMessage::Custom: {other:?}"),
+            }
+        }
+    }
+
+    /// The host handlers drain on read and summarize on count.
+    /// The envelope shape the kernel manager really delivers: the
+    /// host-request routing `type` key rides beside the filter fields (the
+    /// runtime puts the request type last), so the read handler must treat
+    /// it as transport metadata, never an unknown filter field — a bare
+    /// enveloped read drains all, a filtered one drains only its class.
+    #[tokio::test]
+    async fn the_read_handler_treats_the_envelope_routing_key_as_transport() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        inbox.push(
+            notice(
+                "peer",
+                INBOX_CLASS_AGENT_MESSAGE,
+                "the agent mail",
+                json!({}),
+            ),
+            1_000,
+        );
+        inbox.push(
+            notice(
+                "child",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "the child notice",
+                json!({}),
+            ),
+            2_000,
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let enveloped = |class: Option<&str>| {
+            let read = read.clone();
+            let class = class.map(str::to_string);
+            async move {
+                let mut data = json!({ "type": INBOX_READ_REQUEST_TYPE });
+                if let Some(class) = class {
+                    data["class"] = json!(class);
+                }
+                read(HostRequestPayload { data }).await
+            }
+        };
+        let filtered = enveloped(Some(INBOX_CLASS_FACTORY_PROGRESS))
+            .await
+            .expect("the routing key is not an unknown filter field");
+        assert_eq!(filtered["drainedCount"], 1);
+        assert_eq!(
+            inbox
+                .waiting_messages()
+                .into_iter()
+                .map(|message| message.text)
+                .collect::<Vec<_>>(),
+            ["the agent mail"]
+        );
+        let bare = enveloped(None).await.expect("a bare read drains the rest");
+        assert_eq!(bare["drainedCount"], 1);
+        assert!(inbox.waiting_messages().is_empty());
+    }
+
+    /// A filter with an unknown field is a REQUEST ERROR that drains
+    /// nothing: silently reading it as an empty filter would drain the
+    /// whole inbox on a typo. Known fields, a mixed known+unknown filter,
+    /// an empty object, and a null payload keep their documented behavior.
+    #[tokio::test]
+    async fn unknown_read_filter_fields_do_not_drain_the_inbox() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        let pushed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let pushed = Arc::clone(&pushed);
+            inbox.set_read_hook(Arc::new(move |_inbox| {
+                pushed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }
+        inbox.push(
+            notice(
+                "peer",
+                INBOX_CLASS_AGENT_MESSAGE,
+                "keep this message",
+                json!({}),
+            ),
+            1_000,
+        );
+        inbox.push(
+            notice(
+                "child",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "keep this child notice",
+                json!({}),
+            ),
+            2_000,
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let read_with = |data| {
+            let read = read.clone();
+            async move { read(HostRequestPayload { data }).await }
+        };
+        let waiting_texts = || {
+            inbox
+                .waiting_messages()
+                .into_iter()
+                .map(|message| message.text)
+                .collect::<Vec<_>>()
+        };
+
+        let unknown_only = read_with(json!({ "inbox_clas": INBOX_CLASS_AGENT_MESSAGE })).await;
+        assert!(
+            unknown_only.is_err(),
+            "an unknown-only filter must be rejected"
+        );
+        assert_eq!(
+            waiting_texts(),
+            ["keep this message", "keep this child notice"],
+            "the malformed request must leave every message unread"
+        );
+        assert_eq!(
+            pushed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "validation precedes the read hook"
+        );
+
+        let mixed_unknown = read_with(json!({
+            "class": INBOX_CLASS_AGENT_MESSAGE,
+            "inbox_clas": INBOX_CLASS_AGENT_MESSAGE,
+        }))
+        .await;
+        assert!(
+            mixed_unknown.is_err(),
+            "known fields do not excuse an unknown field"
+        );
+        assert_eq!(
+            waiting_texts(),
+            ["keep this message", "keep this child notice"],
+            "the mixed malformed request must leave every message unread"
+        );
+        assert_eq!(
+            pushed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "validation precedes the read hook"
+        );
+
+        let known = read_with(json!({ "class": INBOX_CLASS_AGENT_MESSAGE }))
+            .await
+            .expect("a known-only filter reads");
+        assert_eq!(known["drainedCount"], 1);
+        assert_eq!(waiting_texts(), ["keep this child notice"]);
+        let empty_object = read_with(json!({})).await.expect("an empty filter reads");
+        assert_eq!(empty_object["drainedCount"], 1);
+        assert_eq!(
+            pushed.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a validated read drains"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_drains_and_count_summarizes() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        inbox.push(
+            notice(
+                "the command",
+                INBOX_CLASS_BASH_DONE,
+                "the command finished",
+                json!({"pid": 1}),
+            ),
+            1_000,
+        );
+        inbox.push(
+            notice(
+                "r1",
+                INBOX_CLASS_FACTORY_PROGRESS,
+                "the run paused",
+                json!({"runId": "r1"}),
+            ),
+            2_000,
+        );
+        let count = handlers
+            .get(INBOX_COUNT_REQUEST_TYPE)
+            .expect("count registered")
+            .clone();
+        let reply = count(HostRequestPayload { data: json!({}) }).await.unwrap();
+        assert_eq!(
+            reply,
+            json!({
+                "count": 2,
+                "oldestArrivedAtMs": 1_000,
+                "classes": { "bash-done": 1, "factory-progress": 1 },
+            })
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let reply = read(HostRequestPayload { data: json!({}) }).await.unwrap();
+        assert_eq!(reply["drainedCount"], 2);
+        let messages = reply["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["id"], "inbox-1");
+        assert_eq!(messages[0]["class"], "bash-done");
+        assert_eq!(messages[0]["arrivedAtMs"], 1_000);
+        assert_eq!(messages[0]["text"], "the command finished");
+        assert_eq!(messages[0]["meta"], json!({"pid": 1}));
+        assert_eq!(messages[1]["sender"], "r1");
+        // The read drained.
+        let reply = count(HostRequestPayload { data: json!({}) }).await.unwrap();
+        assert_eq!(
+            reply,
+            json!({ "count": 0, "oldestArrivedAtMs": null, "classes": {} })
+        );
+        let reply = read(HostRequestPayload { data: json!({}) }).await.unwrap();
+        assert_eq!(reply, json!({ "messages": [], "drainedCount": 0 }));
+    }
+
+    /// The read host handler narrows on a filter payload and rejects a
+    /// malformed one (a silent default would drain everything).
+    #[tokio::test]
+    async fn the_read_handler_honors_a_filter_payload() {
+        let inbox = Arc::new(SessionInbox::in_memory());
+        let mut handlers = HostRequestHandlers::default();
+        // The drain hook fires once per read (the daemon's wake-row
+        // refresh seam).
+        let hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_counter = Arc::clone(&hook_calls);
+        inbox.set_read_hook(Arc::new(move |_inbox| {
+            hook_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        register_inbox_host_handlers(&inbox, &mut handlers);
+        inbox.push(
+            notice("sleep 1", INBOX_CLASS_BASH_DONE, "a", json!({})),
+            1_000,
+        );
+        inbox.push(
+            notice("peer", INBOX_CLASS_AGENT_MESSAGE, "b", json!({})),
+            2_000,
+        );
+        let read = handlers
+            .get(INBOX_READ_REQUEST_TYPE)
+            .expect("read registered")
+            .clone();
+        let reply = read(HostRequestPayload {
+            data: json!({ "class": INBOX_CLASS_AGENT_MESSAGE, "sender": "peer" }),
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply["drainedCount"], 1);
+        assert_eq!(reply["messages"][0]["text"], "b");
+        // The unmatched message stays for the next read.
+        let reply = read(HostRequestPayload { data: json!({}) }).await.unwrap();
+        assert_eq!(reply["drainedCount"], 1);
+        assert_eq!(reply["messages"][0]["text"], "a");
+        // A malformed filter fails the read; nothing drains.
+        inbox.push(
+            notice("sleep 3", INBOX_CLASS_BASH_DONE, "c", json!({})),
+            3_000,
+        );
+        let error = read(HostRequestPayload {
+            data: json!({ "sinceMs": "soon" }),
+        })
+        .await;
+        assert!(error.is_err(), "the malformed filter fails the read");
+        assert_eq!(inbox.count().0, 1, "the malformed read drained nothing");
+        assert_eq!(
+            hook_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "every successful read ran the drain hook; the refused one did not"
+        );
+    }
+}

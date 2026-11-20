@@ -1,0 +1,1487 @@
+//! Agent inbox e2e (stage 1): machine notices (`bash.completed`,
+//! `factory.progress`) and delivered agent messages route into the
+//! daemon-owned inbox instead of steering their full rows; a short
+//! coalesced steering notice wakes the agent mid-batch;
+//! `rlm.inbox.read()` returns the messages with their time signature,
+//! drains everything, or narrows to a targeted subset (`sender`,
+//! `inbox_class`, arrival window); the journal persists under the
+//! session's artifact dir; and `agentInbox.enabled: false` (the kill
+//! switch) restores the direct full-row steering. Everything asserts
+//! transcript row order, never wall-clock caps.
+//!
+//! The kernel boots through the real runtime bootstrap: the daemon gets
+//! a private `PRIME_AGENT_KERNEL_VENV` (never the user's shared venv),
+//! so the runtime source ships from this checkout.
+
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// Fn length is a style gate, not correctness.
+#![allow(clippy::too_many_lines)]
+#![cfg(unix)]
+
+use std::fmt::Write as _;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+
+struct Daemon {
+    child: Child,
+    #[allow(dead_code)]
+    socket: PathBuf,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The sequential mock: one scripted answer per provider request, in order.
+fn spawn_mock(next: &'static AtomicUsize) -> (PathBuf, RequestBodies) {
+    let bodies = RequestBodies::default();
+    let url = spawn_mock_with(next, inbox_script, Arc::clone(&bodies));
+    (url, bodies)
+}
+
+/// The sequential mock over one test's script function; the mock captures
+/// each provider request body into `bodies` (per-mock state, so parallel
+/// tests never cross-wire their pins).
+fn spawn_mock_with(
+    next: &'static AtomicUsize,
+    script: fn(usize) -> Vec<String>,
+    bodies: RequestBodies,
+) -> PathBuf {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let bodies = Arc::clone(&bodies);
+            std::thread::spawn(move || {
+                let _ = serve(stream, next, script, &bodies);
+            });
+        }
+    });
+    PathBuf::from(url)
+}
+
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
+    json!({
+        "id": "chatcmpl-inbox",
+        "object": "chat.completion.chunk",
+        "created": 1_750_000_000,
+        "model": "mock-1",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    })
+    .to_string()
+}
+
+fn python_cell(code: &str) -> Value {
+    json!({
+        "name": "python_repl",
+        "arguments": serde_json::to_string(&json!({ "code": code })).unwrap(),
+    })
+}
+
+/// One mock's captured provider request bodies, keyed by its scripted
+/// index: the wake request's last user message is the delivered notice
+/// row's own model-visible text (the byte-identical delivery pin). The
+/// capture is per-mock state — the binary's tests run in parallel over
+/// their own mocks, so a shared capture would cross-wire one test's
+/// pin against another test's provider request.
+type RequestBodies = Arc<Mutex<Vec<(usize, Value)>>>;
+
+/// The captured provider request body for `request` (its scripted index).
+fn captured_request_body(bodies: &RequestBodies, request: usize) -> Value {
+    let bodies = bodies.lock().expect("request bodies lock");
+    let (_, body) = bodies
+        .iter()
+        .find(|(index, _)| *index == request)
+        .expect("the wake request reached the mock");
+    body.clone()
+}
+
+/// The body's last user-role message text: the provider request carries
+/// the delivered row's user-role view, so this is exactly the
+/// model-visible prompt the notice's wake request sends.
+fn last_user_text(body: &Value) -> String {
+    let last = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("messages array in the request body")
+        .iter()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .expect("a user message in the request body");
+    match last.get("content").expect("content on the user message") {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => panic!("unexpected user content shape: {other}"),
+    }
+}
+
+fn serve(
+    mut stream: TcpStream,
+    next: &AtomicUsize,
+    script: fn(usize) -> Vec<String>,
+    bodies: &RequestBodies,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap_or_default();
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    let request = next.fetch_add(1, Ordering::SeqCst);
+    if let Ok(captured) = serde_json::from_slice::<Value>(&body) {
+        bodies
+            .lock()
+            .expect("request bodies lock")
+            .push((request, captured));
+    }
+    let data = script(request);
+    let mut payload = String::new();
+    for data in data {
+        write!(payload, "data: {data}\n\n").expect("write to String");
+    }
+    payload.push_str("data: [DONE]\n\n");
+    stream.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
+        )
+        .as_bytes(),
+    )
+}
+
+/// The stage-1 script: the inbox turn (start two detached handles, count
+/// mid-turn, read and drain), its settle, the notice's wake, then the
+/// kill-switch turn and ITS full-row wake.
+fn inbox_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-inbox-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import bash\nh1 = bash('sleep 2; echo INBOX_E2E_ONE')\nh2 = bash('sleep 3; echo INBOX_E2E_TWO')\nprint('two handles started')"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        1 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-inbox-2",
+                        "type": "function",
+                        "function": python_cell(
+                            "import asyncio\nawait asyncio.sleep(4)\nfrom rlm import inbox\nc = await inbox.count()\nprint((c.count, c.oldest_arrived_at_ms > 0, dict(c.classes)))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        2 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-inbox-3",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox\nmsgs = await inbox.read()\nafter = await inbox.count()\nheader = msgs[0].text.split(chr(93))[0] + chr(93)\nprint((len(msgs), msgs[0].inbox_class, header, msgs[0].arrived_at_ms > 0, after.count, dict(after.classes)))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        3 => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the inbox notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+        4 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-inbox-4",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import bash\nh3 = bash('sleep 2; echo INBOX_E2E_LEGACY')\nprint('legacy handle started')"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        5 => [
+            chunk(
+                &json!({"role": "assistant", "content": "legacy turn complete"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the legacy notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+    }
+}
+
+/// The scripted sequence for the drain-run test: the cell starts one
+/// detached handle; the next cell waits PAST its completion (the arrival
+/// notice queues behind the busy run) and then reads the inbox itself —
+/// the drain seam must withdraw the queued row, so the model answers
+/// the read's tool result (request 2) with no stale notice wake in
+/// between. Any fourth request is an unexpected wake.
+fn drain_run_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-drain-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import bash\nh1 = bash('sleep 2; echo DRAIN_E2E_ONE')\nprint('handle started')"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        1 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-drain-2",
+                        "type": "function",
+                        "function": python_cell(
+                            "import asyncio\nawait asyncio.sleep(5)\nfrom rlm import inbox\nmsgs = await inbox.read()\nprint(('drained', len(msgs)))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        2 => [
+            chunk(
+                &json!({"role": "assistant", "content": "continued after the read"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "unexpected extra request"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+    }
+}
+
+/// The agent-message script: a busy turn waits while the inbox fills (one
+/// delivered agent message plus one detached completion), the woken turn
+/// reads the shell output by class and drains the rest, then the kill-switch
+/// delivery steers its full row.
+fn agent_message_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-am-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import bash\nh = bash('sleep 1; echo AM_E2E_BASH')\nprint('AM_E2E_BASH_STARTED')"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        1 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-am-1b",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox\nimport asyncio\nfor _ in range(80):\n    c = await inbox.count()\n    if c.count >= 2:\n        break\n    await asyncio.sleep(0.25)\nprint(('AM_E2E_BUSY', c.count, tuple(sorted(c.classes))))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        2 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-am-2",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox\nshell = await inbox.read(inbox_class='bash-done')\nmid = await inbox.count()\nmsgs = await inbox.read()\nafter = await inbox.count()\nm = msgs[0]\nprint(('AM_E2E_READ', len(shell), shell[0].inbox_class, 'AM_E2E_BASH' in shell[0].text, len(msgs), m.inbox_class, len(m.sender or '') > 0, 'AGENT_MESSAGE_BODY_MARKER' in m.text))\nprint(('AM_E2E_MID_OK', mid.count >= 1, 'agent-message' in mid.classes, after.count in (0, 1)))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ].to_vec(),
+        3 => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the agent-message notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the legacy agent message"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ].to_vec(),
+    }
+}
+struct Client {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+}
+
+impl Client {
+    fn connect(socket: &Path) -> Client {
+        let stream = UnixStream::connect(socket).expect("connect");
+        let writer = stream.try_clone().expect("clone");
+        let mut client = Client {
+            reader: BufReader::new(stream),
+            writer,
+        };
+        let hello = client.read_line();
+        assert_eq!(hello["type"], "daemon_hello");
+        client
+    }
+
+    fn read_line(&mut self) -> Value {
+        let mut line = String::new();
+        let deadline = Instant::now() + Duration::from_secs(240);
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("timeout");
+        loop {
+            match self.reader.read_line(&mut line) {
+                Ok(0) => panic!("supervisor closed the connection"),
+                Ok(_) if line.trim().is_empty() => line.clear(),
+                Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
+                Err(error) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for supervisor line: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn request(&mut self, id: &str, command: &Value) -> Value {
+        let envelope = json!({
+            "type": "command",
+            "id": id,
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "command": command,
+        });
+        let mut line = serde_json::to_string(&envelope).expect("serialize");
+        line.push('\n');
+        self.writer
+            .write_all(line.as_bytes())
+            .unwrap_or_else(|error| panic!("write command {id}: {error}"));
+        let deadline = Instant::now() + Duration::from_secs(240);
+        loop {
+            assert!(Instant::now() < deadline, "no response for id {id}");
+            let line = self.read_line();
+            if line.get("id").and_then(Value::as_str) == Some(id) {
+                return line;
+            }
+        }
+    }
+
+    fn messages(&mut self, active_session_id: &str) -> Value {
+        let response = self.request(
+            "gm",
+            &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+        );
+        assert_eq!(response["success"], true, "get_messages failed: {response}");
+        response["data"].clone()
+    }
+
+    fn transcript(&mut self, active_session_id: &str) -> String {
+        serde_json::to_string(&self.messages(active_session_id)).expect("messages json")
+    }
+}
+
+/// One transcript row's user-visible text: message rows join their text
+/// blocks, custom rows carry their content field.
+fn row_text(row: &Value) -> String {
+    if row.get("role").and_then(Value::as_str) == Some("custom") {
+        return row
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+    }
+    row.get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// The transcript's delivered rows (steering rows and custom rows), with
+/// tool results excluded.
+fn delivered_rows(messages: &Value) -> Vec<(String, Value)> {
+    messages
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("messages array")
+        .iter()
+        .map(|row| (row_text(row), row.clone()))
+        .filter(|(_, row)| row.get("role").and_then(Value::as_str) != Some("tool_result"))
+        .collect()
+}
+
+/// The session's durable inbox journal: the daemon resolves the
+/// per-session artifact dir off the session file's grandparent
+/// (`session_artifact_dir_for_log`), so the journal sits at
+/// `session-artifacts/<session id>/inbox.jsonl` beside the session dir.
+fn inbox_journal_path(sessions: &Path) -> Option<PathBuf> {
+    let session_file = sessions
+        .read_dir()
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))?;
+    let session_id = session_file.file_stem()?.to_string_lossy().to_string();
+    Some(
+        session_file
+            .parent()?
+            .parent()?
+            .join("session-artifacts")
+            .join(session_id)
+            .join("inbox.jsonl"),
+    )
+}
+
+fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + deadline;
+    loop {
+        if let Some(value) = probe() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "condition never became true");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[allow(clippy::zombie_processes)]
+fn spawn_daemon(socket: &Path, agent_dir: &Path, kernel_venv: &Path) -> Daemon {
+    std::fs::create_dir_all(agent_dir).expect("agent dir");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pa-daemon"));
+    command
+        .arg("supervisor")
+        .arg("--socket")
+        .arg(socket)
+        .arg("--agent-dir")
+        .arg(agent_dir)
+        .env_remove("PRIME_API_KEY")
+        .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
+        // The session kernel boots through the real runtime bootstrap out
+        // of this checkout, into a private venv (never the shared one).
+        .env("PRIME_AGENT_KERNEL_VENV", kernel_venv)
+        // A supervisor killed at teardown must not leak its session workers.
+        .env(
+            pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+            "20000",
+        );
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pa-daemon supervisor");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if socket.exists() {
+            return Daemon {
+                child,
+                socket: socket.to_path_buf(),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("supervisor socket never appeared");
+}
+
+#[test]
+fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let (url, bodies) = spawn_mock(&NEXT);
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "agent-inbox-lane",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // THE INBOX TURN: two detached commands start; both finish inside the
+    // same busy turn, so both notices land in the inbox while the session
+    // is busy; the read then drains.
+    let turn = client.request(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "run the two detached commands, count, read, and finish",
+        }),
+    );
+    assert_eq!(turn["success"], true, "inbox turn failed: {turn}");
+    let after_cut_turn = client.transcript(&active_id);
+    assert!(
+        after_cut_turn.contains("(2, True, {'bash-done': 2})"),
+        "the mid-turn count saw both arrivals in the inbox: {after_cut_turn}"
+    );
+
+    // The coalesced wake: the queued steer cut the busy turn at its
+    // boundary, ONE short steering notice delivered, and the woken turn
+    // read the inbox — no full async_bash_completion custom row steers.
+    let _settled = wait_until(Duration::from_secs(120), || {
+        let messages = client.transcript(&active_id);
+        (messages.contains("woken by the inbox notice")).then_some(messages)
+    });
+    let after_woken = client.transcript(&active_id);
+    assert!(
+        after_woken.contains("[bash-done pid:"),
+        "the read returned the notice text: {after_woken}"
+    );
+    assert!(
+        after_woken.contains("(2, 'bash-done', '[bash-done pid:")
+            && after_woken.contains("exit:0]', True, 0, {})"),
+        "the read drained both messages (count 0 after): {after_woken}"
+    );
+    let rows = client.messages(&active_id);
+    let delivered = delivered_rows(&rows);
+    let notice_at = delivered
+        .iter()
+        .position(|(text, _)| {
+            text.starts_with("[inbox ") && text.contains("2 new bash-done messages")
+        })
+        .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
+    let notice_text = delivered[notice_at].0.clone();
+    assert!(
+        notice_text.contains("rlm.inbox.read()"),
+        "the notice teaches the read API: {notice_text}"
+    );
+    // THE ROW-SHAPE PIN (the real admission -> delivery -> transcript
+    // path): the delivered notice row is the inbox system's attributed
+    // custom row, never typed user input.
+    let notice_row = &delivered[notice_at].1;
+    assert_eq!(
+        notice_row["role"], "custom",
+        "the delivered notice row's role: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["customType"], "inbox_notice",
+        "the delivered notice row's customType: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["display"], true,
+        "the delivered notice row stays displayed: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["details"]["sender"], "Agent inbox",
+        "the delivered notice row's sender identity: {notice_row}"
+    );
+    assert_eq!(
+        notice_row["details"]["class"], "arrival",
+        "the arrival notice row's class word: {notice_row}"
+    );
+    // THE MODEL-VISIBLE PIN (byte-identical): the wake request's last
+    // user message — the provider view of the injected row — equals the
+    // delivered notice text exactly, so the row's typing change never
+    // touched what the model reads.
+    let wake_body = captured_request_body(&bodies, 3);
+    assert_eq!(
+        last_user_text(&wake_body),
+        notice_text,
+        "the wake request's model-visible prompt equals the notice text"
+    );
+    let woken_at = delivered
+        .iter()
+        .position(|(text, _)| text == "woken by the inbox notice")
+        .unwrap_or_else(|| panic!("the woken reply never landed: {delivered:?}"));
+    assert!(
+        notice_at < woken_at,
+        "the notice steers before the reply it woke: {notice_text}"
+    );
+    let full_rows = delivered
+        .iter()
+        .filter(|(_, row)| {
+            row.get("customType").and_then(Value::as_str) == Some("async_bash_completion")
+        })
+        .count();
+    assert_eq!(
+        full_rows, 0,
+        "no full notice row steers while the inbox is enabled: {delivered:?}"
+    );
+    // The durable journal under the session's artifact dir: the message
+    // record plus the read's drain marker (persistence across a restart
+    // replays the unread set).
+    let session_file = sessions
+        .read_dir()
+        .expect("sessions dir readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("the session file landed in the configured session dir");
+    let session_id = session_file
+        .file_stem()
+        .expect("session file stem")
+        .to_string_lossy()
+        .to_string();
+    // The daemon resolves the per-session artifact dir off the session
+    // file's grandparent (`session_artifact_dir_for_log`).
+    let inbox_journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(&session_id)
+        .join("inbox.jsonl");
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal.contains("INBOX_E2E_ONE") && journal.contains("INBOX_E2E_TWO"),
+        "the journal holds both message records: {journal}"
+    );
+    assert!(
+        journal.contains("\"kind\":\"drained\""),
+        "the read appended its drain marker: {journal}"
+    );
+
+    // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
+    // full-row steering for the next arrival.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write the kill-switch settings");
+    let legacy_turn = client.request(
+        "p2",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "start the legacy detached command and finish",
+        }),
+    );
+    assert_eq!(
+        legacy_turn["success"], true,
+        "legacy turn failed: {legacy_turn}"
+    );
+    let _legacy_settled = wait_until(Duration::from_secs(120), || {
+        let messages = client.transcript(&active_id);
+        (messages.contains("woken by the legacy notice")).then_some(messages)
+    });
+    let rows = client.messages(&active_id);
+    let delivered = delivered_rows(&rows);
+    let full_row_at = delivered
+        .iter()
+        .position(|(text, row)| {
+            row.get("customType").and_then(Value::as_str) == Some("async_bash_completion")
+                && text.contains("[bash-done pid:")
+                && text.contains("INBOX_E2E_LEGACY")
+        })
+        .unwrap_or_else(|| {
+            panic!("the kill switch never restored the full notice row: {delivered:?}")
+        });
+    let legacy_settle_at = delivered
+        .iter()
+        .position(|(text, _)| text == "legacy turn complete")
+        .unwrap_or_else(|| panic!("the legacy turn's settle row missing: {delivered:?}"));
+    assert!(
+        full_row_at > legacy_settle_at,
+        "the full notice row steers after the legacy turn: {}",
+        delivered[full_row_at].0
+    );
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("re-read {}: {error}", inbox_journal.display()));
+    assert!(
+        !journal.contains("INBOX_E2E_LEGACY"),
+        "the disabled inbox never journals the legacy arrival: {journal}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel + sleepers) do not leak past the test.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}
+
+/// THE DRAIN-SEAM PIN: a cell that waits past a bash completion and
+/// then reads the inbox itself — the arrival notice queued behind the
+/// busy run — must answer its own tool result. The drain seam withdraws
+/// the queued row AT THE READ, inside the read's own host handler, so
+/// the steering probe sees an empty lane and the run continues with its
+/// tool result answered; no stale notice ever delivers.
+#[test]
+fn a_read_that_drains_the_inbox_continues_the_run_and_never_wakes_a_stale_notice() {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let url = spawn_mock_with(&NEXT, drain_run_script, RequestBodies::default());
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "inbox-drain-lane",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // ONE run: start the handle; the next cell waits past its completion
+    // (the arrival notice queues behind the busy run) and reads the
+    // inbox itself. The read's tool result must get its follow-up
+    // request — the drain seam swept the queued row first.
+    let turn = client.request(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "start the handle, wait past its completion, read the inbox, then continue",
+        }),
+    );
+    assert_eq!(turn["success"], true, "the drain turn failed: {turn}");
+    let settled = wait_until(Duration::from_secs(120), || {
+        let messages = client.transcript(&active_id);
+        (messages.contains("continued after the read")).then_some(messages)
+    });
+    // THE FOLLOW-UP REQUEST: the model answered the read's tool result —
+    // the run continued past the drain.
+    assert!(
+        settled.contains("('drained', 1)"),
+        "the read drained the completion's message: {settled}"
+    );
+    assert_eq!(
+        NEXT.load(Ordering::SeqCst),
+        3,
+        "exactly the three scripted requests: start, wait-and-read, continue — no stale wake"
+    );
+    // NO STALE NOTICE DELIVERS: the queued arrival row withdrew at the
+    // drain; neither its custom shape nor its user-role ghost appears.
+    let rows = client.messages(&active_id);
+    let delivered = delivered_rows(&rows);
+    let stale = delivered
+        .iter()
+        .filter(|(text, row)| {
+            row.get("customType").and_then(Value::as_str) == Some("inbox_notice")
+                || text.starts_with("[inbox ")
+        })
+        .count();
+    assert_eq!(
+        stale, 0,
+        "no inbox notice row (custom or user-typed) ever delivered: {delivered:?}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel + sleeper) do not leak past the test.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}
+
+/// The stage-1 agent-message coverage: a delivered agent message routes
+/// into the inbox (class `agent-message`, its sender label, the rendered
+/// `[agent-message from ...]` prompt as record text), ONE coalesced short
+/// notice steers instead of the full row, the targeted read takes the
+/// shell output by class and then drains the message, the journal keeps
+/// both records, and `agentInbox.enabled: false` restores the direct
+/// full-row steering for the next delivery.
+#[test]
+fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
+    static NEXT_AM: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let url = spawn_mock_with(&NEXT_AM, agent_message_script, RequestBodies::default());
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox-am",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "agent-inbox-messages",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // THE BUSY WINDOW: the turn holds until both a delivered agent
+    // message and a detached completion wait in the inbox.
+    let accepted = client.request(
+        "p1",
+        &json!({
+            "type": "prompt",
+            "activeSessionId": active_id,
+            "message": "hold the turn while the inbox fills",
+        }),
+    );
+    assert_eq!(accepted["success"], true, "prompt failed: {accepted}");
+    // The first provider request was served: the turn is running, so the
+    // delivery below is a busy-window arrival.
+    wait_until(Duration::from_secs(60), || {
+        (NEXT_AM.load(Ordering::SeqCst) >= 1).then_some(())
+    });
+    // The batch's order contract: the delivery must EXTEND the detached
+    // command's waiting batch, never start a second one. The durable
+    // journal is the observable arrival — wait for the completion's
+    // record instead of a fixed delay, which a cold first cell can
+    // outlast (an early delivery would deliver alone at the cell
+    // boundary and split the batch into two notices).
+    wait_until(Duration::from_secs(120), || {
+        let journal =
+            inbox_journal_path(&sessions).and_then(|path| std::fs::read_to_string(path).ok())?;
+        journal
+            .contains("\"class\":\"bash-done\"")
+            .then_some(journal)
+    });
+    let delivered = client.request(
+        "m1",
+        &json!({
+            "type": "send_message",
+            "targetActiveSessionId": active_id,
+            "message": "AGENT_MESSAGE_BODY_MARKER from the peer",
+            "deliveryMode": "steer",
+        }),
+    );
+    assert_eq!(
+        delivered["success"], true,
+        "send_message failed: {delivered}"
+    );
+    assert_eq!(
+        delivered["data"]["deliveryStatus"], "queued",
+        "a busy-window delivery reports queued: {delivered}"
+    );
+
+    // THE WOKEN TURN: ONE coalesced short notice steers (never the full
+    // `[agent-message from ...]` row), the notice teaches the read, and
+    // the read output proves the class filter and the drain.
+    let _settled = wait_until(Duration::from_secs(120), || {
+        let transcript = client.transcript(&active_id);
+        (transcript.contains("woken by the agent-message notice")).then_some(transcript)
+    });
+    let transcript = client.transcript(&active_id);
+    // The busy-wait cell's own print races the wake that interrupts it
+    // (the notice can land during its sleep, backgrounding the cell
+    // before the print), so the mid-turn witness is the read turn's own
+    // count between the two reads — verified in the script, where the
+    // count's invariant is checkable without racing: the waiting set
+    // still held the agent message after the class-filtered read, and
+    // the full read drained the store (tolerating the backgrounded
+    // cell's own late completion).
+    assert!(
+        transcript.contains("('AM_E2E_MID_OK', True, True, True)"),
+        "the mid-turn count still saw the waiting message between the reads: {transcript}"
+    );
+    // The read tuple's deterministic fields: the class filter took the
+    // one shell output, and the drained message is the labeled agent
+    // mail. The middle counts (waiting at the mid count, messages the
+    // full read returned) and the post-read remainder vary with the
+    // backgrounded busy-wait cell's completion landing inside the read
+    // window, so only the invariant prefix and suffix are pinned; the
+    // drain's tolerance for that late cell-done lives in MID_OK's
+    // after.count in (0, 1).
+    assert!(
+        transcript.contains("('AM_E2E_READ', 1, 'bash-done', True,")
+            && transcript.contains("'agent-message', True, True)"),
+        "the targeted read took the shell output first and drained the message: {transcript}"
+    );
+    let rows = client.messages(&active_id);
+    let notice_candidates = delivered_rows(&rows);
+    let notices: Vec<&(String, Value)> = notice_candidates
+        .iter()
+        .filter(|(text, _)| text.starts_with("[inbox "))
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "one coalesced notice steers: {notice_candidates:?}"
+    );
+    let notice_text = notices[0].0.clone();
+    // The notice's arrival count and total float with the wake cell's own
+    // backgrounded completion joining the coalesced batch (cell
+    // completions are legitimate inbox arrivals; the machine-notices test
+    // pins that coalescing), so the pin is the meaning: the notice names
+    // both intended classes and teaches the read.
+    assert!(
+        notice_text.contains("1 bash-done")
+            && notice_text.contains("1 agent-message")
+            && notice_text.contains("rlm.inbox.read()"),
+        "the notice covers both classes and teaches the read: {notice_text}"
+    );
+    assert!(
+        !notice_candidates
+            .iter()
+            .any(|(text, _)| text.contains("[agent-message from")),
+        "no full agent-message row steers while the inbox is on: {notice_candidates:?}"
+    );
+
+    // The durable journal under the session's artifact dir: the
+    // agent-message record plus the read's drain marker.
+    let session_file = sessions
+        .read_dir()
+        .expect("sessions dir readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("the session file landed in the configured session dir");
+    let session_id = session_file
+        .file_stem()
+        .expect("session file stem")
+        .to_string_lossy()
+        .to_string();
+    let inbox_journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(&session_id)
+        .join("inbox.jsonl");
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal.contains("\"class\":\"agent-message\"")
+            && journal.contains("AGENT_MESSAGE_BODY_MARKER"),
+        "the delivered message journaled with its class: {journal}"
+    );
+    assert!(
+        journal.contains("\"kind\":\"drained\""),
+        "the read appended its drain marker: {journal}"
+    );
+
+    // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
+    // full-row steering for the next delivery.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "agentInbox": { "enabled": false } }).to_string(),
+    )
+    .expect("write the kill-switch settings");
+    let legacy = client.request(
+        "m2",
+        &json!({
+            "type": "send_message",
+            "targetActiveSessionId": active_id,
+            "message": "AGENT_MESSAGE_LEGACY_BODY",
+            "deliveryMode": "steer",
+        }),
+    );
+    assert_eq!(legacy["success"], true, "legacy delivery failed: {legacy}");
+    let _legacy = wait_until(Duration::from_secs(120), || {
+        let transcript = client.transcript(&active_id);
+        (transcript.contains("woken by the legacy agent message")).then_some(transcript)
+    });
+    let rows = client.messages(&active_id);
+    let legacy_rows = delivered_rows(&rows);
+    let full_row_at = legacy_rows
+        .iter()
+        .position(|(text, _)| {
+            text.contains("[agent-message from") && text.contains("AGENT_MESSAGE_LEGACY_BODY")
+        })
+        .unwrap_or_else(|| panic!("the kill switch never restored the full row: {legacy_rows:?}"));
+    let legacy_reply_at = legacy_rows
+        .iter()
+        .position(|(text, _)| text == "woken by the legacy agent message")
+        .unwrap_or_else(|| panic!("the legacy reply never landed: {legacy_rows:?}"));
+    assert!(
+        full_row_at < legacy_reply_at,
+        "the full row steers before the reply it woke: {}",
+        legacy_rows[full_row_at].0
+    );
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("re-read {}: {error}", inbox_journal.display()));
+    assert!(
+        !journal.contains("AGENT_MESSAGE_LEGACY_BODY"),
+        "the disabled inbox never journals the legacy delivery: {journal}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel + sleepers) do not leak past the test.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}
+
+/// The child-lifecycle script: the parent spawns a worker through the
+/// kernel, the child finishes its task with a plain answer (no message
+/// back), the settle watcher routes its terminal notice into the
+/// parent's inbox, and the woken parent reads it.
+fn child_lifecycle_script(request: usize) -> Vec<String> {
+    match request {
+        0 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-child-1",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import spawn
+h = await spawn('finish the task without sending a message back', name='f20-worker')
+print('CHILD_SPAWNED ' + h.rlm_child_id)"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ]
+        .to_vec(),
+        // Requests 1-2 race (the parent's spawning-turn continuation and
+        // the child's single answer): the same plain text fits both.
+        1 | 2 => [
+            chunk(&json!({"role": "assistant", "content": "ack"}), None),
+            chunk(&json!({}), Some("stop")),
+        ]
+        .to_vec(),
+        // The woken parent turn reads the lifecycle notice.
+        3 => [
+            chunk(
+                &json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-child-read",
+                        "type": "function",
+                        "function": python_cell(
+                            "from rlm import inbox
+msgs = await inbox.read()
+after = await inbox.count()
+entry = [(m.inbox_class, m.sender, m.meta.get('kind', '')) for m in msgs]
+print(('CHILD_NOTICE_READ', entry, after.count, msgs[0].text.split(chr(10))[0]))"
+                        )
+                    }]
+                }),
+                None,
+            ),
+            chunk(&json!({}), Some("tool_calls")),
+        ]
+        .to_vec(),
+        _ => [
+            chunk(
+                &json!({"role": "assistant", "content": "woken by the child-exit notice"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ]
+        .to_vec(),
+    }
+}
+
+/// The agent-lifecycle class: a settled child's terminal notice lands in
+/// the parent's durable inbox (class `child-exited`, sender = the child
+/// name, status in the metadata), ONE coalesced short notice wakes the
+/// parent, the read drains it, no full `rlm_child_terminal_notice` row
+/// steers, and the journal keeps the record.
+#[test]
+fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
+    static NEXT_CHILD: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    let url = spawn_mock_with(
+        &NEXT_CHILD,
+        child_lifecycle_script,
+        RequestBodies::default(),
+    );
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "child-notice-lane",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // The spawning turn: the kernel cell admits a child that finishes
+    // without replying; its terminal notice then wakes the parent.
+    let turn = client.request(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "spawn a worker that finishes without replying, then finish",
+        }),
+    );
+    assert_eq!(turn["success"], true, "spawn turn failed: {turn}");
+    let _settled = wait_until(Duration::from_secs(180), || {
+        let messages = client.transcript(&active_id);
+        (messages.contains("CHILD_NOTICE_READ")
+            && messages.contains("woken by the child-exit notice"))
+        .then_some(messages)
+    });
+    let after_read = client.transcript(&active_id);
+    assert!(
+        after_read.contains("CHILD_SPAWNED sub-"),
+        "the spawn admission answered the handle: {after_read}"
+    );
+    assert!(
+        after_read.contains("('child-exited', 'f20-worker', 'completed_without_reply')"),
+        "the read returned the lifecycle entry (class, sender, kind): {after_read}"
+    );
+    assert!(
+        after_read.contains("[child-exited: no-reply child:f20-worker]"),
+        "the read returned the notice text: {after_read}"
+    );
+    assert!(
+        after_read.contains(", 0, '"),
+        "the read drained the record (count 0 after): {after_read}"
+    );
+
+    // The wake: ONE short coalesced notice steers, no full terminal row.
+    let rows = client.messages(&active_id);
+    let delivered = delivered_rows(&rows);
+    let notice_at = delivered
+        .iter()
+        .position(|(text, _)| text.starts_with("[inbox ") && text.contains("child-exited"))
+        .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
+    let notice_text = delivered[notice_at].0.clone();
+    assert!(
+        notice_text.contains("1 new message (child-exited)"),
+        "the wake counts the class: {notice_text}"
+    );
+    let reply_at = delivered
+        .iter()
+        .position(|(text, _)| text == "woken by the child-exit notice")
+        .unwrap_or_else(|| panic!("the woken reply never landed: {delivered:?}"));
+    assert!(
+        notice_at < reply_at,
+        "the notice steers before the reply it woke: {notice_text}"
+    );
+    let full_rows = delivered
+        .iter()
+        .filter(|(_, row)| {
+            row.get("customType").and_then(Value::as_str) == Some("rlm_child_terminal_notice")
+        })
+        .count();
+    assert_eq!(
+        full_rows, 0,
+        "no full terminal row steers while the inbox is enabled: {delivered:?}"
+    );
+
+    // The durable journal under the session's artifact dir keeps the
+    // lifecycle record.
+    let session_file = sessions
+        .read_dir()
+        .expect("sessions dir readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("the parent session file landed in the configured session dir");
+    let session_id = session_file
+        .file_stem()
+        .expect("session file stem")
+        .to_string_lossy()
+        .to_string();
+    let inbox_journal = session_file
+        .parent()
+        .and_then(Path::parent)
+        .expect("session file grandparent")
+        .join("session-artifacts")
+        .join(&session_id)
+        .join("inbox.jsonl");
+    let journal = std::fs::read_to_string(&inbox_journal)
+        .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
+    assert!(
+        journal.contains("[child-exited: no-reply child:f20-worker]"),
+        "the journal holds the lifecycle record: {journal}"
+    );
+    assert!(
+        journal.contains("\"class\":\"child-exited\""),
+        "the journal names the class: {journal}"
+    );
+
+    // Teardown: stop the session through the live supervisor so the
+    // worker (and its kernel, child, and sleepers) do not leak.
+    client.request(
+        "k1",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    drop(client);
+    drop(supervisor);
+}

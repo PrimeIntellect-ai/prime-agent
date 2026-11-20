@@ -383,6 +383,10 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
             .as_ref()
             .map(|actions| queue_lane_indices(actions, "rlmChildStatus"))
             .unwrap_or_default(),
+        inbox_notice: actions
+            .as_ref()
+            .map(|actions| queue_lane_indices(actions, "inboxNotice"))
+            .unwrap_or_default(),
         injected_prompts: actions
             .as_ref()
             .map(|actions| queue_lane_indices(actions, "injectedPrompts"))
@@ -474,8 +478,9 @@ fn starting_from_actions(actions: &Value) -> Option<String> {
 
 /// One typed-provenance rider of a `sessionActions` wire value
 /// (Rust-native, no TS counterpart): `rlmChildStatus` marks the parked
-/// child-status notices, `injectedPrompts` the engine-minted
-/// continuations; a projection without marks omits the rider.
+/// child-status notices, `inboxNotice` the parked daemon inbox notices,
+/// `injectedPrompts` the engine-minted continuations; a projection
+/// without marks omits the rider.
 fn queue_lane_indices(actions: &Value, rider: &str) -> crate::queued::QueueLaneIndices {
     let indices = |lane: &str| {
         actions

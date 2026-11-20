@@ -1,0 +1,2 @@
+- The inbox read keeps working with a strict filter: an unknown filter field is now a request error instead of a silently empty filter that drains the whole inbox. The read handler also keeps the request envelope's routing key out of the filter.
+- Fixed a collected bash notice stranding a restored unread message's inbox notice after a restart.

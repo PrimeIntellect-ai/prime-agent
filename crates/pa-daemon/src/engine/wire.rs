@@ -20,6 +20,12 @@ pub struct PromptRequest {
     /// (persisted and rendered) in order ahead of the model turn, and the
     /// loop context carries every row as one `agent.prompt` message list.
     pub batch: Vec<PromptBatchRow>,
+    /// The delivery's streaming behavior when the agent is busy at
+    /// admission (the queue lane the item rode): the runner's steering
+    /// lane steers the running turn, the follow-up lane queues at its
+    /// boundary. `None` (tests and pass-through callers) admits as
+    /// `Steer`, the injected-notice default.
+    pub streaming_behavior: Option<pa_core::session_engine::StreamingBehavior>,
 }
 
 /// One co-delivered user row of a batched prompt request.
