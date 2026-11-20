@@ -2014,7 +2014,7 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
 }
 
 #[test]
-fn node_panels_show_factory_errors_in_documents_and_files() {
+fn node_panels_show_factory_errors_in_documents_and_templates() {
     let mut view = FactoryView::new(Vec::new(), 12);
     view.node = Some(node::NodeView::loading("run", "worker"));
     view.set_error(Some("child session not found".to_string()));

@@ -17,6 +17,7 @@ use crate::{Line, Span};
 const TEXT_MAX: usize = 26;
 const GAP: usize = 3;
 const MARGIN: usize = 2;
+const MAX_DIAGRAM_CELLS: usize = 250_000;
 pub(crate) const BOX_ROWS: usize = 4;
 
 const UP: u8 = 1;
@@ -477,6 +478,20 @@ pub(crate) fn block_diagram(
     } else {
         gutter(backs.len() - 1) + 2
     });
+    if canvas_width.saturating_mul(height) > MAX_DIAGRAM_CELLS {
+        return BlockDiagram {
+            lines: vec![vec![theme.fg_span(
+                ThemeColor::Muted,
+                format!(
+                    "[diagram too large to render: {} states, {} transitions]",
+                    states.len(),
+                    transitions.len()
+                ),
+            )]],
+            #[cfg(test)]
+            node_rows: Vec::new(),
+        };
+    }
     let mut canvas = Canvas(vec![vec![Cell::Empty; canvas_width]; height]);
 
     // Boxes and dummy columns.
