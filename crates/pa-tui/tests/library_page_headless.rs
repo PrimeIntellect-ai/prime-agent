@@ -550,9 +550,9 @@ fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
 }
 
-/// One right-arrow key event (the dock's next-group step).
-fn dock_right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+/// One down-arrow key event (the focused dock's next-group step).
+fn dock_down() -> KeyEvent {
+    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
 }
 
 /// One down-arrow key event (the page's `tui.select.down`).
@@ -582,14 +582,14 @@ fn escape() -> KeyEvent {
 #[test]
 fn library_page_lists_machines_drills_in_and_escs_back() {
     let steps = vec![
-        // Focus the dock and step to the machine-library group
+        // Focus the dock and step down to the machine-library group
         // (subagents -> heartbeats -> shells -> factory -> machines);
         // Enter opens the page and the open fetch lists the machines.
         HeadlessStep::Key(alt_a()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(dock_down()),
+        HeadlessStep::Key(dock_down()),
+        HeadlessStep::Key(dock_down()),
+        HeadlessStep::Key(dock_down()),
         HeadlessStep::Key(enter()),
         // The page mounts at once; the list fetch is async, so hold for
         // a fetched row before the arrows walk the list (the list lands
@@ -686,13 +686,13 @@ fn library_page_lists_machines_drills_in_and_escs_back() {
 #[test]
 fn an_unadvertised_lane_mounts_no_machines_group() {
     let steps = vec![
-        // Focus the dock and walk its groups: the traversal must step
+        // Focus the dock and walk down its groups: the traversal must step
         // across the real groups only, never a hidden one.
         HeadlessStep::Key(alt_a()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(dock_down()),
+        HeadlessStep::Key(dock_down()),
+        HeadlessStep::Key(dock_down()),
+        HeadlessStep::Key(dock_down()),
         HeadlessStep::WaitMs(300),
     ];
     let frames = run_plan(Vec::new(), steps);
