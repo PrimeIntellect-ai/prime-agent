@@ -458,16 +458,23 @@ mod tests {
             }
             offered
         });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         for transport in [Transport::Http1, Transport::H2Alpn] {
             let mut request = RequestOptions::new(reqwest::Method::GET, url.clone());
             request.transport = transport;
             assert!(
-                send(request).await.is_err(),
+                tokio::time::timeout_at(deadline, send(request))
+                    .await
+                    .expect("request did not finish before the ALPN test deadline")
+                    .is_err(),
                 "the server never finishes the handshake"
             );
         }
         assert_eq!(
-            server.await.unwrap(),
+            tokio::time::timeout_at(deadline, server)
+                .await
+                .expect("server did not receive both ClientHellos before the ALPN test deadline")
+                .unwrap(),
             vec![
                 Some(vec![b"http/1.1".to_vec()]),
                 Some(vec![b"h2".to_vec(), b"http/1.1".to_vec()]),
