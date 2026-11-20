@@ -857,6 +857,36 @@ class ReplTest(unittest.TestCase):
             code = f"try:\n    {body}\nexcept Exception as time:\n    pass\ntime.sleep(5)\n"
             events = self.repl.execute(rid, code)
             self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # In a class body the lookup then goes on to the enclosing scope, also
+        # when the class bound the name before the handler.
+        code = (
+            "import time\n"
+            "def f():\n"
+            "    class C:\n"
+            "        time = None\n"
+            "        try:\n"
+            "            int('x')\n"
+            "        except ValueError as time:\n"
+            "            pass\n"
+            "        time.sleep(5)\n"
+        )
+        events = self.repl.execute("handler-name-class", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # In a function the name is then an unbound local, not the import.
+        code = (
+            "import time\n"
+            "def f():\n"
+            "    time = None\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError as time:\n"
+            "        pass\n"
+            "    time.sleep(5)\n"
+            "print('defined')\n"
+        )
+        events = self.repl.execute("handler-name-function", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
 
     def test_discipline_screen_keeps_handler_bindings_off_other_paths(self):
         raised = (
@@ -941,6 +971,23 @@ class ReplTest(unittest.TestCase):
                 "        nonlocal t\n"
                 "        t.sleep(5)\n"
                 "        t = None\n",
+            ),
+            # A global name skips the enclosing function's parameter.
+            (
+                "fn-global-skips-enclosing",
+                "import time as t\n"
+                "def outer(t):\n"
+                "    def inner():\n"
+                "        global t\n"
+                "        t.sleep(5)\n",
+            ),
+            (
+                "class-global-skips-enclosing",
+                "import time as t\n"
+                "def outer(t):\n"
+                "    class C:\n"
+                "        global t\n"
+                "        t.sleep(5)\n",
             ),
         ):
             events = self.repl.execute(rid, code)
@@ -1044,7 +1091,20 @@ class ReplTest(unittest.TestCase):
                 "for-else-break",
                 "    import time as t\n"
                 "    for i in range(2):\n"
-                "        break\n"
+                "        if i:\n"
+                "            break\n"
+                "    else:\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "inner-else-break",
+                "    import time as t\n"
+                "    for i in range(2):\n"
+                "        for j in range(2):\n"
+                "            pass\n"
+                "        else:\n"
+                "            break\n"
                 "    else:\n"
                 "        t = None\n"
                 "    t.sleep(5)\n",
@@ -1096,6 +1156,23 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("plain-handlers", code)
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
+        # Without a break that leaves the loop, the else suite runs on every
+        # path out of the loop.
+        for rid, loop_body in (
+            ("for-else-no-break", "    pass\n"),
+            ("for-else-inner-break", "    for j in range(1):\n        break\n"),
+        ):
+            code = (
+                "import time as t, types\n"
+                "for i in range(1):\n"
+                + loop_body
+                + "else:\n"
+                "    t = types.SimpleNamespace(sleep=print)\n"
+                "t.sleep(5)\n"
+            )
+            events = self.repl.execute(rid, code)
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
 
     def test_discipline_screen_reads_bindings_for_code_that_runs_later(self):
         # A function body or a generator runs after its definition, so it can
