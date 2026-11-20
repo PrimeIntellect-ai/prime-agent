@@ -651,12 +651,12 @@ class _BindingCollector(ast.NodeVisitor):
     scopes."""
 
     def __init__(self) -> None:
-        self.bindings: dict[str, set[tuple | None]] = {}
+        self.bindings: dict[str, set[object]] = {}
         # A name declared global or nonlocal, with its declaration's type.
         self.declared: dict[str, type] = {}
-        # The names that some binding makes on every path through the nodes.
-        self.certain: set[str] = set()
-        self._conditional = 0
+        # The names a statement binds when it ends. The walk binds a walrus
+        # target where the walrus runs.
+        self.direct: set[str] = set()
 
     def made(self) -> dict[str, frozenset]:
         """The bindings in this scope. A declared name binds in another
@@ -667,10 +667,10 @@ class _BindingCollector(ast.NodeVisitor):
             if name not in self.declared
         }
 
-    def _bind(self, name: str, binding: tuple | None) -> None:
+    def _bind(self, name: str, binding: object, walrus: bool = False) -> None:
         self.bindings.setdefault(name, set()).add(binding)
-        if not self._conditional:
-            self.certain.add(name)
+        if not walrus:
+            self.direct.add(name)
 
     def _import(self, alias: ast.alias, root: str, member: str | None) -> None:
         name = alias.asname or member or root
@@ -706,31 +706,12 @@ class _BindingCollector(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Store):
             self._bind(node.id, None)
+        elif isinstance(node.ctx, ast.Del):
+            self._bind(node.id, _UNBOUND)
 
-    def _visit_conditional(self, nodes: Iterable[ast.AST]) -> None:
-        # An operand that may not run binds only on some paths.
-        self._conditional += 1
-        for node in nodes:
-            self.visit(node)
-        self._conditional -= 1
-
-    def visit_BoolOp(self, node: ast.BoolOp) -> None:
-        self.visit(node.values[0])
-        self._visit_conditional(node.values[1:])
-
-    def visit_IfExp(self, node: ast.IfExp) -> None:
-        self.visit(node.test)
-        self._visit_conditional([node.body, node.orelse])
-
-    def visit_Compare(self, node: ast.Compare) -> None:
-        self.visit(node.left)
-        self.visit(node.comparators[0])
-        self._visit_conditional(node.comparators[1:])
-
-    def visit_Assert(self, node: ast.Assert) -> None:
-        self.visit(node.test)
-        if node.msg is not None:
-            self._visit_conditional([node.msg])
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._bind(node.target.id, None, walrus=True)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         pass
@@ -781,13 +762,13 @@ def _global_names(statements: Iterable[ast.AST]) -> frozenset[str]:
     return frozenset(name for name, kind in collector.declared.items() if kind is ast.Global)
 
 
-def _breaks_out(loop: ast.For | ast.AsyncFor | ast.While) -> bool:
-    """Whether a `break` can leave the loop: one in its body that is not in
-    the body of a nested loop."""
+def _jumps(loop: ast.For | ast.AsyncFor | ast.While, kind: type) -> bool:
+    """Whether the loop body has a `kind` statement (break or continue) that
+    acts on this loop: one that is not in the body of a nested loop."""
     pending: list[ast.AST] = list(loop.body)
     while pending:
         node = pending.pop()
-        if isinstance(node, ast.Break):
+        if isinstance(node, kind):
             return True
         if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             pending.extend(node.orelse)
@@ -796,23 +777,37 @@ def _breaks_out(loop: ast.For | ast.AsyncFor | ast.While) -> bool:
     return False
 
 
+def _has_walrus(nodes: list[ast.AST]) -> bool:
+    """Whether a walrus in the expressions can bind a name."""
+    return any(isinstance(inner, ast.NamedExpr) for node in nodes for inner in ast.walk(node))
+
+
 def _escaped_bindings(scope: ast.AST, declaration: type) -> dict[str, frozenset]:
-    """The bindings the function and class bodies inside `scope` make
-    through a `global` or `nonlocal` declaration (`declaration`). The screen
-    does not know when such a body runs, so the scope that the declaration
-    names can hold them at any point."""
+    """The bindings the function and class bodies inside `scope` make in it
+    through a `global` or `nonlocal` declaration (`declaration`). A nonlocal
+    name binds in the nearest enclosing function that binds the name, so a
+    function between them keeps those bindings. The screen does not know
+    when such a body runs, so `scope` can hold the bindings at any point."""
     escaped: dict[str, frozenset] = {}
-    for node in ast.walk(scope):
-        if node is not scope and isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-        ):
+
+    def visit(node: ast.AST, held: frozenset[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, held)
+                continue
             collector = _BindingCollector()
-            for statement in node.body:
+            for statement in child.body:
                 collector.visit(statement)
             for name, kind in collector.declared.items():
-                if kind is declaration:
+                if kind is declaration and name not in held:
                     made = frozenset(collector.bindings.get(name, ()))
                     escaped[name] = escaped.get(name, frozenset()) | made
+            if declaration is ast.Nonlocal and not isinstance(child, ast.ClassDef):
+                visit(child, held | frozenset(_scope_bindings(child)))
+            else:
+                visit(child, held)
+
+    visit(scope, frozenset())
     return escaped
 
 
@@ -877,11 +872,11 @@ def _resolve(scope: _Scope, name: str) -> frozenset:
 
     A scope passes the lookup on to its enclosing scope on the paths where
     it leaves the name unbound, or to the module scope when it declares the
-    name global. A scope can always hold the bindings nested bodies make in
-    it. A function body runs later than its definition, so past a function
-    boundary a scope can hold any binding it makes. A class namespace is not
-    part of a nested scope's lookup chain, so only the immediate scope
-    counts when it is a class.
+    name global. A function body runs later than its definition, so past a
+    function boundary a scope can hold any binding it makes, and any binding
+    a nested body makes in it. A class namespace is not part of a nested
+    scope's lookup chain, so only the immediate scope counts when it is a
+    class.
     """
     found: set[object] = set()
     current: _Scope | None = scope
@@ -890,9 +885,9 @@ def _resolve(scope: _Scope, name: str) -> frozenset:
         parent = current.parent
         if current is scope or current.kind != "class":
             possible = current.bindings.get(name, _FALLTHROUGH)
-            possible = possible | current.escaped.get(name, frozenset())
             if later:
                 possible = possible | current.body_bindings.get(name, frozenset())
+                possible = possible | current.escaped.get(name, frozenset())
             found |= possible - _FALLTHROUGH
             if _UNBOUND not in possible:
                 return frozenset(found)
@@ -938,12 +933,13 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
     break, a continue, an exception, or a context manager that swallows one
     can leave a suite at any point, and a later loop pass starts from the
     bindings an earlier pass made, so those paths carry every binding the
-    suite makes. A break also skips a loop's else suite. A walrus in an
-    operand that may not run binds on some paths only. A name a function
-    body binds is local to the whole body, as Python resolves it: unbound
-    until its binding runs. A function's defaults, decorators, and
-    annotations run in the scope that defines it. Resolution happens during
-    the walk, so the screen keeps one entry per call.
+    suite makes. A break also skips a loop's else suite. A walrus binds
+    where it runs, before the rest of its statement, and only on the paths
+    that run it. A call can run a body that binds a name through `global`
+    or `nonlocal`. A name a function body binds is local to the whole body,
+    as Python resolves it: unbound until its binding runs. A function's
+    defaults, decorators, and annotations run in the scope that defines it.
+    A call the walk reaches twice keeps the bindings of both visits.
     """
     bindings_by_call: dict[int, frozenset] = {}
 
@@ -951,21 +947,26 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
         collector = _BindingCollector()
         collector.visit(node)
         for name, possible in collector.made().items():
-            if name not in collector.certain:
-                possible = possible | scope.bindings.get(name, _FALLTHROUGH)
+            if name not in collector.direct:
+                continue
+            if possible == _FALLTHROUGH and scope.kind == "function":
+                # A deleted local is unbound, not the enclosing scope's name.
+                possible = _SHADOW
             scope.bindings[name] = possible
+
+    def escape(scope: _Scope) -> None:
+        # A call can run a body that binds a name through `global` or
+        # `nonlocal`. The nearest function or module scope runs the call now.
+        while scope.kind not in ("function", "module"):
+            scope = scope.parent  # type: ignore[assignment]
+        if scope.escaped:
+            scope.bindings = _add(scope.bindings, scope.escaped)
 
     def walk_block(statements: object, scope: _Scope) -> None:
         for statement in statements:  # type: ignore[union-attr]
             walk(statement, scope)
             if not isinstance(statement, _SUITE_STATEMENTS):
                 apply(scope, statement)
-
-    def walk_header(expression: ast.AST, scope: _Scope) -> None:
-        # A header runs before its suites; a walrus target in it binds in
-        # the enclosing scope.
-        walk(expression, scope)
-        apply(scope, expression)
 
     def walk_suite(
         start: dict[str, frozenset], statements: object, scope: _Scope
@@ -974,20 +975,111 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
         walk_block(statements, scope)
         return scope.bindings
 
-    def walk_loop_else(loop: ast.For | ast.AsyncFor | ast.While, scope: _Scope) -> None:
-        if loop.orelse:
-            exits = scope.bindings
-            end = walk_suite(exits, loop.orelse, scope)
-            # A break leaves the loop without the else suite.
-            scope.bindings = _join(exits, end) if _breaks_out(loop) else end
+    def walk_branches(branches: list[ast.AST], scope: _Scope) -> None:
+        # One of the branches runs. Only a walrus binds in an expression.
+        if not _has_walrus(branches):
+            for branch in branches:
+                walk(branch, scope)
+            return
+        start = scope.bindings
+        ends = []
+        for branch in branches:
+            scope.bindings = dict(start)
+            walk(branch, scope)
+            ends.append(scope.bindings)
+        scope.bindings = _join(*ends)
+
+    def walk_operands(operands: list[ast.AST], scope: _Scope) -> None:
+        # The operator can stop before each operand after the first.
+        walk(operands[0], scope)
+        if not _has_walrus(operands[1:]):
+            for operand in operands[1:]:
+                walk(operand, scope)
+            return
+        exits = []
+        for operand in operands[1:]:
+            exits.append(dict(scope.bindings))
+            walk(operand, scope)
+        scope.bindings = _join(scope.bindings, *exits)
+
+    def run_out(
+        loop: ast.For | ast.AsyncFor | ast.While,
+        entry: dict[str, frozenset],
+        jumped: dict[str, frozenset],
+        scope: _Scope,
+    ) -> None:
+        # The loop runs out after zero passes, after a full pass, or after a
+        # continue, which can come from any point of the body.
+        ends = [entry, scope.bindings]
+        if _jumps(loop, ast.Continue):
+            ends.append(jumped)
+        scope.bindings = _join(*ends)
+
+    def finish_loop(
+        loop: ast.For | ast.AsyncFor | ast.While, jumped: dict[str, frozenset], scope: _Scope
+    ) -> None:
+        # The else suite runs when the loop runs out. A break leaves the loop
+        # from any point of the body, without the else suite.
+        walk_block(loop.orelse, scope)
+        if _jumps(loop, ast.Break):
+            scope.bindings = _join(scope.bindings, jumped)
 
     def walk(node: ast.AST, scope: _Scope) -> None:
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                bindings_by_call[id(node)] = _resolve(scope, func.value.id)
-            elif isinstance(func, ast.Name):
-                bindings_by_call[id(node)] = _resolve(scope, func.id)
+                func = func.value
+            if isinstance(func, ast.Name):
+                # A node the walk reaches twice keeps the bindings of both.
+                seen = bindings_by_call.get(id(node), frozenset())
+                bindings_by_call[id(node)] = seen | _resolve(scope, func.id)
+            for child in ast.iter_child_nodes(node):
+                walk(child, scope)
+            escape(scope)
+            return
+        if isinstance(node, ast.NamedExpr):
+            walk(node.value, scope)
+            # The target binds before the rest of the statement runs.
+            scope.bindings[node.target.id] = _SHADOW
+            return
+        if isinstance(node, ast.BoolOp):
+            walk_operands(node.values, scope)
+            return
+        if isinstance(node, ast.Compare):
+            walk(node.left, scope)
+            walk_operands(node.comparators, scope)
+            return
+        if isinstance(node, ast.IfExp):
+            walk(node.test, scope)
+            walk_branches([node.body, node.orelse], scope)
+            return
+        if isinstance(node, ast.Assert):
+            walk(node.test, scope)
+            if node.msg is not None:
+                # The message runs only when the assert raises, so its
+                # bindings never reach the next statement.
+                start = scope.bindings
+                scope.bindings = dict(start)
+                walk(node.msg, scope)
+                scope.bindings = start
+            return
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            # The value runs before the targets.
+            if node.value is not None:
+                walk(node.value, scope)
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            else:
+                targets = [node.target, node.annotation]
+            for target in targets:
+                walk(target, scope)
+            return
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is not None:
+                    walk(key, scope)
+                walk(value, scope)
+            return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             for expression in _outer_expressions(node):
                 walk(expression, scope)
@@ -1010,6 +1102,8 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             for keyword in node.keywords:
                 walk(keyword.value, scope)
             walk_block(node.body, _Scope("class", scope, global_names=_global_names(node.body)))
+            # The class body runs now and can bind a name through `global`.
+            escape(scope)
             return
         if isinstance(node, ast.Module):
             module = _Scope(
@@ -1042,36 +1136,39 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
                 walk(node.elt, inner)
             return
         if isinstance(node, ast.If):
-            walk_header(node.test, scope)
+            walk(node.test, scope)
             start = scope.bindings
             scope.bindings = _join(
                 walk_suite(start, node.body, scope), walk_suite(start, node.orelse, scope)
             )
             return
         if isinstance(node, (ast.For, ast.AsyncFor)):
-            walk_header(node.iter, scope)
+            walk(node.iter, scope)
+            entry = scope.bindings
             # A later pass starts from the bindings an earlier pass made, and
-            # a break can leave the body at any point.
-            scope.bindings = _add(scope.bindings, _bindings_of(node.body))
-            skipped = dict(scope.bindings)
+            # a break or a continue can leave the body at any point.
+            jumped = _add(entry, _bindings_of(node.body))
+            scope.bindings = dict(jumped)
             apply(scope, node.target)
             walk_block(node.body, scope)
-            # The body can run zero times.
-            scope.bindings = _join(skipped, scope.bindings)
-            walk_loop_else(node, scope)
+            run_out(node, entry, jumped, scope)
+            finish_loop(node, jumped, scope)
             return
         if isinstance(node, ast.While):
-            # The test also runs after each pass.
-            scope.bindings = _add(scope.bindings, _bindings_of(node.body))
-            walk_header(node.test, scope)
-            skipped = dict(scope.bindings)
+            entry = scope.bindings
+            jumped = _add(entry, _bindings_of(node.body))
+            scope.bindings = dict(jumped)
+            walk(node.test, scope)
             walk_block(node.body, scope)
-            scope.bindings = _join(skipped, scope.bindings)
-            walk_loop_else(node, scope)
+            run_out(node, entry, jumped, scope)
+            # The loop runs out when its test fails, so the test runs once
+            # more.
+            walk(node.test, scope)
+            finish_loop(node, jumped, scope)
             return
         if isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
-                walk_header(item.context_expr, scope)
+                walk(item.context_expr, scope)
                 if item.optional_vars is not None:
                     apply(scope, item.optional_vars)
             start = dict(scope.bindings)
@@ -1122,7 +1219,7 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
                     scope.bindings.pop(node.name, None)
             return
         if isinstance(node, ast.Match):
-            walk_header(node.subject, scope)
+            walk(node.subject, scope)
             start = scope.bindings
             last = node.cases[-1]
             exhaustive = (
@@ -1137,7 +1234,7 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
                 for name in _pattern_names(case.pattern):
                     scope.bindings[name] = _SHADOW
                 if case.guard is not None:
-                    walk_header(case.guard, scope)
+                    walk(case.guard, scope)
                 walk_block(case.body, scope)
                 ends.append(scope.bindings)
             scope.bindings = _join(*ends)

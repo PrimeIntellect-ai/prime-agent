@@ -888,6 +888,31 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
 
+    def test_discipline_screen_unbinds_deleted_names(self):
+        # After `del`, a class lookup goes on to the enclosing scope.
+        code = (
+            "import time\n"
+            "def f():\n"
+            "    class C:\n"
+            "        time = None\n"
+            "        del time\n"
+            "        time.sleep(5)\n"
+        )
+        events = self.repl.execute("del-class", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # In a function, the deleted name is an unbound local, not the import.
+        code = (
+            "import time\n"
+            "def f():\n"
+            "    time = None\n"
+            "    del time\n"
+            "    time.sleep(5)\n"
+            "print('defined')\n"
+        )
+        events = self.repl.execute("del-function", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+
     def test_discipline_screen_keeps_handler_bindings_off_other_paths(self):
         raised = (
             "import time\ntry:\n    raise ValueError\nexcept ValueError:\n    time = None\n"
@@ -1118,6 +1143,35 @@ class ReplTest(unittest.TestCase):
                 "        t = None\n"
                 "    t.sleep(5)\n",
             ),
+            # A continue can end the last pass at any point of the body.
+            (
+                "for-continue",
+                "    for i in range(2):\n"
+                "        import time as t\n"
+                "        if i:\n"
+                "            continue\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "while-continue",
+                "    i = 0\n"
+                "    while i < 2:\n"
+                "        i += 1\n"
+                "        import time as t\n"
+                "        if i:\n"
+                "            continue\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            # The test runs again after each pass.
+            (
+                "while-test-after-pass",
+                "    t = None\n"
+                "    while t.sleep(5):\n"
+                "        import time as t\n"
+                "        t = None\n",
+            ),
             (
                 "while-next-pass",
                 "    t = None\n"
@@ -1156,6 +1210,23 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("plain-handlers", code)
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
+        # Without a break or a continue, a loop runs out after zero passes or
+        # after a full pass. A while loop runs out after its test.
+        clock = "types.SimpleNamespace(sleep=print)"
+        for rid, code in (
+            (
+                "for-full-pass",
+                f"for i in range(1):\n    import time as t\n    t = {clock}\n",
+            ),
+            (
+                "while-full-pass",
+                f"i = 0\nwhile i < 1:\n    i += 1\n    import time as t\n    t = {clock}\n",
+            ),
+            ("while-test", f"import time as t\nwhile (t := {clock}) is None:\n    pass\n"),
+        ):
+            events = self.repl.execute(rid, "import types\n" + code + "t.sleep(5)\n")
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
         # Without a break that leaves the loop, the else suite runs on every
         # path out of the loop.
         for rid, loop_body in (
@@ -1203,6 +1274,28 @@ class ReplTest(unittest.TestCase):
         ):
             events = self.repl.execute(rid, code)
             self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # A call or a class body can run the global import now. The flag keeps
+        # the cell from running it.
+        for rid, run_it in (
+            ("escape-at-call", "def init():\n    global t\n    import time as t\nif flag:\n    init()\n"),
+            ("escape-at-class", "if flag:\n    class C:\n        global t\n        import time as t\n"),
+        ):
+            code = "flag = False\n" + run_it + "if flag:\n    t.sleep(5)\n"
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # An assignment after the call replaces the global import.
+        code = (
+            "import types\n"
+            "def init():\n"
+            "    global time\n"
+            "    import time\n"
+            "init()\n"
+            "time = types.SimpleNamespace(sleep=print)\n"
+            "time.sleep(5)\n"
+        )
+        events = self.repl.execute("escape-replaced", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
         # The global import reaches the module scope only: a parameter with the
         # same name in another function is not the import.
         code = (
@@ -1216,6 +1309,38 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("global-elsewhere", code)
         self.assertIsNone(one(events, "error"))
         self.assertIn("defined", stream_text(events, "stdout"))
+        # A nonlocal import binds in the nearest function that binds the name,
+        # not in the functions around that one.
+        code = (
+            "def outer(t):\n"
+            "    def middle():\n"
+            "        t = None\n"
+            "        def inner():\n"
+            "            nonlocal t\n"
+            "            import time as t\n"
+            "        inner()\n"
+            "    middle()\n"
+            "    t.sleep(5)\n"
+            "print('defined')\n"
+        )
+        events = self.repl.execute("nonlocal-held", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+        # A class body between them does not keep the name: its method's
+        # nonlocal name is the function's.
+        code = (
+            "def outer():\n"
+            "    t = None\n"
+            "    class C:\n"
+            "        t = 1\n"
+            "        def method(self):\n"
+            "            nonlocal t\n"
+            "            import time as t\n"
+            "    C().method()\n"
+            "    t.sleep(5)\n"
+        )
+        events = self.repl.execute("nonlocal-through-class", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
 
     def test_discipline_screen_keeps_bindings_past_operands_that_may_not_run(self):
         # A walrus in an operand that may not run does not hide the import.
@@ -1233,6 +1358,31 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("walrus-first-operand", code)
         self.assertIsNone(one(events, "error"))
         self.assertIn("5", stream_text(events, "stdout"))
+
+    def test_discipline_screen_binds_walrus_targets_in_evaluation_order(self):
+        # A walrus binds before the rest of its statement runs.
+        clock = "import time, types\nclock = types.SimpleNamespace(sleep=print)\n"
+        for rid, code in (
+            ("walrus-then-call", "(time := clock, time.sleep(5))\n"),
+            ("walrus-operand-then-call", "flag = True\nflag and (time := clock) and time.sleep(5)\n"),
+            # Defaults and decorators run in the enclosing scope, so their
+            # walrus binds there.
+            ("walrus-default", "def f(a=(time := clock)):\n    pass\ntime.sleep(5)\n"),
+            ("walrus-decorator", "@(time := clock).sleep\ndef f():\n    pass\ntime.sleep(5)\n"),
+        ):
+            events = self.repl.execute(rid, clock + code)
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
+        # An assignment runs its value before its targets, and a dict display
+        # runs each key before its value. The functions are never called.
+        for rid, line in (
+            ("assign-value-first", "d[(time := 0)] = time.sleep(5)"),
+            ("annotated-value-first", "d[(time := 0)]: int = time.sleep(5)"),
+            ("dict-key-then-value", "d = {1: time.sleep(5), (time := 0): 2}"),
+        ):
+            code = f"def f():\n    import time\n    d = {{}}\n    {line}\n"
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
 
     def test_discipline_screen_honors_loop_targets(self):
         code = (
