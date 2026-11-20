@@ -1,0 +1,1 @@
+- Fixed Stop pressed right after you send a prompt marking an active goal as failed.

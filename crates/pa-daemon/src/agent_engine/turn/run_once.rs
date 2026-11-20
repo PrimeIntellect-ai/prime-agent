@@ -536,6 +536,12 @@ impl AgentSessionEngine {
             return Ok(TurnOnce::Queued);
         }
         if let Some(error) = admission_error {
+            // An abort that lands before the provider stream starts fails the
+            // run with the typed abort error, after the run's failure path
+            // already settled the aborted row: the turn was aborted.
+            if pa_agent::abort::is_abort_error(&error) {
+                return Ok(TurnOnce::Aborted);
+            }
             return Err(anyhow::anyhow!("{error:#}"));
         }
         let state = agent.state().await;
