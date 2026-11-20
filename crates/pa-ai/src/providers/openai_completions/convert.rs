@@ -70,6 +70,10 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                                 "type": "image_url",
                                 "image_url": { "url": format!("data:{mime_type};base64,{data}") },
                             }),
+                            crate::types::UserBlockPayload::Video { data, mime_type } => json!({
+                                "type": "video_url",
+                                "video_url": { "url": format!("data:{mime_type};base64,{data}") },
+                            }),
                             crate::types::UserBlockPayload::Opaque(json) => json!({
                                 "type": "text",
                                 "text": sanitize_surrogates(&json),
@@ -271,6 +275,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
             }
             Message::ToolResult(_) => {
                 let mut image_blocks: Vec<Value> = Vec::new();
+                let mut video_blocks: Vec<Value> = Vec::new();
                 let mut j = index;
                 while j < transformed.len() {
                     let Message::ToolResult(tool_msg) = &transformed[j] else {
@@ -290,6 +295,10 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                         .content
                         .iter()
                         .any(|block| matches!(block, UserOrToolContent::Image(_)));
+                    let has_videos = tool_msg
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, UserOrToolContent::Video(_)));
 
                     let has_text = !text_result.is_empty();
                     let mut tool_result_msg = Map::new();
@@ -300,6 +309,8 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             text_result.as_str()
                         } else if has_images {
                             "(see attached image)"
+                        } else if has_videos {
+                            "(see attached video)"
                         } else {
                             ""
                         })),
@@ -325,11 +336,26 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             }
                         }
                     }
+                    if has_videos
+                        && model
+                            .input
+                            .iter()
+                            .any(|mode| matches!(mode, ModelInput::Video))
+                    {
+                        for block in &tool_msg.content {
+                            if let UserOrToolContent::Video(video) = block {
+                                video_blocks.push(json!({
+                                    "type": "video_url",
+                                    "video_url": { "url": format!("data:{};base64,{}", video.mime_type, video.data) },
+                                }));
+                            }
+                        }
+                    }
                     j += 1;
                 }
 
                 index = j;
-                if image_blocks.is_empty() {
+                if image_blocks.is_empty() && video_blocks.is_empty() {
                     last_role = Some("toolResult");
                 } else {
                     if compat.requires_assistant_after_tool_result {
@@ -340,9 +366,14 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                     }
                     let mut content_items = vec![json!({
                         "type": "text",
-                        "text": "Attached image(s) from tool result:",
+                        "text": if video_blocks.is_empty() {
+                            "Attached image(s) from tool result:"
+                        } else {
+                            "Attached media from tool result:"
+                        },
                     })];
                     content_items.extend(image_blocks);
+                    content_items.extend(video_blocks);
                     params.push(json!({
                         "role": "user",
                         "content": content_items,
@@ -668,5 +699,92 @@ mod tests {
         assert!((usage.cost.input.as_f64() - 0.035).abs() < 1e-9);
         assert!((usage.cost.output.as_f64() - 0.035).abs() < 1e-9);
         assert!((usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
+    }
+
+    fn video_context(model: &Model, role: &str) -> Context {
+        let video = json!({"type": "video", "data": "AAAA", "mimeType": "video/mp4"});
+        let mut messages = Vec::new();
+        if role == "toolResult" {
+            let mut assistant = crate::event_stream::initial_assistant_message(
+                &model.api,
+                &model.provider,
+                &model.id,
+            );
+            assistant.content = vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_1".into(),
+                name: "python_repl".into(),
+                arguments: Map::default(),
+                thought_signature: None,
+                rest: Map::default(),
+            })];
+            assistant.stop_reason = StopReason::ToolUse;
+            messages.push(crate::types::Message::Assistant(assistant));
+        }
+        messages.push(
+            serde_json::from_value(json!({
+                "role": role, "toolCallId": "call_1", "toolName": "python_repl", "isError": false,
+                "content": [{"type": "text", "text": "Watch clip"}, video], "timestamp": 1,
+            }))
+            .expect("video message"),
+        );
+        Context {
+            system_prompt: None,
+            messages,
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn video_is_serialized_from_user_and_tool_result_messages() {
+        let mut model = model("intercept", 0.0, 0.0);
+        model.input.push(ModelInput::Video);
+        for role in ["user", "toolResult"] {
+            let params = convert_messages(
+                &model,
+                &video_context(&model, role),
+                &crate::providers::openai_completions::get_compat(&model),
+            );
+            let mut content = vec![
+                json!({"type": "text", "text": "Watch clip"}),
+                json!({"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}}),
+            ];
+            if role == "toolResult" {
+                assert_eq!(
+                    params[params.len() - 2],
+                    json!({
+                        "role": "tool", "content": "Watch clip", "tool_call_id": "call_1",
+                    })
+                );
+                content[0] = json!({"type": "text", "text": "Attached media from tool result:"});
+            }
+            assert_eq!(
+                params.last(),
+                Some(&json!({"role": "user", "content": content}))
+            );
+        }
+    }
+
+    #[test]
+    fn videos_become_placeholders_without_declared_video_input() {
+        let mut model = model("intercept", 0.0, 0.0);
+        model.input.push(ModelInput::Image); // Image capability alone does not permit video.
+        for role in ["user", "toolResult"] {
+            let params = convert_messages(
+                &model,
+                &video_context(&model, role),
+                &crate::providers::openai_completions::get_compat(&model),
+            );
+            let expected = if role == "user" {
+                json!({"role": "user", "content": [
+                    {"type": "text", "text": "Watch clip"},
+                    {"type": "text", "text": "(video omitted: model does not support video)"}]})
+            } else {
+                json!({"role": "tool", "tool_call_id": "call_1",
+                    "content": "Watch clip
+(tool video omitted: model does not support video)"})
+            };
+            assert_eq!(params.last(), Some(&expected));
+            assert!(!Value::Array(params).to_string().contains("video_url"));
+        }
     }
 }

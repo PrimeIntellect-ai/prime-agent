@@ -183,6 +183,12 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                                 }));
                             }
                             crate::types::UserBlockPayload::Image { .. } => {}
+                            crate::types::UserBlockPayload::Video { .. } => {
+                                content.push(json!({
+                                    "type": "text",
+                                    "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER,
+                                }));
+                            }
                             crate::types::UserBlockPayload::Opaque(json) => {
                                 content.push(json!({
                                     "type": "text",
@@ -261,7 +267,11 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                         crate::types::UserOrToolContent::Text(text) => {
                             Some(sanitize_surrogates(&text.text))
                         }
-                        _ => None,
+                        crate::types::UserOrToolContent::Video(_) => {
+                            Some(crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER.to_string())
+                        }
+                        crate::types::UserOrToolContent::Image(_)
+                        | crate::types::UserOrToolContent::Raw(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -392,6 +402,45 @@ mod tests {
         assert_eq!(
             build_tool_result_text("", false, false, true),
             "[tool error] (no tool output)"
+        );
+    }
+
+    #[test]
+    fn tool_result_video_becomes_placeholder_for_video_model() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "m", "name": "Mistral",
+            "api": "mistral-conversations", "provider": "mistral",
+            "baseUrl": "https://example.invalid", "reasoning": false,
+            "input": ["text", "video"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 8192,
+        }))
+        .unwrap();
+        let context: Context = serde_json::from_value(json!({ "messages": [{
+            "role": "toolResult", "toolCallId": "call_1", "toolName": "python_repl",
+            "content": [
+                { "type": "text", "text": "Loaded clip.mp4" },
+                { "type": "video", "data": "AAAA", "mimeType": "video/mp4" },
+            ],
+            "isError": false, "timestamp": 0,
+        }] }))
+        .unwrap();
+
+        let payload = build_chat_payload(
+            &model,
+            &context,
+            &context.messages,
+            &MistralOptions::default(),
+        );
+        assert_eq!(
+            payload["messages"],
+            json!([{
+                "role": "tool", "tool_call_id": "call_1", "name": "python_repl",
+                "content": [{
+                    "type": "text",
+                    "text": format!("Loaded clip.mp4\n{}", crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER),
+                }],
+            }])
         );
     }
 }

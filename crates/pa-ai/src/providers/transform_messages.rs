@@ -12,6 +12,8 @@ use crate::types::{
 const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
     "(tool image omitted: model does not support images)";
+const NON_VIDEO_USER_VIDEO_PLACEHOLDER: &str = "(video omitted: model does not support video)";
+const NON_VIDEO_TOOL_VIDEO_PLACEHOLDER: &str = "(tool video omitted: model does not support video)";
 
 fn replace_images_with_placeholder(
     content: &[UserOrToolContent],
@@ -61,6 +63,63 @@ fn downgrade_unsupported_images(messages: &[Message], model: &Model) -> Vec<Mess
                 content: replace_images_with_placeholder(
                     &tool_result.content,
                     NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+                ),
+                ..tool_result.clone()
+            }),
+            other @ Message::Assistant(_) => other.clone(),
+        })
+        .collect()
+}
+
+fn replace_videos_with_placeholder(
+    content: &[UserOrToolContent],
+    placeholder: &str,
+) -> Vec<UserOrToolContent> {
+    let mut result: Vec<UserOrToolContent> = Vec::new();
+    let mut previous_was_placeholder = false;
+    for block in content {
+        if let UserOrToolContent::Video(_) = block {
+            if !previous_was_placeholder {
+                result.push(UserOrToolContent::Text(TextContent {
+                    text: placeholder.to_string(),
+                    text_signature: None,
+                    rest: Map::default(),
+                }));
+            }
+            previous_was_placeholder = true;
+            continue;
+        }
+        previous_was_placeholder =
+            matches!(block, UserOrToolContent::Text(text) if text.text == placeholder);
+        result.push(block.clone());
+    }
+    result
+}
+
+/// Videos reach only models that declare `"video"` input; every other model gets a placeholder.
+fn downgrade_unsupported_videos(messages: Vec<Message>, model: &Model) -> Vec<Message> {
+    if model.supports_video_input() {
+        return messages;
+    }
+    messages
+        .iter()
+        .map(|msg| match msg {
+            Message::User(user) => {
+                let UserMessageContent::Blocks(blocks) = &user.content else {
+                    return msg.clone();
+                };
+                Message::User(UserMessage {
+                    content: UserMessageContent::Blocks(replace_videos_with_placeholder(
+                        blocks,
+                        NON_VIDEO_USER_VIDEO_PLACEHOLDER,
+                    )),
+                    ..user.clone()
+                })
+            }
+            Message::ToolResult(tool_result) => Message::ToolResult(ToolResultMessage {
+                content: replace_videos_with_placeholder(
+                    &tool_result.content,
+                    NON_VIDEO_TOOL_VIDEO_PLACEHOLDER,
                 ),
                 ..tool_result.clone()
             }),
@@ -123,7 +182,8 @@ pub fn transform_messages_with_normalizer(
     normalize_tool_call_id: &Normalizer<'_>,
 ) -> Vec<Message> {
     let mut tool_call_id_map: HashMap<String, String> = HashMap::new();
-    let image_aware = downgrade_unsupported_images(messages, model);
+    let image_aware =
+        downgrade_unsupported_videos(downgrade_unsupported_images(messages, model), model);
 
     // `None` marks a dropped unnamed-only assistant turn: it still ends the previous turn's pending
     // calls, so its own results cannot be replayed against an earlier call that reused the id.

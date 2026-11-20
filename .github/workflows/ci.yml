@@ -444,6 +444,7 @@ jobs:
         run: |
           cd prime-agent-runtime
           uv run --python 3.11 python -m unittest discover -s test
+          PYTHONPATH=../skills/attach-video/src uv run --python 3.11 python -m unittest discover -s ../skills/attach-video/tests
 
   # The Windows job set + the supply-chain deny gate:
   #
