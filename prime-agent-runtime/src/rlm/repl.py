@@ -779,14 +779,20 @@ def _resolve(scope: _Scope, name: str) -> object:
 
 
 def _join(*tables: dict[str, tuple | None]) -> dict[str, tuple | None]:
-    """Merge branch tables: a watched import wins over a plain shadow."""
+    """Merge branch tables: a watched import wins over a plain shadow. A
+    shadow that some branch does not bind is dropped: on that branch's path
+    the name is unbound."""
     joined: dict[str, tuple | None] = {}
     for table in tables:
         for name, binding in table.items():
             current = joined.get(name, _MISSING)
             if current is _MISSING or (current is None and binding is not None):
                 joined[name] = binding
-    return joined
+    return {
+        name: binding
+        for name, binding in joined.items()
+        if binding is not None or all(name in table for table in tables)
+    }
 
 
 def _call_bindings(tree: ast.AST) -> dict[int, object]:
@@ -796,9 +802,10 @@ def _call_bindings(tree: ast.AST) -> dict[int, object]:
     order. Each suite starts from the bindings of the paths that reach it.
     The paths join after the statement: a binding in a suite that may not
     run (an if or match branch, a loop body, a try handler) does not hide a
-    watched import on a path that skips the suite. Function locals stay
-    whole-scope, as Python resolves them, and a function's defaults,
-    decorators, and annotations run in the scope that defines it.
+    watched import or an unbound name on a path that skips the suite.
+    Function locals stay whole-scope, as Python resolves them, and a
+    function's defaults, decorators, and annotations run in the scope that
+    defines it.
     Resolution happens during the walk, so the screen keeps one entry per
     call.
     """

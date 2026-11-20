@@ -821,6 +821,22 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("5", stream_text(events, "stdout"))
 
+    def test_discipline_screen_charges_names_that_a_path_leaves_unbound(self):
+        # A shadow on one path does not hide the name on a path that skips the
+        # suite: there the name is unbound, so the call is charged as written.
+        for rid, code in (
+            ("if-unbound", "if False:\n    time = None\ntime.sleep(5)"),
+            ("for-unbound", "for time in ():\n    pass\ntime.sleep(5)"),
+            (
+                "try-unbound",
+                "try:\n    int('x')\n    time = None\n"
+                "except ValueError:\n    pass\ntime.sleep(5)",
+            ),
+            ("match-unbound", "match 1:\n    case 2:\n        time = None\ntime.sleep(5)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
     def test_discipline_screen_honors_exception_handler_names(self):
         code = (
             "import time\n"
@@ -836,16 +852,11 @@ class ReplTest(unittest.TestCase):
 
     def test_discipline_screen_unbinds_handler_names_after_the_handler(self):
         # The handler name is unbound after the handler, so the call after it
-        # is charged as written.
-        code = (
-            "try:\n"
-            "    pass\n"
-            "except Exception as time:\n"
-            "    pass\n"
-            "time.sleep(5)\n"
-        )
-        events = self.repl.execute("handler-name-after", code)
-        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # is charged as written, also when the body binds the same name.
+        for rid, body in (("handler-name-after", "pass"), ("handler-name-body", "time = None")):
+            code = f"try:\n    {body}\nexcept Exception as time:\n    pass\ntime.sleep(5)\n"
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
 
     def test_discipline_screen_keeps_handler_bindings_off_other_paths(self):
         raised = (
