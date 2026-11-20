@@ -381,6 +381,8 @@ impl LibraryView {
                 list_hint(kb, "scroll", "back", /*confirm*/ None),
             ),
         ]);
+        // Shed footer rows before the frame can crop the document from the front.
+        rows.truncate(self.viewport_rows.max(1));
         rows.into_iter()
             .map(|row| truncate_line(&row, width, ""))
             .collect()
@@ -787,6 +789,44 @@ mod tests {
                 assert!(text.contains("machine-0"), "{text}");
                 assert!(text.contains("Esc close"), "{text}");
             }
+        }
+    }
+
+    #[test]
+    fn the_compact_frame_keeps_the_scrolled_machine_source_visible() {
+        for (terminal_rows, budget) in [(5, 1), (6, 2)] {
+            let mut library = LibraryView::new(Vec::new(), 20);
+            library.apply_detail("builder", &graph("entry --> checking\nchecking --> done"));
+            let mut view = crate::view::AgentView::new(theme());
+            // A six-row frame can arrive before the cached terminal size catches up.
+            view.set_terminal_rows(terminal_rows);
+            view.chrome.speed_text = Some("42 tok/s".to_string());
+            view.library_view = Some(library);
+            let _ = view.render_frame(100, 6);
+            let library = view.library_view.as_mut().unwrap();
+            assert_eq!(library.viewport_rows, budget);
+            let document_rows =
+                LibraryView::detail_document(&theme(), 100, library.detail.as_ref().unwrap()).len();
+            for _ in 0..document_rows {
+                assert_eq!(library.handle_key("down", &kb()), LibraryViewAction::None);
+            }
+            let frame = view.render_frame(100, 6);
+            let text = plain(&frame);
+            assert_eq!(frame.len(), 6, "{text}");
+            assert!(
+                text.contains("checking --> done"),
+                "budget {budget}: {text}"
+            );
+            assert!(text.contains("42 tok/s"), "budget {budget}: {text}");
+            assert_eq!(
+                view.library_view.as_mut().unwrap().handle_key("up", &kb()),
+                LibraryViewAction::None
+            );
+            let text = plain(&view.render_frame(100, 6));
+            assert!(
+                text.contains("entry --> checking"),
+                "budget {budget}: {text}"
+            );
         }
     }
 
