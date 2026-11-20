@@ -11,13 +11,13 @@ from unittest.mock import AsyncMock, patch
 from attach_video.attach_video import _validate_video
 
 
-def box(kind, payload):
+def _box(kind, payload):
     return struct.pack(">I4s", len(payload) + 8, kind) + payload
 
 
 def mp4(handler=b"vide"):
-    return box(b"ftyp", b"isom" + bytes(4)) + box(
-        b"moov", box(b"trak", box(b"mdia", box(b"hdlr", bytes(8) + handler)))
+    return _box(b"ftyp", b"isom" + bytes(4)) + _box(
+        b"moov", _box(b"trak", _box(b"mdia", _box(b"hdlr", bytes(8) + handler)))
     )
 
 
@@ -54,7 +54,7 @@ class ContainerTests(unittest.TestCase):
                 self.assertEqual(self.validate(data), mime)
 
     def test_rejects_signature_only_files(self):
-        cases = [(box(b"ftyp", b"isom" + bytes(4)), "moov"),
+        cases = [(_box(b"ftyp", b"isom" + bytes(4)), "moov"),
                  (element(bytes.fromhex("1a45dfa3"), element(bytes.fromhex("4282"), b"webm")),
                   "Segment")]
         for data, reason in cases:
@@ -77,7 +77,7 @@ class ContainerTests(unittest.TestCase):
 
     def test_rejects_invalid_nested_lengths(self):
         cases = [mp4() + struct.pack(">I4s", 4, b"free"),
-                 box(b"ftyp", b"isom" + bytes(4)) + box(b"moov", b"\x00"),
+                 _box(b"ftyp", b"isom" + bytes(4)) + _box(b"moov", b"\x00"),
                  element(bytes.fromhex("1a45dfa3"), element(bytes.fromhex("4282"), b"webm"))
                  + element(bytes.fromhex("18538067"), b"\x16\x54\xae\x6b\x00")]
         for data in cases:
