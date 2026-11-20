@@ -173,7 +173,7 @@ impl AgentSessionEngine {
             children,
             refine_flight: std::sync::Mutex::new(None),
             pending_refine_reply: std::sync::Mutex::new(None),
-            abandoned_refine_child: std::sync::Mutex::new(None),
+            abandoned_refine_children: std::sync::Mutex::default(),
             refine_spawn_lock: tokio::sync::Mutex::new(()),
             usage_producer: std::sync::Mutex::new(None),
             rlm_usage_store: std::sync::Mutex::new(None),

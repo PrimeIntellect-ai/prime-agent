@@ -181,8 +181,8 @@ pub trait SessionEngine: Send + Sync {
     /// in-flight refinement child's proposal (or its failure envelope) is
     /// stored for the idle-boundary apply — the fire-and-wake contract's
     /// delivery is answered at once, and the apply never runs inside the
-    /// child's send. The late reply of the refine child that a branch move
-    /// or a replacement abandoned is consumed and dropped. `None` for any
+    /// child's send. The late reply of a refine child that a branch move or
+    /// a replacement abandoned is consumed and dropped. `None` for any
     /// other sender.
     fn park_refine_child_reply(
         &self,
