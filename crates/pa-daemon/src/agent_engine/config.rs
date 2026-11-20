@@ -78,13 +78,13 @@ pub(super) struct RestoredSessionModel {
     pub(super) fallback_message: Option<String>,
 }
 
-/// The flagged selection's latest resolution warning and the one a turn last
-/// showed: a warning row goes out once per distinct resolution, not per
+/// The flagged selection's latest resolution warning and whether a turn has
+/// emitted its row: the row goes out once per distinct resolution, not per
 /// resolve call.
 #[derive(Default)]
 pub(super) struct ModelResolutionWarning {
     pub(super) latest: Option<String>,
-    pub(super) shown: Option<String>,
+    pub(super) shown: bool,
 }
 
 /// A create command's session flags, under the TS `AgentSessionRuntimeConfig` names.

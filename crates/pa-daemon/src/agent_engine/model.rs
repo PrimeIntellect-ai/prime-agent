@@ -294,32 +294,43 @@ impl AgentSessionEngine {
         if let Some(error) = resolved.error {
             anyhow::bail!("{error}");
         }
-        self.model_resolution_warning
+        let mut warning = self
+            .model_resolution_warning
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .latest = resolved.warning;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if warning.latest != resolved.warning {
+            warning.latest = resolved.warning;
+            warning.shown = false;
+        }
+        drop(warning);
         resolved
             .model
             .ok_or_else(|| anyhow::anyhow!("No matching model found."))
     }
 
-    /// The latest resolution's warning row, once: `None` when no turn owes it.
-    pub(super) fn take_unshown_model_resolution_warning(
+    /// The latest resolution's warning row while no turn has emitted it.
+    pub(super) fn unshown_model_resolution_warning(
         &self,
     ) -> Option<pa_types::session::CustomMessage> {
-        let mut guard = self
+        let warning = self
             .model_resolution_warning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let warning = &mut *guard;
-        if warning.latest == warning.shown {
+        if warning.shown {
             return None;
         }
-        warning.shown.clone_from(&warning.latest);
         warning
             .latest
             .as_deref()
             .map(pa_core::session_engine::model_resolution_notice::notice_message)
+    }
+
+    /// Record that a turn emitted the latest resolution's warning row.
+    pub(super) fn mark_model_resolution_warning_shown(&self) {
+        self.model_resolution_warning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shown = true;
     }
 
     /// Test seam: a scripted faux provider (same script contract as pa-cli's
