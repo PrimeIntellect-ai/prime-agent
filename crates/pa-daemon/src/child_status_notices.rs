@@ -5,12 +5,16 @@
 //! only the daemon's own delivery or recovery journal reaches a queue lane with a
 //! reserved kind.
 
+#[cfg(not(unix))]
 use std::collections::HashMap;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(not(unix))]
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(unix))]
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -53,6 +57,7 @@ const MINT_TTL: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const NONCE_DIR: &str = "rlm-notice-nonces";
 
+#[cfg(not(unix))]
 fn pending() -> &'static Mutex<HashMap<String, Instant>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -70,21 +75,16 @@ fn well_formed_nonce(nonce: &str) -> bool {
     uuid::Uuid::parse_str(nonce).is_ok()
 }
 
-/// Record the durable twin (best effort): a write failure keeps the
-/// in-process mint authoritative for a same-process admission.
+/// Record the capability in the shared, private Unix store.
 #[cfg(unix)]
 fn write_nonce_file(agent_dir: &Path, nonce: &str) {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use pa_core::platform::perms::{create_dir_all_private, restrict_dir, set_private_mode};
 
     let directory = nonce_dir(agent_dir);
-    if std::fs::create_dir_all(&directory).is_err() {
+    if create_dir_all_private(&directory).is_err() || restrict_dir(&directory).is_err() {
         return;
     }
-    // The directory and the nonce files are private to this user: a
-    // capability another account could read would be no capability.
-    let _ = std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700));
-    // Sweep the mints whose admission never arrived (or whose consuming
-    // process died): bounded by the same TTL as the in-process map.
+    // Sweep abandoned mints after the same window as the in-process store.
     if let Ok(entries) = std::fs::read_dir(&directory) {
         let now = std::time::SystemTime::now();
         for entry in entries.flatten() {
@@ -97,21 +97,13 @@ fn write_nonce_file(agent_dir: &Path, nonce: &str) {
             }
         }
     }
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(directory.join(nonce));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    set_private_mode(&mut options);
+    let _ = options.open(directory.join(nonce));
 }
 
-/// The durable twin is a POSIX file claim; the Windows build keeps the
-/// in-process map alone (a same-process admission, the only shape the
-/// desktop daemon serves).
-#[cfg(not(unix))]
-fn write_nonce_file(_agent_dir: &Path, _nonce: &str) {}
-
-/// Claim the durable twin exactly once: the unlink is atomic, so two
-/// consumers racing the same nonce can never both win.
+/// Claim the capability exactly once through an atomic unlink.
 #[cfg(unix)]
 fn consume_nonce_file(agent_dir: &Path, nonce: &str) -> bool {
     if !well_formed_nonce(nonce) {
@@ -120,25 +112,20 @@ fn consume_nonce_file(agent_dir: &Path, nonce: &str) -> bool {
     std::fs::remove_file(nonce_dir(agent_dir).join(nonce)).is_ok()
 }
 
-#[cfg(not(unix))]
-fn consume_nonce_file(_agent_dir: &Path, _nonce: &str) -> bool {
-    false
-}
-
-/// Mint a fresh one-shot notice capability: only
-/// [`crate::rlm_children::deliver_terminal_notice`] calls this, so a client-plane
-/// caller can never mint, observe, or replay one. The in-process map serves a
-/// same-process admission; the agent-dir twin covers a delivery whose consuming
-/// worker runs in another process. The registry has NO capacity bound on purpose
-/// (review round 3): eviction could drop a still-live mint; growth is bounded and
-/// mints age out (the files by [`MINT_TTL`], the map by the same window).
+/// Mint a one-shot notice capability. Unix workers share a private file
+/// store. Other platforms use the same-process registry.
 pub(crate) fn mint(agent_dir: &Path) -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
+    #[cfg(unix)]
     write_nonce_file(agent_dir, &nonce);
-    let mut registry = pending().lock().unwrap();
-    let now = Instant::now();
-    registry.retain(|_, minted| now.duration_since(*minted) < MINT_TTL);
-    registry.insert(nonce.clone(), now);
+    #[cfg(not(unix))]
+    {
+        let _ = agent_dir;
+        let mut registry = pending().lock().unwrap();
+        let now = Instant::now();
+        registry.retain(|_, minted| now.duration_since(*minted) < MINT_TTL);
+        registry.insert(nonce.clone(), now);
+    }
     nonce
 }
 
@@ -153,13 +140,15 @@ pub(crate) fn consume(agent_dir: &Path, nonce: Option<&str>) -> bool {
         // Every mint is a UUID; anything else is a caller's guess.
         return false;
     }
-    // Claim BOTH twins on every consume: claiming only the in-process map
-    // would leave the durable twin claimable a second time from another
-    // process inside the TTL. A miss on both is the caller's no-capability
-    // answer.
-    let in_process = pending().lock().unwrap().remove(nonce).is_some();
-    let durable = consume_nonce_file(agent_dir, nonce);
-    in_process || durable
+    #[cfg(unix)]
+    {
+        consume_nonce_file(agent_dir, nonce)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = agent_dir;
+        pending().lock().unwrap().remove(nonce).is_some()
+    }
 }
 
 #[cfg(test)]
@@ -182,29 +171,32 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_minted_capability_consumes_from_another_process_twin() {
-        // The daemon's delivery can run in a different process than the
-        // consuming queue admission (an embedding host, the e2e harness):
-        // the mint's durable twin under the shared agent dir is what lets
-        // that delivery pass the guard. Clearing the in-process map models
-        // the consuming process, which never saw the mint.
+    fn an_external_claim_prevents_a_local_replay() {
         let dir = agent_dir();
         let nonce = mint(dir.path());
-        // Drop only this mint's in-process entry: the consuming process
-        // never saw it (the map is global to the test process).
-        assert!(
-            pending().lock().unwrap().remove(&nonce).is_some(),
-            "the mint registered in-process first"
-        );
-        assert!(
-            consume(dir.path(), Some(&nonce)),
-            "the cross-process twin consumes the mint"
-        );
-        assert!(
-            !consume(dir.path(), Some(&nonce)),
-            "the cross-process twin is one-shot too"
-        );
+        assert!(nonce_dir(dir.path()).join(&nonce).is_file());
+        // Another process can only claim the shared file.
+        assert!(consume_nonce_file(dir.path(), &nonce));
+        assert!(!consume(dir.path(), Some(&nonce)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_nonce_store_is_private_on_creation_and_reuse() {
+        use pa_core::platform::perms::file_mode;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = agent_dir();
+        let nonce = mint(dir.path());
+        let store = nonce_dir(dir.path());
+        assert_eq!(file_mode(&store), Some(0o700));
+        assert_eq!(file_mode(&store.join(&nonce)), Some(0o600));
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let second = mint(dir.path());
+        assert_eq!(file_mode(&store), Some(0o700));
+        assert_eq!(file_mode(&store.join(&second)), Some(0o600));
     }
 
     #[test]
@@ -233,7 +225,9 @@ mod tests {
         );
         // Build the name so the claim is tested against a computed value,
         // never a hard-coded one that could read as a real nonce.
+        #[cfg(unix)]
         let traversal = String::from("..") + "/" + "escape";
+        #[cfg(unix)]
         assert!(
             !consume_nonce_file(dir.path(), &traversal),
             "the file claim itself refuses a non-UUID name"
