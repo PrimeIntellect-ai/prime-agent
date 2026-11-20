@@ -70,7 +70,8 @@ impl MockSupervisor {
         } else {
             &[]
         };
-        serve_connection(stream, capabilities, |writer, Request { id, kind, .. }| {
+        serve_connection(stream, capabilities, |writer, request| {
+            let Request { id, kind, command } = request;
             match kind {
                 "create" => {
                     write_json(writer, &create_response(id));
@@ -94,6 +95,11 @@ impl MockSupervisor {
                     );
                 }
                 "factory_activity" => {
+                    let data = if command.get("action").and_then(Value::as_str) == Some("library") {
+                        json!({ "machines": [] })
+                    } else {
+                        json!({ "runs": [] })
+                    };
                     write_json(
                         writer,
                         &json!({
@@ -101,7 +107,7 @@ impl MockSupervisor {
                             "id": id,
                             "command": "factory_activity",
                             "success": true,
-                            "data": { "runs": [] },
+                            "data": data,
                         }),
                     );
                 }
@@ -322,8 +328,8 @@ fn focus_expands_the_dock_into_one_row_per_group_and_unfocus_collapses_it() {
     );
 }
 
-/// Enter and Right each open the selected row's page on every row (the factory row included while
-/// the lane is advertised); Down steps the rows and wraps from the bottom (goal) row to the top.
+/// Enter and Right open every row's page, including factory and library while the lane is
+/// advertised. Down wraps from the last library row to the top.
 #[test]
 fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
     for open in [enter(), right()] {
@@ -367,7 +373,18 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
             },
             HeadlessStep::Key(escape()),
             HeadlessStep::WaitMs(100),
-            // Down from the bottom (goal) row wraps to the subagents row.
+            HeadlessStep::Key(down()),
+            HeadlessStep::Key(open),
+            HeadlessStep::WaitRender {
+                needle: "No machines in the library".to_string(),
+                timeout_ms: 5_000,
+            },
+            HeadlessStep::Key(escape()),
+            HeadlessStep::WaitGone {
+                needle: "machine library".to_string(),
+                timeout_ms: 5_000,
+            },
+            // Down from the last library row wraps to subagents.
             HeadlessStep::Key(down()),
             HeadlessStep::Key(open),
             HeadlessStep::WaitMs(300),
@@ -387,6 +404,7 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
             "No background commands",
             "No live factory runs.",
             "status   active",
+            "No machines in the library",
         ] {
             assert!(all.contains(page), "{open:?} did not open {page:?}:\n{all}");
         }

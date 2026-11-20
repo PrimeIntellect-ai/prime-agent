@@ -360,7 +360,7 @@ impl SessionUi {
         }
         // The machine library page owns the frame the same way.
         if view.library_view.is_some() {
-            return self.handle_library_view_key(key, view).await;
+            return self.handle_library_view_key(key, view);
         }
         // The `/heartbeats` view owns the frame the same way.
         if view.heartbeats_picker.is_some() {

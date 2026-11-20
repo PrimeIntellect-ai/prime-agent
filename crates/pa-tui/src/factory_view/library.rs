@@ -123,7 +123,7 @@ pub enum LibraryViewAction {
     /// Enter on a machine: drill into it (the session UI fetches the
     /// machine's graph payload over the lane and folds it back in).
     DrillIn { name: String },
-    /// Esc on the list (or ctrl+c anywhere): close the page.
+    /// Esc or ctrl+c on the list: close the page.
     Close,
 }
 
@@ -136,9 +136,11 @@ pub struct LibraryView {
     /// The open drill-in; `None` is the list mode.
     detail: Option<LibraryDetail>,
     error: Option<String>,
+    loading: bool,
     /// The detail document window's first row (0 = the top).
     detail_scroll: usize,
     viewport_rows: usize,
+    viewport_width: usize,
 }
 
 /// The detail frame's pinned rows: the blank and the hint (the error
@@ -147,9 +149,7 @@ pub struct LibraryView {
 const DETAIL_PINNED_ROWS: usize = 2;
 
 impl LibraryView {
-    /// Build the view from the first list reply. The batch arrives with
-    /// the open (the fetch rides the open), so the default selection —
-    /// index 0 — is the first machine in the kernel's sorted list.
+    /// Build a loaded view with the first machine selected.
     #[must_use]
     pub fn new(machines: Vec<LibraryMachine>, viewport_rows: usize) -> Self {
         Self {
@@ -157,20 +157,18 @@ impl LibraryView {
             selected: 0,
             detail: None,
             error: None,
+            loading: false,
             detail_scroll: 0,
             viewport_rows,
+            viewport_width: usize::MAX,
         }
     }
 
-    /// Mount the view from the open-path fetch (the factory page's
-    /// malformed-reply contract: a cached malformed lane mounts with its
-    /// error set, never as a silent fake empty state).
+    /// Mount the page while the initial machine list is being fetched.
     #[must_use]
-    pub fn from_reply(data: &Value, viewport_rows: usize) -> Self {
-        let mut view = Self::new(parse_library_machines(data), viewport_rows);
-        if !library_reply_lists_machines(data) {
-            view.set_error(Some(MALFORMED_LIBRARY_REPLY_ERROR.to_string()));
-        }
+    pub fn loading(viewport_rows: usize) -> Self {
+        let mut view = Self::new(Vec::new(), viewport_rows);
+        view.loading = true;
         view
     }
 
@@ -183,6 +181,9 @@ impl LibraryView {
     /// Record one fetch/error line from the session UI (daemon-provided
     /// text painted on the view's error row, so it scrubs).
     pub fn set_error(&mut self, error: Option<String>) {
+        if error.is_some() {
+            self.loading = false;
+        }
         self.error = error.map(|text| crate::menu_panel::scrub_controls(&text));
     }
 
@@ -190,6 +191,7 @@ impl LibraryView {
     /// the selection stays on the same machine name (a machine that
     /// left the batch returns the selection to the list's head).
     pub fn apply_machines(&mut self, machines: Vec<LibraryMachine>) {
+        self.loading = false;
         let selected_name = self
             .machines
             .get(self.selected)
@@ -250,7 +252,7 @@ impl LibraryView {
             }
             return LibraryViewAction::None;
         }
-        if kb.matches(key, "tui.select.confirm") {
+        if self.detail.is_none() && kb.matches(key, "tui.select.confirm") {
             if let Some(machine) = self.selected_machine() {
                 return LibraryViewAction::DrillIn {
                     name: machine.name.clone(),
@@ -274,7 +276,7 @@ impl LibraryView {
     fn scroll_detail(&mut self, delta: isize) {
         let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
         let total = self.detail.as_ref().map_or(0, |detail| {
-            Self::detail_document(&theme, usize::MAX, detail).len()
+            Self::detail_document(&theme, self.viewport_width, detail).len()
         });
         let visible = self.detail_visible_rows(total);
         let max = total.saturating_sub(visible);
@@ -300,9 +302,20 @@ impl LibraryView {
     /// (the diagram plus the mermaid panel) — the error row and the key
     /// hint pinned at the frame's end either way.
     #[must_use]
-    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+    pub fn render(
+        &mut self,
+        theme: &Theme,
+        width: usize,
+        kb: &KeybindingsManager,
+        viewport_rows: usize,
+    ) -> Vec<Line> {
+        self.viewport_rows = viewport_rows;
+        self.viewport_width = width;
         match &self.detail {
-            Some(detail) => self.render_detail(theme, width, kb, detail),
+            Some(detail) => {
+                let document = Self::detail_document(theme, width, detail);
+                self.render_detail(theme, width, kb, document)
+            }
             None => self.render_list(theme, width, kb),
         }
     }
@@ -331,7 +344,7 @@ impl LibraryView {
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::MdCodeBlock, line.clone()),
             ];
-            document.push(truncate_line(&row, width, ""));
+            document.extend(crate::width::wrap_line(&row, width));
         }
         document
     }
@@ -340,17 +353,20 @@ impl LibraryView {
     /// the top, the mermaid text below), the error row, and the hint
     /// pinned at the frame's end — the info panel's own geometry.
     fn render_detail(
-        &self,
+        &mut self,
         theme: &Theme,
         width: usize,
         kb: &KeybindingsManager,
-        detail: &LibraryDetail,
+        document: Vec<Line>,
     ) -> Vec<Line> {
-        let document = Self::detail_document(theme, width, detail);
         let total = document.len();
         let visible = self.detail_visible_rows(total);
-        let scroll = self.detail_scroll.min(total.saturating_sub(visible));
-        let mut rows: Vec<Line> = document.into_iter().skip(scroll).take(visible).collect();
+        self.detail_scroll = self.detail_scroll.min(total.saturating_sub(visible));
+        let mut rows: Vec<Line> = document
+            .into_iter()
+            .skip(self.detail_scroll)
+            .take(visible)
+            .collect();
         if let Some(error) = &self.error {
             rows.push(vec![
                 Span::raw("  "),
@@ -360,7 +376,10 @@ impl LibraryView {
         rows.push(vec![Span::raw("")]);
         rows.push(vec![
             Span::raw("  "),
-            theme.fg_span(ThemeColor::Dim, list_hint(kb, "scroll", "back")),
+            theme.fg_span(
+                ThemeColor::Dim,
+                list_hint(kb, "scroll", "back", /*confirm*/ None),
+            ),
         ]);
         rows.into_iter()
             .map(|row| truncate_line(&row, width, ""))
@@ -377,7 +396,11 @@ impl LibraryView {
             theme.fg_span(ThemeColor::ToolTitle, "machine library"),
         ]];
         let mut body: Vec<Line> = Vec::new();
-        if self.machines.is_empty() {
+        if self.loading {
+            body.push(vec![
+                theme.fg_span(ThemeColor::Muted, "  Loading machines...")
+            ]);
+        } else if self.machines.is_empty() && self.error.is_none() {
             body.push(vec![Span::raw("")]);
             body.push(vec![
                 Span::raw("  "),
@@ -413,7 +436,10 @@ impl LibraryView {
         tail.push(vec![Span::raw("")]);
         tail.push(vec![
             Span::raw("  "),
-            theme.fg_span(ThemeColor::Dim, list_hint(kb, "move", "close")),
+            theme.fg_span(
+                ThemeColor::Dim,
+                list_hint(kb, "move", "close", Some("open")),
+            ),
         ]);
         // The machine window follows the selection: the header and the
         // tail stay pinned, and the body keeps the selected row in view.
@@ -430,20 +456,19 @@ impl LibraryView {
     }
 }
 
-/// The page's key hint (the factory page's hint grammar): the arrows,
-/// Enter, and Esc, with the middle action named by the mode (move on the
-/// list, scroll on the drill-in) and the close named by it too (close on
-/// the list, back out of the drill-in).
-fn list_hint(kb: &KeybindingsManager, middle: &str, close: &str) -> String {
+/// The page's navigation hint, with Enter shown only on the machine list.
+fn list_hint(kb: &KeybindingsManager, middle: &str, close: &str, confirm: Option<&str>) -> String {
     let key = |binding: &str, fallback: &str| {
         kb.first_key(binding)
             .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
     };
+    let confirm = confirm.map_or_else(String::new, |action| {
+        format!(" · {} {action}", key("tui.select.confirm", "Enter"))
+    });
     format!(
-        "{}/{} {middle} · {} open · {} {close}",
+        "{}/{} {middle}{confirm} · {} {close}",
         key("tui.select.up", "\u{2191}"),
         key("tui.select.down", "\u{2193}"),
-        key("tui.select.confirm", "Enter"),
         key("tui.select.cancel", "Esc"),
     )
 }
@@ -471,6 +496,14 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn graph(mermaid: &str) -> Value {
+        json!({
+            "specId": "builder",
+            "machine": {"states": [{"id": "entry", "entry": true}]},
+            "mermaid": mermaid,
+        })
     }
 
     /// The `library` list reply's wire shape (camelCase-free keys:
@@ -565,7 +598,7 @@ mod tests {
         });
         let mut view = LibraryView::new(Vec::new(), 30);
         view.apply_detail("pr-manager", &data);
-        let text = plain(&view.render(&theme(), 100, &kb()));
+        let text = plain(&view.render(&theme(), 100, &kb(), 30));
         assert!(
             text.contains("machine: pr-manager"),
             "the header renders: {text}"
@@ -592,7 +625,7 @@ mod tests {
         );
         // Esc backs out to the list first; the second Esc closes.
         assert_eq!(view.handle_key("escape", &kb()), LibraryViewAction::None);
-        assert!(plain(&view.render(&theme(), 100, &kb())).contains("machine library"));
+        assert!(plain(&view.render(&theme(), 100, &kb(), 30)).contains("machine library"));
         assert_eq!(view.handle_key("escape", &kb()), LibraryViewAction::Close);
     }
 
@@ -603,7 +636,7 @@ mod tests {
         let mut view = LibraryView::new(Vec::new(), 30);
         view.apply_detail("pr-manager", &json!({"boom": true}));
         assert!(view.detail.is_none());
-        let text = plain(&view.render(&theme(), 100, &kb()));
+        let text = plain(&view.render(&theme(), 100, &kb(), 30));
         assert!(
             text.contains("Error: malformed factory reply for machine pr-manager"),
             "{text}"
@@ -645,5 +678,100 @@ mod tests {
             Some("builder"),
             "the selection follows the machine, never the index"
         );
+    }
+
+    #[test]
+    fn the_frame_rebudgets_the_library_after_resize() {
+        let machines = (0..13)
+            .map(|index| LibraryMachine {
+                name: format!("machine-{index}"),
+                description: String::new(),
+                source: "repo".to_string(),
+            })
+            .collect();
+        let mut library = LibraryView::new(machines, 14);
+        for _ in 0..2 {
+            assert_eq!(library.handle_key("down", &kb()), LibraryViewAction::None);
+        }
+        let mut view = crate::view::AgentView::new(theme());
+        view.library_view = Some(library);
+        view.set_terminal_rows(18);
+        let _ = view.render_frame(100, 18);
+
+        view.set_terminal_rows(10);
+        let shrunk = plain(&view.render_frame(100, 10));
+        assert!(shrunk.contains("▸ machine-2"), "{shrunk}");
+        assert!(shrunk.contains("Esc close"), "{shrunk}");
+
+        view.set_terminal_rows(30);
+        let grown = plain(&view.render_frame(100, 30));
+        assert!(grown.contains("machine-12"), "{grown}");
+        assert!(grown.contains("▸ machine-2"), "{grown}");
+    }
+
+    #[test]
+    fn enter_keeps_the_open_detail_and_scroll_position() {
+        let mut view = LibraryView::new(
+            vec![LibraryMachine {
+                name: "builder".to_string(),
+                description: String::new(),
+                source: "repo".to_string(),
+            }],
+            6,
+        );
+        view.apply_detail("builder", &graph(&"entry --> entry\n".repeat(20)));
+        let _ = view.render(&theme(), 100, &kb(), 6);
+        assert_eq!(view.handle_key("down", &kb()), LibraryViewAction::None);
+        let before = view.render(&theme(), 100, &kb(), 6);
+        assert!(view.detail_scroll > 0);
+        assert_eq!(view.handle_key("enter", &kb()), LibraryViewAction::None);
+        assert_eq!(view.render(&theme(), 100, &kb(), 6), before);
+    }
+
+    #[test]
+    fn vertical_scroll_reaches_the_end_of_a_wrapped_mermaid_row() {
+        let mut view = LibraryView::new(Vec::new(), 6);
+        let mermaid = format!("{}TAIL", "x".repeat(60));
+        view.apply_detail("builder", &graph(&mermaid));
+        let _ = view.render(&theme(), 12, &kb(), 6);
+        let mut end = Vec::new();
+        for _ in 0..100 {
+            assert_eq!(view.handle_key("down", &kb()), LibraryViewAction::None);
+            end = view.render(&theme(), 12, &kb(), 6);
+        }
+        let text = plain(&end);
+        assert!(text.contains("TAIL"), "{text}");
+        assert!(end.iter().all(|row| crate::width::line_width(row) <= 12));
+        let detail = view.detail.as_ref().unwrap();
+        let source = LibraryView::detail_document(&theme(), 12, detail);
+        let title = source
+            .iter()
+            .position(|row| plain(std::slice::from_ref(row)).trim() == "mermaid")
+            .unwrap();
+        let wrapped: String = source[title + 1..]
+            .iter()
+            .flat_map(|row| row.iter().map(|span| span.content.as_str()))
+            .collect();
+        assert_eq!(wrapped.trim_start(), mermaid);
+    }
+
+    #[test]
+    fn a_pending_list_is_not_an_empty_library() {
+        let mut view = LibraryView::loading(20);
+        let pending = plain(&view.render(&theme(), 100, &kb(), 20));
+        assert!(pending.contains("Loading machines"), "{pending}");
+        assert!(!pending.contains("No machines"), "{pending}");
+
+        view.apply_machines(Vec::new());
+        let loaded = plain(&view.render(&theme(), 100, &kb(), 20));
+        assert!(!loaded.contains("Loading machines"), "{loaded}");
+        assert!(loaded.contains("No machines"), "{loaded}");
+
+        let mut failed = LibraryView::loading(20);
+        failed.set_error(Some("fetch failed".to_string()));
+        let error = plain(&failed.render(&theme(), 100, &kb(), 20));
+        assert!(error.contains("fetch failed"), "{error}");
+        assert!(!error.contains("Loading machines"), "{error}");
+        assert!(!error.contains("No machines"), "{error}");
     }
 }

@@ -202,10 +202,12 @@ impl ActivityDock {
         // pair — no lane, no rows, no pages.
         if self.factory_group {
             groups.push(ActivityGroup::Factory);
-            groups.push(ActivityGroup::Library);
         }
         if self.goal_label.is_some() {
             groups.push(ActivityGroup::Goal);
+        }
+        if self.factory_group {
+            groups.push(ActivityGroup::Library);
         }
         groups
     }
