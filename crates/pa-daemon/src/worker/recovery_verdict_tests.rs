@@ -200,7 +200,11 @@ async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle()
     );
     // The held gate: a settled delivery must not be woken by the pacing
     // notice.
-    worker.core.lock().unwrap().busy = false;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering.clear();
+        core.busy = false;
+    }
     admit_turn_held_notice(
         &worker.recovery,
         &worker.core,
@@ -211,7 +215,7 @@ async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle()
     let core = worker.core.lock().unwrap();
     assert_eq!(
         core.steering.len(),
-        1,
+        0,
         "the idle session refuses the pacing notice"
     );
     drop(core);

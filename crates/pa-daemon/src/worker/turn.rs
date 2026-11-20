@@ -338,24 +338,29 @@ impl TurnRunner {
         // the next turn's prompt. The delivery revokes admission before
         // it settles.
         let turn_held_delivery = tokio_util::sync::CancellationToken::new();
-        let turn_held_window = {
+        {
             let delivery = turn_held_delivery.clone();
             let core = Arc::clone(&self.core);
             let recovery = Arc::clone(&self.recovery);
             let work_notify = Arc::clone(&self.work_notify);
+            let window = tokio::time::sleep(TURN_HELD_WINDOW);
             tokio::spawn(async move {
-                tokio::time::sleep(TURN_HELD_WINDOW).await;
-                admit_turn_held_notice(
-                    &recovery,
-                    &core,
-                    &work_notify,
-                    pa_core::session_engine::bash_notices::KernelNotice::turn_held(
-                        TURN_HELD_WINDOW.as_millis() as u64,
-                    ),
-                    &delivery,
-                );
-            })
-        };
+                tokio::select! {
+                    () = delivery.cancelled() => {}
+                    () = window => {
+                        admit_turn_held_notice(
+                            &recovery,
+                            &core,
+                            &work_notify,
+                            pa_core::session_engine::bash_notices::KernelNotice::turn_held(
+                                TURN_HELD_WINDOW.as_millis() as u64,
+                            ),
+                            &delivery,
+                        );
+                    }
+                }
+            });
+        }
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
         engine.on_turn_start();
@@ -1138,10 +1143,8 @@ impl TurnRunner {
         });
         let held_run_end = turn.await.ok().flatten();
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
-        // Revoke admission before settling. Aborting alone cannot stop a
-        // timer already waiting for the core lock from cutting a later turn.
+        // Revoke admission before settling and stop a still-sleeping timer.
         turn_held_delivery.cancel();
-        turn_held_window.abort();
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();

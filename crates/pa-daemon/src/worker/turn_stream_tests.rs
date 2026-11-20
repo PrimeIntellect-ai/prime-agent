@@ -204,6 +204,81 @@ impl SessionEngine for GateProbeEngine {
     }
 }
 
+#[tokio::test]
+async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
+    for held_past_window in [false, true] {
+        let (started_tx, started_rx) = oneshot::channel();
+        let started_tx = Mutex::new(Some(started_tx));
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+            frames: vec![EngineEvent::Done(Ok(()))],
+            before_delivery: Mutex::new(Some(Box::new(move || {
+                started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                let _ = finish_rx.recv();
+            }))),
+            ..GateProbeEngine::default()
+        });
+        let runner = burst_runner(Arc::clone(&engine));
+        let core = Arc::clone(&runner.core);
+        core.lock().unwrap().busy = true;
+        let work_notify = Arc::clone(&runner.work_notify);
+        tokio::time::pause();
+        let turn = tokio::spawn(async move {
+            runner
+                .run_turn(
+                    engine,
+                    Lane::Steering,
+                    vec![QueuedItem {
+                        priority: QueuePriority::Human,
+                        preview: None,
+                        message: "timer probe".to_string(),
+                        custom_message: None,
+                        agent_message: None,
+                        queue_key: None,
+                        admission_id: None,
+                        images: Vec::new(),
+                        done: None,
+                        queue_visible: true,
+                        policy: TurnPolicy::Queued,
+                        forced_batch: false,
+                    }],
+                )
+                .await;
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        if held_past_window {
+            tokio::time::advance(std::time::Duration::from_secs(59)).await;
+            tokio::task::yield_now().await;
+            assert!(core.lock().unwrap().steering.is_empty());
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                futures::FutureExt::now_or_never(work_notify.notified()).is_some(),
+                "a held delivery must receive its pacing notice"
+            );
+            {
+                let mut core = core.lock().unwrap();
+                assert_eq!(core.steering.len(), 1);
+                let row = core.steering[0].custom_message.as_ref().unwrap();
+                assert_eq!(row["customType"], "turn_held_notice");
+                core.steering.clear();
+            }
+        }
+        finish_tx.send(()).unwrap();
+        turn.await.unwrap();
+        // A later busy delivery must not receive the completed turn's timer.
+        core.lock().unwrap().busy = true;
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            core.lock().unwrap().steering.is_empty(),
+            "a settled delivery must cancel its pacing timer"
+        );
+        tokio::time::resume();
+    }
+}
+
 /// One gated sighting battery: change the worker flags after producing each
 /// scripted frame, immediately before delivering it to the worker callback.
 async fn gate_sighting_events(
