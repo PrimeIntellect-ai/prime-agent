@@ -676,7 +676,10 @@ def declined_reason(code: str) -> CellDeclinedError | None:
                 )
         if (
             (root == "subprocess" and member in _SUBPROCESS_CALLS)
-            or (root == "os" and member in ("system", "popen"))
+            or (
+                root == "os"
+                and member in ("system", "popen", "getoutput", "getstatusoutput")
+            )
             or (root == "pty" and member == "spawn")
         ):
             return CellDeclinedError(
