@@ -367,8 +367,8 @@ struct SupervisorChildSessionsInner {
     /// Delete-receipt tombstones: a deleted child's identity stays behind
     /// the registry so `collect` answers a just-deleted selector.
     deleted_children: std::sync::Mutex<std::collections::HashMap<String, DeletedChild>>,
-    /// The parent worker's turn boundary: prompt tasks spawned mid-turn wait for that turn to
-    /// complete (the continuation is in flight before the child's first model turn).
+    /// The parent worker's turn boundary: prompts spawned mid-turn wait for
+    /// this boundary unless a positive collect releases that selected child.
     parent_turn: tokio::sync::watch::Sender<ParentTurn>,
     /// The parent engine's child-settle hook (goal continuation resume).
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -471,14 +471,14 @@ impl SupervisorChildSessions {
     }
 
     /// The worker started a parent turn: spawns admitted from here on hold
-    /// their task prompt until the turn completes.
+    /// their task prompt until the boundary, unless a positive collect releases it.
     pub fn notify_turn_started(&self) {
         self.inner
             .parent_turn
             .send_modify(|turn| turn.running = true);
     }
 
-    /// The worker saw the parent's turn end: release prompt tasks waiting
+    /// The worker saw the parent's turn end: release prompts still waiting
     /// on the boundary (called once per `EngineEvent::Done`).
     pub fn notify_turn_done(&self) {
         self.inner.parent_turn.send_modify(|turn| {

@@ -15,20 +15,37 @@ use super::{
     RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
 };
 
-async fn wait_for_prompt_release(record: &Arc<Mutex<ChildRecord>>) {
-    loop {
-        let signal = record.lock().await.run.notifier();
-        let wake = signal.notified();
-        tokio::pin!(wake);
-        let _ = wake.as_mut().enable();
-        if record.lock().await.run.prompt_released() {
-            return;
+#[derive(Clone, Copy)]
+pub(super) enum PromptWait {
+    Release,
+    Admission,
+}
+
+impl PromptWait {
+    fn satisfied(self, run: &RunState) -> bool {
+        match self {
+            Self::Release => run.prompt_released(),
+            Self::Admission => run.prompt_admitted(),
         }
-        wake.await;
+    }
+
+    fn stopped(self, record: &ChildRecord) -> bool {
+        match self {
+            Self::Release => false,
+            Self::Admission => {
+                !record.run.is_running()
+                    || record.retirement.closed_by_parent()
+                    || record.retirement.retiring()
+            }
+        }
     }
 }
 
-async fn wait_for_prompt_admission(record: &Arc<Mutex<ChildRecord>>, deadline: Instant) -> bool {
+pub(super) async fn wait_for_prompt_state(
+    record: &Arc<Mutex<ChildRecord>>,
+    wait_for: PromptWait,
+    deadline: Option<Instant>,
+) -> bool {
     loop {
         let signal = record.lock().await.run.notifier();
         let wake = signal.notified();
@@ -36,19 +53,20 @@ async fn wait_for_prompt_admission(record: &Arc<Mutex<ChildRecord>>, deadline: I
         let _ = wake.as_mut().enable();
         {
             let record = record.lock().await;
-            if record.run.prompt_admitted() {
+            if wait_for.satisfied(&record.run) {
                 return true;
             }
-            if !record.run.is_running() || record.retirement.closed_by_parent() {
+            if wait_for.stopped(&record) {
                 return false;
             }
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return record.lock().await.run.prompt_admitted();
-        }
-        if tokio::time::timeout(remaining, wake).await.is_err() {
-            return record.lock().await.run.prompt_admitted();
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if tokio::time::timeout(remaining, wake).await.is_err() {
+                return wait_for.satisfied(&record.lock().await.run);
+            }
+        } else {
+            wake.await;
         }
     }
 }
@@ -215,7 +233,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
-                    run: RunState::running(),
+                    run: RunState::held(),
                     answer_preview: None,
                     answer_text: None,
                     answer_captured: false,
@@ -245,9 +263,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
             }
             .await;
             let (record, created, model) = admission?;
-            // The task prompt runs detached from the spawn admission: the
-            // handle returns at registration and the child's first turn
-            // starts after the parent's continuation request is in flight.
+            // The handle returns at registration. A positive collect can
+            // release this child before the parent turn boundary.
             let watcher_this = Arc::clone(&this);
             let watcher_record = Arc::clone(&record);
             // TS `spawnMessage`: the kickoff rides prompt admission as
@@ -289,10 +306,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
-            // Capture the spawning turn before detaching: an ordinary spawn
-            // admitted mid-turn waits for that turn to complete, so the parent's
-            // continuation reaches the provider first. A positive collect can
-            // release this child earlier. An idle parent has no turn to wait for.
+            // Capture the spawning turn before detaching. A normal mid-turn
+            // spawn waits for this boundary, unless a positive collect releases
+            // this child first. An idle parent has no turn to wait for.
             let spawning_turn = {
                 let turn = *this.parent_turn.borrow();
                 turn.running.then_some(turn.completed)
@@ -301,7 +317,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 if let Some(generation) = spawning_turn {
                     tokio::select! {
                         () = watcher_this.wait_turn_done(generation) => {}
-                        () = wait_for_prompt_release(&watcher_record) => {}
+                        _ = wait_for_prompt_state(
+                            &watcher_record,
+                            PromptWait::Release,
+                            None,
+                        ) => {}
                     }
                 }
                 // The parent closed before the prompt admitted: the
@@ -361,7 +381,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     .lock()
                     .await
                     .run
-                    .apply(RunEvent::PromptAccepted);
+                    .apply(RunEvent::PromptAdmitted);
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
@@ -683,15 +703,18 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // selected live prompts as one batch before waiting on a child.
                 for record in &records {
                     let mut record = record.lock().await;
-                    if record.run.is_running() && !record.retirement.closed_by_parent() {
+                    if record.run.is_running()
+                        && !record.retirement.closed_by_parent()
+                        && !record.retirement.retiring()
+                    {
                         record.run.apply(RunEvent::ReleasePrompt);
                     }
                 }
             }
             let mut results = Vec::with_capacity(records.len());
             for record in &records {
-                let admission_ready =
-                    timeout_ms == 0 || wait_for_prompt_admission(record, deadline).await;
+                let admission_ready = timeout_ms == 0
+                    || wait_for_prompt_state(record, PromptWait::Admission, Some(deadline)).await;
                 if admission_ready {
                     this.refresh_record(record).await;
                     // A settled child that is busy again runs a follow-up turn:

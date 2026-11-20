@@ -879,9 +879,8 @@ async fn a_child_spawned_while_the_parent_is_idle_runs_without_a_turn_boundary()
     );
 }
 
-/// A spawn admitted mid-turn holds its task prompt until that parent turn
-/// completes, so the parent's continuation request reaches the provider
-/// before the child's first turn.
+/// A spawn admitted mid-turn normally holds its task prompt until that parent
+/// turn completes, unless a positive collect releases it first.
 #[tokio::test]
 async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -944,6 +943,11 @@ async fn a_blocking_collect_mid_turn_releases_the_held_task_prompt() {
         .await
         .expect("zero-timeout collect is a snapshot");
     assert_eq!((poll[0].status, poll[0].settled), ("running", false));
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    assert!(
+        !record.lock().await.run.prompt_released(),
+        "a zero-timeout poll keeps the task prompt held"
+    );
 
     let collect_sessions = sessions.clone();
     let child_id = handle.rlm_child_id.clone();
@@ -982,6 +986,163 @@ async fn a_blocking_collect_mid_turn_releases_the_held_task_prompt() {
     let turn = *sessions.inner.parent_turn.borrow();
     assert!(turn.running, "collect leaves the parent turn active");
     assert_eq!(turn.completed, 0);
+}
+
+/// A positive collect releases every selected task before it waits on the first
+/// prompt's admission.
+#[tokio::test]
+async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.notify_turn_started();
+    let first = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "first task".to_string(),
+            name: Some("batch-first".to_string()),
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: None,
+        })
+        .await
+        .expect("spawn first child");
+    let second = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "second task".to_string(),
+            name: Some("batch-second".to_string()),
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: None,
+        })
+        .await
+        .expect("spawn second child");
+
+    let collect_sessions = sessions.clone();
+    let first_id = first.rlm_child_id.clone();
+    let second_id = second.rlm_child_id.clone();
+    let collect = tokio::spawn(async move {
+        collect_sessions
+            .collect(vec![first_id, second_id], 5_000)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.copied.notified())
+        .await
+        .expect("the first selected prompt reaches its admission gate");
+
+    let records = sessions.inner.children.lock().await.clone();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert!(
+            record.lock().await.run.prompt_released(),
+            "collect releases all selected prompts before waiting"
+        );
+    }
+
+    gate.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(10), collect)
+        .await
+        .expect("collect completes after both prompts are admitted")
+        .expect("collect task remains alive")
+        .expect("collect succeeds");
+    assert_eq!(result.len(), 2);
+    assert!(result
+        .iter()
+        .all(|child| child.status == "done" && child.settled));
+}
+
+/// A positive collect during deletion keeps the task prompt held while the
+/// delete's delayed kill is in flight.
+#[tokio::test]
+async fn a_blocking_collect_does_not_release_a_prompt_during_delete() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate {
+        armed: AtomicBool::new(true),
+        ..FakePeerGate::default()
+    });
+    let (sessions, mut kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::SuccessAfterMs(1_500),
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents {
+            prompt_gate: Some(Arc::clone(&gate)),
+            ..FakeChildSubagents::default()
+        }),
+    )
+    .await;
+    sessions.notify_turn_started();
+    let handle = spawn_child(&sessions).await;
+    let delete_sessions = sessions.clone();
+    let delete_id = handle.rlm_child_id.clone();
+    let delete = tokio::spawn(async move { delete_sessions.delete_subagent(delete_id).await });
+    let kill = tokio::time::timeout(Duration::from_secs(10), kill_rx.recv())
+        .await
+        .expect("delete reaches its delayed kill")
+        .expect("kill receiver remains open");
+    assert_eq!(kill["type"], "kill");
+
+    let collect_result = tokio::time::timeout(
+        Duration::from_millis(500),
+        sessions.collect(vec![handle.rlm_child_id.clone()], 5_000),
+    )
+    .await
+    .expect("collect exits when it sees the retiring child")
+    .expect("collect succeeds");
+    assert_eq!(
+        (collect_result[0].status, collect_result[0].settled),
+        ("running", false)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), gate.copied.notified())
+            .await
+            .is_err(),
+        "delete in flight keeps the prompt gate unopened"
+    );
+
+    let deleted = tokio::time::timeout(Duration::from_secs(5), delete)
+        .await
+        .expect("delayed delete completes")
+        .expect("delete task remains alive")
+        .expect("delete succeeds");
+    assert_eq!(deleted.outcome, Some("deleted"));
+}
+
+/// A failed task prompt wakes a positive collect instead of consuming its
+/// full deadline.
+#[tokio::test]
+async fn a_blocking_collect_returns_promptly_when_the_prompt_fails() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::PromptFails)
+            .await;
+    sessions.notify_turn_started();
+    let handle = spawn_child(&sessions).await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        sessions.collect(vec![handle.rlm_child_id], 60_000),
+    )
+    .await
+    .expect("prompt failure wakes collect before its 60-second deadline")
+    .expect("collect succeeds");
+    assert_eq!((result[0].status, result[0].settled), ("error", true));
 }
 
 /// A collect whose shared deadline expires before prompt acceptance returns
@@ -1113,19 +1274,15 @@ async fn a_collect_reading_the_admission_idle_window_keeps_the_child_running() {
     let handle = spawn_child(&sessions).await;
     let record = Arc::clone(&sessions.inner.children.lock().await[0]);
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let signal = record.lock().await.run.notifier();
-        let wake = signal.notified();
-        tokio::pin!(wake);
-        let _ = wake.as_mut().enable();
-        if record.lock().await.run.prompt_admitted() {
-            break;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        tokio::time::timeout(remaining, wake)
-            .await
-            .expect("the task prompt never admitted");
-    }
+    assert!(
+        super::host::wait_for_prompt_state(
+            &record,
+            super::host::PromptWait::Admission,
+            Some(deadline),
+        )
+        .await,
+        "the task prompt never admitted"
+    );
 
     let results = sessions
         .collect(vec![handle.rlm_child_id.clone()], 0)

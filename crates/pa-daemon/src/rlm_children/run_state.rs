@@ -40,8 +40,8 @@ pub(super) enum RunVerdict {
 pub(super) enum RunEvent {
     /// Release the detached task sender from the parent's turn boundary.
     ReleasePrompt,
-    /// The child worker accepted its task prompt.
-    PromptAccepted,
+    /// The child worker admitted its task prompt.
+    PromptAdmitted,
     /// The worker read idle past the settle grace: `done`, or `error` when the
     /// run's final turn failed.
     IdleRead { final_turn_error: Option<String> },
@@ -58,7 +58,7 @@ pub(super) enum RunEvent {
 }
 
 impl RunState {
-    pub(super) fn running() -> Self {
+    pub(super) fn held() -> Self {
         Self {
             phase: RunPhase::Running(PromptPhase::Held),
             changed: Arc::new(Notify::new()),
@@ -95,27 +95,27 @@ impl RunState {
             (RunPhase::Settled(verdict, PromptPhase::Held), RunEvent::ReleasePrompt) => {
                 (RunPhase::Settled(verdict, PromptPhase::Released), true)
             }
-            (RunPhase::Running(PromptPhase::Released), RunEvent::PromptAccepted) => {
+            (RunPhase::Running(PromptPhase::Released), RunEvent::PromptAdmitted) => {
                 (RunPhase::Running(PromptPhase::Admitted), true)
             }
-            (RunPhase::Verdict(verdict, PromptPhase::Released), RunEvent::PromptAccepted) => {
+            (RunPhase::Verdict(verdict, PromptPhase::Released), RunEvent::PromptAdmitted) => {
                 (RunPhase::Verdict(verdict, PromptPhase::Admitted), true)
             }
-            (RunPhase::Settled(verdict, PromptPhase::Released), RunEvent::PromptAccepted) => {
+            (RunPhase::Settled(verdict, PromptPhase::Released), RunEvent::PromptAdmitted) => {
                 (RunPhase::Settled(verdict, PromptPhase::Admitted), true)
             }
             (
                 RunPhase::Running(PromptPhase::Held)
                 | RunPhase::Verdict(_, PromptPhase::Held)
                 | RunPhase::Settled(_, PromptPhase::Held),
-                RunEvent::PromptAccepted,
-            ) => panic!("task prompt accepted before it was released"),
+                RunEvent::PromptAdmitted,
+            ) => panic!("task prompt admitted before it was released"),
             (
                 RunPhase::Running(PromptPhase::Admitted)
                 | RunPhase::Verdict(_, PromptPhase::Admitted)
                 | RunPhase::Settled(_, PromptPhase::Admitted),
-                RunEvent::PromptAccepted,
-            ) => panic!("task prompt accepted more than once"),
+                RunEvent::PromptAdmitted,
+            ) => panic!("task prompt admitted more than once"),
 
             (RunPhase::Running(PromptPhase::Admitted), RunEvent::IdleRead { final_turn_error }) => {
                 (
@@ -244,30 +244,30 @@ mod tests {
 
     #[test]
     fn prompt_release_is_idempotent_and_admission_is_one_shot() {
-        let mut run = RunState::running();
+        let mut run = RunState::held();
         assert!(run.apply(RunEvent::ReleasePrompt));
         assert!(!run.apply(RunEvent::ReleasePrompt));
         assert!(run.prompt_released());
         assert!(!run.prompt_admitted());
 
-        assert!(run.apply(RunEvent::PromptAccepted));
+        assert!(run.apply(RunEvent::PromptAdmitted));
         assert!(run.prompt_admitted());
         assert!(!run.apply(RunEvent::ReleasePrompt));
         assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run.apply(RunEvent::PromptAccepted)
+            run.apply(RunEvent::PromptAdmitted)
         }))
         .is_err());
     }
 
     #[test]
     fn admission_before_release_and_idle_before_admission_are_rejected() {
-        let mut held = RunState::running();
+        let mut held = RunState::held();
         assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
-            held.apply(RunEvent::PromptAccepted)
+            held.apply(RunEvent::PromptAdmitted)
         }))
         .is_err());
 
-        let mut held = RunState::running();
+        let mut held = RunState::held();
         assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
             held.apply(RunEvent::IdleRead {
                 final_turn_error: None,
@@ -278,12 +278,12 @@ mod tests {
 
     #[test]
     fn late_admission_and_cancel_refusal_preserve_the_cancelled_verdict() {
-        let mut run = RunState::running();
+        let mut run = RunState::held();
         run.apply(RunEvent::ReleasePrompt);
         assert!(run.apply(RunEvent::Cancel { reason: None }));
         assert_eq!(run.status(), "cancelled");
 
-        assert!(run.apply(RunEvent::PromptAccepted));
+        assert!(run.apply(RunEvent::PromptAdmitted));
         assert_eq!(run.status(), "cancelled");
         assert!(run.prompt_admitted());
 
