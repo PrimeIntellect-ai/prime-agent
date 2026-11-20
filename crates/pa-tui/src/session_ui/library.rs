@@ -83,13 +83,30 @@ impl super::SessionUi {
         if id == "ctrl+c" {
             self.exit_guard.note_key_handled("ctrl+c");
         }
+        let selected_before = view
+            .library_view
+            .as_ref()
+            .and_then(LibraryView::selected_machine)
+            .map(|machine| machine.name.clone());
         let action = view
             .library_view
             .as_mut()
             .map(|library_view| library_view.handle_key(&id, view.editor.keybindings()));
+        let selected_after = view
+            .library_view
+            .as_ref()
+            .and_then(LibraryView::selected_machine)
+            .map(|machine| machine.name.as_str());
         // Navigation mutates selection and scroll even without a daemon action.
         self.dirty = true;
-        self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
+        if selected_before.as_deref() != selected_after
+            || matches!(
+                action,
+                Some(LibraryViewAction::Close | LibraryViewAction::DrillIn { .. })
+            )
+        {
+            self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
+        }
         match action {
             Some(LibraryViewAction::None) | None => {}
             Some(LibraryViewAction::Close) => {
@@ -103,7 +120,7 @@ impl super::SessionUi {
         Ok(())
     }
 
-    /// Fetch a graph off the input path. A later key or page mount fences its reply.
+    /// Fetch a graph off the input path. Selection changes and page mounts fence its reply.
     fn spawn_library_graph_fetch(&self, name: String) {
         let client = self.client.clone();
         let session = self.active_session_id.clone();
