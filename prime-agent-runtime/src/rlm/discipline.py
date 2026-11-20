@@ -397,7 +397,13 @@ def _resolve(scope: _Scope, name: str) -> frozenset:
             if declared_global and current is not scope:
                 view = current.bindings.get(name)
             else:
-                possible = current.bindings.get(name, _FALLTHROUGH) if view is None else view
+                possible = current.bindings.get(name, _FALLTHROUGH)
+                if view is not None and _UNBOUND not in view:
+                    possible = view
+                elif view is not None:
+                    # The declaring function can leave the name unbound, and
+                    # the module's binding holds on those paths.
+                    possible = (view - _FALLTHROUGH) | possible
                 if later:
                     possible = possible | after.get(name)
                     possible = possible | current.escaped.get(name, frozenset())

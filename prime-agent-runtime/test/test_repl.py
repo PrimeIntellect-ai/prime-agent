@@ -1400,6 +1400,11 @@ class ReplTest(unittest.TestCase):
         for rid, code in (
             ("global-view-rebound", view + "g = f()\nimport time as t\n"),
             (
+                "global-view-skipped",
+                "import contextlib, time as t\ndef f():\n    global t\n    with contextlib.suppress(ValueError):\n"
+                "        raise ValueError\n        t = None\n    def g():\n        t.sleep(5)\n    return g\n",
+            ),
+            (
                 "nonlocal-view-rebound",
                 "def e():\n    t = None\n    def f():\n        nonlocal t\n        t = None\n"
                 "        def g():\n            t.sleep(5)\n        import time as t\n        return g\n    return f\n",
@@ -1429,6 +1434,11 @@ class ReplTest(unittest.TestCase):
             ("shadow-before-generator", "list(time.sleep(5) for _ in range(1))\n"),
             ("lambda-in-comprehension", "fs = [(lambda: time.sleep(5)) for _ in range(1)]\nfs[0]()\n"),
             ("comprehension-target", "import time as t\n[t.sleep(5) for t in [time]]\n"),
+            (
+                "global-view-skipped-shadow",
+                "import contextlib\ndef f():\n    global time\n    with contextlib.suppress(ValueError):\n"
+                "        raise ValueError\n        time = None\n    def g():\n        time.sleep(5)\n    return g\nf()()\n",
+            ),
         ):
             events = self.repl.execute(rid, clock + code)
             self.assertIsNone(one(events, "error"), rid)
