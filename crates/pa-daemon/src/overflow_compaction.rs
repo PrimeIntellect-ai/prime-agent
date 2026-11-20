@@ -292,8 +292,8 @@ impl AgentSessionEngine {
                     )
                     .await
             };
-            // A committed compaction keeps its result: the signal is
-            // checked inside the run before the durable append.
+            // A result that is ready when the abort lands stands: the
+            // signal is checked inside the run before the durable append.
             let outcome = self
                 .runtime
                 .block_on(pa_agent::abort::race_keep_result(compact, &signal));

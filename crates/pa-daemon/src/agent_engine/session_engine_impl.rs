@@ -655,8 +655,8 @@ impl SessionEngine for AgentSessionEngine {
                     &model,
                     api_key,
                     // The run's own signal: a raced summarizer still lands
-                    // the pre-commit check (TS `_performCompaction`), and a
-                    // committed run keeps its result.
+                    // the pre-commit check (TS `_performCompaction`); the race
+                    // keeps a result that is ready when the abort lands.
                     Some(signal),
                 )
                 .await

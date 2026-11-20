@@ -1079,10 +1079,10 @@ fn compaction_reply(text: &str) -> pa_types::session::AgentMessage {
     ))
 }
 
-/// A model-requested compaction that commits, then sees the abort while it
-/// builds the post-commit kernel notice, keeps its committed result. The
-/// result and the compaction row must both stand; reporting cancelled here
-/// skips the success event and the retry for work that is already durable.
+/// A model-requested compaction that commits, then sees the abort in the
+/// poll that returns its result, keeps that result. The result and the
+/// compaction row must both stand; reporting cancelled here skips the
+/// success event and the retry for work that is already durable.
 #[tokio::test]
 async fn a_committed_compaction_keeps_its_result_when_the_abort_lands_in_the_final_poll() {
     let dir = tempfile::TempDir::new().unwrap();
