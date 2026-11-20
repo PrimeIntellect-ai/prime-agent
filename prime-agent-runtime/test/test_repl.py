@@ -4158,6 +4158,29 @@ class CellSpanGuardTest(unittest.TestCase):
         self.assertEqual(one(events, "result")["text"], "42")
         self.assertEqual(one(events, "done")["status"], "ok")
 
+    def test_the_guard_stays_armed_through_result_rendering(self):
+        # The cell body returns at once, but its __repr__ outlives the limit:
+        # rendering is still this cell's span, so the teaching error replaces
+        # the value instead of a bare KeyboardInterrupt or an ok outcome.
+        repl = self.guarded_repl()
+        events = self.execute_limited(
+            repl,
+            "slow-repr",
+            "import time\n"
+            "class Slow:\n"
+            "    def __repr__(self):\n"
+            "        time.sleep(1.5)\n"
+            "        return 'slow'\n"
+            "Slow()",
+            400,
+        )
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.4s cell limit", error["evalue"])
+        self.assertIsNone(one(events, "result"))
+        self.assertEqual(one(events, "done")["status"], "error")
+
     def test_no_announced_limit_keeps_the_guard_disarmed(self):
         # An absent field and an explicit 0 both mean the session runs with
         # no cell limit (the setting is off): the guard must not invent one.
