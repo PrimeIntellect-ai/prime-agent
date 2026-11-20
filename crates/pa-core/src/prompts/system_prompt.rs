@@ -299,10 +299,21 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         });
     }
     if has_ipython {
-        lines.push(
-            "`await bash(cmd)` waits at most 1 second. If the command is still running, it returns a snapshot: `r.running` is True, `r.exit_code` is None, `r.output` is the output so far, and `r.handle` is the live handle. A completed result has `r.running` False and an integer `r.exit_code`. The command keeps running after a snapshot; end the turn and collect the final result on the `[bash-done]` notification."
-                .to_string(),
-        );
+        let agent_inbox = !options.daemonless && options.settings.get_agent_inbox_enabled();
+        if agent_inbox {
+            lines.push(
+                "This session has an agent inbox: bash completions, agent messages, child exits, heartbeats, and factory milestones wait in it, and a short `[inbox …]` notice announces new ones. The notice means unread messages are waiting; read them with `msgs = await rlm.inbox.read()`."
+                    .to_string(),
+            );
+        }
+        lines.push(format!(
+            "`await bash(cmd)` waits at most 1 second. If the command is still running, it returns a snapshot: `r.running` is True, `r.exit_code` is None, `r.output` is the output so far, and `r.handle` is the live handle. A completed result has `r.running` False and an integer `r.exit_code`. The command keeps running after a snapshot; end the turn and collect the final result {}.",
+            if agent_inbox {
+                "when its `[inbox …]` notice arrives"
+            } else {
+                "on the `[bash-done]` notification"
+            }
+        ));
         lines.push(
             "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
                 .to_string(),
