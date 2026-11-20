@@ -174,6 +174,8 @@ impl MockSupervisor {
                                 json!({
                                     "name": "node-run",
                                     "specId": "sw",
+                                    "template": "Template body from executor {input}",
+                                    "templateTruncated": false,
                                     "state": {
                                         "id": "worker",
                                         "status": "running",
@@ -192,14 +194,6 @@ impl MockSupervisor {
                                         "inputs": "{}",
                                         "answer": if node_requests > 1 { "Updated node answer" } else { "Node answer fixture" },
                                     },
-                                })
-                            }
-                            (_, Some("library"))
-                                if command.get("specId").and_then(Value::as_str) == Some("sw") =>
-                            {
-                                json!({
-                                    "files": [{"path": "worker.md", "text": "Template body from library"}],
-                                    "stateFiles": [{"state": "worker", "paths": ["worker.md"]}],
                                 })
                             }
                             _ => json!({}),
@@ -888,12 +882,12 @@ fn factory_node_refreshes_the_mounted_document() {
 }
 
 #[test]
-fn factory_node_fetches_its_template_files_from_the_library() {
+fn factory_node_renders_its_template_from_the_node_reply() {
     let mut steps = open_node_steps();
     steps.extend([
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
-            needle: "Template body from library".to_string(),
+            needle: "Template body from executor {input}".to_string(),
             timeout_ms: 5_000,
         },
     ]);
@@ -902,7 +896,7 @@ fn factory_node_fetches_its_template_files_from_the_library() {
         Some(json!({"runs": [factory_node_run()]})),
         steps,
     );
-    assert!(flat_text(&frames).contains("Template body from library"));
+    assert!(flat_text(&frames).contains("Template body from executor {input}"));
 }
 
 #[test]

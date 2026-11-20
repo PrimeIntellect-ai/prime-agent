@@ -7150,6 +7150,67 @@ def slow(inputs):
 
 class FactoryNodeActivityTest(_ExecutorTestCase):
     @async_test
+    async def test_node_activity_reports_run_template_before_and_after_entry(self) -> None:
+        prompt = "Template α"
+        self.harness.create_subagent("Template worker", prompt, id="template-worker")
+        for source in ("inline", "reference"):
+            for cap in (len(prompt.encode("utf-8")), len(prompt.encode("utf-8")) - 1):
+                with self.subTest(source=source, cap=cap), patch.object(
+                    factory_module, "NODE_PROMPT_CAP", cap
+                ):
+                    spec_id = f"template-{source}-{cap}"
+                    self.host.outcomes["block"] = {"status": "running"}
+                    self.store_machine({
+                        "states": [
+                            {"id": "block", "entry": True, "subagent": "worker"},
+                            {"id": "work", "subagent": (
+                                {"prompt": prompt} if source == "inline" else "template-worker"
+                            )},
+                        ],
+                        "transitions": [{"from": "block", "to": "work"}],
+                    }, spec_id=spec_id)
+                    result = await self.start(spec_id)
+                    request = {"action": "node", "runId": result["run_id"], "specId": "work"}
+                    expected = prompt.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
+                    before = await self.executor.activity(request)
+                    self.assertIsNone(before["entry"])
+                    self.assertEqual(
+                        (before["template"], before["templateTruncated"]),
+                        (expected, cap < len(prompt.encode("utf-8"))),
+                    )
+
+                    self.host.outcomes["block"] = {"status": "done", "answer": "ready"}
+                    await self.executor._runs[result["run_id"]].task
+                    after = await self.executor.activity(request)
+                    self.assertIsNotNone(after["instance"])
+                    self.assertEqual(
+                        (after["template"], after["templateTruncated"]),
+                        (expected, cap < len(prompt.encode("utf-8"))),
+                    )
+
+    @async_test
+    async def test_node_activity_flags_same_prefix_answer_growth_past_cap(self) -> None:
+        answer = "x" * ANSWER_BINDING_CAP
+        self.host.outcomes["work"] = {"status": "done", "answer": answer}
+        refresh = self.host.gate("rlm.collect", 2)
+        self.store_factory({"nodes": [
+            self.node("work", outputs=[{"name": "out", "type": "json"}]),
+        ]})
+        result = await self.start()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        request = {"action": "node", "runId": result["run_id"], "specId": "work"}
+        initial = await self.executor.activity(request)
+        self.assertEqual(initial["instance"]["answer"], answer)
+        self.assertFalse(initial["instance"]["answerTruncated"])
+
+        self.host.outcomes["work"]["answer"] = answer + "more"
+        refresh.set()
+        await self.executor._runs[result["run_id"]].task
+        refreshed = await self.executor.activity(request)
+        self.assertEqual(refreshed["instance"]["answer"], answer)
+        self.assertTrue(refreshed["instance"]["answerTruncated"])
+
+    @async_test
     async def test_node_activity_tracks_subagent_answer_truncation_at_capture(self) -> None:
         long_answer = "x" * (ANSWER_BINDING_CAP + 1)
         for capture in ("done", "provisional", "refresh", "retry-short"):

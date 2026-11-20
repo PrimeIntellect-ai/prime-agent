@@ -1,15 +1,9 @@
-//! The node view: one state's inspection surface for the run view. The
-//! instance list (one row per spawned child across entries) walks with
-//! ↑/↓; the selected instance's document renders the session lines, the
-//! REALIZED prompt (the exact text the executor handed the child — the
-//! template with params and bound inputs substituted), its inputs, its
-//! answer, and the entry's settle outputs — Markdown rendered with the
-//! same colored renderer the machine view's files view uses, never plain
-//! text. Enter toggles the node's TEMPLATE FILES document (today's files
-//! view, byte-for-byte the same colored rendering); `o` jumps into the
-//! selected instance's child session through the standard session open
-//! (the same chat UI every row opens); Esc steps back (files → document
-//! → diagram).
+//! Inspect one run state and its instances. The instance list walks with
+//! Up and Down. The document shows the realized prompt, bound inputs,
+//! captured answer, and settle outputs. Enter opens the executor's prompt
+//! template. Markdown and Mermaid use the shared terminal renderers.
+//! `o` opens the selected child's session. Esc returns to the document,
+//! then to the run diagram.
 
 use serde_json::Value;
 use std::cell::Cell;
@@ -38,77 +32,6 @@ pub struct NodeTarget {
     /// The selected instance's `(entry, index)` selector, when the
     /// instance list carried one.
     pub instance: Option<(u64, u64)>,
-}
-
-/// The node's template files (the machine's `library` payload): every
-/// file's text once, by path, and each state's file paths — the same
-/// reply the machine view's drill-in folds.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct NodeFiles {
-    pub files: Vec<(String, String)>,
-    pub state_files: Vec<(String, Vec<String>)>,
-}
-
-impl NodeFiles {
-    /// Parse the library payload's file tables; a reply without them
-    /// stays empty (the files document reports "no files recorded").
-    pub fn parse(data: &Value) -> Self {
-        let scrub = |text: &str| crate::menu_panel::scrub_controls(text);
-        let files = data
-            .get("files")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|file| {
-                        Some((
-                            scrub(file.get("path")?.as_str()?),
-                            scrub(file.get("text")?.as_str()?),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let state_files = data
-            .get("stateFiles")
-            .or_else(|| data.get("state_files"))
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| {
-                        let state = scrub(row.get("state")?.as_str()?);
-                        let paths = row
-                            .get("paths")?
-                            .as_array()?
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(scrub)
-                            .collect();
-                        Some((state, paths))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { files, state_files }
-    }
-
-    /// The state's files, resolved to their texts.
-    fn node_files(&self, state: &str) -> Vec<(&str, &str)> {
-        self.state_files
-            .iter()
-            .find(|(id, _)| id == state)
-            .map(|(_, paths)| {
-                paths
-                    .iter()
-                    .filter_map(|path| {
-                        self.files
-                            .iter()
-                            .find(|(known, _)| known == path)
-                            .map(|(path, text)| (path.as_str(), text.as_str()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
 }
 
 /// One instance row (the node report's instance list).
@@ -254,7 +177,7 @@ impl NodeDocument {
 }
 
 /// The node view's state: the run + state it inspects, the instance
-/// list, the selected instance's document, the template files, and the
+/// list, the selected instance's document, the prompt template, and the
 /// scrolls.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeView {
@@ -268,15 +191,12 @@ pub struct NodeView {
     never_entered: bool,
     pub scroll: usize,
     pub error: Option<String>,
-    /// The template-files fetch's failure, independent of the node document.
-    files_error: Option<String>,
-    /// The node's template files (the `library` payload): `None` until
-    /// the fetch lands.
-    pub files: Option<NodeFiles>,
-    files_open: bool,
-    files_scroll: usize,
+    /// The executor's prompt template before input substitution.
+    pub template: Option<String>,
+    pub template_truncated: bool,
+    template_open: bool,
+    template_scroll: usize,
     request_epoch: Option<u64>,
-    files_epoch: Option<u64>,
     last_width: Cell<Option<usize>>,
 }
 
@@ -293,12 +213,11 @@ impl NodeView {
             never_entered: false,
             scroll: 0,
             error: None,
-            files_error: None,
-            files: None,
-            files_open: false,
-            files_scroll: 0,
+            template: None,
+            template_truncated: false,
+            template_open: false,
+            template_scroll: 0,
             request_epoch: None,
-            files_epoch: None,
             last_width: Cell::new(None),
         }
     }
@@ -351,12 +270,14 @@ impl NodeView {
             never_entered,
             scroll: 0,
             error: None,
-            files_error: None,
-            files: None,
-            files_open: false,
-            files_scroll: 0,
+            template: data.get("template").and_then(Value::as_str).map(scrub),
+            template_truncated: data
+                .get("templateTruncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            template_open: false,
+            template_scroll: 0,
             request_epoch: None,
-            files_epoch: None,
             last_width: Cell::new(None),
         })
     }
@@ -395,7 +316,7 @@ impl NodeView {
     /// Fold one `node` reply into the open view: the instance list and
     /// the document replace theirs, the selection follows its instance
     /// when present, the scroll survives refreshes of the same instance,
-    /// and the files document (fetched separately) survives. An empty entry leaves no instance selected.
+    /// and the prompt template refreshes with the document. An empty entry leaves no instance selected.
     /// A malformed reply keeps the last good document and reports on the
     /// error row instead.
     pub fn merge_reply(&mut self, data: &Value) {
@@ -412,6 +333,8 @@ impl NodeView {
         self.instances = reply.instances;
         self.document = reply.document;
         self.never_entered = reply.never_entered;
+        self.template = reply.template;
+        self.template_truncated = reply.template_truncated;
         self.selected = self.document.as_ref().and_then(|document| {
             let (entry, index) = (document.entry?, document.index?);
             self.instances
@@ -431,11 +354,6 @@ impl NodeView {
         self.request_epoch.is_some()
     }
 
-    /// Mark the template-files request for this mounted view.
-    pub fn set_files_epoch(&mut self, files_epoch: u64) {
-        self.files_epoch = Some(files_epoch);
-    }
-
     /// Apply a node-document reply only if no newer instance fetch replaced it.
     pub fn apply_request_result(
         &mut self,
@@ -453,46 +371,17 @@ impl NodeView {
         true
     }
 
-    /// Apply template files only while their mounted view is still current.
-    pub fn apply_files_result(
-        &mut self,
-        request_epoch: u64,
-        result: Result<Value, String>,
-    ) -> bool {
-        if self.files_epoch != Some(request_epoch) {
-            return false;
-        }
-        match result {
-            Ok(data) => self.set_files(NodeFiles::parse(&data)),
-            Err(message) => self.set_files_error(&message),
-        }
-        true
-    }
-
     /// Record the node fetch's failure on the error row (the last good
     /// document stays).
     pub fn set_error(&mut self, message: String) {
         self.error = Some(message);
     }
 
-    /// Fold the template-files fetch (the machine's `library` payload)
-    /// into the view.
-    pub fn set_files(&mut self, files: NodeFiles) {
-        self.files = Some(files);
-        self.files_error = None;
-    }
-
-    /// Record a template-files fetch failure without replacing the node's
-    /// own document error or last good file snapshot.
-    pub fn set_files_error(&mut self, message: &str) {
-        self.files_error = Some(crate::menu_panel::scrub_controls(message));
-    }
-
-    /// One Esc: the files document closes first (back to the instance
+    /// One Esc: the template document closes first (back to the instance
     /// document); the caller closes the view when this returns `false`.
     pub fn step_back(&mut self) -> bool {
-        if self.files_open {
-            self.files_open = false;
+        if self.template_open {
+            self.template_open = false;
             return true;
         }
         false
@@ -501,21 +390,20 @@ impl NodeView {
     /// One key press. Returns `true` when the view handled it.
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager, viewport_rows: usize) -> bool {
         if kb.matches(key, "tui.select.confirm") {
-            // Enter toggles the template-files document (the machine
-            // view's own files surface, colored as today).
-            self.files_open = !self.files_open;
-            self.files_scroll = 0;
+            // Enter toggles the executor's prompt template.
+            self.template_open = !self.template_open;
+            self.template_scroll = 0;
             return true;
         }
         let up = kb.matches(key, "tui.select.up");
         let down = kb.matches(key, "tui.select.down");
         let page_up = kb.matches(key, "tui.select.pageUp");
         let page_down = kb.matches(key, "tui.select.pageDown");
-        if self.files_open {
+        if self.template_open {
             let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
             let width = self.last_width.get().unwrap_or_default();
-            let total = self.files_document(&theme, width).len();
-            let visible = visible_rows(viewport_rows, self.files_error.is_some());
+            let total = self.template_document(&theme, width).len();
+            let visible = visible_rows(viewport_rows, self.error.is_some());
             let step = if page_up || page_down { visible } else { 1 };
             let delta = if up || page_up {
                 -(step as isize)
@@ -524,7 +412,7 @@ impl NodeView {
             } else {
                 return false;
             };
-            self.files_scroll = (self.files_scroll as isize + delta)
+            self.template_scroll = (self.template_scroll as isize + delta)
                 .clamp(0, total.saturating_sub(visible) as isize)
                 as usize;
             return true;
@@ -538,6 +426,7 @@ impl NodeView {
             if selected != self.selected {
                 self.selected = selected;
                 self.scroll = 0;
+                self.request_epoch = None;
             }
             return true;
         }
@@ -552,6 +441,7 @@ impl NodeView {
             if selected != self.selected {
                 self.selected = selected;
                 self.scroll = 0;
+                self.request_epoch = None;
             }
             return true;
         }
@@ -579,8 +469,7 @@ impl NodeView {
 
     /// The instance document's rows: the instance list, then the
     /// selected instance's sections. Markdown sections render through
-    /// the colored Markdown renderer (the files view's own), so the
-    /// node's text keeps its color; JSON sections render as code.
+    /// the shared Markdown renderer; JSON sections render as code.
     fn document_lines(&self, theme: Option<&Theme>, width: usize) -> Vec<Line> {
         let mut rows: Vec<Line> = Vec::new();
         for (index, instance) in self.instances.iter().enumerate() {
@@ -685,8 +574,7 @@ impl NodeView {
                 ThemeColor::Muted,
             );
         }
-        // The realized prompt: the exact text the child received —
-        // Markdown, colored like the template file it realizes.
+        // The realized prompt is the exact text the child received.
         rows.push(vec![Span::raw("")]);
         section(&mut rows, "realized prompt");
         if document.prompt.is_empty() {
@@ -762,88 +650,41 @@ impl NodeView {
         rows
     }
 
-    /// The node's template files: today's files view, byte-for-byte —
-    /// Markdown files render colored (mermaid fences as diagrams), other
-    /// files as code.
-    fn files_document(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let files = self
-            .files
-            .as_ref()
-            .map(|files| files.node_files(&self.state_id));
-        let file_count = files.as_ref().map_or(0, Vec::len);
-        let mut document: Vec<Line> = Vec::new();
-        let mut header: Line = vec![Span::raw("  ")];
-        header.push(theme.fg_span(ThemeColor::ToolTitle, "node: "));
-        header.push(theme.fg_span(ThemeColor::Text, self.state_id.clone()));
-        header.push(theme.fg_span(
-            ThemeColor::Muted,
-            format!(
-                " · {} · {} file{}",
-                if self.run_name.is_empty() {
-                    self.run_id.clone()
+    /// The run's prompt template, before input substitution.
+    fn template_document(&self, theme: &Theme, width: usize) -> Vec<Line> {
+        let mut document = vec![
+            vec![
+                Span::raw("  "),
+                theme.fg_span(ThemeColor::ToolTitle, "prompt template"),
+            ],
+            vec![],
+        ];
+        let Some(template) = &self.template else {
+            document.push(vec![theme.fg_span(
+                ThemeColor::Muted,
+                if self.document.is_none() && !self.never_entered && self.error.is_none() {
+                    "Loading template…"
                 } else {
-                    self.run_name.clone()
+                    "This state has no prompt template."
                 },
-                file_count,
-                if file_count == 1 { "" } else { "s" }
-            ),
-        ));
-        document.push(truncate_line(&header, width, ""));
-        let Some(files) = files else {
-            if self.files_error.is_none() {
-                document.push(vec![Span::raw("")]);
-                document.push(vec![
-                    Span::raw("  "),
-                    theme.fg_span(ThemeColor::Muted, "Loading files…"),
-                ]);
-            }
+            )]);
             return document;
         };
-        if files.is_empty() {
-            document.push(vec![Span::raw("")]);
-            document.push(vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Muted, "No files recorded for this state."),
-            ]);
-        }
         let style = MarkdownStyle::from_theme(theme);
         let inner = width.saturating_sub(4).max(20);
-        for (path, text) in files {
-            document.push(vec![Span::raw("")]);
-            let rule = "─".repeat(inner.saturating_sub(path.chars().count() + 4).min(60));
-            document.push(vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Accent, format!("── {path} ")),
-                theme.fg_span(ThemeColor::Dim, rule),
-            ]);
-            document.push(vec![Span::raw("")]);
-            let rows: Vec<Line> = if std::path::Path::new(path)
-                .extension()
-                .is_some_and(|ext| ext == "md")
-                || path.starts_with("MACHINE.md")
-            {
-                let mut rows = Vec::new();
-                for segment in split_mermaid_fences(text) {
-                    match segment {
-                        FileSegment::Text(prose) => {
-                            rows.extend(render_markdown(&prose, inner, &style));
-                        }
-                        FileSegment::Mermaid(source) => {
-                            rows.extend(mermaid_block_lines(theme, &source));
-                        }
-                    }
-                }
-                rows
-            } else {
-                text.lines()
-                    .map(|line| vec![theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())])
-                    .collect()
+        for segment in split_mermaid_fences(template) {
+            let rows = match segment {
+                FileSegment::Text(prose) => render_markdown(&prose, inner, &style),
+                FileSegment::Mermaid(source) => mermaid_block_lines(theme, &source),
             };
             for row in rows {
-                let mut line: Line = vec![Span::raw("  ")];
+                let mut line = vec![Span::raw("  ")];
                 line.extend(row);
                 document.push(truncate_line(&line, width, ""));
             }
+        }
+        if self.template_truncated {
+            document.push(vec![theme.fg_span(ThemeColor::Warning, "… (truncated)")]);
         }
         document
     }
@@ -874,16 +715,12 @@ impl NodeView {
         self.last_width.set(Some(width));
         let inner_width = width.saturating_sub(4).max(20);
 
-        let (document, scroll) = if self.files_open {
-            (self.files_document(theme, width), self.files_scroll)
+        let (document, scroll) = if self.template_open {
+            (self.template_document(theme, width), self.template_scroll)
         } else {
             (self.document_lines(Some(theme), inner_width), self.scroll)
         };
-        let error = if self.files_open {
-            self.files_error.as_ref()
-        } else {
-            self.error.as_ref()
-        };
+        let error = self.error.as_ref();
         let error_rows = usize::from(error.is_some());
         let visible = visible_rows(viewport_rows, error.is_some());
         let scroll = scroll.min(document.len().saturating_sub(visible));
@@ -924,14 +761,14 @@ impl NodeView {
             key("tui.select.pageDown", "PgDn")
         );
         let esc = key("tui.select.cancel", "Esc");
-        if self.files_open {
+        if self.template_open {
             return format!(
                 "{arrows}/{pages} scroll · {} back to the node · {esc} back to the diagram",
                 key("tui.select.confirm", "Enter")
             );
         }
         format!(
-            "{arrows} instance · {pages} scroll · {} files · o open session · {esc} back",
+            "{arrows} instance · {pages} scroll · {} template · o open session · {esc} back",
             key("tui.select.confirm", "Enter")
         )
     }
@@ -959,6 +796,59 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn returning_to_the_loaded_instance_rejects_the_pending_reply() {
+        let reply = json!({
+            "state": {"instances": [
+                {"entry": 0, "index": 0, "status": "running"},
+                {"entry": 0, "index": 1, "status": "running"},
+            ]},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "loaded"},
+        });
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        assert!(node.handle_key("down", &kb, 20));
+        node.set_request_epoch(7);
+        assert!(node.handle_key("up", &kb, 20));
+        let mut late = reply;
+        late["instance"]["index"] = json!(1);
+        late["instance"]["prompt"] = json!("superseded");
+        assert!(!node.apply_request_result(7, Ok(late)));
+        assert_eq!(node.selected_selector(), Some((0, 0)));
+        assert_eq!(node.document.unwrap().prompt, "loaded");
+    }
+
+    #[test]
+    fn node_refresh_loads_the_template_after_a_failed_request() {
+        let mut node = NodeView::loading("run", "worker");
+        node.set_request_epoch(1);
+        assert!(node.apply_request_result(1, Err("request failed".to_string())));
+        node.set_request_epoch(2);
+        assert!(node.apply_request_result(
+            2,
+            Ok(json!({
+                "state": {"instances": []},
+                "entry": null,
+                "instance": null,
+                "template": "# Bound {input}",
+                "templateTruncated": true,
+            }))
+        ));
+        assert_eq!(node.template.as_deref(), Some("# Bound {input}"));
+        assert!(node.template_truncated);
+        assert!(node.error.is_none());
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .template_document(&theme, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("Bound {input}"));
+        assert!(text.contains("truncated"));
+    }
+
+    #[test]
     fn refreshing_the_same_instance_preserves_document_scroll() {
         let mut reply = json!({
             "state": {"instances": [
@@ -977,26 +867,6 @@ mod tests {
         reply["instance"]["index"] = json!(1);
         node.merge_reply(&reply);
         assert_eq!(node.scroll, 0);
-    }
-
-    #[test]
-    fn files_survive_newer_node_requests_and_reject_older_mounts() {
-        let mut node = NodeView::loading("run", "worker");
-        node.set_request_epoch(1);
-        node.set_files_epoch(1);
-        node.set_request_epoch(2);
-        let files = json!({
-            "files": [{"path": "MACHINE.md", "text": "# worker"}],
-            "stateFiles": [{"state": "worker", "paths": ["MACHINE.md"]}],
-        });
-        assert!(node.apply_files_result(1, Ok(files.clone())));
-        assert_eq!(node.files, Some(NodeFiles::parse(&files)));
-
-        let mut next_mount = NodeView::loading("run", "worker");
-        next_mount.set_request_epoch(3);
-        next_mount.set_files_epoch(3);
-        assert!(!next_mount.apply_files_result(1, Ok(files)));
-        assert_eq!(next_mount.files, None);
     }
 
     #[test]
@@ -1049,7 +919,7 @@ mod tests {
         let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
         let keybindings = KeybindingsManager::new();
         let content = format!("{}tail marker", "body row\n".repeat(20));
-        for files_open in [false, true] {
+        for template_open in [false, true] {
             for with_error in [false, true] {
                 for viewport_rows in [6, 8, 12] {
                     let mut node = NodeView::loading("run", "worker");
@@ -1058,15 +928,11 @@ mod tests {
                         outputs: Some(content.clone()),
                         ..NodeDocument::default()
                     });
-                    node.set_files(NodeFiles {
-                        files: vec![("output.txt".to_string(), content.clone())],
-                        state_files: vec![("worker".to_string(), vec!["output.txt".to_string()])],
-                    });
+                    node.template = Some(content.clone());
                     if with_error {
                         node.set_error("refresh failed".to_string());
-                        node.set_files_error("refresh failed");
                     }
-                    node.files_open = files_open;
+                    node.template_open = template_open;
                     node.render(&theme, 80, &keybindings, viewport_rows);
                     for _ in 0..50 {
                         assert!(node.handle_key("pagedown", &keybindings, viewport_rows));
@@ -1079,7 +945,7 @@ mod tests {
                         .collect::<String>();
                     assert!(
                         text.contains("tail marker"),
-                        "tail inaccessible: files={files_open}, error={with_error}, rows={viewport_rows}"
+                        "tail inaccessible: template={template_open}, error={with_error}, rows={viewport_rows}"
                     );
                     if with_error {
                         assert!(text.contains("refresh failed"));
