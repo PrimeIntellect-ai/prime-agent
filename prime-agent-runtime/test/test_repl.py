@@ -922,6 +922,181 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(one(events, "error"))
         self.assertIn("5", stream_text(events, "stdout"))
 
+    def test_discipline_screen_reads_function_bodies_in_order(self):
+        # The functions are never called: the screen reads them before the
+        # cell runs.
+        for rid, code in (
+            # A later shadow does not hide an import that runs before it.
+            ("fn-later-shadow", "def f():\n    import time as t\n    t.sleep(5)\n    t = None\n"),
+            # A name declared global or nonlocal is not a local of the function.
+            (
+                "fn-global",
+                "import time as t\ndef f():\n    global t\n    t.sleep(5)\n    t = None\n",
+            ),
+            (
+                "fn-nonlocal",
+                "def outer():\n"
+                "    import time as t\n"
+                "    def inner():\n"
+                "        nonlocal t\n"
+                "        t.sleep(5)\n"
+                "        t = None\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # A local is unbound until its binding runs. Before that, the name is
+        # neither the enclosing import nor the local's later import.
+        for rid, code in (
+            ("fn-local-before-shadow", "import time\ndef f():\n    time.sleep(5)\n    time = None\n"),
+            ("fn-local-before-import", "def f():\n    t.sleep(5)\n    import time as t\n"),
+        ):
+            events = self.repl.execute(rid, code + "print('defined')")
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("defined", stream_text(events, "stdout"), rid)
+
+    def test_discipline_screen_keeps_every_binding_a_join_can_carry(self):
+        for rid, code in (
+            # The branches bind the alias to two watched modules.
+            (
+                "join-two-modules",
+                "def f(flag):\n"
+                "    if flag:\n"
+                "        import os as t\n"
+                "    else:\n"
+                "        import time as t\n"
+                "    t.sleep(5)\n",
+            ),
+            # The path that skips the import leaves the name unbound, so the
+            # call is also charged as written.
+            (
+                "join-unbound-and-module",
+                "flag = False\nif flag:\n    import os as time\ntime.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_carries_bindings_out_of_suites_that_end_early(self):
+        # An exception, a break, or the next loop pass can start from any
+        # point of a suite. The functions are never called.
+        for rid, body in (
+            (
+                "handler-mid-body",
+                "    try:\n"
+                "        import time as t\n"
+                "        int('x')\n"
+                "        t = None\n"
+                "    except ValueError:\n"
+                "        t.sleep(5)\n",
+            ),
+            (
+                "finally-after-handler",
+                "    try:\n"
+                "        int('x')\n"
+                "    except ValueError:\n"
+                "        import time as t\n"
+                "        int('y')\n"
+                "        t = None\n"
+                "    finally:\n"
+                "        t.sleep(5)\n",
+            ),
+            (
+                "finally-after-else",
+                "    try:\n"
+                "        pass\n"
+                "    except ValueError:\n"
+                "        pass\n"
+                "    else:\n"
+                "        import time as t\n"
+                "        int('x')\n"
+                "        t = None\n"
+                "    finally:\n"
+                "        t.sleep(5)\n",
+            ),
+            (
+                "with-swallowed",
+                "    with contextlib.suppress(ValueError):\n"
+                "        import time as t\n"
+                "        int('x')\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "with-swallowed-at-start",
+                "    import time as t\n"
+                "    with contextlib.suppress(ValueError):\n"
+                "        int('x')\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "for-break",
+                "    for i in range(2):\n"
+                "        import time as t\n"
+                "        if i == 0:\n"
+                "            break\n"
+                "        t = None\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "while-next-pass",
+                "    t = None\n"
+                "    i = 0\n"
+                "    while i < 2:\n"
+                "        i += 1\n"
+                "        if i == 2:\n"
+                "            t.sleep(5)\n"
+                "        import time as t\n",
+            ),
+            # One exception group can run several except* handlers in turn.
+            (
+                "except-star-chain",
+                "    try:\n"
+                "        pass\n"
+                "    except* ValueError:\n"
+                "        import time as t\n"
+                "    except* TypeError:\n"
+                "        t.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, "import contextlib\ndef f():\n" + body)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # At most one handler of a plain try runs, so a handler does not see
+        # the bindings of another handler.
+        code = (
+            "def f():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError:\n"
+            "        import time as t\n"
+            "    except TypeError:\n"
+            "        t.sleep(5)\n"
+            "print('defined')\n"
+        )
+        events = self.repl.execute("plain-handlers", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+
+    def test_discipline_screen_reads_bindings_for_code_that_runs_later(self):
+        # A function body or a generator runs after its definition, so it can
+        # see any binding the enclosing scope makes. Nothing here runs it.
+        for rid, code in (
+            ("late-function", "def f():\n    t.sleep(5)\nimport time as t\n"),
+            ("late-generator", "g = (t.sleep(5) for _ in range(1))\nimport time as t\n"),
+            # A global declaration puts the import in the module scope.
+            (
+                "late-global",
+                "def setup():\n    global t\n    import time as t\ndef wait():\n    t.sleep(5)\n",
+            ),
+            (
+                "class-global",
+                "class C:\n    global t\n    import time as t\ndef wait():\n    t.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
     def test_discipline_screen_honors_loop_targets(self):
         code = (
             "from time import sleep as item\n"
