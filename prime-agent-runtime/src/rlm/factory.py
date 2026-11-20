@@ -1187,6 +1187,9 @@ FACTORY_FRAME_CAP = 262_144
 full 1024-state machine cap fits; a snapshot that cannot shrink under the
 cap fails loudly instead of being silently truncated."""
 
+LIBRARY_METADATA_MAX_LENGTH = 1024
+"""Maximum author or version label length in a library activity reply."""
+
 ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume", "library")
 """The host bridge's actions over the factory surface, the
 ``factory_activity`` frame's action vocabulary: one run's
@@ -2612,8 +2615,12 @@ class FactoryExecutor:
             snapshot = self._spec_snapshot(graph["name"], canonical, compact=True)
             snapshot["mermaid"] = graph["mermaid"]
             snapshot["description"] = graph["description"]
-            snapshot["version"] = graph["version"]
-            snapshot["author"] = graph["author"]
+            for field in ("version", "author"):
+                value = graph[field]
+                snapshot[field] = (
+                    value if len(value) <= LIBRARY_METADATA_MAX_LENGTH
+                    else value[:LIBRARY_METADATA_MAX_LENGTH - 1] + "…"
+                )
             return _wire_payload(snapshot)
         if action == "graph":
             return _wire_payload(self.graph(run_id or spec_id, compact=True))

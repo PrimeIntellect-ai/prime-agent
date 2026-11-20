@@ -8534,6 +8534,28 @@ class FactoryLibraryLaneTest(_ExecutorTestCase):
         )
 
     @async_test
+    async def test_library_detail_bounds_metadata_without_losing_its_graph(self) -> None:
+        path = self.repo / "sweep" / "MACHINE.md"
+        for field in ("author", "version"):
+            with self.subTest(field=field):
+                metadata = {"author": "Tester", "version": "1"}
+                metadata[field] = "x" * factory_module.FACTORY_FRAME_CAP
+                path.write_text(machine_file_text(**metadata), encoding="utf-8")
+                with patch("rlm.repl._send") as send:
+                    await factory_module._run_activity(
+                        {"id": "library-detail", "action": "library", "specId": "sweep"}
+                    )
+                frame = send.call_args.args[0]
+                self.assertEqual(frame["status"], "ok")
+                self.assertLessEqual(len(json.dumps(frame)), factory_module.FACTORY_FRAME_CAP)
+                detail = frame["result"]
+                self.assertEqual(len(detail[field]), factory_module.LIBRARY_METADATA_MAX_LENGTH)
+                self.assertTrue(detail[field].endswith("…"))
+                self.assertEqual(detail["machine"]["states"][0]["id"], "a")
+                self.assertIn("stateDiagram-v2", detail["mermaid"])
+                self.assertEqual(factory_module.library_graph("sweep")[field], metadata[field])
+
+    @async_test
     async def test_activity_library_serves_one_machines_graph_payload(self) -> None:
         graph = await factory_module.default_factory_executor().activity(
             {"action": "library", "specId": "sweep"}
