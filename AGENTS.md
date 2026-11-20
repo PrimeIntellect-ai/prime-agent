@@ -25,6 +25,7 @@ Development rules for Prime Agent (Rust) on PrimeIntellect-ai/prime-agent, branc
 - Prefer native RPITIT trait methods with explicit `Send` bounds (`fn foo(&self) -> impl Future<Output = T> + Send;`) over `#[async_trait]` or `#[allow(async_fn_in_trait)]`. Implementations may use `async fn` when they satisfy the contract.
 - No single-use helper methods. Do not create a helper referenced only once.
 - Instrument async work at the definition (`#[tracing::instrument(...)]`), not with `.instrument(...)` at call sites. Check whether the callee is already instrumented first.
+- Markdown prose is never hard-wrapped: each paragraph and list item is one line.
 
 ## Change hygiene
 
