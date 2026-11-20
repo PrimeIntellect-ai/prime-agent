@@ -197,7 +197,8 @@ pub struct NodeView {
     template_open: bool,
     template_scroll: usize,
     request_epoch: Option<u64>,
-    last_width: Cell<Option<usize>>,
+    requested_selector: Option<(u64, u64)>,
+    last_viewport: Cell<Option<(usize, usize)>>,
 }
 
 impl NodeView {
@@ -218,7 +219,8 @@ impl NodeView {
             template_open: false,
             template_scroll: 0,
             request_epoch: None,
-            last_width: Cell::new(None),
+            requested_selector: None,
+            last_viewport: Cell::new(None),
         }
     }
 
@@ -278,7 +280,8 @@ impl NodeView {
             template_open: false,
             template_scroll: 0,
             request_epoch: None,
-            last_width: Cell::new(None),
+            requested_selector: None,
+            last_viewport: Cell::new(None),
         })
     }
 
@@ -309,7 +312,7 @@ impl NodeView {
         NodeTarget {
             run_id: self.run_id.clone(),
             state_id: self.state_id.clone(),
-            instance: self.selected_selector(),
+            instance: self.requested_selector.or(self.selected_selector()),
         }
     }
 
@@ -324,12 +327,11 @@ impl NodeView {
             self.error = Some(MALFORMED_NODE_REPLY_ERROR.to_string());
             return;
         };
-        if self.document_selector() != reply.document_selector() {
-            self.scroll = 0;
-        }
+        let selection_changed = self.document_selector() != reply.document_selector();
         if !reply.run_name.is_empty() {
             self.run_name = reply.run_name;
         }
+        self.requested_selector = None;
         self.instances = reply.instances;
         self.document = reply.document;
         self.never_entered = reply.never_entered;
@@ -341,12 +343,22 @@ impl NodeView {
                 .iter()
                 .position(|row| row.entry == Some(entry) && row.index == Some(index))
         });
+        if selection_changed {
+            self.scroll_to_selected(self.last_viewport.get().map_or(0, |size| size.1));
+        }
         self.error = None;
     }
 
+    fn scroll_to_selected(&mut self, viewport_rows: usize) {
+        self.scroll = self.selected.map_or(0, |index| {
+            index.saturating_sub(visible_rows(viewport_rows, self.error.is_some()) - 1)
+        });
+    }
+
     /// Mark the newest node-document request for this mounted view.
-    pub fn set_request_epoch(&mut self, request_epoch: u64) {
+    pub fn set_request_epoch(&mut self, request_epoch: u64, selector: Option<(u64, u64)>) {
         self.request_epoch = Some(request_epoch);
+        self.requested_selector = selector;
     }
 
     /// Whether the mounted view is waiting for a node-document reply.
@@ -401,7 +413,7 @@ impl NodeView {
         let page_down = kb.matches(key, "tui.select.pageDown");
         if self.template_open {
             let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-            let width = self.last_width.get().unwrap_or_default();
+            let width = self.last_viewport.get().map_or(0, |size| size.0);
             let total = self.template_document(&theme, width).len();
             let visible = visible_rows(viewport_rows, self.error.is_some());
             let step = if page_up || page_down { visible } else { 1 };
@@ -425,8 +437,9 @@ impl NodeView {
             };
             if selected != self.selected {
                 self.selected = selected;
-                self.scroll = 0;
+                self.scroll_to_selected(viewport_rows);
                 self.request_epoch = None;
+                self.requested_selector = None;
             }
             return true;
         }
@@ -440,27 +453,28 @@ impl NodeView {
             };
             if selected != self.selected {
                 self.selected = selected;
-                self.scroll = 0;
+                self.scroll_to_selected(viewport_rows);
                 self.request_epoch = None;
+                self.requested_selector = None;
             }
             return true;
         }
         if page_up || page_down {
             let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
             let width = self
-                .last_width
+                .last_viewport
                 .get()
-                .unwrap_or_default()
+                .map_or(0, |size| size.0)
                 .saturating_sub(4)
                 .max(20);
             let total = self.document_lines(Some(&theme), width).len();
             let visible = visible_rows(viewport_rows, self.error.is_some());
+            let max_scroll = total.saturating_sub(visible);
+            self.scroll = self.scroll.min(max_scroll);
             self.scroll = if page_up {
                 self.scroll.saturating_sub(visible)
             } else {
-                self.scroll
-                    .saturating_add(visible)
-                    .min(total.saturating_sub(visible))
+                self.scroll.saturating_add(visible).min(max_scroll)
             };
             return true;
         }
@@ -500,6 +514,9 @@ impl NodeView {
                 "  no instances were created"
             };
             plain_line(&mut rows, theme, text, ThemeColor::Muted);
+        }
+        if self.selected_selector() != self.document_selector() {
+            return rows;
         }
         let Some(document) = &self.document else {
             return rows;
@@ -712,7 +729,7 @@ impl NodeView {
             ),
         ));
         let mut rows = vec![header, vec![Span::raw("")]];
-        self.last_width.set(Some(width));
+        self.last_viewport.set(Some((width, viewport_rows)));
         let inner_width = width.saturating_sub(4).max(20);
 
         let (document, scroll) = if self.template_open {
@@ -795,6 +812,115 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn reply_with_instances(count: usize) -> Value {
+        json!({
+            "state": {"instances": (0..count).map(|index| json!({
+                "entry": 0, "index": index, "status": "running"
+            })).collect::<Vec<_>>()},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "old prompt",
+                "answer": "old answer", "outputs": {"value": "old output"}},
+        })
+    }
+
+    #[test]
+    fn moving_below_the_viewport_keeps_the_selected_instance_visible() {
+        let reply = reply_with_instances(30);
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        for _ in 0..20 {
+            assert!(node.handle_key("down", &kb, 12));
+        }
+        assert_eq!(node.selected_selector(), Some((0, 20)));
+        let rows = node.render(&theme, 80, &kb, 12);
+        assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+        let mut reply = reply;
+        reply["instance"]["index"] = json!(20);
+        node.merge_reply(&reply);
+        let rows = node.render(&theme, 80, &kb, 12);
+        assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+        let mut restored = NodeView::loading("run", "worker");
+        restored.merge_reply(&reply);
+        let rows = restored.render(&theme, 80, &kb, 12);
+        assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+    }
+
+    #[test]
+    fn page_up_clamps_after_refresh_or_a_larger_viewport() {
+        let mut reply = reply_with_instances(1);
+        reply["instance"]["prompt"] = json!("long row\n".repeat(200));
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        node.scroll = 150;
+        reply["instance"]["prompt"] = json!("short row\n".repeat(40));
+        node.merge_reply(&reply);
+        let visible = visible_rows(20, false);
+        let total = node.document_lines(None, 80).len();
+        let end = total.saturating_sub(visible);
+        assert!(node.handle_key("pageup", &kb, 20));
+        assert_eq!(node.scroll, end.saturating_sub(visible));
+
+        node.scroll = total.saturating_sub(visible_rows(12, false));
+        let larger_visible = visible_rows(30, false);
+        assert!(node.handle_key("pageup", &kb, 30));
+        assert_eq!(
+            node.scroll,
+            total
+                .saturating_sub(larger_visible)
+                .saturating_sub(larger_visible)
+        );
+    }
+
+    #[test]
+    fn failed_explicit_request_keeps_its_selector_for_the_retry() {
+        for mut node in [
+            NodeView::loading("run", "worker"),
+            NodeView::parse_reply("run", "worker", &reply_with_instances(4)).unwrap(),
+        ] {
+            node.set_request_epoch(1, Some((2, 3)));
+            assert!(node.apply_request_result(1, Err("timeout".to_string())));
+            assert!(!node.request_in_flight());
+            assert_eq!(node.target().instance, Some((2, 3)));
+            let mut reply = reply_with_instances(4);
+            reply["entry"]["index"] = json!(2);
+            reply["instance"]["index"] = json!(3);
+            reply["state"]["instances"][3]["entry"] = json!(2);
+            node.set_request_epoch(2, node.target().instance);
+            assert!(node.apply_request_result(2, Ok(reply)));
+            assert_eq!(node.target().instance, Some((2, 3)));
+            assert!(node.handle_key("up", &KeybindingsManager::new(), 20));
+            assert_eq!(node.target().instance, Some((0, 2)));
+        }
+    }
+
+    #[test]
+    fn a_changed_selection_hides_the_previous_instances_sections() {
+        let reply = reply_with_instances(2);
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        assert!(node.handle_key("down", &kb, 20));
+        node.set_request_epoch(1, Some((0, 1)));
+        assert!(node.apply_request_result(1, Err("timeout".to_string())));
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        for stale in ["old prompt", "old answer", "old output"] {
+            assert!(!text.contains(stale), "stale detail: {stale}");
+        }
+        assert!(node.handle_key("up", &kb, 20));
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("old prompt"));
+    }
+
     #[test]
     fn returning_to_the_loaded_instance_rejects_the_pending_reply() {
         let reply = json!({
@@ -808,7 +934,7 @@ mod tests {
         let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
         let kb = KeybindingsManager::new();
         assert!(node.handle_key("down", &kb, 20));
-        node.set_request_epoch(7);
+        node.set_request_epoch(7, None);
         assert!(node.handle_key("up", &kb, 20));
         let mut late = reply;
         late["instance"]["index"] = json!(1);
@@ -821,9 +947,9 @@ mod tests {
     #[test]
     fn node_refresh_loads_the_template_after_a_failed_request() {
         let mut node = NodeView::loading("run", "worker");
-        node.set_request_epoch(1);
+        node.set_request_epoch(1, None);
         assert!(node.apply_request_result(1, Err("request failed".to_string())));
-        node.set_request_epoch(2);
+        node.set_request_epoch(2, None);
         assert!(node.apply_request_result(
             2,
             Ok(json!({
@@ -866,14 +992,14 @@ mod tests {
 
         reply["instance"]["index"] = json!(1);
         node.merge_reply(&reply);
-        assert_eq!(node.scroll, 0);
+        assert_eq!(node.scroll, 1);
     }
 
     #[test]
     fn node_replies_clear_only_the_current_pending_request() {
         let mut node = NodeView::loading("run", "worker");
-        node.set_request_epoch(1);
-        node.set_request_epoch(2);
+        node.set_request_epoch(1, None);
+        node.set_request_epoch(2, None);
         assert!(!node.apply_request_result(1, Err("stale".to_string())));
         assert!(node.request_in_flight());
         assert!(node.apply_request_result(2, Err("current".to_string())));

@@ -73,6 +73,7 @@ struct Band {
     labels: Vec<usize>,
     channels: Vec<(usize, usize)>,
     arrivals: Vec<usize>,
+    entry: Option<usize>,
     arrow: Option<usize>,
     height: usize,
 }
@@ -286,6 +287,30 @@ pub(crate) fn block_diagram(
     }
     let depth = layer.iter().copied().max().map_or(0, |max| max + 1);
 
+    let too_large = || BlockDiagram {
+        lines: vec![vec![theme.fg_span(
+            ThemeColor::Muted,
+            format!(
+                "[diagram too large to render: {} states, {} transitions]",
+                states.len(),
+                transitions.len()
+            ),
+        )]],
+        #[cfg(test)]
+        node_rows: Vec::new(),
+    };
+    // Bound dummy items and segments before expanding long forward edges.
+    let expanded_segments = edges
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !is_back[*index])
+        .fold(0usize, |count, (_, (from, to, _))| {
+            count.saturating_add(layer[*to] - layer[*from])
+        });
+    if expanded_segments > MAX_DIAGRAM_CELLS {
+        return too_large();
+    }
+
     // Items: the states first (item i is state i), then one dummy per
     // skipped layer of a long edge.
     let mut item_layer: Vec<usize> = layer.clone();
@@ -371,7 +396,20 @@ pub(crate) fn block_diagram(
                 .map(|label| width[item] / 2 + 2 + label.chars().count())
                 .max()
                 .unwrap_or(0);
-            (width[item] + loop_room).max(guard_end)
+            let target_guard_end = incoming[item]
+                .first()
+                .filter(|_| incoming[item].len() == 1)
+                .and_then(|&edge| segments[edge].label.as_ref())
+                .map_or(0, |label| width[item] / 2 + 2 + label.chars().count());
+            let entry_end = if item < n && states[item].entry {
+                width[item] / 2 + 2 + "start".len()
+            } else {
+                0
+            };
+            (width[item] + loop_room)
+                .max(guard_end)
+                .max(target_guard_end)
+                .max(entry_end)
         })
         .collect();
     let row_width = |row: &Vec<usize>| -> usize {
@@ -421,9 +459,7 @@ pub(crate) fn block_diagram(
         let wants_arrow = b < depth
             && layers[b].iter().any(|&item| {
                 item < n
-                    && (!incoming[item].is_empty()
-                        || arrivals.iter().any(|&k| backs[k].to == item)
-                        || (b == 0 && states[item].entry))
+                    && (!incoming[item].is_empty() || arrivals.iter().any(|&k| backs[k].to == item))
             });
         let labels: Vec<usize> = if b < depth {
             layers[b]
@@ -444,6 +480,11 @@ pub(crate) fn block_diagram(
             })
             .collect();
         row += arrivals.len();
+        let entry = (b < depth && layers[b].iter().any(|&item| item < n && states[item].entry))
+            .then(|| {
+                row += 1;
+                row - 1
+            });
         let arrow = wants_arrow.then(|| {
             row += 1;
             row - 1
@@ -457,6 +498,7 @@ pub(crate) fn block_diagram(
             labels,
             channels,
             arrivals,
+            entry,
             arrow,
             height: row - y,
         });
@@ -479,18 +521,7 @@ pub(crate) fn block_diagram(
         gutter(backs.len() - 1) + 2
     });
     if canvas_width.saturating_mul(height) > MAX_DIAGRAM_CELLS {
-        return BlockDiagram {
-            lines: vec![vec![theme.fg_span(
-                ThemeColor::Muted,
-                format!(
-                    "[diagram too large to render: {} states, {} transitions]",
-                    states.len(),
-                    transitions.len()
-                ),
-            )]],
-            #[cfg(test)]
-            node_rows: Vec::new(),
-        };
+        return too_large();
     }
     let mut canvas = Canvas(vec![vec![Cell::Empty; canvas_width]; height]);
 
@@ -604,12 +635,15 @@ pub(crate) fn block_diagram(
             }
         }
     }
-    // The entry arrows.
-    if let Some(arrow) = bands[0].arrow {
-        for &item in layers.first().into_iter().flatten() {
-            if item < n && states[item].entry {
-                canvas.put(center(item), arrow, "▼", Role::Arrow);
-                canvas.label(center(item) + 2, arrow, "start");
+    // Entry markers get their own row, separate from incoming guards.
+    for (b, band) in bands.iter().take(depth).enumerate() {
+        if let Some(entry) = band.entry {
+            for &item in &layers[b] {
+                if item < n && states[item].entry {
+                    canvas.vertical(center(item), entry, layer_top[b] - 1);
+                    canvas.put(center(item), entry, "▼", Role::Arrow);
+                    canvas.label(center(item) + 2, entry, "start");
+                }
             }
         }
     }
