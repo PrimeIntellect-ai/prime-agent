@@ -27,24 +27,10 @@ const RIGHT: u8 = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Border,
-    Selected,
     Title,
     Detail,
     Arrow,
     Label,
-    /// A live box's border, in the state's status color (the run view's
-    /// overlay: the box frame takes the status color).
-    LiveBorder(ThemeColor),
-    /// A live box's title, in the state's status color.
-    LiveTitle(ThemeColor),
-    /// A live box's detail line, in the state's status color.
-    LiveDetail(ThemeColor),
-    /// A fired edge's arrow or label (the last-fired window paints
-    /// Success, mirroring the run rows' fired-edge green).
-    Fired,
-    /// One nested child row under a live box (the run view's occupancy
-    /// detail: the spawned sessions under the state).
-    Child(ThemeColor),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,51 +40,12 @@ enum Cell {
     Char(char, Role),
 }
 
-/// One nested child session row under a live state box: the child's
-/// display label and its live status color.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OverlayChild {
-    pub label: String,
-    pub color: ThemeColor,
-}
-
-/// One state's live overlay (the run view's live paint over the same
-/// layout the machine view draws).
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OverlayNode {
-    /// The status color (the box's border and title take it).
-    pub color: ThemeColor,
-    /// The status glyph riding the box's top border.
-    pub glyph: char,
-    /// The occupancy fragment appended to the detail line.
-    pub occupancy: String,
-    /// The spawned child sessions nested under the box.
-    pub children: Vec<OverlayChild>,
-}
-
-/// The live overlay a run view paints over the block diagram: per-state
-/// status and the last-fired edge set. Overlay changes only styles and
-/// adds child rows; the base layout never moves.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct DiagramOverlay {
-    pub nodes: std::collections::HashMap<String, OverlayNode>,
-    /// The fired transitions, keyed `from + to + when` (the same identity
-    /// `FactoryEdge::matches` uses).
-    pub fired: std::collections::HashSet<String>,
-}
-
-impl DiagramOverlay {
-    /// One fired-edge key, matching a transition's identity.
-    pub(crate) fn fired_key(from: &[String], to: &str, when: Option<&str>) -> String {
-        format!("{}->{}@{}", from.join(" + "), to, when.unwrap_or(""))
-    }
-}
-
-/// The rendered diagram and the first row of each state's box (by the
-/// state's index), so a view can scroll a selected state into sight.
+/// The rendered diagram. Tests also keep each state's first box row to
+/// check the layout.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BlockDiagram {
     pub lines: Vec<Line>,
+    #[cfg(test)]
     pub node_rows: Vec<usize>,
 }
 
@@ -163,8 +110,7 @@ fn clip(text: &str, max: usize) -> String {
     out
 }
 
-/// Lay out and draw the diagram. `selected` (a state index) paints that
-/// state's box in the accent.
+/// Lay out and draw the diagram.
 #[expect(
     clippy::too_many_lines,
     reason = "one layout pass: edges, layers, order, positions, rows, then the drawing; split, each step would only pass the same tables along"
@@ -173,67 +119,16 @@ pub(crate) fn block_diagram(
     theme: &Theme,
     states: &[FactoryState],
     transitions: &[FactoryTransition],
-    selected: Option<usize>,
-    overlay: Option<&DiagramOverlay>,
 ) -> BlockDiagram {
     let n = states.len();
     if n == 0 {
         return BlockDiagram {
             lines: Vec::new(),
+            #[cfg(test)]
             node_rows: Vec::new(),
         };
     }
     let index_of = |id: &str| states.iter().position(|state| state.id == id);
-    // Each state's live overlay row count (the nested children grow the
-    // layer band below the box; the box itself never moves).
-    let overlay_children = |item: usize| -> &[OverlayChild] {
-        overlay
-            .and_then(|overlay| overlay.nodes.get(&states[item].id))
-            .map_or(&[] as &[OverlayChild], |node| &node.children)
-    };
-    // The fired (from, to) index pairs: a transition in the overlay's
-    // last-fired window lights its arrow and label (the run rows'
-    // fired-edge green, on the same diagram).
-    let fired_pairs: std::collections::HashSet<(usize, usize)> =
-        overlay.map_or_else(std::collections::HashSet::new, |overlay| {
-            transitions
-                .iter()
-                .filter(|transition| {
-                    overlay.fired.contains(&DiagramOverlay::fired_key(
-                        &transition.from,
-                        &transition.to,
-                        transition.when.as_deref(),
-                    ))
-                })
-                .flat_map(|transition| {
-                    let to = index_of(&transition.to);
-                    transition
-                        .from
-                        .iter()
-                        .filter_map(move |source| Some((index_of(source)?, to?)))
-                })
-                .collect()
-        });
-    // The fired guards' short labels, keyed by target: a sibling guarded
-    // edge with the same from+to never cross-marks (the fired window
-    // names the guard that fired).
-    let fired_labels: std::collections::HashSet<(usize, String)> =
-        overlay.map_or_else(std::collections::HashSet::new, |overlay| {
-            transitions
-                .iter()
-                .filter(|transition| {
-                    overlay.fired.contains(&DiagramOverlay::fired_key(
-                        &transition.from,
-                        &transition.to,
-                        transition.when.as_deref(),
-                    ))
-                })
-                .filter_map(|transition| {
-                    let label = transition.when.as_deref().map(short_label)?;
-                    Some((index_of(&transition.to)?, label))
-                })
-                .collect()
-        });
     // Every transition source is one edge; a join labels its edges "join".
     let mut edges: Vec<(usize, usize, Option<String>)> = Vec::new();
     let mut self_loops: Vec<Vec<String>> = vec![Vec::new(); n];
@@ -424,22 +319,10 @@ pub(crate) fn block_diagram(
     let width: Vec<usize> = (0..items)
         .map(|item| {
             if item < n {
-                // A live box's detail line grows by its occupancy
-                // fragment (`… · 3 run · 2 queued`): the box widens with
-                // it, so the counts never clip.
-                let occupancy = overlay
-                    .and_then(|overlay| overlay.nodes.get(&states[item].id))
-                    .map_or(0, |node| {
-                        if node.occupancy.is_empty() {
-                            0
-                        } else {
-                            node.occupancy.chars().count() + 3
-                        }
-                    });
                 titles[item]
                     .chars()
                     .count()
-                    .max(details[item].chars().count() + occupancy)
+                    .max(details[item].chars().count())
                     + 4
             } else {
                 1
@@ -526,16 +409,7 @@ pub(crate) fn block_diagram(
         if b < depth {
             layer_top[b] = y;
             let real = layers[b].iter().any(|&item| item < n);
-            // The layer's rows: the boxes plus the deepest nested child
-            // column under any of them (run mode only; the machine view's
-            // overlay is None and the height is BOX_ROWS exactly).
-            let nested = layers[b]
-                .iter()
-                .filter(|&&item| item < n)
-                .map(|&item| overlay_children(item).len())
-                .max()
-                .unwrap_or(0);
-            y += if real { BOX_ROWS + nested } else { 1 };
+            y += if real { BOX_ROWS } else { 1 };
         }
     }
     let height = y;
@@ -544,7 +418,7 @@ pub(crate) fn block_diagram(
         .filter_map(|(_, _, label)| label.as_ref().map(|label| label.chars().count()))
         .max()
         .unwrap_or(0);
-    let canvas_width = ((MARGIN + widest + label_room + 4).max(if backs.is_empty() {
+    let canvas_width = (MARGIN + widest + label_room + 4).max(if backs.is_empty() {
         0
     } else {
         gutter(backs.len() - 1) + 2
@@ -552,17 +426,7 @@ pub(crate) fn block_diagram(
         .iter()
         .map(|labels| labels.join(", ").chars().count() + 4)
         .max()
-        .unwrap_or(0))
-    .max(states.iter().enumerate().fold(0, |widest, (item, _)| {
-        // The nested child rows under a live box can outreach the
-        // box itself: the canvas widens so their labels fit.
-        let children = overlay_children(item)
-            .iter()
-            .map(|child| child.label.chars().count() + 4)
-            .max()
-            .unwrap_or(0);
-        widest.max(x[item] + 2 + children)
-    }));
+        .unwrap_or(0);
     let mut canvas = Canvas(vec![vec![Cell::Empty; canvas_width]; height]);
 
     // Boxes and dummy columns.
@@ -572,79 +436,25 @@ pub(crate) fn block_diagram(
             if item >= n {
                 let rows = if row.iter().any(|&other| other < n) {
                     BOX_ROWS
-                        + row
-                            .iter()
-                            .filter(|&&other| other < n)
-                            .map(|&other| overlay_children(other).len())
-                            .max()
-                            .unwrap_or(0)
                 } else {
                     1
                 };
                 canvas.vertical(center(item), top, top + rows - 1);
                 continue;
             }
-            let live = overlay.and_then(|overlay| overlay.nodes.get(&states[item].id));
-            let chosen = selected == Some(item);
-            // The live box's frame takes the state's status color; the
-            // selected frame stays the accent (the selection stays
-            // distinct from the status paint).
-            let (role, [top_left, top_right, bottom_left, bottom_right, rule_char, side]) =
-                if chosen {
-                    (Role::Selected, ['┏', '┓', '┗', '┛', '━', '┃'])
-                } else if let Some(node) = live {
-                    (Role::LiveBorder(node.color), ['┌', '┐', '└', '┘', '─', '│'])
-                } else {
-                    (Role::Border, ['┌', '┐', '└', '┘', '─', '│'])
-                };
             let inner = width[item] - 2;
-            let mut stroke: String = std::iter::repeat_n(rule_char, inner).collect();
-            // The status glyph rides the top border's first inner cell.
-            if let Some(node) = live {
-                let mut glyphs: Vec<char> = stroke.chars().collect();
-                if let Some(first) = glyphs.first_mut() {
-                    *first = node.glyph;
-                }
-                stroke = glyphs.into_iter().collect();
-            }
-            canvas.put(
-                x[item],
-                top,
-                &format!("{top_left}{stroke}{top_right}"),
-                role,
-            );
-            canvas.put(
-                x[item],
-                top + 3,
-                &format!("{bottom_left}{stroke}{bottom_right}"),
-                role,
-            );
-            let mut detail_text = details[item].clone();
-            if let Some(node) = live {
-                if !node.occupancy.is_empty() {
-                    detail_text = format!("{detail_text} · {}", node.occupancy);
-                    // The occupancy grows the detail line; it clips to
-                    // the box's own width like the base detail does.
-                    detail_text = clip(&detail_text, width[item].saturating_sub(4));
-                }
-            }
-            for (offset, (text, text_role)) in [
-                (
-                    &titles[item],
-                    live.map_or(Role::Title, |node| Role::LiveTitle(node.color)),
-                ),
-                (
-                    &detail_text,
-                    live.map_or(Role::Detail, |node| Role::LiveDetail(node.color)),
-                ),
-            ]
-            .into_iter()
-            .enumerate()
+            let stroke: String = std::iter::repeat_n('─', inner).collect();
+            canvas.put(x[item], top, &format!("┌{stroke}┐"), Role::Border);
+            canvas.put(x[item], top + 3, &format!("└{stroke}┘"), Role::Border);
+            for (offset, (text, text_role)) in
+                [(&titles[item], Role::Title), (&details[item], Role::Detail)]
+                    .into_iter()
+                    .enumerate()
             {
                 let line_y = top + 1 + offset;
-                canvas.put(x[item], line_y, &side.to_string(), role);
+                canvas.put(x[item], line_y, "│", Role::Border);
                 canvas.put(x[item] + 2, line_y, text, text_role);
-                canvas.put(x[item] + width[item] - 1, line_y, &side.to_string(), role);
+                canvas.put(x[item] + width[item] - 1, line_y, "│", Role::Border);
             }
             if !self_loops[item].is_empty() {
                 canvas.put(
@@ -672,17 +482,8 @@ pub(crate) fn block_diagram(
             let start = band.top.saturating_sub(1);
             let mut line_start = start;
             if from < n {
-                let tee = if selected == Some(from) { '┳' } else { '┬' };
-                let role = if selected == Some(from) {
-                    Role::Selected
-                } else {
-                    Role::Border
-                };
-                // The tee rides the box's own bottom border (the layer's
-                // trailing child rows sit below it); the line then drops
-                // through them to the band.
                 let tee_row = (layer_top[item_layer[from]] + BOX_ROWS - 1).min(start);
-                canvas.put(center(from), tee_row, &tee.to_string(), role);
+                canvas.put(center(from), tee_row, "┬", Role::Border);
                 line_start = tee_row;
             }
             let end = if to < n {
@@ -715,29 +516,14 @@ pub(crate) fn block_diagram(
         }
         if let Some(arrow) = band.arrow {
             for (item, labels) in arrow_labels {
-                let fired = (0..n).any(|from| fired_pairs.contains(&(from, item)));
-                canvas.put(
-                    center(item),
-                    arrow,
-                    "▼",
-                    if fired { Role::Fired } else { Role::Arrow },
-                );
-                // Each label lights only when ITS guard fired: sibling
-                // guarded edges share one from+to pair, and the fired
-                // window names the guard that fired.
+                canvas.put(center(item), arrow, "▼", Role::Arrow);
                 let mut at = center(item) + 2;
                 for (index, label) in labels.iter().enumerate() {
                     if index > 0 {
-                        canvas.label_role(at, arrow, ", ", Role::Label);
+                        canvas.label(at, arrow, ", ");
                         at += 2;
                     }
-                    let label_fired = fired_labels.contains(&(item, label.clone()));
-                    let role = if label_fired {
-                        Role::Fired
-                    } else {
-                        Role::Label
-                    };
-                    canvas.label_role(at, arrow, label, role);
+                    canvas.label(at, arrow, label);
                     at += label.chars().count();
                 }
             }
@@ -772,72 +558,20 @@ pub(crate) fn block_diagram(
         };
         let column = gutter(k);
         let bottom = layer_top[layer[back.from]] + BOX_ROWS - 1;
-        let tee = if selected == Some(back.from) {
-            '┳'
-        } else {
-            '┬'
-        };
-        let role = if selected == Some(back.from) {
-            Role::Selected
-        } else {
-            Role::Border
-        };
-        canvas.put(center(back.from), bottom, &tee.to_string(), role);
+        canvas.put(center(back.from), bottom, "┬", Role::Border);
         canvas.vertical(center(back.from), bottom, departure);
         canvas.horizontal(departure, center(back.from), column);
         canvas.vertical(column, arrival, departure);
         canvas.horizontal(arrival, center(back.to), column);
         let arrow = target_band.arrow.unwrap_or(arrival + 1);
         canvas.vertical(center(back.to), arrival, arrow);
-        // The target's arrow cell is shared with the band's forward
-        // edges: it lights when ANY incoming edge fired (this back edge
-        // or a forward one), never overwriting a fired paint with a
-        // plain one.
-        let fired = fired_pairs.contains(&(back.from, back.to))
-            || (0..n).any(|from| fired_pairs.contains(&(from, back.to)));
-        canvas.put(
-            center(back.to),
-            arrow,
-            "▼",
-            if fired { Role::Fired } else { Role::Arrow },
-        );
+        canvas.put(center(back.to), arrow, "▼", Role::Arrow);
         if let Some(label) = &back.label {
-            let role = if fired { Role::Fired } else { Role::Label };
-            canvas.label_role(
-                center(back.from) + 2,
-                departure,
-                &format!(" {label} "),
-                role,
-            );
+            canvas.label(center(back.from) + 2, departure, &format!(" {label} "));
         }
     }
 
-    // The nested child sessions under a live box: one row per spawned
-    // child, indented under the box's left edge. Painted AFTER the edges:
-    // an outgoing line passes behind a label (text over the line), never
-    // a hole in the label.
-    if let Some(overlay) = overlay {
-        for item in 0..n {
-            let Some(node) = overlay.nodes.get(&states[item].id) else {
-                continue;
-            };
-            let top = layer_top[item_layer[item]];
-            let count = node.children.len();
-            // The label clips to the box's own width (a layer's boxes sit
-            // GAP apart; a longer label would run into the neighbor's).
-            let room = width[item].saturating_sub(4);
-            for (k, child) in node.children.iter().enumerate() {
-                let row = top + BOX_ROWS + k;
-                let branch = if k + 1 < count { '├' } else { '└' };
-                canvas.put(
-                    x[item] + 2,
-                    row,
-                    &format!("{branch}─ {}", clip(&child.label, room)),
-                    Role::Child(child.color),
-                );
-            }
-        }
-    }
+    #[cfg(test)]
     let node_rows = (0..n).map(|item| layer_top[item_layer[item]]).collect();
     let lines = canvas
         .0
@@ -854,15 +588,9 @@ pub(crate) fn block_diagram(
                         ch,
                         match role {
                             Role::Border | Role::Detail => ThemeColor::Muted,
-                            Role::Selected => ThemeColor::Accent,
                             Role::Title => ThemeColor::ToolTitle,
                             Role::Arrow => ThemeColor::Text,
                             Role::Label => ThemeColor::Warning,
-                            Role::LiveBorder(color)
-                            | Role::LiveTitle(color)
-                            | Role::LiveDetail(color)
-                            | Role::Child(color) => color,
-                            Role::Fired => ThemeColor::Success,
                         },
                     ),
                 };
@@ -885,7 +613,11 @@ pub(crate) fn block_diagram(
             line
         })
         .collect();
-    BlockDiagram { lines, node_rows }
+    BlockDiagram {
+        lines,
+        #[cfg(test)]
+        node_rows,
+    }
 }
 
 /// The character grid the diagram draws on: lines merge into junctions,
@@ -931,15 +663,10 @@ impl Canvas {
 
     /// A label writes only over empty cells and plain horizontal runs.
     fn label(&mut self, x: usize, y: usize, text: &str) {
-        self.label_role(x, y, text, Role::Label);
-    }
-
-    /// A label in an explicit role (the fired edge's Success paint).
-    fn label_role(&mut self, x: usize, y: usize, text: &str, role: Role) {
         for (offset, ch) in text.chars().enumerate() {
             if let Some(cell) = self.0.get_mut(y).and_then(|row| row.get_mut(x + offset)) {
                 if matches!(*cell, Cell::Empty | Cell::Line(4 | 8 | 12)) {
-                    *cell = Cell::Char(ch, role);
+                    *cell = Cell::Char(ch, Role::Label);
                 }
             }
         }

@@ -133,7 +133,11 @@ fn parse_state_diagram(text: &str) -> Mermaid {
     let mut graph = Graph::default();
     let mut labels = std::collections::HashMap::new();
     let mut past_header = false;
-    for line in text.lines().map(str::trim) {
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("%%"))
+    {
         if !past_header {
             past_header = line.starts_with("stateDiagram");
             continue;
@@ -142,7 +146,8 @@ fn parse_state_diagram(text: &str) -> Mermaid {
             .strip_prefix("state ")
             .and_then(split_state_declaration)
         {
-            graph.node(&id, &label);
+            graph.node(&id, &id);
+            graph.display.insert(id.clone(), label);
             labels.insert(id.clone(), String::new());
             continue;
         }
@@ -208,7 +213,11 @@ fn parse_flowchart(text: &str) -> Mermaid {
     let mut graph = Graph::default();
     let mut labels = std::collections::HashMap::new();
     let mut past_header = false;
-    for line in text.lines().map(str::trim) {
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("%%"))
+    {
         if !past_header {
             past_header = line.starts_with("flowchart") || line.starts_with("graph");
             continue;
@@ -311,7 +320,7 @@ pub(super) fn mermaid_block_lines(theme: &Theme, text: &str) -> Vec<Line> {
         Some(Mermaid::Diagram {
             states,
             transitions,
-        }) => block_diagram(theme, &states, &transitions, None, None).lines,
+        }) => block_diagram(theme, &states, &transitions).lines,
         Some(Mermaid::Unsupported(kind)) => vec![vec![
             Span::raw("  "),
             theme.fg_span(ThemeColor::Muted, format!("[mermaid {kind} not rendered]")),
@@ -362,4 +371,43 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
         segments.push(FileSegment::Text(prose));
     }
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mermaid;
+
+    #[test]
+    fn state_labels_do_not_depend_on_declaration_order() {
+        let declarations_first = parse_mermaid(
+            r#"stateDiagram-v2
+state "Start work" as start
+state "Finished work" as finish
+[*] --> start
+start --> finish: done
+finish --> start: retry
+"#,
+        );
+        let edges_first = parse_mermaid(
+            r#"stateDiagram-v2
+[*] --> start
+start --> finish: done
+state "Start work" as start
+state "Finished work" as finish
+finish --> start: retry
+"#,
+        );
+        assert_eq!(edges_first, declarations_first);
+    }
+
+    #[test]
+    fn comments_do_not_add_nodes_or_edges() {
+        for kind in ["stateDiagram-v2", "flowchart TB"] {
+            let plain = format!("{kind}\na --> b\n");
+            let commented = format!(
+                "%% before the header\n{kind}\na --> b\n    %%\n    %% ghost --> phantom\n"
+            );
+            assert_eq!(parse_mermaid(&commented), parse_mermaid(&plain), "{kind}");
+        }
+    }
 }
