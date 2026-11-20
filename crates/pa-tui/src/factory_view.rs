@@ -633,10 +633,14 @@ impl FactoryView {
                 }
                 return FactoryViewAction::None;
             }
-            if node.handle_key(key, kb, self.viewport_rows) {
+            let viewport_rows = self
+                .viewport_rows
+                .saturating_sub(usize::from(self.error.is_some()));
+            let previous_selector = node.selected_selector();
+            if node.handle_key(key, kb, viewport_rows) {
                 let selected = node.selected_selector();
                 let fetched = node.document_selector();
-                if selected.is_some() && selected != fetched {
+                if selected.is_some() && selected != previous_selector && selected != fetched {
                     return FactoryViewAction::OpenNode {
                         run_id: node.run_id.clone(),
                         state_id: node.state_id.clone(),
@@ -802,7 +806,24 @@ impl FactoryView {
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         if let Some(node) = &self.node {
-            return node.render(theme, width, kb, self.viewport_rows);
+            let viewport_rows = self
+                .viewport_rows
+                .saturating_sub(usize::from(self.error.is_some()));
+            let mut rows = node.render(theme, width, kb, viewport_rows);
+            if let Some(error) = &self.error {
+                rows.insert(
+                    rows.len().saturating_sub(2),
+                    truncate_line(
+                        &vec![
+                            Span::raw("  "),
+                            theme.fg_span(ThemeColor::Error, format!("Error: {error}")),
+                        ],
+                        width,
+                        "",
+                    ),
+                );
+            }
+            return rows;
         }
         // The panel area: one panel per run; the selected row's line (and
         // its panel's start) is recorded for the budget window below.

@@ -41,13 +41,6 @@ pub(crate) enum FactoryUpdate {
         message: String,
         tone: crate::agents_view::StatusTone,
     },
-    NodeFiles {
-        session: String,
-        run_id: String,
-        state_id: String,
-        request_epoch: u64,
-        result: Result<Value, String>,
-    },
     Node {
         session: String,
         run_id: String,
@@ -129,10 +122,6 @@ impl super::SessionUi {
             .node
             .as_ref()
             .is_some_and(|node| node.run_id == run_id && node.state_id == state_id);
-        let files_spec_id = factory_view
-            .selected_run()
-            .filter(|run| run.run_id == run_id)
-            .map(|run| run.spec_id.clone());
         if new_mount {
             factory_view.node = Some(crate::factory_view::node::NodeView::loading(
                 run_id, state_id,
@@ -140,47 +129,6 @@ impl super::SessionUi {
         }
         if let Some(node) = factory_view.node.as_mut() {
             node.set_request_epoch(request_epoch);
-            if new_mount {
-                node.set_files_epoch(request_epoch);
-            }
-        }
-        if new_mount {
-            let client = self.client.clone();
-            let session = self.active_session_id.clone();
-            let run_id = run_id.to_string();
-            let state_id = state_id.to_string();
-            let tx = self.factory_updates.clone();
-            tokio::spawn(async move {
-                let result = if let Some(spec_id) = files_spec_id {
-                    match tokio::time::timeout(
-                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                        client.request_ok(DaemonCommand::FactoryActivity {
-                            id: None,
-                            active_session_id: session.clone(),
-                            action: "library".to_string(),
-                            run_id: None,
-                            spec_id: Some(spec_id),
-                            timeout_ms: None,
-                            rest: Map::default(),
-                        }),
-                    )
-                    .await
-                    {
-                        Ok(Ok(data)) => Ok(data),
-                        Ok(Err(error)) => Err(format!("{error:#}")),
-                        Err(_) => Err("the template files request timed out".to_string()),
-                    }
-                } else {
-                    Err("cannot find the node's machine in the run list".to_string())
-                };
-                let _ = tx.send(FactoryUpdate::NodeFiles {
-                    session,
-                    run_id,
-                    state_id,
-                    request_epoch,
-                    result,
-                });
-            });
         }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
@@ -557,24 +505,6 @@ impl super::SessionUi {
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
         let update = match update {
-            FactoryUpdate::NodeFiles {
-                session,
-                run_id,
-                state_id,
-                request_epoch,
-                result,
-            } => {
-                if session == self.active_session_id {
-                    let node = view
-                        .factory_view
-                        .as_mut()
-                        .and_then(|factory_view| factory_view.node.as_mut())
-                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
-                    self.dirty |=
-                        node.is_some_and(|node| node.apply_files_result(request_epoch, result));
-                }
-                return;
-            }
             FactoryUpdate::Node {
                 session,
                 run_id,
@@ -628,7 +558,7 @@ impl super::SessionUi {
                 }
                 return;
             }
-            FactoryUpdate::Node { .. } | FactoryUpdate::NodeFiles { .. } => return,
+            FactoryUpdate::Node { .. } => return,
         };
         // Only refresh deliveries release the refresh slot; child-stop
         // results are independent of any snapshot currently in flight.

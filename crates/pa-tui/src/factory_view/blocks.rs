@@ -5,8 +5,9 @@
 //! redesign), layers come from the longest forward path, an edge that
 //! skips layers runs through one dummy column per skipped layer, and two
 //! barycenter sweeps order each layer. Forward edges run down between
-//! the layers and end in `▼ <label>`; back edges leave their source
-//! labelled, climb the right-hand gutter, and drop into their target.
+//! the layers; guards label their source before a merge, or an unshared
+//! target arrow. Back edges leave their source labelled, climb the
+//! right-hand gutter, and drop into their target.
 
 use super::diagram::{FactoryState, FactoryTransition};
 use crate::theme::{Theme, ThemeColor};
@@ -63,11 +64,12 @@ struct BackEdge {
     label: Option<String>,
 }
 
-/// The rows between two layers: back-edge departures, forward channels,
-/// back-edge arrivals, then the arrow row.
+/// The rows between two layers: back-edge departures, source-side guards,
+/// forward channels, back-edge arrivals, then the arrow row.
 struct Band {
     top: usize,
     departures: Vec<usize>,
+    labels: Vec<usize>,
     channels: Vec<(usize, usize)>,
     arrivals: Vec<usize>,
     arrow: Option<usize>,
@@ -108,6 +110,76 @@ fn clip(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Two barycenter sweeps, down then up, visiting only each item's neighbors.
+fn order_layers(
+    layers: &mut [Vec<usize>],
+    segments: &[Segment],
+    incoming: &[Vec<usize>],
+    outgoing: &[Vec<usize>],
+) {
+    let mut position = vec![0f64; incoming.len()];
+    let renumber = |row: &[usize], position: &mut [f64]| {
+        for (at, &item) in row.iter().enumerate() {
+            position[item] = at as f64;
+        }
+    };
+    for row in layers.iter() {
+        renumber(row, &mut position);
+    }
+    for _ in 0..2 {
+        for row in layers.iter_mut().skip(1) {
+            let mut sorted: Vec<(usize, f64)> = row
+                .iter()
+                .map(|&item| {
+                    let neighbors = &incoming[item];
+                    let average = if neighbors.is_empty() {
+                        position[item]
+                    } else {
+                        neighbors
+                            .iter()
+                            .map(|&edge| {
+                                #[cfg(test)]
+                                tests::count_ordering_visit();
+                                position[segments[edge].from]
+                            })
+                            .sum::<f64>()
+                            / neighbors.len() as f64
+                    };
+                    (item, average)
+                })
+                .collect();
+            sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+            *row = sorted.into_iter().map(|(item, _)| item).collect();
+            renumber(row, &mut position);
+        }
+        for row in layers.iter_mut().rev().skip(1) {
+            let mut sorted: Vec<(usize, f64)> = row
+                .iter()
+                .map(|&item| {
+                    let neighbors = &outgoing[item];
+                    let average = if neighbors.is_empty() {
+                        position[item]
+                    } else {
+                        neighbors
+                            .iter()
+                            .map(|&edge| {
+                                #[cfg(test)]
+                                tests::count_ordering_visit();
+                                position[segments[edge].to]
+                            })
+                            .sum::<f64>()
+                            / neighbors.len() as f64
+                    };
+                    (item, average)
+                })
+                .collect();
+            sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+            *row = sorted.into_iter().map(|(item, _)| item).collect();
+            renumber(row, &mut position);
+        }
+    }
 }
 
 /// Lay out and draw the diagram.
@@ -250,62 +322,13 @@ pub(crate) fn block_diagram(
         layers[item_layer[item]].push(item);
     }
 
-    // Two barycenter sweeps, down then up.
-    let mut position = vec![0f64; items];
-    let renumber = |layers: &Vec<Vec<usize>>, position: &mut Vec<f64>| {
-        for row in layers {
-            for (at, &item) in row.iter().enumerate() {
-                position[item] = at as f64;
-            }
-        }
-    };
-    renumber(&layers, &mut position);
-    for _ in 0..2 {
-        for current in 1..layers.len() {
-            let key: Vec<(usize, f64)> = layers[current]
-                .iter()
-                .map(|&item| {
-                    let sources: Vec<f64> = segments
-                        .iter()
-                        .filter(|segment| segment.to == item)
-                        .map(|segment| position[segment.from])
-                        .collect();
-                    let average = if sources.is_empty() {
-                        position[item]
-                    } else {
-                        sources.iter().sum::<f64>() / sources.len() as f64
-                    };
-                    (item, average)
-                })
-                .collect();
-            let mut sorted = key;
-            sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
-            layers[current] = sorted.into_iter().map(|(item, _)| item).collect();
-            renumber(&layers, &mut position);
-        }
-        for current in (0..layers.len().saturating_sub(1)).rev() {
-            let key: Vec<(usize, f64)> = layers[current]
-                .iter()
-                .map(|&item| {
-                    let targets: Vec<f64> = segments
-                        .iter()
-                        .filter(|segment| segment.from == item)
-                        .map(|segment| position[segment.to])
-                        .collect();
-                    let average = if targets.is_empty() {
-                        position[item]
-                    } else {
-                        targets.iter().sum::<f64>() / targets.len() as f64
-                    };
-                    (item, average)
-                })
-                .collect();
-            let mut sorted = key;
-            sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
-            layers[current] = sorted.into_iter().map(|(item, _)| item).collect();
-            renumber(&layers, &mut position);
-        }
+    let mut incoming = vec![Vec::new(); items];
+    let mut outgoing = vec![Vec::new(); items];
+    for (index, segment) in segments.iter().enumerate() {
+        incoming[segment.to].push(index);
+        outgoing[segment.from].push(index);
     }
+    order_layers(&mut layers, &segments, &incoming, &outgoing);
 
     // Box text and widths; dummies are one column.
     let titles: Vec<String> = states
@@ -329,8 +352,29 @@ pub(crate) fn block_diagram(
             }
         })
         .collect();
+    let occupied: Vec<usize> = (0..items)
+        .map(|item| {
+            let loop_room = if item < n && !self_loops[item].is_empty() {
+                1 + 2 + self_loops[item].join(", ").chars().count()
+            } else {
+                0
+            };
+            let guard_end = outgoing[item]
+                .iter()
+                .filter_map(|&edge| {
+                    let segment = &segments[edge];
+                    (incoming[segment.to].len() > 1)
+                        .then_some(segment.label.as_ref())
+                        .flatten()
+                })
+                .map(|label| width[item] / 2 + 2 + label.chars().count())
+                .max()
+                .unwrap_or(0);
+            (width[item] + loop_room).max(guard_end)
+        })
+        .collect();
     let row_width = |row: &Vec<usize>| -> usize {
-        row.iter().map(|&item| width[item]).sum::<usize>() + GAP * row.len().saturating_sub(1)
+        row.iter().map(|&item| occupied[item]).sum::<usize>() + GAP * row.len().saturating_sub(1)
     };
     let widest = layers.iter().map(row_width).max().unwrap_or(0);
     let mut x = vec![0usize; items];
@@ -338,7 +382,7 @@ pub(crate) fn block_diagram(
         let mut at = MARGIN + (widest - row_width(row)) / 2;
         for &item in row {
             x[item] = at;
-            at += width[item] + GAP;
+            at += occupied[item] + GAP;
         }
     }
     let center = |item: usize| x[item] + width[item] / 2;
@@ -362,10 +406,9 @@ pub(crate) fn block_diagram(
         let mut entering = false;
         if b < depth {
             for &item in &layers[b] {
-                let sources: Vec<usize> = segments
+                let sources: Vec<usize> = incoming[item]
                     .iter()
-                    .filter(|segment| segment.to == item)
-                    .map(|segment| segment.from)
+                    .map(|&edge| segments[edge].from)
                     .collect();
                 entering |= !sources.is_empty();
                 if sources.len() > 1 || sources.iter().any(|&source| center(source) != center(item))
@@ -377,11 +420,21 @@ pub(crate) fn block_diagram(
         let wants_arrow = b < depth
             && layers[b].iter().any(|&item| {
                 item < n
-                    && (segments.iter().any(|segment| segment.to == item)
+                    && (!incoming[item].is_empty()
                         || arrivals.iter().any(|&k| backs[k].to == item)
                         || (b == 0 && states[item].entry))
             });
-        let mut row = y + departures.len();
+        let labels: Vec<usize> = if b < depth {
+            layers[b]
+                .iter()
+                .filter(|&&item| incoming[item].len() > 1)
+                .flat_map(|&item| incoming[item].iter().copied())
+                .filter(|&edge| segments[edge].label.is_some())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut row = y + departures.len() + labels.len();
         let channels: Vec<(usize, usize)> = needs_channel
             .iter()
             .map(|&item| {
@@ -400,6 +453,7 @@ pub(crate) fn block_diagram(
         bands.push(Band {
             top: y,
             departures,
+            labels,
             channels,
             arrivals,
             arrow,
@@ -422,11 +476,7 @@ pub(crate) fn block_diagram(
         0
     } else {
         gutter(backs.len() - 1) + 2
-    }) + self_loops
-        .iter()
-        .map(|labels| labels.join(", ").chars().count() + 4)
-        .max()
-        .unwrap_or(0);
+    });
     let mut canvas = Canvas(vec![vec![Cell::Empty; canvas_width]; height]);
 
     // Boxes and dummy columns.
@@ -508,10 +558,20 @@ pub(crate) fn block_diagram(
                     .find(|(item, _)| *item == to)
                     .expect("pushed above");
                 if let Some(label) = &segment.label {
-                    if !entry.1.contains(label) {
+                    if incoming[to].len() == 1 && !entry.1.contains(label) {
                         entry.1.push(label.clone());
                     }
                 }
+            }
+        }
+        for (at, &edge) in band.labels.iter().enumerate() {
+            let segment = &segments[edge];
+            if let Some(label) = &segment.label {
+                canvas.label(
+                    center(segment.from) + 2,
+                    band.top + band.departures.len() + at,
+                    label,
+                );
             }
         }
         if let Some(arrow) = band.arrow {
@@ -552,7 +612,11 @@ pub(crate) fn block_diagram(
             continue;
         };
         let Some(arrival) = target_band.arrivals.iter().position(|&a| a == k).map(|at| {
-            target_band.top + target_band.departures.len() + target_band.channels.len() + at
+            target_band.top
+                + target_band.departures.len()
+                + target_band.labels.len()
+                + target_band.channels.len()
+                + at
         }) else {
             continue;
         };

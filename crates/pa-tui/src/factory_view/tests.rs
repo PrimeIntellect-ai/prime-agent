@@ -2013,6 +2013,23 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
     );
 }
 
+#[test]
+fn node_panels_show_factory_errors_in_documents_and_files() {
+    let mut view = FactoryView::new(Vec::new(), 12);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child session not found".to_string()));
+    for files_open in [false, true] {
+        if files_open {
+            assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+        }
+        let rows = frame_text(&mut view);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("child session not found")));
+        assert!(rows.len() <= 12);
+    }
+}
+
 /// The dock's factory row lists the live runs (the dock count's own set), paused runs first.
 #[test]
 fn the_dock_factory_items_list_live_runs_paused_first() {

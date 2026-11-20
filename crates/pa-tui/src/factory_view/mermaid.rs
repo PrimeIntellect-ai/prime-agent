@@ -51,31 +51,24 @@ pub(super) fn parse_mermaid(text: &str) -> Option<Mermaid> {
     Some(Mermaid::Unsupported(kind.to_string()))
 }
 
-/// The parse's working shape: node ids in first-seen order, each id's
-/// display name, the entry ids, and the edges as read.
+/// Node ids in first-seen order, entry ids, and edges as read.
 #[derive(Default)]
 struct Graph {
     ids: Vec<String>,
-    display: std::collections::HashMap<String, String>,
     entry: std::collections::HashSet<String>,
     edges: Vec<FactoryTransition>,
 }
 
 impl Graph {
-    /// One node sighting, in order: a new id joins the roster with its
-    /// display name (an earlier sighting keeps its own).
-    fn node(&mut self, id: &str, display: &str) {
+    fn node(&mut self, id: &str) {
         if !self.ids.iter().any(|known| known == id) {
             self.ids.push(id.to_string());
-            self.display.insert(id.to_string(), display.to_string());
         }
     }
 
-    /// One edge sighting: both ends join the roster, and the edge records
-    /// the ids as read (`finish` maps them to display names).
     fn edge(&mut self, from: &str, to: &str, label: Option<String>) {
-        self.node(from, from);
-        self.node(to, to);
+        self.node(from);
+        self.node(to);
         self.edges.push(FactoryTransition {
             from: vec![from.to_string()],
             to: to.to_string(),
@@ -83,22 +76,13 @@ impl Graph {
         });
     }
 
-    /// The graph as the block-diagram renderer reads it: states in
-    /// sighting order with their display names (a mermaid node's second
-    /// line is its shape label, or empty — mermaid carries no model or
-    /// python detail), and edges with both ends displayed.
+    /// Keep Mermaid ids for lookup and put display text on the second box line.
     fn finish(self, labels: &std::collections::HashMap<String, String>) -> Mermaid {
-        let name = |id: &str| {
-            self.display
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| id.to_string())
-        };
         let states = self
             .ids
             .iter()
             .map(|id| FactoryState {
-                id: name(id),
+                id: id.clone(),
                 entry: self.entry.contains(id),
                 lifecycle: "task".to_string(),
                 max_entries: 1,
@@ -108,18 +92,9 @@ impl Graph {
                 label: Some(labels.get(id).cloned().unwrap_or_default()),
             })
             .collect();
-        let transitions = self
-            .edges
-            .iter()
-            .map(|edge| FactoryTransition {
-                from: edge.from.iter().map(|id| name(id)).collect(),
-                to: name(&edge.to),
-                when: edge.when.clone(),
-            })
-            .collect();
         Mermaid::Diagram {
             states,
-            transitions,
+            transitions: self.edges,
         }
     }
 }
@@ -146,9 +121,8 @@ fn parse_state_diagram(text: &str) -> Mermaid {
             .strip_prefix("state ")
             .and_then(split_state_declaration)
         {
-            graph.node(&id, &id);
-            graph.display.insert(id.clone(), label);
-            labels.insert(id.clone(), String::new());
+            graph.node(&id);
+            labels.insert(id, label);
             continue;
         }
         let Some((from, rest)) = line.split_once("-->") else {
@@ -157,7 +131,7 @@ fn parse_state_diagram(text: &str) -> Mermaid {
         let (to, label) = split_edge_label(rest);
         if from.trim() == "[*]" {
             if let Some(to) = to {
-                graph.node(&to, &to);
+                graph.node(&to);
                 graph.entry.insert(to);
             }
             continue;
@@ -222,11 +196,13 @@ fn parse_flowchart(text: &str) -> Mermaid {
             past_header = line.starts_with("flowchart") || line.starts_with("graph");
             continue;
         }
-        let parts: Vec<&str> = line.split("-->").collect();
+        let parts = split_flow_arrows(line);
         if parts.len() < 2 {
             if let Some((id, label)) = parse_flow_node(line) {
-                graph.node(&id, &id);
-                labels.insert(id.clone(), label.unwrap_or_default());
+                graph.node(&id);
+                if let Some(label) = label {
+                    labels.insert(id, label);
+                }
             }
             continue;
         }
@@ -250,6 +226,52 @@ fn parse_flowchart(text: &str) -> Mermaid {
         }
     }
     graph.finish(&labels)
+}
+
+/// Split arrows outside node shapes, quoted text, and pipe-delimited edge labels.
+fn split_flow_arrows(line: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut pipe_label = false;
+    let mut chars = line.char_indices();
+    while let Some((at, ch)) = chars.next() {
+        if quoted {
+            if ch == '\\' {
+                chars.next();
+            } else if ch == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            quoted = true;
+            continue;
+        }
+        if depth == 0 && ch == '|' {
+            pipe_label = !pipe_label;
+            continue;
+        }
+        if pipe_label {
+            continue;
+        }
+        if depth == 0 && line[at..].starts_with("-->") {
+            parts.push(&line[start..at]);
+            start = at + 3;
+            chars.next();
+            chars.next();
+            continue;
+        }
+        match ch {
+            '[' | '(' | '{' => depth += 1,
+            '>' if depth == 0 => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    parts.push(&line[start..]);
+    parts
 }
 
 /// One flowchart node token: its id and the label its shape carries
@@ -281,13 +303,18 @@ fn parse_flow_node(token: &str) -> Option<(String, Option<String>)> {
     };
     let rest = shape[opener.len_utf8()..].trim();
     let mut label = rest.rfind(closer).map_or(rest, |end| &rest[..end]);
-    for (open, close) in [("((", "))"), ("([", "])"), ("[(", ")]"), ("{{", "}}")] {
-        if let Some(inner) = label
-            .strip_prefix(open)
-            .and_then(|inner| inner.strip_suffix(close))
-        {
-            label = inner.trim();
-        }
+    loop {
+        let inner = [("(", ")"), ("[", "]"), ("{", "}")]
+            .iter()
+            .find_map(|(open, close)| {
+                label
+                    .strip_prefix(open)
+                    .and_then(|inner| inner.strip_suffix(close))
+            });
+        let Some(inner) = inner else {
+            break;
+        };
+        label = inner.trim();
     }
     if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
         label = &label[1..label.len() - 1];
@@ -335,42 +362,65 @@ pub(super) enum FileSegment {
     Mermaid(String),
 }
 
-/// Split a Markdown file on its `` ```mermaid `` fences: everything between a
-/// `` ```mermaid `` opening line and the next fence line (or the end of the
-/// file, the way Markdown reads an unterminated fence) is one diagram
-/// block; everything around them is prose.
+/// Split live Mermaid fences from Markdown, preserving examples inside other fences.
 pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
     let mut segments = Vec::new();
     let mut prose = String::new();
     let mut fence = String::new();
-    let mut in_fence = false;
+    let mut active = None;
     for line in text.lines() {
-        if in_fence {
-            if line.trim().starts_with("```") {
-                segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
-                in_fence = false;
+        let marker = markdown_fence(line);
+        if let Some((delimiter, length, mermaid)) = active {
+            let closes = marker.is_some_and(|(ch, count, info)| {
+                ch == delimiter && count >= length && info.trim().is_empty()
+            });
+            if mermaid {
+                if closes {
+                    segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
+                } else {
+                    fence.push_str(line);
+                    fence.push('\n');
+                }
             } else {
-                fence.push_str(line);
-                fence.push('\n');
+                prose.push_str(line);
+                prose.push('\n');
+            }
+            if closes {
+                active = None;
             }
             continue;
         }
-        if line.trim().starts_with("```mermaid") {
-            if !prose.trim().is_empty() {
-                segments.push(FileSegment::Text(std::mem::take(&mut prose)));
+        if let Some((delimiter, length, info)) = marker {
+            let mermaid = info.split_whitespace().next() == Some("mermaid");
+            active = Some((delimiter, length, mermaid));
+            if mermaid {
+                if prose.trim().is_empty() {
+                    prose.clear();
+                } else {
+                    segments.push(FileSegment::Text(std::mem::take(&mut prose)));
+                }
+                continue;
             }
-            in_fence = true;
-            continue;
         }
         prose.push_str(line);
         prose.push('\n');
     }
-    if in_fence {
-        segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
+    if active.is_some_and(|(_, _, mermaid)| mermaid) {
+        segments.push(FileSegment::Mermaid(fence));
     } else if !prose.trim().is_empty() {
         segments.push(FileSegment::Text(prose));
     }
     segments
+}
+
+fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
+    let line = line.trim_start();
+    let delimiter = line.chars().next()?;
+    if !matches!(delimiter, '`' | '~') {
+        return None;
+    }
+    let length = line.chars().take_while(|ch| *ch == delimiter).count();
+    (length >= 3).then(|| (delimiter, length, &line[length..]))
 }
 
 #[cfg(test)]
@@ -409,5 +459,125 @@ finish --> start: retry
             );
             assert_eq!(parse_mermaid(&commented), parse_mermaid(&plain), "{kind}");
         }
+    }
+
+    #[test]
+    fn flowchart_arrows_inside_labels_do_not_split_nodes_or_edges() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid(
+            r#"flowchart TB
+A["before --> after"] -->|then --> continue| B(["Review --> now"]) --> C[finish --> stop] --> D
+"#,
+        )
+        .unwrap()
+        else {
+            panic!("expected graph")
+        };
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.id.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "D"]
+        );
+        assert_eq!(states[0].label.as_deref(), Some("before --> after"));
+        assert_eq!(states[2].label.as_deref(), Some("finish --> stop"));
+        assert_eq!(transitions.len(), 3);
+        assert_eq!(transitions[0].from, ["A"]);
+        assert_eq!(transitions[0].to, "B");
+        assert_eq!(transitions[0].when.as_deref(), Some("then --> continue"));
+        assert_eq!(transitions[1].from, ["B"]);
+        assert_eq!(transitions[1].to, "C");
+        assert_eq!(transitions[2].from, ["C"]);
+        assert_eq!(transitions[2].to, "D");
+    }
+
+    #[test]
+    fn duplicate_state_display_names_keep_distinct_edge_endpoints() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid(
+            "stateDiagram-v2\nstate \"Review\" as a\nstate \"Review\" as b\na --> b\n",
+        )
+        .unwrap()
+        else {
+            panic!("expected graph")
+        };
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(states
+            .iter()
+            .all(|state| state.label.as_deref() == Some("Review")));
+        assert_eq!(transitions[0].from, ["a"]);
+        assert_eq!(transitions[0].to, "b");
+        let diagram = super::block_diagram(
+            &crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor),
+            &states,
+            &transitions,
+        );
+        assert!(diagram.node_rows[0] < diagram.node_rows[1]);
+    }
+
+    #[test]
+    fn bare_flowchart_reference_keeps_declared_label() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid("flowchart TB\nA[Review]\nA\nA --> B\n").unwrap()
+        else {
+            panic!("expected graph")
+        };
+        assert_eq!(states[0].id, "A");
+        assert_eq!(states[0].label.as_deref(), Some("Review"));
+        assert_eq!(transitions.len(), 1);
+    }
+
+    #[test]
+    fn nested_flowchart_shapes_keep_only_label_text() {
+        for shape in [
+            r#"A(["Review"])"#,
+            r#"A(("Review"))"#,
+            r#"A[("Review")]"#,
+            r#"A{{"Review"}}"#,
+        ] {
+            assert_eq!(
+                super::parse_flow_node(shape),
+                Some(("A".to_string(), Some("Review".to_string()))),
+                "{shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_examples_inside_markdown_fences_remain_text() {
+        for delimiter in ["````", "~~~~"] {
+            let example = format!(
+                "{delimiter}markdown\n```mermaid\nflowchart TB\nA --> B\n```\n{delimiter}\n"
+            );
+            let text =
+                format!("{example}\n````mermaid\nflowchart TB\nC --> D\n```\nE --> F\n````\n");
+            let segments = super::split_mermaid_fences(&text);
+            assert_eq!(segments.len(), 2);
+            let super::FileSegment::Text(prose) = &segments[0] else {
+                panic!("expected prose")
+            };
+            assert_eq!(prose, &format!("{example}\n"));
+            let super::FileSegment::Mermaid(graph) = &segments[1] else {
+                panic!("expected graph")
+            };
+            assert_eq!(graph, "flowchart TB\nC --> D\n```\nE --> F\n");
+        }
+        let segments = super::split_mermaid_fences("~~~mermaid\nflowchart TB\nA --> B\n~~~\n");
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n")
+        );
     }
 }
