@@ -752,6 +752,18 @@ class ReplTest(unittest.TestCase):
             events = self.repl.execute(rid, code)
             self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
 
+    def test_discipline_screen_declines_sleeps_in_loop_and_with_targets(self):
+        # Python runs the calls in a subscript target when it binds the target.
+        for rid, code in (
+            ("for-target", "import time as t\nd = {}\nfor d[t.sleep(5)] in [1]:\n    pass\n"),
+            (
+                "with-target",
+                "import contextlib, time as t\nd = {}\nwith contextlib.nullcontext() as d[t.sleep(5)]:\n    pass\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
     def test_discipline_screen_reads_module_bindings_in_order(self):
         events = self.repl.execute("order-after", "import time\ntime.sleep(5)\ntime = 3")
         self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")

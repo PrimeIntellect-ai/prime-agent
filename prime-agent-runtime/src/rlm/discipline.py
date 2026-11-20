@@ -697,6 +697,8 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             # a break or a continue can leave the body at any point.
             jumped = _add(entry, _bindings_of(node.body))
             scope.bindings = dict(jumped)
+            # A pass runs the calls in the target, then binds the target.
+            walk(node.target, scope)
             apply(scope, node.target)
             walk_block(node.body, scope)
             run_out(node, entry, jumped, scope)
@@ -718,6 +720,7 @@ def _call_bindings(tree: ast.AST) -> dict[int, frozenset]:
             for item in node.items:
                 walk(item.context_expr, scope)
                 if item.optional_vars is not None:
+                    walk(item.optional_vars, scope)
                     apply(scope, item.optional_vars)
             start = dict(scope.bindings)
             walk_block(node.body, scope)
