@@ -85,6 +85,17 @@ clock, the children, and the files; it gives the time to each call.
   and the executor committed its result (outputs or failure). No clock
   settles an entry. A run is quiescent when no settle waits for
   evaluation and every entry settled.
+- Selector: an input's `from` is `"<state>.<port>"`. It picks that port
+  from the latest settle of the state. A reference with more than one
+  `.` is ambiguous and is an error.
+- Payload: `plan_payloads` checks every input of a canonical spec before
+  the run starts. A reference to a state or port that does not exist, a
+  resident source, or a type mismatch fails there with the port named.
+  `PayloadPlan::bind` copies the selected values into a typed `Payload`
+  record. A required input waits for its source and fails when the
+  settled source has no value. An optional input binds `null`, but waits
+  for another state that is live. A foreach input gives one record for
+  each item, up to `max`.
 
 ## Scope
 
