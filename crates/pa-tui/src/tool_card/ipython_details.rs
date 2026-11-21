@@ -237,7 +237,11 @@ impl IpythonDetails {
 fn inbox_message_entries(message: &Value) -> Vec<ChatEntry> {
     let class = message.get("class").and_then(Value::as_str).unwrap_or("");
     let text = message.get("text").and_then(Value::as_str).unwrap_or("");
-    let mut details = message.get("meta").cloned().unwrap_or(Value::Null);
+    let mut details = message
+        .get("meta")
+        .filter(|meta| meta.is_object())
+        .cloned()
+        .unwrap_or(Value::Null);
     let custom_type = match class {
         INBOX_CLASS_AGENT_MESSAGE => {
             details["message"] = json!(text);
@@ -485,5 +489,18 @@ mod tests {
             "deliveryStatus": "delivered",
         }))
         .is_none());
+    }
+
+    /// The cell can emit any inbox-message display: a non-object `meta`
+    /// decodes like a missing one instead of panicking the card.
+    #[test]
+    fn inbox_message_with_non_object_meta_decodes_like_a_missing_one() {
+        let without_meta = serde_json::json!({ "class": "agent-message", "text": "Done." });
+        let mut string_meta = without_meta.clone();
+        string_meta["meta"] = serde_json::json!("oops");
+        assert_eq!(
+            inbox_message_entries(&string_meta),
+            inbox_message_entries(&without_meta)
+        );
     }
 }
