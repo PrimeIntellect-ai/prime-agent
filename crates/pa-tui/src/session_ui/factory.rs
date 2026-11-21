@@ -777,7 +777,9 @@ mod fold_tests {
             Ok(superseded),
         ));
         assert!(!node.request_in_flight());
-        assert_eq!(node.target().instance, None);
+        // Retirement keeps the selector, so the retry opens the instance
+        // the superseded fetch asked for.
+        assert_eq!(node.target().instance, Some((0, 1)));
 
         node.set_request_epoch(4, None);
         assert!(fold_node_delivery(
