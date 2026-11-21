@@ -19,7 +19,7 @@ from contextlib import nullcontext
 from types import FunctionType, SimpleNamespace
 from unittest import mock
 
-from rlm import bash
+from rlm import _scan_guard, bash
 
 # The package re-exports the bash() function under the same name, so reach the
 # module through sys.modules for internals.
@@ -1480,6 +1480,71 @@ async def _poll_journal(path: str, pid: int, count: int, timeout: float = 2.0) -
             return records
         await asyncio.sleep(0.05)
     return records
+
+
+class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
+    """The kernel's scan-cost warning and opt-in scan timeout."""
+
+    def test_persistent_dispatch_teaches_the_scan_cost_too(self):
+        # The hint sits at the single dispatch point before the persistent
+        # branch, so persistent shells get it as well; a persistent scan is
+        # even costlier (it outlives its kernel).
+        with (
+            mock.patch.object(_scan_guard, "_scan_hints_written", 0),
+            mock.patch("sys.stderr", new=io.StringIO()) as err,
+            mock.patch.object(bash_module, "_spawn_persistent") as spawn,
+        ):
+            bash("grep -rl needle ~/Documents", persistent=True)
+        spawn.assert_called_once()
+        self.assertIn("unbounded", err.getvalue())
+
+    async def test_scan_timeout_env_bounds_the_scan(self):
+        # The regression pin: the env var arms the dispatch — a matching
+        # scan's group is killed at the bound and the result keeps the partial
+        # output plus the timeout status. Without the arming this command runs
+        # the full sleep (exit 0, no status line).
+        with mock.patch.dict(os.environ, {_scan_guard.SCAN_TIMEOUT_ENV: "0.5"}):
+            result = await bash("find ~/prime-agent-scan-pin-no-such-root; sleep 5")
+        self.assertLess(result.duration, 4.0)
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn(
+            "Command timed out after 0.5 seconds (PRIME_AGENT_SCAN_TIMEOUT)",
+            result.output,
+        )
+
+    async def test_scan_timeout_env_stops_a_backgrounded_scan(self):
+        # The foreground result comes back at once, but the group still runs
+        # the backgrounded scan: the timeout stops it at the bound too, the
+        # way kill() reaches a lingering background group.
+        with mock.patch.dict(os.environ, {_scan_guard.SCAN_TIMEOUT_ENV: "0.5"}):
+            handle = bash("(find ~/prime-agent-scan-pin-no-such-root; sleep 30) &")
+        self.addCleanup(handle.kill, signal.SIGKILL)
+        result = await asyncio.wait_for(handle, timeout=5)
+        self.assertEqual(result.exit_code, 0)
+        for _ in range(60):
+            if not handle.running:
+                break
+            await asyncio.sleep(0.05)
+        self.assertFalse(handle.running)
+
+    async def test_scan_timeout_env_leaves_bounded_commands_alone(self):
+        with mock.patch.dict(os.environ, {_scan_guard.SCAN_TIMEOUT_ENV: "0.5"}):
+            result = await bash("sleep 1.2")
+        self.assertEqual(result.exit_code, 0)
+        self.assertGreaterEqual(result.duration, 1.2)
+        self.assertNotIn("PRIME_AGENT_SCAN_TIMEOUT", result.output)
+
+    async def test_scan_timeout_env_rejects_unusable_values(self):
+        for raw in ("garbage", "-1", "0", "1e400"):
+            with (
+                mock.patch.dict(os.environ, {_scan_guard.SCAN_TIMEOUT_ENV: raw}),
+                self.subTest(raw=raw),
+            ):
+                result = await bash(
+                    "find ~/prime-agent-scan-pin-no-such-root; sleep 1.2"
+                )
+            self.assertEqual(result.exit_code, 0)
+            self.assertGreaterEqual(result.duration, 1.2)
 
 
 @unittest.skipUnless(os.name == "posix", "persistent shells are POSIX-only")

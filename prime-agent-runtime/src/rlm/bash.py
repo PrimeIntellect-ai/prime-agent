@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, NoReturn, cast
 
-from . import _winjob
+from . import _scan_guard, _winjob
 
 _IS_POSIX = os.name == "posix"
 
@@ -393,6 +393,9 @@ class BashHandle:
         self._result_consumed = False
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
+        # The armed scan timeout (PRIME_AGENT_SCAN_TIMEOUT), and whether it fired.
+        self._scan_timeout: float | None = None
+        self._scan_fired = False
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
         self._kill_lock = threading.Lock()
         self._started = time.monotonic()
@@ -557,6 +560,24 @@ class BashHandle:
     def _force_kill(self) -> None:
         if not self._reaped:
             _signal_group(self._pid, signal.SIGKILL)
+
+    def _arm_scan_timeout(self, secs: float) -> None:
+        """Apply the opted-in scan timeout: at the bound the scan's group is
+        killed (the kill() escalation), so a matching scan cannot stall the
+        turn past the user's bound — the incident fix on this dispatch path."""
+        self._scan_timeout = secs
+        timer = threading.Timer(secs, self._scan_timeout_kill)
+        timer.daemon = True
+        timer.start()
+
+    def _scan_timeout_kill(self) -> None:
+        # The flag precedes the kill so _finalize notes the timeout. Guard on
+        # group death like kill(): a backgrounded scan (`find ~ &`) outlives
+        # the foreground result and must still stop at the bound.
+        if self._reaped:
+            return
+        self._scan_fired = True
+        self.kill()
 
     def _pump(self) -> None:
         stdout = self._proc.stdout
@@ -773,9 +794,17 @@ class BashHandle:
         with self._callback_lock:
             if self._done.is_set():
                 return
+            text = self._buffer.text() if output is None else output
+            if self._scan_fired:
+                status = (
+                    f"Command timed out after {self._scan_timeout:g} seconds "
+                    f"({_scan_guard.SCAN_TIMEOUT_ENV})"
+                )
+                # A blank line separates any partial output from the status.
+                text = status if not text else f"{text}\n\n{status}"
             self._result = BashResult(
                 exit_code=exit_code,
-                output=self._buffer.text() if output is None else output,
+                output=text,
                 duration=time.monotonic() - self._started,
             )
             self._done.set()
@@ -1185,6 +1214,10 @@ class PersistentBashHandle(BashHandle):
         self._callback_lock = threading.Lock()
         self._reaped = False
         self._kill_lock = threading.Lock()
+        # The dispatch never arms a scan timeout on a persistent shell, so
+        # these stay inert here; _finalize reads them on both classes.
+        self._scan_timeout: float | None = None
+        self._scan_fired = False
         self._started_at = started_at
         self._started = time.monotonic() - max(
             0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(started_at)).total_seconds()
@@ -1332,11 +1365,17 @@ def bash(command: str, persistent: bool = False) -> BashHandle:
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
+    # A persistent shell ends only on its own exit or an explicit kill(), so
+    # the auto-timeout never arms there.
+    scan_timeout = None if persistent else _scan_guard.scan_timeout_from_env(command)
+    _scan_guard.note_scan_cost(command, scan_timeout)
     if persistent:
         handle: BashHandle = _spawn_persistent(command)
     else:
         _install_shutdown_hook()
         handle = BashHandle(command)
+        if scan_timeout is not None:
+            handle._arm_scan_timeout(scan_timeout)
     from . import repl
 
     repl.emit(
