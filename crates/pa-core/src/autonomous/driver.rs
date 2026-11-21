@@ -109,9 +109,12 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
             {
                 return AutonomousFollowUp::Inactive;
             }
-            let now = now_millis();
             let decision =
                 should_autonomously_continue(state, Some(message.stop_reason), &self.gates).await;
+            // Read the clock after the decision: the gate run inside it can
+            // take minutes, and a wall-clock timeout that crossed during it
+            // must surface as Limit(TimeoutMs) with its wake.
+            let now = now_millis();
             if decision.should_continue {
                 add_autonomous_continuation(state);
                 let text = match decision.reason {
@@ -147,12 +150,9 @@ impl<R: GateCommandRunner> AutonomousDriver for ShellAutonomousDriver<R> {
                     // The exhausted budget mints one finalize wake before the
                     // stop: the model gets a final turn to write its
                     // deliverable and run the task's submission step. The
-                    // limit re-derivation and the wake text read a fresh
-                    // clock: the gate run just above can take minutes, and a
-                    // wall-clock timeout that crossed during it must surface
-                    // as Limit(TimeoutMs) with its wake, not as a bare
-                    // GateRetryExhausted.
-                    let now = now_millis();
+                    // wake's reason comes from the post-decision clock, so a
+                    // timeout that crossed during the gate run surfaces as
+                    // Limit(TimeoutMs), not as a bare GateRetryExhausted.
                     if let Some(reason) = autonomous_limit_reason(state, now) {
                         if !state.finalize_wake_used {
                             state.finalize_wake_used = true;

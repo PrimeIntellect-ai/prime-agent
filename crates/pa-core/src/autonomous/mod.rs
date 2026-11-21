@@ -446,9 +446,9 @@ pub fn autonomous_continuation_text(state: &AutonomousRuntimeState) -> String {
     format!("[autonomous-continuation]\n\n{}", state.continuation_prompt)
 }
 
-/// Whether the budget allows at most one more settled turn before the
-/// driver's limit check stops the run: a continuation minted now may be
-/// the model's last turn, so it must carry the last-call text.
+/// Whether the budget is thin enough that the continuation minted now
+/// may be the model's last ordinary turn, so it must carry the
+/// last-call text.
 #[must_use]
 pub fn autonomous_budget_thin(state: &AutonomousRuntimeState, now: u64) -> bool {
     if !state.enabled {
@@ -481,7 +481,7 @@ pub fn autonomous_budget_thin(state: &AutonomousRuntimeState, now: u64) -> bool 
 #[must_use]
 pub fn build_autonomous_last_call_text(state: &AutonomousRuntimeState, now: u64) -> String {
     format!(
-        "{AUTONOMOUS_LAST_CALL_PREFIX}\n\nBudget is nearly exhausted: turns {}/{}, continuations {}/{}, tokens {}/{}. The turn after this one may be your last.\n\nPrioritize completion over exploration: write the deliverable files the task asks for to disk as soon as their content is ready, keep them current as you work, and run the task's submission or finish step as soon as the work is done. Do not leave writing the deliverable for later. Timestamp: {}.",
+        "{AUTONOMOUS_LAST_CALL_PREFIX}\n\nBudget is nearly exhausted: turns {}/{}, continuations {}/{}, tokens {}/{}. Treat this turn as your last chance to make progress: the next budget check can stop the run.\n\nPrioritize completion over exploration: write the deliverable files the task asks for to disk as soon as their content is ready, keep them current as you work, and run the task's submission or finish step as soon as the work is done. Do not leave writing the deliverable for later. Timestamp: {}.",
         state.turns_used,
         state.limits.max_turns,
         state.continuations_used,
@@ -502,7 +502,7 @@ pub fn build_autonomous_finalize_wake_text(
     now: u64,
 ) -> String {
     format!(
-        "{AUTONOMOUS_FINALIZE_WAKE_PREFIX}\n\nThe autonomous budget is exhausted: {}. This is your FINAL turn — the run stops after it and no further turns will run.\n\nStop starting new work. Finalize NOW: write every deliverable file the task asks for to disk (a partial deliverable on disk is strictly better than none), run the task's submission or finish step exactly as the task instructions define it, and reply with the final result. Timestamp: {}.",
+        "{AUTONOMOUS_FINALIZE_WAKE_PREFIX}\n\nThe autonomous budget is exhausted: {}. This is your FINAL turn — the run stops after it and no further turns will run.\n\nStop starting new work. Finalize NOW: save your work and every deliverable file the task asks for (a partial deliverable on disk is strictly better than none). If the task defines a submission or finish step, run it exactly as the task instructions define it. Reply with the final result. Timestamp: {}.",
         describe_autonomous_limit(status, reason, now),
         crate::session::manager::format_iso(now as i64),
     )
@@ -651,6 +651,7 @@ mod tests {
         let mut state = create_autonomous_runtime_state(Some(&config(true)), None);
         add_autonomous_usage(&mut state, Some(&usage(10, 5)));
         add_autonomous_continuation(&mut state);
+        state.finalize_wake_used = true;
         set_autonomous_enabled(&mut state, false);
         assert!(!state.enabled);
         assert_eq!(state.started_at, None);
@@ -658,6 +659,7 @@ mod tests {
         set_autonomous_enabled(&mut state, true);
         assert_eq!(state.turns_used, 0);
         assert_eq!(state.continuations_used, 0);
+        assert!(!state.finalize_wake_used, "a new run gets a fresh wake");
         assert!(state.started_at.is_some());
     }
 
@@ -772,11 +774,13 @@ mod tests {
         ));
         assert!(wake.contains("This is your FINAL turn"));
         assert!(wake.contains("a partial deliverable on disk is strictly better than none"));
+        assert!(wake.contains("If the task defines a submission or finish step"));
         // The thin-budget last call carries the budget numbers.
         state.continuations_used = 1;
         let last_call = build_autonomous_last_call_text(&state, 0);
         assert!(last_call.starts_with("[autonomous-continuation: last-call]"));
         assert!(last_call.contains("turns 0/12, continuations 1/3, tokens 0/80000"));
+        assert!(last_call.contains("Treat this turn as your last chance to make progress"));
         assert!(last_call
             .contains("run the task's submission or finish step as soon as the work is done"));
     }
