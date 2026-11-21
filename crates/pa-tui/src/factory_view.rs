@@ -2,9 +2,9 @@
 //! diagram with live highlighting, the run's state, the instances
 //! running and queued, the budget consumed, and the milestone tail. The
 //! panels read NEWEST-FIRST (a run created after an existing one renders
-//! above it). The arrows walk the run headers and the states that ran a
-//! session, across panels; Enter/→ open the selected state's latest
-//! child session, ←/Esc close the page. Navigation never acts on a run:
+//! above it). The arrows walk run headers and states across panels.
+//! Enter inspects the selected state. Right/o open its latest child
+//! session; Left/Esc close the page. Navigation never acts on a run:
 //! the stop rides the agents view's two-press `app.agents.delete`
 //! grammar (a header stops its run, a state stops its running child),
 //! and `r` resumes a paused run.
@@ -33,8 +33,11 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::{Line, Span};
 
+mod blocks;
 mod diagram;
 mod library;
+mod mermaid;
+pub(crate) mod node;
 #[cfg(test)]
 mod tests;
 
@@ -408,6 +411,12 @@ pub enum FactoryViewAction {
     Open {
         child_id: String,
     },
+    /// Open the selected state's node inspection view.
+    OpenNode {
+        run_id: String,
+        state_id: String,
+        selector: Option<(u64, u64)>,
+    },
     /// Stop the selected run (a confirmed stop on its header).
     Stop {
         run_id: String,
@@ -459,6 +468,8 @@ pub struct FactoryView {
     armed: Option<(FactoryRow, FactoryViewAction)>,
     error: Option<String>,
     viewport_rows: usize,
+    /// The open node inspection view, if the selected run state is open.
+    pub node: Option<node::NodeView>,
 }
 
 impl FactoryView {
@@ -475,6 +486,7 @@ impl FactoryView {
             armed: None,
             error: None,
             viewport_rows,
+            node: None,
         };
         view.selected = view.rows().into_iter().next();
         view
@@ -523,20 +535,10 @@ impl FactoryView {
         let mut rows = Vec::new();
         for run in &self.runs {
             rows.push(FactoryRow::header(&run.run_id));
-            rows.extend(
-                run.states
-                    .iter()
-                    .filter(|state| {
-                        run.nodes
-                            .get(&state.id)
-                            .and_then(FactoryNodeState::latest_child)
-                            .is_some()
-                    })
-                    .map(|state| FactoryRow {
-                        run_id: run.run_id.clone(),
-                        state_id: Some(state.id.clone()),
-                    }),
-            );
+            rows.extend(run.states.iter().map(|state| FactoryRow {
+                run_id: run.run_id.clone(),
+                state_id: Some(state.id.clone()),
+            }));
         }
         rows
     }
@@ -616,14 +618,54 @@ impl FactoryView {
     }
 
     /// One key press. Navigation never acts on a run: the arrows (the
-    /// `tui.select.up`/`down` bindings) walk the rows, Enter/→ open the
-    /// selected state's session (inert on a header), ←/Esc/ctrl+c close
-    /// the page. The stop rides the agents view's two-press grammar on
+    /// `tui.select.up`/`down` bindings) walk the rows. Enter inspects the
+    /// selected state; →/o open its session (inert on a header). ←/Esc/ctrl+c
+    /// close the page. The stop rides the agents view's two-press grammar on
     /// `app.agents.delete`: the first press arms the selected row, a
     /// second press on it stops (the run on a header, the child on a
     /// state), and any other key only disarms. `r` resumes a paused run.
     #[must_use]
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
+        if let Some(node) = self.node.as_mut() {
+            if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
+                if !node.step_back() {
+                    self.node = None;
+                }
+                return FactoryViewAction::None;
+            }
+            let viewport_rows = self
+                .viewport_rows
+                .saturating_sub(usize::from(self.error.is_some()));
+            let previous_selector = node.selected_selector();
+            if node.handle_key(key, kb, viewport_rows) {
+                let selected = node.selected_selector();
+                let fetched = node.document_selector();
+                if selected.is_some() && selected != previous_selector && selected != fetched {
+                    return FactoryViewAction::OpenNode {
+                        run_id: node.run_id.clone(),
+                        state_id: node.state_id.clone(),
+                        selector: selected,
+                    };
+                }
+                return FactoryViewAction::None;
+            }
+            if key == "left" {
+                if !node.step_back() {
+                    self.node = None;
+                }
+                return FactoryViewAction::None;
+            }
+            if key == "o" || key == "right" {
+                return node
+                    .selected_child()
+                    .map_or(FactoryViewAction::None, |child_id| {
+                        FactoryViewAction::Open {
+                            child_id: child_id.to_string(),
+                        }
+                    });
+            }
+            return FactoryViewAction::None;
+        }
         let armed = self.armed.take();
         if kb.matches(key, "app.agents.delete") {
             let Some(row) = self.selected.clone() else {
@@ -656,6 +698,9 @@ impl FactoryView {
             return FactoryViewAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
+            return self.open_selected_node();
+        }
+        if key == "o" {
             return self.open_selected();
         }
         // The horizontal arrows are fallbacks after the configured
@@ -690,8 +735,21 @@ impl FactoryView {
         self.selected = Some(rows[next].clone());
     }
 
-    /// The selected state's latest child, as the open action; a header
-    /// opens nothing.
+    /// Inspect the selected state; a run header opens nothing.
+    fn open_selected_node(&self) -> FactoryViewAction {
+        self.selected
+            .as_ref()
+            .and_then(|row| row.state_id.as_ref().map(|state_id| (row, state_id)))
+            .map_or(FactoryViewAction::None, |(row, state_id)| {
+                FactoryViewAction::OpenNode {
+                    run_id: row.run_id.clone(),
+                    state_id: state_id.clone(),
+                    selector: None,
+                }
+            })
+    }
+
+    /// Open the selected state's latest child; a run header opens nothing.
     fn open_selected(&self) -> FactoryViewAction {
         self.selected
             .as_ref()
@@ -747,6 +805,29 @@ impl FactoryView {
     /// trailing key hint.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+        if let Some(node) = &self.node {
+            let viewport_rows = self
+                .viewport_rows
+                .saturating_sub(usize::from(self.error.is_some()));
+            let mut rows = node.render(theme, width, kb, viewport_rows);
+            if let Some(error) = &self.error {
+                rows.insert(
+                    rows.len().saturating_sub(2),
+                    truncate_line(
+                        &vec![
+                            Span::raw("  "),
+                            theme.fg_span(ThemeColor::Error, format!("Error: {error}")),
+                        ],
+                        width,
+                        "",
+                    ),
+                );
+            }
+            if rows.len() > self.viewport_rows {
+                rows.drain(..rows.len() - self.viewport_rows);
+            }
+            return rows;
+        }
         // The panel area: one panel per run; the selected row's line (and
         // its panel's start) is recorded for the budget window below.
         let mut panels: Vec<Line> = Vec::new();
@@ -850,7 +931,8 @@ impl FactoryView {
                 key("tui.select.up", "\u{2191}"),
                 key("tui.select.down", "\u{2193}"),
             ),
-            format!("{}/\u{2192} open", key("tui.select.confirm", "Enter")),
+            format!("{} inspect", key("tui.select.confirm", "Enter")),
+            "\u{2192}/o open session".to_string(),
             "\u{2190} back".to_string(),
         ];
         if self

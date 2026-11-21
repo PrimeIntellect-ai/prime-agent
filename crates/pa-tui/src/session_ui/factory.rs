@@ -41,6 +41,13 @@ pub(crate) enum FactoryUpdate {
         message: String,
         tone: crate::agents_view::StatusTone,
     },
+    Node {
+        session: String,
+        run_id: String,
+        state_id: String,
+        request_epoch: u64,
+        result: Result<Value, String>,
+    },
 }
 
 impl super::SessionUi {
@@ -90,6 +97,83 @@ impl super::SessionUi {
         self.spawn_factory_refresh();
     }
 
+    /// Open a state's node document through the factory activity lane.
+    pub(crate) fn open_factory_node(
+        &mut self,
+        view: &mut AgentView,
+        run_id: &str,
+        state_id: &str,
+        selector: Option<(u64, u64)>,
+    ) {
+        if !self.factory_activity_supported()
+            || !self
+                .client
+                .supports_server_capability("factory_node_activity")
+        {
+            self.note(
+                "The node view needs a daemon that supports node inspection",
+                view,
+            );
+            return;
+        }
+        self.factory_node_epoch += 1;
+        let request_epoch = self.factory_node_epoch;
+        let factory_view = view.factory_view.as_mut();
+        let Some(factory_view) = factory_view else {
+            return;
+        };
+        let new_mount = !factory_view
+            .node
+            .as_ref()
+            .is_some_and(|node| node.run_id == run_id && node.state_id == state_id);
+        if new_mount {
+            factory_view.node = Some(crate::factory_view::node::NodeView::loading(
+                run_id, state_id,
+            ));
+        }
+        if let Some(node) = factory_view.node.as_mut() {
+            node.set_request_epoch(request_epoch, selector);
+        }
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let run_id = run_id.to_string();
+        let state_id = state_id.to_string();
+        let tx = self.factory_updates.clone();
+        tokio::spawn(async move {
+            let mut rest = Map::default();
+            if let Some((entry, instance)) = selector {
+                rest.insert("entry".to_string(), Value::from(entry));
+                rest.insert("instance".to_string(), Value::from(instance));
+            }
+            let fetched = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(DaemonCommand::FactoryActivity {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    action: "node".to_string(),
+                    run_id: Some(run_id.clone()),
+                    spec_id: Some(state_id.clone()),
+                    timeout_ms: None,
+                    rest,
+                }),
+            )
+            .await;
+            let result = match fetched {
+                Ok(Ok(data)) => Ok(data),
+                Ok(Err(error)) => Err(format!("{error:#}")),
+                Err(_) => Err("the node request timed out".to_string()),
+            };
+            let _ = tx.send(FactoryUpdate::Node {
+                session: active_session_id,
+                run_id,
+                state_id,
+                request_epoch,
+                result,
+            });
+        });
+        self.dirty = true;
+    }
+
     /// One key press while the view is open: the view resolves the key;
     /// Open hands off to the child's session, the run stop/resume ride the
     /// daemon lane and the child stop rides `cancel_rlm_child` (bounded,
@@ -117,6 +201,13 @@ impl super::SessionUi {
                 self.dirty = true;
             }
             Some(FactoryViewAction::Open { child_id }) => self.open_factory_child(view, &child_id),
+            Some(FactoryViewAction::OpenNode {
+                run_id,
+                state_id,
+                selector,
+            }) => {
+                self.open_factory_node(view, &run_id, &state_id, selector);
+            }
             Some(FactoryViewAction::Stop { run_id }) => {
                 self.factory_control(view, "stop", run_id).await?;
             }
@@ -148,6 +239,11 @@ impl super::SessionUi {
                         .as_ref()
                         .and_then(FactoryView::selected_row)
                         .cloned(),
+                    node: view
+                        .factory_view
+                        .as_ref()
+                        .and_then(|factory_view| factory_view.node.as_ref())
+                        .map(crate::factory_view::node::NodeView::target),
                 },
                 closes_to_agents_view: self.panel_returns_to_agents_view,
             });
@@ -412,6 +508,31 @@ impl super::SessionUi {
     /// reports it on its error line instead of painting a fake empty
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
+        let update = match update {
+            FactoryUpdate::Node {
+                session,
+                run_id,
+                state_id,
+                request_epoch,
+                result,
+            } => {
+                let node = view
+                    .factory_view
+                    .as_mut()
+                    .and_then(|factory_view| factory_view.node.as_mut())
+                    .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                let landed = fold_node_delivery(
+                    node,
+                    &self.active_session_id,
+                    &session,
+                    request_epoch,
+                    result,
+                );
+                self.dirty |= landed;
+                return;
+            }
+            other => other,
+        };
         let (session, epoch, payload) = match update {
             FactoryUpdate::Snapshot {
                 session,
@@ -445,6 +566,7 @@ impl super::SessionUi {
                 }
                 return;
             }
+            FactoryUpdate::Node { .. } => return,
         };
         // Only refresh deliveries release the refresh slot; child-stop
         // results are independent of any snapshot currently in flight.
@@ -462,6 +584,20 @@ impl super::SessionUi {
                     if let Some(factory_view) = view.factory_view.as_mut() {
                         factory_view.set_error(None);
                         factory_view.apply_runs(runs);
+                    }
+                    let target = view
+                        .factory_view
+                        .as_ref()
+                        .and_then(|factory_view| factory_view.node.as_ref())
+                        .filter(|node| !node.request_in_flight())
+                        .map(crate::factory_view::node::NodeView::target);
+                    if let Some(target) = target {
+                        self.open_factory_node(
+                            view,
+                            &target.run_id,
+                            &target.state_id,
+                            target.instance,
+                        );
                     }
                 }
                 None => {
@@ -520,10 +656,32 @@ fn factory_child_selection(
     Some((SessionSelection::open_summary(summary)?, rlm_depth))
 }
 
+/// Fold one `node` delivery into the mounted view. A delivery for the
+/// current session lands when no newer fetch replaced it; one a rebind
+/// superseded retires its epoch instead — its reply can never land, and a
+/// preserved view left in flight would skip every later refresh.
+fn fold_node_delivery(
+    node: Option<&mut crate::factory_view::node::NodeView>,
+    current_session: &str,
+    session: &str,
+    request_epoch: u64,
+    result: Result<Value, String>,
+) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if session == current_session {
+        node.apply_request_result(request_epoch, result)
+    } else {
+        node.retire_request(request_epoch);
+        false
+    }
+}
+
 #[cfg(test)]
 mod fold_tests {
     use super::super::SessionUi;
-    use super::{factory_child_selection, SessionIdentity, SessionSelection};
+    use super::{factory_child_selection, fold_node_delivery, SessionIdentity, SessionSelection};
     use serde_json::json;
 
     /// A factory child opens through the roster: among this session's
@@ -596,5 +754,41 @@ mod fold_tests {
         let runs = taken.expect("the well-formed batch is taken");
         assert_eq!(runs.len(), 1);
         assert_eq!(cache["runs"][0]["runId"], "r2");
+    }
+
+    /// A rebind moves the view to a new active session while a node fetch
+    /// is in flight: that reply can never land, so its delivery retires the
+    /// epoch instead of leaving the preserved view in flight forever.
+    #[test]
+    fn a_rebind_superseded_node_delivery_retires_its_request() {
+        use crate::factory_view::node::NodeView;
+        let mut node = NodeView::loading("run", "worker");
+        node.set_request_epoch(3, Some((0, 1)));
+        let superseded = json!({
+            "state": {"instances": [{"entry": 0, "index": 0, "status": "running"}]},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "late"},
+        });
+        assert!(!fold_node_delivery(
+            Some(&mut node),
+            "new-session",
+            "old-session",
+            3,
+            Ok(superseded),
+        ));
+        assert!(!node.request_in_flight());
+        // Retirement keeps the selector, so the retry opens the instance
+        // the superseded fetch asked for.
+        assert_eq!(node.target().instance, Some((0, 1)));
+
+        node.set_request_epoch(4, None);
+        assert!(fold_node_delivery(
+            Some(&mut node),
+            "same-session",
+            "same-session",
+            4,
+            Err("timeout".to_string()),
+        ));
+        assert_eq!(node.error.as_deref(), Some("timeout"));
     }
 }

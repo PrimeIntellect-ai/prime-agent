@@ -34,6 +34,12 @@ pub struct FactoryState {
     pub subagent: Option<String>,
     /// A python state's `<import>.<callable>`; such a state has no subagent.
     pub python: Option<String>,
+    /// The agent's model selector, when the graph names one.
+    pub model: Option<String>,
+    /// A mermaid node's shape label: the box's second line, empty when
+    /// the node carries none. Machine states never carry one, and their
+    /// box keeps its own model/python detail.
+    pub label: Option<String>,
 }
 
 impl FactoryState {
@@ -58,6 +64,12 @@ impl FactoryState {
                 .and_then(Value::as_str)
                 .map(scrubbed)
                 .filter(|text| !text.is_empty()),
+            model: value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(scrubbed)
+                .filter(|text| !text.is_empty()),
+            label: None,
         })
     }
 }
@@ -68,6 +80,8 @@ pub struct FactoryTransition {
     pub from: Vec<String>,
     pub to: String,
     pub when: Option<String>,
+    /// Display text, separate from the full guard used to match fired edges.
+    pub label: Option<String>,
 }
 
 impl FactoryTransition {
@@ -92,6 +106,18 @@ impl FactoryTransition {
                 .and_then(format_guard)
                 .map(|guard| scrubbed(&guard))
                 .filter(|guard| !guard.is_empty()),
+            label: value.get("when").and_then(|when| {
+                let guard = format_guard(when)?;
+                let label = if when.get("op").and_then(Value::as_str).unwrap_or("eq") == "eq" {
+                    when.get("value").and_then(|value| match value {
+                        Value::String(text) => Some(text.clone()),
+                        _ => serde_json::to_string(value).ok(),
+                    })
+                } else {
+                    None
+                };
+                Some(scrubbed(&label.unwrap_or(guard)))
+            }),
         })
     }
 
@@ -405,7 +431,6 @@ pub fn run_state_color(state: Option<&str>) -> ThemeColor {
         _ => ThemeColor::Muted,
     }
 }
-
 /// The connector marker for one transition row: the last edge under a
 /// source uses the elbow (`└`), joins use the crossbar (`╪`), and a back
 /// edge (re-entry, a target earlier in the machine's declared order)

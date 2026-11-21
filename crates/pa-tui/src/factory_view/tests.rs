@@ -689,9 +689,11 @@ fn the_arrows_walk_headers_and_session_states_across_panels() {
         row("run-def67890", None),
         row("run-def67890", Some("collect")),
         row("run-def67890", Some("reviewing")),
+        row("run-def67890", Some("fixing")),
         row("run-abc12345", None),
         row("run-abc12345", Some("collect")),
         row("run-abc12345", Some("reviewing")),
+        row("run-abc12345", Some("fixing")),
     ];
     assert_eq!(selected_row(&view), expected[0]);
     for want in &expected[1..] {
@@ -699,8 +701,8 @@ fn the_arrows_walk_headers_and_session_states_across_panels() {
         assert_eq!(&selected_row(&view), want);
     }
     let _ = view.handle_key("down", &kb());
-    assert_eq!(selected_row(&view), expected[5], "down clamps");
-    for want in expected[..5].iter().rev() {
+    assert_eq!(selected_row(&view), expected[7], "down clamps");
+    for want in expected[..7].iter().rev() {
         let _ = view.handle_key("up", &kb());
         assert_eq!(&selected_row(&view), want);
     }
@@ -724,11 +726,9 @@ fn the_arrows_walk_headers_and_session_states_across_panels() {
     assert!(paints(ThemeColor::Dim) && !paints(ThemeColor::Accent));
 }
 
-/// Enter and → open the selected state's LATEST child (a retry overwrites
-/// the instance's child; a later entry's child wins); on a header they
-/// open nothing.
+/// Enter inspects the state. Right and o open its latest child.
 #[test]
-fn enter_and_right_open_the_latest_child_and_headers_open_nothing() {
+fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     let mut snapshot = scripted_snapshot();
     snapshot["nodes"][1]["instances"] = json!([
         { "index": 0, "entry": 0, "status": "done", "attempt": 2, "child": "child-2-retry", "durationMs": 5, "error": null },
@@ -736,22 +736,68 @@ fn enter_and_right_open_the_latest_child_and_headers_open_nothing() {
         { "index": 1, "entry": 1, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null }
     ]);
     let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
-    for key in ["enter", "right"] {
+    for key in ["enter", "right", "o"] {
         assert_eq!(view.handle_key(key, &kb()), FactoryViewAction::None);
     }
     let _ = view.handle_key("down", &kb());
     let open = |child: &str| FactoryViewAction::Open {
         child_id: child.to_string(),
     };
-    assert_eq!(view.handle_key("enter", &kb()), open("child-1"));
+    let open_node = |state: &str| FactoryViewAction::OpenNode {
+        run_id: "run-abc12345".to_string(),
+        state_id: state.to_string(),
+        selector: None,
+    };
+    let (hint, _) = view.hint(&kb());
+    assert!(hint.contains("Enter inspect"), "{hint}");
+    assert!(hint.contains("→/o open session"), "{hint}");
+    assert_eq!(view.handle_key("enter", &kb()), open_node("collect"));
+    // The session UI mounts the node view on OpenNode; once mounted, it
+    // owns the keys — Esc steps back to the diagram (the unit harness
+    // mounts the loading view the session UI would).
+    view.node = Some(node::NodeView::loading("run-abc12345", "collect"));
+    assert_eq!(view.handle_key("escape", &kb()), FactoryViewAction::None);
+    assert!(view.node.is_none(), "Esc closed the node view");
     let _ = view.handle_key("down", &kb());
-    assert_eq!(view.handle_key("enter", &kb()), open("child-5"));
+    assert_eq!(view.handle_key("enter", &kb()), open_node("reviewing"));
+    assert_eq!(view.handle_key("o", &kb()), open("child-5"));
     assert_eq!(view.handle_key("right", &kb()), open("child-5"));
+    // A state without a child still opens its node view.
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(view.handle_key("enter", &kb()), open_node("fixing"));
 }
 
-/// The accident this page had: on a live run, repeated navigation —
-/// →→, Enter Enter, on the header or a running state — never stops or
-/// resumes anything (paused, so both run actions are on offer).
+#[test]
+fn node_errors_keep_the_footer_within_short_viewports() {
+    let mut view = FactoryView::new(Vec::new(), 20);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child open failed".to_string()));
+    let full = view.render(&theme(), 110, &kb());
+    let footer = full.last().unwrap().clone();
+    for budget in 0..=6 {
+        view.viewport_rows = budget;
+        let rows = view.render(&theme(), 110, &kb());
+        assert!(rows.len() <= budget, "budget {budget}: {rows:?}");
+        if budget > 0 {
+            assert_eq!(rows.last(), Some(&footer), "budget {budget}");
+        }
+    }
+}
+
+#[test]
+fn the_node_view_honors_rebound_confirm_before_literal_shortcuts() {
+    for key in ["right", "left", "o"] {
+        let rebound = KeybindingsManager::with_user_bindings(
+            serde_json::from_value(json!({"tui.select.confirm": [key]})).unwrap(),
+        );
+        let mut view = FactoryView::new(Vec::new(), 40);
+        view.node = Some(node::NodeView::loading("run", "worker"));
+        assert_eq!(view.handle_key(key, &rebound), FactoryViewAction::None);
+        assert!(view.node.as_mut().unwrap().step_back(), "{key} opens files");
+    }
+}
+
+/// Repeated navigation on a header or running state never stops or resumes a run.
 #[test]
 fn navigation_never_stops_or_resumes_a_run() {
     let mut runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
@@ -763,7 +809,9 @@ fn navigation_never_stops_or_resumes_a_run() {
             assert!(
                 matches!(
                     action,
-                    FactoryViewAction::None | FactoryViewAction::Open { .. }
+                    FactoryViewAction::None
+                        | FactoryViewAction::Open { .. }
+                        | FactoryViewAction::OpenNode { .. }
                 ),
                 "{key} on {:?} acted: {action:?}",
                 selected_row(&view)
@@ -997,7 +1045,7 @@ fn the_runs_list_reads_newest_first_and_opens_on_the_newest_run() {
 #[test]
 fn a_fold_keeps_the_selection_on_the_same_row() {
     let mut view = FactoryView::new(parse_factory_runs(&two_run_response()), 40);
-    for _ in 0..5 {
+    for _ in 0..6 {
         let _ = view.handle_key("down", &kb());
     }
     assert_eq!(selected_row(&view), row("run-abc12345", Some("reviewing")));
@@ -1012,8 +1060,8 @@ fn a_fold_keeps_the_selection_on_the_same_row() {
     view.apply_runs(parse_factory_runs(&without_session));
     assert_eq!(
         selected_row(&view),
-        row("run-abc12345", None),
-        "a vanished state falls back to its run's header"
+        row("run-abc12345", Some("reviewing")),
+        "a state remains selectable while it has no child session"
     );
     view.apply_runs(parse_factory_runs(&later_pair_response()));
     assert_eq!(
@@ -1071,7 +1119,8 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     );
     // The key hint stays painted (the trailing chrome never truncates).
     assert!(
-        joined.contains("Enter/→ open"),
+        rows.last()
+            .is_some_and(|row| row.trim() == view.hint(&kb()).0),
         "the key hint stays painted: {joined}"
     );
     // The default selection is the newest run: its header stays visible
@@ -1097,7 +1146,8 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         "the view stays inside the budget: {joined}"
     );
     assert!(
-        joined.contains("Enter/→ open"),
+        rows.last()
+            .is_some_and(|row| row.trim() == selected_older.hint(&kb()).0),
         "the key hint stays painted: {joined}"
     );
     assert!(
@@ -1947,7 +1997,11 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
         joined.contains("▸ factory: world-run-7 — running"),
         "{joined}"
     );
-    assert!(joined.contains("Enter/→ open"), "{joined}");
+    assert!(
+        rows.last()
+            .is_some_and(|row| row.trim() == view.hint(&kb()).0),
+        "{joined}"
+    );
     // The focused run vanishes mid-orchestration: the selection hands
     // back to the head, and the very next keypress resolves against
     // the folded batch — never a stale index.
@@ -1978,9 +2032,26 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
     }
     assert_eq!(
         selected_row(&view),
-        row("run-w19", Some("watchdog")),
+        row("run-w19", Some("fix")),
         "every keypress resolved against the folded batch"
     );
+}
+
+#[test]
+fn node_panels_show_factory_errors_in_documents_and_templates() {
+    let mut view = FactoryView::new(Vec::new(), 12);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child session not found".to_string()));
+    for files_open in [false, true] {
+        if files_open {
+            assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+        }
+        let rows = frame_text(&mut view);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("child session not found")));
+        assert!(rows.len() <= 12);
+    }
 }
 
 /// The dock's factory row lists the live runs (the dock count's own set), paused runs first.

@@ -329,6 +329,8 @@ pub(crate) struct SessionUi {
     /// Monotonic id of the latest issued factory refresh; an older
     /// response never repaints a newer snapshot.
     factory_list_epoch: u64,
+    /// Monotonic id of the latest node-document request.
+    factory_node_epoch: u64,
     /// Where background factory refreshes deliver the run graph (the run
     /// loop folds them into the open view).
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,

@@ -7148,6 +7148,174 @@ def slow(inputs):
 """
 
 
+class FactoryNodeActivityTest(_ExecutorTestCase):
+    @async_test
+    async def test_node_activity_reports_run_template_before_and_after_entry(self) -> None:
+        prompt = "Template α"
+        self.harness.create_subagent("Template worker", prompt, id="template-worker")
+        for source in ("inline", "reference"):
+            for cap in (len(prompt.encode("utf-8")), len(prompt.encode("utf-8")) - 1):
+                with self.subTest(source=source, cap=cap), patch.object(
+                    factory_module, "NODE_PROMPT_CAP", cap
+                ):
+                    spec_id = f"template-{source}-{cap}"
+                    self.host.outcomes["block"] = {"status": "running"}
+                    self.store_machine({
+                        "states": [
+                            {"id": "block", "entry": True, "subagent": "worker"},
+                            {"id": "work", "subagent": (
+                                {"prompt": prompt} if source == "inline" else "template-worker"
+                            )},
+                        ],
+                        "transitions": [{"from": "block", "to": "work"}],
+                    }, spec_id=spec_id)
+                    result = await self.start(spec_id)
+                    request = {"action": "node", "runId": result["run_id"], "specId": "work"}
+                    expected = prompt.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
+                    before = await self.executor.activity(request)
+                    self.assertIsNone(before["entry"])
+                    self.assertEqual(
+                        (before["template"], before["templateTruncated"]),
+                        (expected, cap < len(prompt.encode("utf-8"))),
+                    )
+
+                    self.host.outcomes["block"] = {"status": "done", "answer": "ready"}
+                    await self.executor._runs[result["run_id"]].task
+                    after = await self.executor.activity(request)
+                    self.assertIsNotNone(after["instance"])
+                    self.assertEqual(
+                        (after["template"], after["templateTruncated"]),
+                        (expected, cap < len(prompt.encode("utf-8"))),
+                    )
+
+    @async_test
+    async def test_node_activity_flags_same_prefix_answer_growth_past_cap(self) -> None:
+        answer = "x" * ANSWER_BINDING_CAP
+        self.host.outcomes["work"] = {"status": "done", "answer": answer}
+        refresh = self.host.gate("rlm.collect", 2)
+        self.store_factory({"nodes": [
+            self.node("work", outputs=[{"name": "out", "type": "json"}]),
+        ]})
+        result = await self.start()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        request = {"action": "node", "runId": result["run_id"], "specId": "work"}
+        initial = await self.executor.activity(request)
+        self.assertEqual(initial["instance"]["answer"], answer)
+        self.assertFalse(initial["instance"]["answerTruncated"])
+
+        self.host.outcomes["work"]["answer"] = answer + "more"
+        refresh.set()
+        await self.executor._runs[result["run_id"]].task
+        refreshed = await self.executor.activity(request)
+        self.assertEqual(refreshed["instance"]["answer"], answer)
+        self.assertTrue(refreshed["instance"]["answerTruncated"])
+
+    @async_test
+    async def test_node_activity_tracks_subagent_answer_truncation_at_capture(self) -> None:
+        long_answer = "x" * (ANSWER_BINDING_CAP + 1)
+        clipped = long_answer[:ANSWER_BINDING_CAP]
+        cases = {
+            "done": (clipped, True, False),
+            "provisional": (clipped, True, True),
+            "refresh": (clipped, True, False),
+            "retry-short": ("short", False, False),
+            # The retry's exit carries no text: the clipped provisional
+            # answer and its warning both stay.
+            "retry-silent": (clipped, True, True),
+        }
+        for capture, expected in cases.items():
+            with self.subTest(capture=capture):
+                host = (
+                    LateAnswerHost(clock=self.clock, late_children={"child-1"})
+                    if capture == "refresh" else FakeHost(clock=self.clock)
+                )
+                host.outcomes["work"] = {"status": "done", "answer": long_answer}
+                if capture in ("provisional", "retry-short", "retry-silent"):
+                    host.child_outcomes["child-1"] = {
+                        "status": "error", "error": "task exited", "answer": long_answer,
+                    }
+                if capture == "retry-short":
+                    host.child_outcomes["child-2"] = {"status": "done", "answer": "short"}
+                if capture == "retry-silent":
+                    host.child_outcomes["child-2"] = {"status": "error", "error": "task exited"}
+                spec_id = f"capture-{capture}"
+                self.store_factory({"run": {"failure_policy": "continue"}, "nodes": [
+                    self.node("work", retries=1 if capture.startswith("retry") else 0,
+                              outputs=[{"name": "out", "type": "text"}]),
+                ]}, spec_id=spec_id)
+                with patch.object(rlm_module, "host_request", host):
+                    result = await self.start(spec_id)
+                    await self.executor._runs[result["run_id"]].task
+                reply = await self.executor.activity({
+                    "action": "node", "runId": result["run_id"], "specId": "work",
+                })
+                self.assertEqual(
+                    (reply["instance"]["answer"], reply["instance"]["answerTruncated"],
+                     reply["instance"]["provisional"]),
+                    expected,
+                )
+
+    @async_test
+    async def test_node_activity_reports_resolved_subagent_inputs(self) -> None:
+        items = [{"id": 1}, {"id": 2}]
+        context = {"tag": "go"}
+        self.host.outcomes["seed"] = {
+            "status": "done",
+            "answer": json.dumps({"items": items, "context": context}),
+        }
+        self.store_factory({"nodes": [
+            self.node("seed", outputs=[
+                {"name": "items", "type": "json"},
+                {"name": "context", "type": "json"},
+            ]),
+            self.node("single", inputs=[
+                {"name": "context", "type": "json", "from": "seed.context"},
+            ]),
+            self.node("fan", inputs=[
+                {"name": "context", "type": "json", "from": "seed.context"},
+                {"name": "item", "type": "json", "from": "seed.items"},
+            ], foreach={"over": "item", "max": 2}),
+        ]})
+        result = await self.start()
+        await self.executor._runs[result["run_id"]].task
+        expected_inputs = {
+            "single": [{"context": context}],
+            "fan": [{"context": context, "item": item} for item in items],
+        }
+        for state_id, inputs in expected_inputs.items():
+            for index, expected in enumerate(inputs):
+                with self.subTest(state=state_id, instance=index):
+                    reply = await self.executor.activity({
+                        "action": "node", "runId": result["run_id"], "specId": state_id,
+                        "entry": 0, "instance": index,
+                    })
+                    instance = reply["instance"]
+                    self.assertEqual(
+                        (instance["inputs"], instance["inputsTruncated"]),
+                        (json.dumps(expected, indent=2), False),
+                    )
+
+    @async_test
+    async def test_node_activity_rejects_incomplete_or_malformed_selectors(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="node-test")
+        run = await self.start("node-test")
+        base = {"action": "node", "runId": run["run_id"], "specId": "a"}
+
+        # The kernel's wire form uses a null pair to mean no selector.
+        reply = await self.executor.activity({**base, "entry": None, "instance": None})
+        self.assertEqual(reply["entry"]["index"], 0)
+
+        for selectors in (
+            {"entry": 0},
+            {"instance": 0},
+            {"entry": -1, "instance": 0},
+            {"entry": 0, "instance": "0"},
+        ):
+            with self.subTest(selectors=selectors):
+                with self.assertRaisesRegex(ValueError, "node"):
+                    await self.executor.activity({**base, **selectors})
+
+
 class FactoryPythonStateTest(_ExecutorTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -7168,6 +7336,35 @@ class FactoryPythonStateTest(_ExecutorTestCase):
 
     def node_status(self, status: dict[str, Any], node_id: str) -> dict[str, Any]:
         return next(entry for entry in status["nodes"] if entry["id"] == node_id)
+
+    @async_test
+    async def test_node_activity_flags_python_answer_clipped_before_reporting(self) -> None:
+        outputs = {"items": ["a", "b"], "mode": "go"}
+        answer = json.dumps(outputs, separators=(",", ":"))
+        for cap in (len(answer) - 1, len(answer)):
+            with self.subTest(cap=cap), patch.object(factory_module, "ANSWER_BINDING_CAP", cap):
+                spec_id = f"cap-{cap}"
+                self.store_machine({"states": [{
+                    "id": "plan", "entry": True, "python": self.py("plan"),
+                    "outputs": [
+                        {"name": "items", "type": "json"},
+                        {"name": "mode", "type": "text"},
+                    ],
+                }]}, spec_id=spec_id)
+                result = await self.start(spec_id)
+                status = await self.finish(result)
+                self.assertEqual(status["state"], "done")
+                reply = await self.executor.activity({
+                    "action": "node", "runId": result["run_id"], "specId": "plan",
+                })
+                self.assertEqual(
+                    (reply["instance"]["answer"], reply["instance"]["answerTruncated"]),
+                    (answer[:cap], len(answer) > cap),
+                )
+                # A python state declares no prompt: the reply sends no
+                # template, so the view keeps its "no prompt template" text.
+                self.assertIsNone(reply["template"])
+                self.assertEqual(json.loads(reply["entry"]["outputs"]), outputs)
 
     @async_test
     async def test_python_states_route_and_bind_like_agent_states(self) -> None:

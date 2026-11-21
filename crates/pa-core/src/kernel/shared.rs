@@ -39,10 +39,10 @@ pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
 
 /// The `factory_activity` out-of-band frame's action vocabulary, mirroring
 /// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge):
-/// one run's graph/status/watch/stop/resume, a run by spec id, and the
-/// machine library's list/graph reads (the `/factory` view's library page).
-pub const FACTORY_ACTIVITY_ACTIONS: [&str; 7] = [
-    "graph", "status", "watch", "run", "stop", "resume", "library",
+/// one run's graph/status/watch/stop/resume, a run by spec id, machine library
+/// reads, and node inspection.
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 8] = [
+    "graph", "status", "watch", "run", "stop", "resume", "library", "node",
 ];
 
 /// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel

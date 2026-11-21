@@ -94,6 +94,7 @@ impl MockSupervisor {
         // A page stop also stops the mock's session: the daemon's `session_closed` follows the
         // stop's reply, and the closed session's graph lane answers a refusal from then on.
         let mut session_closed = false;
+        let mut node_requests = 0;
         serve_connection(
             stream,
             &capabilities,
@@ -164,6 +165,37 @@ impl MockSupervisor {
                             command.get("action").and_then(Value::as_str),
                         ) {
                             (Some(runs), Some("graph")) => runs.clone(),
+                            (_, Some("node")) => {
+                                node_requests += 1;
+                                let entry =
+                                    command.get("entry").and_then(Value::as_u64).unwrap_or(1);
+                                let index =
+                                    command.get("instance").and_then(Value::as_u64).unwrap_or(1);
+                                json!({
+                                    "name": "node-run",
+                                    "specId": "sw",
+                                    "template": "Template body from executor {input}",
+                                    "templateTruncated": false,
+                                    "state": {
+                                        "id": "worker",
+                                        "status": "running",
+                                        "instances": [
+                                            {"index": 0, "entry": 0, "status": "done", "child": "child-0"},
+                                            {"index": 1, "entry": 1, "status": "running", "child": "child-1"},
+                                        ],
+                                    },
+                                    "entry": {"index": entry, "status": "running"},
+                                    "instance": {
+                                        "index": index,
+                                        "entry": entry,
+                                        "status": "running",
+                                        "child": format!("child-{index}"),
+                                        "prompt": if index == 0 { "Earlier node prompt" } else if node_requests > 1 { "Updated node prompt" } else { "Node prompt fixture" },
+                                        "inputs": "{}",
+                                        "answer": if node_requests > 1 { "Updated node answer" } else { "Node answer fixture" },
+                                    },
+                                })
+                            }
                             _ => json!({}),
                         };
                         write_json(
@@ -697,6 +729,26 @@ fn factory_page_run(id: &str, name: &str) -> Value {
     })
 }
 
+fn factory_node_run() -> Value {
+    json!({
+        "runId": "node-run",
+        "specId": "sw",
+        "name": "node-run",
+        "state": "running",
+        "elapsedMs": 100,
+        "machine": {
+            "states": [{"id": "worker", "entry": true, "subagent": "worker"}],
+            "transitions": [],
+        },
+        "nodes": [{
+            "id": "worker",
+            "status": "running",
+            "instances": [{"index": 0, "entry": 0, "status": "running", "child": "child-1"}],
+        }],
+        "usage": { "running": 1 },
+    })
+}
+
 /// One alt+a key event (the dock's focus hand-off).
 fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
@@ -773,6 +825,158 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     assert!(
         all.contains("\u{25b8} factory: first-run"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
+    );
+}
+
+fn open_node_steps() -> Vec<HeadlessStep> {
+    vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Node prompt fixture".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]
+}
+
+#[test]
+fn factory_node_requires_node_specific_daemon_support() {
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "supports node inspection".to_string(),
+            timeout_ms: 5_000,
+        },
+    ];
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    let all = flat_text(&frames);
+    assert!(!all.contains("node: worker"), "{all}");
+}
+
+#[test]
+fn factory_node_navigation_fetches_the_selected_entry_and_instance() {
+    let mut steps = open_node_steps();
+    steps.extend([
+        HeadlessStep::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        HeadlessStep::WaitRender {
+            needle: "Earlier node prompt".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]);
+    let frames = run_plan_config(
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Earlier node prompt"));
+}
+
+#[test]
+fn factory_node_refreshes_the_mounted_document() {
+    let mut steps = open_node_steps();
+    steps.push(HeadlessStep::WaitRender {
+        needle: "Updated node prompt".to_string(),
+        timeout_ms: 5_000,
+    });
+    let frames = run_plan_config(
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Updated node prompt"));
+}
+
+#[test]
+fn factory_node_renders_its_template_from_the_node_reply() {
+    let mut steps = open_node_steps();
+    steps.extend([
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Template body from executor {input}".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]);
+    let frames = run_plan_config(
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Template body from executor {input}"));
+}
+
+#[test]
+fn factory_page_opens_and_renders_a_state_node_document() {
+    let graph = json!({"runs": [factory_node_run()]});
+    let steps = vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "factory: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Node prompt fixture".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(escape()),
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitMs(100),
+    ];
+    let frames = run_plan_config(
+        vec![
+            "factory_activity".to_string(),
+            "factory_node_activity".to_string(),
+        ],
+        Some(graph),
+        steps,
+    );
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("node: worker"),
+        "the selected state opens its node view:
+{all}"
+    );
+    assert!(
+        all.contains("Node prompt fixture"),
+        "the node view renders the fetched prompt:
+{all}"
     );
 }
 
