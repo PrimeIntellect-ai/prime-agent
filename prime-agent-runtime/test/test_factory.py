@@ -7403,6 +7403,16 @@ class FactoryEmitTest(_ExecutorTestCase):
         await self.executor._runs[result["run_id"]].task
         return await rlm_module.rlm.factory.status(result["run_id"])
 
+    async def settle(self, run_result: dict[str, Any]) -> dict[str, Any]:
+        """Yield to the control loop until the run leaves the running state."""
+        run_id = run_result["run_id"]
+        for _ in range(50_000):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await yield_loop_turn()
+        self.fail(f"run {run_id} never left the running state")
+
     @async_test
     async def test_the_child_gets_its_contract_with_the_bound_inputs(self) -> None:
         self.emitted("child-1", {"plan": {"steps": 2}})
@@ -7486,6 +7496,54 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(len(names), 3)
         self.assertIn("-i0-a2", names[-1])
         self.assertNotIn("-i1-a2", " ".join(names))
+
+    @async_test
+    async def test_resume_readmits_every_foreach_instance_that_omitted_its_port(self) -> None:
+        # Cursor finding: with retries=0, the first omitted instance failed
+        # the entry and the other omitted instances stayed done, so resume
+        # re-admitted only the first and the entry failed again on the rest.
+        self.emitted("child-1", {"items": ["a", "b"]})
+        self.emitted("child-4", {"report": "a"})  # fan i0 resume emit
+        self.emitted("child-5", {"report": "b"})  # fan i1 resume emit
+        self.store_machine(
+            {
+                "params": {"task": "ship it"},
+                "states": [
+                    state(
+                        "plan",
+                        entry=True,
+                        subagent={"prompt": "Plan {task}."},
+                        outputs=[{"name": "items", "type": "json"}],
+                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
+                    ),
+                    state(
+                        "fan",
+                        subagent={"prompt": "Do {items}."},
+                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
+                        outputs=[{"name": "report", "type": "text"}],
+                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                        foreach={"over": "items", "max": 2},
+                        retries=0,
+                    ),
+                ],
+                "transitions": [{"from": "plan", "to": "fan"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+
+        self.assertEqual(paused["state"], "paused")
+        fan = next(node for node in paused["nodes"] if node["id"] == "fan")
+        self.assertEqual([instance["status"] for instance in fan["instances"]], ["error", "error"])
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        self.assertEqual(resumed["state"], "running")
+        final = await self.settle(result)
+
+        self.assertEqual(final["state"], "done")
+        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
+        self.assertEqual(len(names), 4)
+        self.assertEqual(sum("-i0-a2" in name for name in names), 1)
+        self.assertEqual(sum("-i1-a2" in name for name in names), 1)
 
     @async_test
     async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
