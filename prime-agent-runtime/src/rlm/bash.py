@@ -132,15 +132,15 @@ def _is_home_scale_root(token: str) -> bool:
 
 
 def _is_rg_depth_bound(tokens: list[str]) -> bool:
-    """rg's --max-depth[=]N / -d N / -dN with a numeric argument, also at the
-    end of a short cluster (`-id2`, `-id 2`); a bare token (the filename
-    maxdepth.txt) never counts."""
+    """rg's --max-depth[=]N (or its --maxdepth alias) / -d N / -dN with a
+    numeric argument, also at the end of a short cluster (`-id2`, `-id 2`); a
+    bare token (the filename maxdepth.txt) never counts."""
     for i, t in enumerate(tokens):
         following = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if t == "--max-depth" and following.isdigit():
-            return True
-        if t.startswith("--max-depth=") and t[len("--max-depth=") :].isdigit():
-            return True
+        option, eq, value = t.partition("=")
+        if option in ("--max-depth", "--maxdepth"):
+            if (value if eq else following).isdigit():
+                return True
         cluster = _short_cluster(t, _RG_VALUE_LETTERS)
         if cluster is not None and cluster[-1] == "d":
             if (t[len(cluster) + 1 :] or following).isdigit():
@@ -179,7 +179,8 @@ _GREP_VALUE_OPTIONS = frozenset(
     }
 )
 _RG_VALUE_OPTIONS = _GREP_VALUE_OPTIONS | {
-    "-d", "--max-depth", "-E", "--encoding", "-g", "--glob", "-j", "--threads",
+    "-d", "--max-depth", "--maxdepth", "-E", "--encoding", "-g", "--glob", "-j",
+    "--threads",
     "-M", "--max-columns", "-r", "--replace", "-t", "-T", "--type",
     "--type-not", "--color", "--colors", "--context-separator",
     "--dfa-size-limit", "--engine", "--field-context-separator",
@@ -225,6 +226,10 @@ _COMMAND_PREFIX_WORDS = frozenset(
     {"!", "do", "elif", "else", "if", "then", "time", "until", "while"}
 )
 
+# An assignment word before a command (`LC_ALL=C find ...`) only sets the
+# command's environment.
+_ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
 
 # Masked quoted arguments leave this placeholder token behind: bash saw an
 # argument here, and the scanner's positional pattern-skip must skip the
@@ -237,6 +242,23 @@ def _mask_quoted_char(ch: str) -> str:
     never whitespace) and keeps `/`: bash joins `~/"work/repo"` into one deep
     path, and the home-scale root test reads the depth from its `/`."""
     return "/" if ch == "/" else MASK_PLACEHOLDER
+
+
+# A quoted span that is all digits or one option word (`'2'`, `"--max-depth"`)
+# is an argument, not data: the tool sees it after quote removal, so it stays
+# visible for option and bound detection.
+_ARGUMENT_WORD = re.compile(r"[0-9]+|--?[A-Za-z0-9][A-Za-z0-9_.=-]*")
+
+
+def _quoted_argument_end(chars: list[str], start: int, quote: str) -> int | None:
+    """The closing quote's index when the quoted text from `start` is one
+    argument word; None for any other quoted text."""
+    end = start
+    while end < len(chars) and chars[end] != quote:
+        end += 1
+    if end < len(chars) and _ARGUMENT_WORD.fullmatch("".join(chars[start:end])):
+        return end
+    return None
 
 
 # Substitution nesting deeper than this is not scanned: a malformed
@@ -279,15 +301,12 @@ def _mask_scan_literals(command: str) -> str:
     while i < n:
         ch = chars[i]
         if ch == "'":
-            # An all-digit quoted span is an argument (`-maxdepth '2'`), not
-            # data: keep the digits visible for bound detection.
-            j = i + 1
-            while j < n and chars[j].isascii() and chars[j].isdigit():
-                j += 1
-            if j > i + 1 and j < n and chars[j] == "'":
-                chars[i] = ""
-                chars[j] = ""
-                i = j + 1
+            # An argument word (`-maxdepth '2'`, `'--max-depth' 2`) stays
+            # visible; other single-quoted text is data.
+            end = _quoted_argument_end(chars, i + 1, "'")
+            if end is not None:
+                chars[i] = chars[end] = ""
+                i = end + 1
                 continue
             j = i + 1
             while j < n and chars[j] != "'":
@@ -460,15 +479,12 @@ def _mask_scan_literals(command: str) -> str:
             i += 2
             continue
         if ch == '"':
-            # An all-digit quoted span is an argument (`--max-depth "3"`),
-            # not data: keep the digits visible for bound detection.
-            j = i + 1
-            while j < n and chars[j].isascii() and chars[j].isdigit():
-                j += 1
-            if j > i + 1 and j < n and chars[j] == '"':
-                chars[i] = ""
-                chars[j] = ""
-                i = j + 1
+            # An argument word (`--max-depth "3"`, `"--max-depth" 3`) stays
+            # visible, like its single-quoted form.
+            end = _quoted_argument_end(chars, i + 1, '"')
+            if end is not None:
+                chars[i] = chars[end] = ""
+                i = end + 1
                 continue
             # A span that starts with a home expansion is a path argument:
             # keep the whole span live so the expansion is never split into
@@ -606,15 +622,20 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
     # inside the segment: their `&` is not a separator.
     for segment in re.split(r"&&|\|\||;|\||\n|(?<![<>])&(?!>)", masked):
         tokens = segment.split()
-        # Leading grouping operators and reserved words: `(find ...)`,
-        # `{ ...; }`, `then find ...`, and `! find ...` run the same command,
-        # so the shape must survive them. Walk by index and strip all
-        # prefixes at once: popping the head or copying one character per
-        # round is quadratic in the number of prefixes.
+        # Leading grouping operators, reserved words, and assignment words:
+        # `(find ...)`, `{ ...; }`, `then find ...`, `! find ...`, and
+        # `LC_ALL=C find ...` run the same command, so the shape must survive
+        # them. Walk by index and strip all prefixes at once: popping the head
+        # or copying one character per round is quadratic in the number of
+        # prefixes.
         command_start = 0
         while command_start < len(tokens):
             stripped = tokens[command_start].lstrip("({")
-            if stripped and stripped not in _COMMAND_PREFIX_WORDS:
+            if (
+                stripped
+                and stripped not in _COMMAND_PREFIX_WORDS
+                and not _ASSIGNMENT_WORD.match(stripped)
+            ):
                 tokens[command_start] = stripped
                 break
             command_start += 1
@@ -782,11 +803,12 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
 
 
 def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
-    """Replace every $(...) span (paren-depth matched, quote-aware) and
-    backtick span with a placeholder, returning the parent text with bodies
-    blanked plus the bodies themselves: the bodies execute, so they are
-    command text — but they are scanned separately, so a quoted separator
-    inside one must never split the parent command."""
+    """Replace every $(...) or process-substitution <(...)/>(...) span
+    (paren-depth matched, quote-aware) and backtick span with a placeholder,
+    returning the parent text with bodies blanked plus the bodies themselves:
+    the bodies execute, so they are command text — but they are scanned
+    separately, so a quoted separator inside one must never split the parent
+    command."""
 
     def _is_escaped(at: int) -> bool:
         # A backslash-escaped `\$(` or backtick is literal data, not a
@@ -809,7 +831,7 @@ def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
             i += 3
             continue
         if (
-            chars[i] == "$"
+            chars[i] in ("$", "<", ">")
             and i + 1 < n
             and chars[i + 1] == "("
             and not _is_escaped(i)
@@ -870,8 +892,8 @@ def _is_unbounded_home_scan(command: str) -> bool:
     Recursive scan (grep -r, rg, find — recursive by default) over a ~/$HOME
     root, with no `timeout` prefix and no --max-depth/-maxdepth bound.
     Quoted literal data, heredoc bodies, and comments are masked first so
-    they cannot masquerade as a scan; command-substitution bodies run in a
-    subshell, so they are scanned as commands too.
+    they cannot masquerade as a scan; command- and process-substitution
+    bodies run in a subshell, so they are scanned as commands too.
     """
     # Iterative worklist with a depth cap: recursion would hit Python's
     # limit (or the agent's stack) on deeply nested malformed input before

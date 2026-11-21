@@ -1832,6 +1832,40 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_scan("echo $(( find + ~ 1 ))"))
         self.assertTrue(is_scan("echo $(( $(find ~/Documents | wc -l) + 1 ))"))
 
+    def test_rg_maxdepth_alias_is_a_bound(self):
+        # rg also accepts --maxdepth for --max-depth, with either operand form.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan('rg --maxdepth=2 needle "$HOME"'))
+        self.assertFalse(is_scan('rg --maxdepth 2 needle "$HOME"'))
+        self.assertTrue(is_scan('rg --maxdepth=x needle "$HOME"'))
+
+    def test_quoted_option_words_stay_visible(self):
+        # The tool sees a quoted option word after quote removal, so a quoted
+        # depth bound is still a bound and a quoted expression word still
+        # ends find's roots.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan('rg "--max-depth" "2" needle "$HOME"'))
+        self.assertFalse(is_scan("find ~/Documents '-maxdepth' 2"))
+        self.assertFalse(is_scan("find . '-newer' ~/stamp"))
+        self.assertTrue(is_scan("find ~/Documents '-name' x"))
+
+    def test_assignment_words_do_not_hide_the_command(self):
+        # An assignment word before a command only sets its environment, so
+        # the scan after it warns like the bare command.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertTrue(is_scan("LC_ALL=C grep -rl needle ~/Documents"))
+        self.assertTrue(is_scan('FOO=1 BAR="a b" find ~/Documents'))
+        self.assertFalse(is_scan("LC_ALL=C timeout 60 find ~/Documents"))
+        self.assertFalse(is_scan("x=1"))
+
+    def test_process_substitution_bodies_are_scanned(self):
+        # `<(...)` and `>(...)` bodies run like `$(...)` bodies, so a scan
+        # inside one warns.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertTrue(is_scan("diff <(find ~/Documents) <(ls)"))
+        self.assertTrue(is_scan("tee >(grep -rl needle ~/Documents) < /dev/null"))
+        self.assertFalse(is_scan("diff <(find . -name x) <(ls)"))
+
     def test_standalone_background_ampersand_is_a_segment_separator(self):
         # A lone `&` backgrounds the left side and starts a new command, so
         # `sleep 1 & find "$HOME"` must warn like its `&&` form; the `&` in
