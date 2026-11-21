@@ -402,15 +402,15 @@ impl NodeView {
         self.request_epoch = None;
         match result {
             Ok(data) => self.merge_reply(&data),
-            Err(message) => self.set_error(message),
+            Err(message) => self.set_error(&message),
         }
         true
     }
 
     /// Record the node fetch's failure on the error row (the last good
     /// document stays).
-    pub fn set_error(&mut self, message: String) {
-        self.error = Some(crate::menu_panel::scrub_controls(&message));
+    pub fn set_error(&mut self, message: &str) {
+        self.error = Some(crate::menu_panel::scrub_controls(message));
     }
 
     /// One Esc: the template document closes first (back to the instance
@@ -1163,7 +1163,7 @@ mod tests {
                     });
                     node.template = Some(content.clone());
                     if with_error {
-                        node.set_error("refresh failed".to_string());
+                        node.set_error("refresh failed");
                     }
                     node.template_open = template_open;
                     node.render(&theme, 80, &keybindings, viewport_rows);
@@ -1230,7 +1230,7 @@ mod tests {
         let mut node = NodeView::loading("run", "worker");
         assert!(document_text(&node).contains("loading…"));
         assert!(!document_text(&node).contains("no instances were created"));
-        node.set_error("request failed".to_string());
+        node.set_error("request failed");
         assert!(!document_text(&node).contains("no instances were created"));
         assert!(!document_text(&node).contains("loading…"));
         node.error = None;
