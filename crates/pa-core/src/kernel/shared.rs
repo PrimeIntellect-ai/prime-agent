@@ -41,8 +41,12 @@ pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
 /// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge).
 /// `peek` is the supervisor overview's non-arming read of the unscoped
 /// graph; it takes no target.
-pub const FACTORY_ACTIVITY_ACTIONS: [&str; 7] =
-    ["graph", "status", "watch", "run", "stop", "resume", "peek"];
+/// `library` is public's machine-library lane (the TUI library page asks the
+/// host for the listing and one machine's graph); dev's host set does not
+/// carry it because dev's page reads through a different route.
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 8] = [
+    "graph", "status", "watch", "run", "stop", "resume", "peek", "library",
+];
 
 /// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel
 /// caps its own at 60s; the host bridge pins the view's polling cadence
