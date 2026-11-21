@@ -1381,6 +1381,7 @@ async fn unwritable_venv_disables_uncovered_skills_instead_of_failing() {
         &normalize_python_skills(&options.python_skills),
         venv.clone(),
         None,
+        /*account_home*/ None,
     )
     .await;
     set_mode(dir.path(), 0o755);
@@ -1432,6 +1433,7 @@ async fn unwritable_stale_venv_names_the_venv_and_both_env_overrides() {
         &[],
         venv.clone(),
         None,
+        /*account_home*/ None,
     )
     .await
     .expect_err("an unusable venv in a read-only dir is a setup error");

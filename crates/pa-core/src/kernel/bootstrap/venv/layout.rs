@@ -1,7 +1,8 @@
 //! The venv dir-layout concern: the override-aware
-//! kernel venv dir, the writable-dir fallback, and the interpreter path.
+//! kernel venv dir, the writable-dir fallback, the interpreter path, and the
+//! retired `.stale-*` copy kept beside the venv.
 
-use super::{anyhow, Path, PathBuf};
+use super::{anyhow, Context, Path, PathBuf};
 
 pub(crate) fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
@@ -25,7 +26,40 @@ pub fn kernel_venv_dir() -> PathBuf {
             return expand_home(&override_dir);
         }
     }
-    home_dir().join(".prime").join("agent").join("kernel-venv")
+    home_kernel_venv_dir(&home_dir())
+}
+
+/// The default kernel venv under `home`, used when no override is set.
+pub(crate) fn home_kernel_venv_dir(home: &Path) -> PathBuf {
+    home.join(".prime").join("agent").join("kernel-venv")
+}
+
+/// Move a venv built for another runtime to `<venv>.stale-<unix-ms>` beside it,
+/// then remove every other `<venv>.stale-*` sibling, so only the newest retired
+/// copy stays on disk.
+///
+/// A bootstrap never deletes the venv it replaces: the caller may be a worktree
+/// binary or an older install whose runtime differs from the one the user's
+/// sessions run, and the retired copy can be renamed back.
+pub(crate) fn retire_stale_venv(venv: &Path) -> anyhow::Result<PathBuf> {
+    let name = venv.file_name().unwrap_or_default().to_string_lossy();
+    let prefix = format!("{name}.stale-");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let retired = venv.with_file_name(format!("{prefix}{stamp}"));
+    std::fs::rename(venv, &retired)
+        .with_context(|| format!("moving {} to {}", venv.display(), retired.display()))?;
+    let parent = venv.parent().unwrap_or(Path::new("/"));
+    for entry in std::fs::read_dir(parent)?.flatten() {
+        let path = entry.path();
+        if path != retired && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("removing older {}", path.display()))?;
+        }
+    }
+    Ok(retired)
 }
 
 fn xdg_kernel_venv_dir() -> PathBuf {

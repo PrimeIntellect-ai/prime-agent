@@ -1,0 +1,1 @@
+- A kernel venv rebuild no longer deletes the existing venv: it is kept beside the new one as `kernel-venv.stale-<timestamp>` (only the newest such copy is kept), and tests refuse to bootstrap the user's real `~/.prime/agent/kernel-venv`.
