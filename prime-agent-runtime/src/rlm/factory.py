@@ -2594,8 +2594,8 @@ class FactoryExecutor:
             # machine's graph payload (``specId`` names it) — the same
             # snapshot shape a stored spec's ``graph`` answers, plus the
             # machine file's fields and the mermaid rendering. The machine
-            # resolves through the library's own contract (repo first,
-            # user second; broken machines name their errors), so the
+            # resolves through the library's own contract (exact folder
+            # before declared name, repo before user at each step), so the
             # lane, run, and export never disagree about a name.
             if spec_id is None:
                 return _wire_payload(
@@ -5280,6 +5280,14 @@ def _mermaid_state_ids(states: list[Any]) -> dict[str, str]:
     return ids
 
 
+def _mermaid_label(text: str) -> str:
+    """Escape label text with Mermaid's numeric character entities."""
+    return "".join(
+        char if char.isalnum() or char in " ._-" else f"#{ord(char)};"
+        for char in text
+    )
+
+
 def _mermaid_guard_label(when: Any) -> str:
     """One guard's edge label: ``<output>[.<path>] <op>[ <value>]``.
 
@@ -5294,9 +5302,9 @@ def _mermaid_guard_label(when: Any) -> str:
     path = when.get("path")
     target = f"{output}.{path}" if isinstance(path, str) and path else str(output)
     label = f"{target} {when.get('op')}"
-    if "value" in when:
+    if when.get("op") != "exists" and "value" in when:
         label += f" {json.dumps(when.get('value'))}"
-    return label
+    return _mermaid_label(label)
 
 
 def _machine_to_mermaid_lines(machine: dict[str, Any]) -> list[str]:
@@ -5357,7 +5365,7 @@ def _dag_to_mermaid_lines(dag: dict[str, Any]) -> list[str]:
         if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
             lines.append(
                 f'    {node_id}["{node_id}<br/>foreach: over '
-                f'{foreach.get("over")} (max {foreach.get("max")})"]'
+                f'{_mermaid_label(foreach["over"])} (max {foreach.get("max")})"]'
             )
         else:
             lines.append(f"    {node_id}")
@@ -5478,8 +5486,9 @@ def _scan_machine_library(
     warnings (``<path>: <errors>``).
 
     The shared scan behind ``list_machines`` and the CLI's ``factory list``:
-    both levels resolve identically, repo wins on name conflicts, and the
-    gates are ``_read_library_machine`` — the same verdict
+    exact-name folders win before declared-name aliases, with repo before
+    user at each step, matching ``resolve_machine``. The gates are
+    ``_read_library_machine`` — the same verdict
     ``resolve_machine`` applies, so a machine the listing shows always
     parses and validates for resolve/run/import, while the files it skips
     surface as warnings here and never claim their name on the resolve
@@ -5487,6 +5496,7 @@ def _scan_machine_library(
     machine carries the name).
     """
     machines: dict[str, dict[str, Any]] = {}
+    exact_names: set[str] = set()
     warnings: list[str] = []
     for source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
         if not directory.is_dir():
@@ -5496,8 +5506,11 @@ def _scan_machine_library(
             if error:
                 warnings.append(error)
                 continue
-            if machine.name in machines:
-                continue  # repo first: the earlier level keeps the name
+            exact = path.parent.name == machine.name
+            if machine.name in machines and (machine.name in exact_names or not exact):
+                continue
+            if exact:
+                exact_names.add(machine.name)
             machines[machine.name] = {
                 "name": machine.name,
                 "description": machine.description,
@@ -5512,7 +5525,7 @@ def _scan_machine_library(
 def list_machines(
     *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
 ) -> "list[dict[str, Any]]":
-    """Library contents with descriptions, resolution-deduped (repo wins).
+    """Library contents with descriptions, deduped like ``resolve_machine``.
 
     Broken files are skipped silently here (the agent-facing list);
     ``cli_dispatch``'s ``list`` op surfaces them as warnings so the CLI's
@@ -5647,8 +5660,8 @@ def library_graph(
     """One library machine's graph payload.
 
     Resolves the machine exactly like a run does (``resolve_machine``:
-    repo directory first, user second) and returns the machine file's own
-    fields with the spec rendered as diagram text:
+    exact folder before declared name, repo before user at each step)
+    and returns the machine file's fields with the spec rendered as text:
     ``{"name", "description", "version", "author", "spec", "mermaid"}``.
     The spec is the file's payload as written (machine form, or dag sugar
     — the same object ``parse_machine_file`` read); ``mermaid`` is its
@@ -6425,7 +6438,7 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   stops the selected row: the whole run on its header, or the state's
   running child (that attempt fails under the state's `retries` and
   `failure_policy`). `r` resumes a paused run.
-- The machine library view: the dock's `☰ machines` group (the factory
+- The machine library view: the dock's `▤ machines` group (the factory
   group's neighbor, the same opt-in gate) lists every machine with its
   description and source; Enter drills into one for its diagram and its
   mermaid text (plain monospace, copyable for GitHub and previews), and
