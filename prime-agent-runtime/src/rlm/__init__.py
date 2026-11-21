@@ -12,6 +12,9 @@ from typing import Any
 from .bash import BashHandle, BashResult, BashSnapshot, bash, persistent_shells, _set_completion_notices_wired
 from .factory import (
     FACTORY_HELP,
+    FactoryEmitError,
+    emit_factory_outputs,
+    factory_inputs,
     graph_factory,
     resume_factory,
     run_factory,
@@ -270,9 +273,12 @@ async def _spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     factory: dict[str, str] | None = None,
+    factory_contract: dict[str, Any] | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
-    stateId}``), which the host records on the child's ledger spawn edge."""
+    stateId}``), which the host records on the child's ledger spawn edge,
+    and the state's output contract, which the child's ``factory.emit``
+    checks against."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
     kwargs: dict[str, Any] = {"name": name}
@@ -284,6 +290,8 @@ async def _spawn(
         kwargs["cwd"] = cwd
     if factory is not None:
         kwargs["factory"] = factory
+    if factory_contract is not None:
+        kwargs["factoryContract"] = factory_contract
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -843,6 +851,16 @@ class _RLMFactoryNamespace:
 
     async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
         return await watch_factory(run_id, timeout)
+
+    async def emit(self, **outputs: Any) -> dict[str, Any]:
+        """Hand this factory child's outputs back: ``await
+        rlm.factory.emit(verdict={...})``. A wrong value raises
+        ``FactoryEmitError`` naming the field; fix it and call again."""
+        return await emit_factory_outputs(outputs)
+
+    async def inputs(self) -> dict[str, Any]:
+        """This factory child's bound inputs (and the machine's params) as values."""
+        return await factory_inputs()
 
     def help(self) -> str:
         """Return the embedded factory authoring reference and API guide."""

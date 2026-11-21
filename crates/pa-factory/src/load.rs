@@ -384,6 +384,31 @@ fn is_builtin_type_name(name: &str) -> bool {
     )
 }
 
+/// The value path of a `file` inside a list or a record field of `ty`
+/// (`report[]`, `report.findings[].at`), or `None`. The emit copies only a
+/// top-level `file` port, so a nested one would reach later states as the
+/// child's own path.
+fn nested_file(
+    ty: &Type,
+    records: &Records,
+    path: String,
+    nested: bool,
+    seen: &mut BTreeSet<String>,
+) -> Option<String> {
+    match ty {
+        Type::File => nested.then_some(path),
+        Type::List(item) => nested_file(item, records, format!("{path}[]"), true, seen),
+        Type::Record(name) if seen.insert(name.clone()) => records
+            .fields(name)
+            .unwrap_or_default()
+            .iter()
+            .find_map(|(field, slot)| {
+                nested_file(&slot.ty, records, format!("{path}.{field}"), true, seen)
+            }),
+        _ => None,
+    }
+}
+
 fn refers_to(records: &Records, from: &str, target: &str, seen: &mut BTreeSet<String>) -> bool {
     if !seen.insert(from.to_string()) {
         return false;
@@ -726,7 +751,13 @@ fn build_state(
                         format!("unknown type {missing:?}; declare it under [types.{missing}]"),
                     ));
                 } else if slot.optional {
-                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "optional outputs need typed emit (rlm.factory.emit); this build captures outputs from the final answer, so every output is required"));
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "optional outputs are not supported yet; every output is required, and the child must emit each one"));
+                } else if let Some(path) =
+                    nested_file(&slot.ty, records, name.clone(), false, &mut BTreeSet::new())
+                {
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, format!("file ports inside a list or a record are not supported yet ({path}); declare each file as a top-level output, which the emit copies")));
+                } else if matches!(&work, Some(Work::Python(_))) && slot.ty == Type::File {
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"));
                 } else {
                     outputs.push(Output { name, slot });
                 }

@@ -164,6 +164,7 @@ async fn a_cell_past_its_timeout_is_interrupted_and_the_turn_continues() {
         steering_mode: None,
         follow_up_mode: None,
         factory_child: false,
+        factory_contract: None,
         cwd: cwd.clone(),
         agent_dir,
         model: Some(model),

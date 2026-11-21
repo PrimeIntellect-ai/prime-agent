@@ -20,7 +20,9 @@
 //! existing `rlm.spawn` host path, where the daemon allowlist pin is
 //! enforced per spawn.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use anyhow::anyhow;
 use serde_json::{json, Map, Value};
@@ -506,6 +508,238 @@ fn compile_machine_dir(data: &Value) -> anyhow::Result<Value> {
         "author": machine.author,
         "spec": spec,
     }))
+}
+
+/// The kernel host request a parent uses to check a python state's
+/// returned outputs against the state's contract.
+pub const FACTORY_CHECK_REQUEST_TYPE: &str = "factory.check";
+
+/// Where a factory child's accepted outputs live, beside its session file;
+/// the parent's executor reads them through the spawn handle's
+/// `session_dir`.
+pub const FACTORY_OUTPUTS_FILE: &str = "factory-outputs.json";
+
+/// Where a factory child's emitted `file` ports are copied, beside its
+/// session file.
+pub const FACTORY_FILES_DIR: &str = "factory-files";
+
+/// Register `factory.check`: `{contract, outputs}` answers `{}` when every
+/// value fits, else one error naming every wrong field. A python state has
+/// no `factory.emit`, so a `file` port is refused: only an agent child's
+/// emit copies a file beside the session. It keeps no state, so every
+/// session has it.
+pub fn register_factory_check_host_handler(handlers: &mut HostRequestHandlers) {
+    handlers.register(
+        FACTORY_CHECK_REQUEST_TYPE,
+        host_handler(|payload| {
+            Box::pin(async move {
+                let contract = contract_from(payload.data.get("contract"))?;
+                let outputs =
+                    outputs_from(payload.data.get("outputs"), FACTORY_CHECK_REQUEST_TYPE)?;
+                contract
+                    .check(&outputs)
+                    .map_err(|problems| anyhow!(problems.join("; ")))?;
+                if let Some((port, _)) = contract.outputs.iter().find(|(port, slot)| {
+                    slot.ty == pa_factory::types::Type::File && outputs.contains_key(port)
+                }) {
+                    return Err(anyhow!(
+                        "{port}: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"
+                    ));
+                }
+                Ok(json!({}))
+            })
+        }),
+    );
+}
+
+/// Register a factory child's `factory.emit` and `factory.inputs`.
+///
+/// `contract` is the state's contract from the child's create; its
+/// `inputs` are the bound input values. `session_dir` holds the
+/// accepted-outputs file and the copied file ports; `cwd` resolves
+/// relative file paths. Each emit is all-or-nothing: every value is
+/// checked (and every file port found) before anything is written, so a
+/// wrong value fails the call with the exact field and the child fixes it
+/// in the same turn.
+pub fn register_factory_emit_host_handlers(
+    contract: Value,
+    session_dir: PathBuf,
+    cwd: PathBuf,
+    handlers: &mut HostRequestHandlers,
+) {
+    let inputs = contract.get("inputs").cloned().unwrap_or_else(|| json!({}));
+    handlers.register(
+        "factory.inputs",
+        host_handler(move |_payload| {
+            let inputs = inputs.clone();
+            Box::pin(async move { Ok(json!({ "inputs": inputs })) })
+        }),
+    );
+    handlers.register(
+        "factory.emit",
+        host_handler(move |payload| {
+            let contract = contract.clone();
+            let session_dir = session_dir.clone();
+            let cwd = cwd.clone();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    emit_outputs(&contract, &session_dir, &cwd, &payload.data)
+                })
+                .await
+                .map_err(|error| anyhow!("factory.emit stopped: {error}"))?
+            })
+        }),
+    );
+}
+
+fn contract_from(value: Option<&Value>) -> anyhow::Result<pa_factory::Contract> {
+    let value = value.ok_or_else(|| anyhow!("the factory contract is missing"))?;
+    pa_factory::Contract::from_json(value).map_err(|error| anyhow!(error))
+}
+
+fn outputs_from(value: Option<&Value>, request: &str) -> anyhow::Result<Map<String, Value>> {
+    match value {
+        Some(Value::Object(outputs)) => Ok(outputs.clone()),
+        _ => Err(anyhow!(
+            "{request} outputs must be an object of port values"
+        )),
+    }
+}
+
+/// One lock per session dir. A child can run two `factory.emit` calls at
+/// the same time (`asyncio.gather`), each in its own blocking thread;
+/// without the lock the two read-merge-write passes race and one call
+/// loses the ports of the other.
+static EMIT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn emit_lock(session_dir: &Path) -> Arc<Mutex<()>> {
+    let registry = EMIT_LOCKS.get_or_init(Mutex::default);
+    let mut locks = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    locks.entry(session_dir.to_path_buf()).or_default().clone()
+}
+
+/// The directories one emit copied its file ports into. Until the outputs
+/// file that references them is committed nothing points at them, so a
+/// failed emit removes them on drop and leaves no stray copies behind.
+struct StagedFiles {
+    dirs: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl Drop for StagedFiles {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for dir in &self.dirs {
+            // Best effort: the emit already reports its own error, and an
+            // unreferenced copy left behind is never read.
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Check the values, copy the file ports, and merge one emit into the
+/// outputs file.
+///
+/// Each emit copies its file ports under a directory of its own and the
+/// outputs file references those copies, so an emit never overwrites a
+/// file an earlier emit published. The copies become visible only with
+/// the outputs commit: a failed emit leaves the committed outputs and
+/// their files as they were, and two concurrent emits never pair one
+/// call's values with the other's bytes.
+fn emit_outputs(
+    contract_json: &Value,
+    session_dir: &Path,
+    cwd: &Path,
+    data: &Value,
+) -> anyhow::Result<Value> {
+    let contract = contract_from(Some(contract_json))?;
+    let mut outputs = outputs_from(data.get("outputs"), "factory.emit")?;
+    if outputs.is_empty() {
+        return Err(anyhow!(
+            "factory.emit needs at least one output, like emit(verdict=...)"
+        ));
+    }
+    let mut problems = contract.check(&outputs).err().unwrap_or_default();
+    // A file port names a file the child wrote. It must exist now, and
+    // downstream states read the copy, not the path of the child.
+    let emit_id = uuid::Uuid::new_v4().to_string();
+    let files_dir = session_dir.join(FACTORY_FILES_DIR);
+    let mut copies: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    for (port, value) in &outputs {
+        let is_file = contract
+            .slot(port)
+            .is_some_and(|slot| slot.ty == pa_factory::types::Type::File);
+        let Some(path) = value.as_str().filter(|_| is_file) else {
+            continue;
+        };
+        let source = cwd.join(path);
+        match std::fs::metadata(&source) {
+            Ok(meta) if meta.is_file() => {
+                let name = source
+                    .file_name()
+                    .map_or_else(|| port.clone().into(), ToOwned::to_owned);
+                let target = files_dir.join(port).join(&emit_id).join(name);
+                copies.push((port.clone(), source, target));
+            }
+            Ok(_) => problems.push(format!("{port}: {} is not a file", source.display())),
+            Err(error) => {
+                problems.push(format!("{port}: cannot read {}: {error}", source.display()));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return Err(anyhow!(problems.join("; ")));
+    }
+    let mut staged = StagedFiles {
+        dirs: Vec::new(),
+        committed: false,
+    };
+    for (port, source, target) in &copies {
+        let dir = files_dir.join(port).join(&emit_id);
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| anyhow!("{port}: cannot create {}: {error}", dir.display()))?;
+        staged.dirs.push(dir);
+        std::fs::copy(source, target)
+            .map_err(|error| anyhow!("{port}: cannot copy {}: {error}", source.display()))?;
+        outputs.insert(port.clone(), json!(target.display().to_string()));
+    }
+    let outputs_path = session_dir.join(FACTORY_OUTPUTS_FILE);
+    let lock = emit_lock(session_dir);
+    let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut merged: Map<String, Value> = match std::fs::read(&outputs_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            anyhow!(
+                "{FACTORY_OUTPUTS_FILE} is not readable; the ports accepted before were not \
+                 reset. Fix or move the file and emit again: {error}"
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(error) => return Err(anyhow!("cannot read {FACTORY_OUTPUTS_FILE}: {error}")),
+    };
+    // The copies this emit replaces: only a directory this function
+    // created (`<files>/<port>/<emit id>`) is ever removed.
+    let superseded: Vec<PathBuf> = copies
+        .iter()
+        .filter_map(|(port, ..)| {
+            let dir = Path::new(merged.get(port)?.as_str()?).parent()?;
+            (dir.parent() == Some(files_dir.join(port).as_path())).then(|| dir.to_path_buf())
+        })
+        .collect();
+    let accepted: Vec<String> = outputs.keys().cloned().collect();
+    merged.extend(outputs);
+    std::fs::create_dir_all(session_dir)?;
+    let staging = session_dir.join(format!("{FACTORY_OUTPUTS_FILE}.{emit_id}.tmp"));
+    std::fs::write(&staging, serde_json::to_vec_pretty(&merged)?)?;
+    crate::platform::rename_onto(&staging, &outputs_path)?;
+    staged.committed = true;
+    for dir in superseded {
+        // Best effort: the emit is committed and nothing references the
+        // old copy any more.
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Ok(json!({ "accepted": accepted, "missing": contract.missing(&merged) }))
 }
 
 // The unit battery lives in the child module (factory_host::tests).

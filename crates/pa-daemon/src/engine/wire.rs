@@ -284,6 +284,10 @@ pub struct RlmSessionIdentity {
     /// The create's runtime metadata carries a factory run tag: the
     /// session runs one factory state.
     pub factory_child: bool,
+    /// The factory state's output contract from the create's runtime
+    /// metadata (`factoryContract`): the child's `factory.emit` checks
+    /// against it.
+    pub factory_contract: Option<serde_json::Value>,
 }
 
 /// A created session's semantic-edge provenance (TS
