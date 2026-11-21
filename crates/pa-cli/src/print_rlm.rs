@@ -809,6 +809,10 @@ impl RlmSubagentHost for InlineHost {
                 semantic_parent_session_id: Some(node.session_id.clone()),
                 spawned_by_request_id: request.spawned_by_request_id.clone(),
                 factory_child: request.factory.is_some(),
+                factory_contract: request
+                    .factory
+                    .as_ref()
+                    .and_then(|factory| factory.contract.clone()),
             };
             let headless = crate::print_runtime::build_engine(
                 &recipe.options,

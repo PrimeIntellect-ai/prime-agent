@@ -474,6 +474,71 @@ fn print_inline_subagents_enforce_the_depth_limit() {
 /// The quiescence predicate reads the child's live session state (the
 /// queued follow-up row), so the run cannot exit while the row sits in
 /// the settled child's steering lane.
+/// A factory state's child in print mode: the spawn's run tag carries the
+/// state's output contract, so the inline child's `rlm.factory.emit`
+/// checks the value and writes the accepted outputs beside its session
+/// file, where the factory executor reads them.
+#[test]
+fn print_inline_factory_child_emits_through_its_contract() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let spawn = "from rlm import _spawn\n\
+        h = await _spawn(\"write the line\", name=\"emitter\", \
+        factory={\"runId\": \"run-1\", \"specId\": \"spec\", \"stateId\": \"plan\"}, \
+        factory_contract={\"outputs\": [{\"name\": \"line\", \"type\": \"text\"}], \"records\": {}, \"inputs\": {\"topic\": \"tides\"}})\n\
+        print(\"SPAWNED\", h.rlm_child_id)";
+    let emit = "inputs = await rlm.factory.inputs()\n\
+        receipt = await rlm.factory.emit(line=\"about \" + inputs[\"topic\"])\n\
+        await agent_message.send(f\"EMITTED {receipt['accepted']} {receipt['missing']}\", receiver_role=\"parent\")";
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython", "arguments": { "code": spawn } },
+            ] },
+            "PARENT DONE",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "emitter": { "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "ipython", "arguments": { "code": emit } },
+                ] },
+                "emitter finished",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(&["-p", "run the state"], &script, &kernel, &[]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+
+    let parent_file = lane.parent_session_file();
+    let parent_text = serde_json::to_string(&PrintLane::entries(&parent_file)).unwrap();
+    assert!(
+        parent_text.contains("EMITTED ['line'] []"),
+        "the child's emit was accepted: {parent_text}"
+    );
+    let parent_id = parent_file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap();
+    let artifacts = lane.agent_dir.join("session-artifacts").join(parent_id);
+    let child_dirs: Vec<PathBuf> = std::fs::read_dir(&artifacts)
+        .expect("the child's session dir exists")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("sub-"))
+        })
+        .collect();
+    assert_eq!(child_dirs.len(), 1, "one child session dir: {child_dirs:?}");
+    let outputs: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(child_dirs[0].join("factory-outputs.json")).expect("the outputs file"),
+    )
+    .unwrap();
+    assert_eq!(outputs, serde_json::json!({"line": "about tides"}));
+}
+
 #[test]
 fn print_inline_subagents_wait_for_a_retasked_child() {
     let lane = lane();
