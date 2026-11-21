@@ -1536,7 +1536,7 @@ mod tests {
     /// milestone; other custom rows stay unrouted.
     #[test]
     fn inbox_notice_fields_route_by_custom_type() {
-        let bash = KernelNotice::bash_completion(4321, "sleep 1", 7);
+        let bash = KernelNotice::bash_completion(4321, "sleep 1", 7, None);
         let fields = inbox_notice_fields(&bash).expect("the completion routes");
         assert_eq!(fields.class, INBOX_CLASS_BASH_DONE);
         assert_eq!(fields.sender.as_deref(), Some("sleep 1"));

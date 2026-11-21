@@ -634,11 +634,11 @@ impl Worker {
                     refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
                 );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
-                // for `bash.completed` and `factory.progress`): the handlers
-                // validate, the sinks admit/withdraw through the queue lanes.
-                // With the agent inbox enabled (default), the notice's message
-                // lands in the session's durable inbox and ONE short steering
-                // notice wakes instead of the full row.
+                // for `bash.completed`, `bash.waiting` and `factory.progress`):
+                // the handlers validate, the sinks admit/withdraw through the
+                // queue lanes. With the agent inbox enabled (default), the
+                // notice's message lands in the session's durable inbox and ONE
+                // short steering notice wakes instead of the full row.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
@@ -653,10 +653,10 @@ impl Worker {
                 let arrivals_for_consumed = std::sync::Arc::clone(&arrivals_for_sink);
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
-                        return;
+                        return false;
                     };
                     if engine.session_is_closed() {
-                        return;
+                        return false;
                     }
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
@@ -679,7 +679,7 @@ impl Worker {
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {
-                                return;
+                                return true;
                             }
                             // The store moved on between the capture and
                             // the identity-checked push (a replacement
@@ -693,7 +693,7 @@ impl Worker {
                         &notice_notify,
                         notice,
                         closed,
-                    );
+                    )
                 });
                 crate::agent_inbox::spawn_inbox_reminder(
                     std::sync::Arc::downgrade(concrete),
