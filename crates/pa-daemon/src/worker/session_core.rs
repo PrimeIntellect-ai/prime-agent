@@ -57,6 +57,10 @@ pub(crate) struct SessionCore {
     pub(crate) last_activity_ms: u64,
     /// `top-level` | `subagent` (summary `runtimeKind`).
     pub(crate) runtime_kind: String,
+    /// The Decision API child flag (create `decisionChild`, worker launch
+    /// env): summary `decisionChild`, so the agents view hides System 1
+    /// children from the user while costs still roll up.
+    pub(crate) decision_child: bool,
     /// The subagent runtime identity (create `runtimeMetadata`): the child id
     /// and the parent's ids, so the roster keys children `parentPath#childId`.
     pub(crate) rlm_child_id: Option<String>,
@@ -140,6 +144,7 @@ impl SessionCore {
             last_action_snapshot: Some(SessionActionSnapshot::default()),
             rlm_depth: 0,
             runtime_kind: "top-level".to_string(),
+            decision_child: false,
             rlm_child_id: None,
             parent_active_session_id: None,
             parent_session_id: None,

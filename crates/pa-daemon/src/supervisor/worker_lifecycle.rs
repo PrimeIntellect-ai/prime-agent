@@ -279,6 +279,10 @@ impl Supervisor {
             // The scripted-parent verification seam: a dropped key leaves
             // spawned children scriptless.
             "childScript",
+            // The decision-child flag (`rlm.spawn kind="decision"`): a
+            // dropped key respawns the decision child as a regular agent
+            // session.
+            "decisionChild",
             // The semantic-edge spawn anchor rides the durable create so a
             // respawned child keeps its provenance (its ledger
             // re-registers idempotently either way).
@@ -600,6 +604,7 @@ impl Supervisor {
             spawn_code: display.as_ref().and_then(|entry| entry.spawn_code.clone()),
             model: display.as_ref().and_then(|entry| entry.model.clone()),
             status: "deleted".to_string(),
+            decision_child: display.as_ref().is_some_and(|entry| entry.decision_child),
             created_at: display.as_ref().map_or(0, |entry| entry.created_at),
         };
         if let Err(error) = crate::rlm_ledger::write_rlm_subagent_display(&tombstone) {

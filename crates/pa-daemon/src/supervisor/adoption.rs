@@ -805,6 +805,11 @@ impl Supervisor {
                 .map(str::to_string),
             model: metadata.get("model").cloned(),
             status: "running".to_string(),
+            decision_child: config
+                .as_ref()
+                .and_then(|config| config.get("decisionChild"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             created_at: metadata
                 .get("createdAt")
                 .and_then(Value::as_u64)
