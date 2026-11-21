@@ -144,6 +144,48 @@ where
         return Err(aborted_error());
     }
     tokio::select! {
+        // A cancellation the caller requested wins over a result that became
+        // ready in the same poll: the abort branch is polled first, and the
+        // result branch re-checks the signal through `consume_unless_aborted`.
+        biased;
+        () = signal.aborted() => Err(aborted_error()),
+        value = operation => consume_unless_aborted(value, signal),
+    }
+}
+
+/// Consume an operation's result unless a cancellation is already requested.
+///
+/// The check reads the signal at the moment the result is consumed, not when
+/// the race started: a result that became ready in the same poll as the abort
+/// is not work the caller still wants, so it reports cancelled.
+fn consume_unless_aborted<T>(result: T, signal: &AbortSignal) -> anyhow::Result<T> {
+    if signal.is_aborted() {
+        Err(aborted_error())
+    } else {
+        Ok(result)
+    }
+}
+
+/// Race an operation against an abort signal, and keep a result that is ready.
+///
+/// The operation is polled first, and its result is not re-checked. Use this
+/// for work that is durable once it produces a result: a cancellation that
+/// arrives in the poll that makes the result does not replace the result.
+/// The operation must check the signal before it commits.
+///
+/// # Errors
+///
+/// Returns `AbortedError` if `signal` is already aborted, or if it aborts before `operation` completes.
+pub async fn race_keep_result<T, F>(operation: F, signal: &AbortSignal) -> anyhow::Result<T>
+where
+    F: Future<Output = T>,
+{
+    if signal.is_aborted() {
+        drop(operation);
+        return Err(aborted_error());
+    }
+    tokio::select! {
+        biased;
         value = operation => Ok(value),
         () = signal.aborted() => Err(aborted_error()),
     }
@@ -216,6 +258,84 @@ mod tests {
         let signal = AbortSignal::never();
         let value = race_with_abort(async { 7 }, &signal).await.unwrap();
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn race_keep_result_keeps_a_result_that_is_ready_with_the_abort() {
+        // The result and the abort both become ready before the second poll.
+        // The operation branch is polled first and is not re-checked, so the
+        // result stands even though the signal is aborted.
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut race = std::pin::pin!(race_keep_result(receiver, &signal));
+        let first = std::future::poll_fn(|cx| std::task::Poll::Ready(race.as_mut().poll(cx))).await;
+        assert!(first.is_pending());
+        sender.send(7).unwrap();
+        controller.abort();
+        assert_eq!(race.await.unwrap().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn race_keep_result_still_cancels_before_a_result() {
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let aborter = {
+            let controller = controller.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                controller.abort();
+            })
+        };
+        let error = race_keep_result(std::future::pending::<()>(), &signal)
+            .await
+            .unwrap_err();
+        aborter.await.unwrap();
+        assert!(is_abort_error(&error));
+    }
+
+    #[tokio::test]
+    async fn race_keep_result_short_circuits_a_pre_aborted_signal() {
+        let controller = AbortController::new();
+        controller.abort();
+        let error = race_keep_result(async { 7 }, &controller.signal())
+            .await
+            .unwrap_err();
+        assert!(is_abort_error(&error));
+    }
+
+    #[test]
+    fn a_completed_result_reports_cancelled_once_the_abort_is_requested() {
+        // The result was ready before the caller consumed it, and the abort
+        // was requested before the caller consumed it: the cancelled outcome
+        // wins. One call, no poll order involved, so the assertion is exact.
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        controller.abort();
+        let error = consume_unless_aborted(7, &signal).unwrap_err();
+        assert!(is_abort_error(&error));
+        // An un-aborted signal still delivers the result.
+        let live = AbortController::new();
+        assert_eq!(consume_unless_aborted(7, &live.signal()).unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn a_requested_abort_wins_over_a_result_ready_in_the_same_poll() {
+        // The operation requests the abort in the poll that makes its result,
+        // so the abort branch has not seen it. Only the re-check in the result
+        // branch reports cancelled, and poll order cannot change that, so one
+        // run is exact.
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let result = race_with_abort(
+            async {
+                controller.abort();
+                7
+            },
+            &signal,
+        )
+        .await;
+        assert!(is_abort_error(&result.unwrap_err()));
     }
 
     #[tokio::test]

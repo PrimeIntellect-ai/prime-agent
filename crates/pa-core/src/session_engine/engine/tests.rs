@@ -1036,3 +1036,138 @@ async fn a_fresh_session_reports_skill_problems_on_its_first_turn() {
         .collect();
     assert_eq!(rows, vec![(expected.content, true)]);
 }
+
+/// A kernel probe whose liveness read requests the caller's abort. The
+/// read runs after the compaction row commits, inside the poll that makes
+/// the compaction result.
+struct AbortInFinalPoll {
+    controller: pa_agent::abort::AbortController,
+}
+
+impl crate::session_engine::ipython_state::CompactionKernelProbe for AbortInFinalPoll {
+    fn has_running_kernel(&self) -> bool {
+        self.controller.abort();
+        true
+    }
+
+    fn prune_oversized_variables(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<String>>> + Send + '_>> {
+        Box::pin(async { None })
+    }
+
+    fn list_namespace_names(
+        &self,
+        _signal: Option<crate::kernel::cancellation::AbortSignal>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<String>>> + Send + '_>> {
+        Box::pin(async { Some(Vec::new()) })
+    }
+}
+
+fn compaction_turn(text: &str) -> pa_types::session::AgentMessage {
+    pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
+        content: pa_types::ai::UserContent::Text(text.to_string()),
+        timestamp: 0,
+        rest: pa_types::JsonMap::default(),
+    })
+}
+
+fn compaction_reply(text: &str) -> pa_types::session::AgentMessage {
+    pa_types::session::AgentMessage::Assistant(pa_ai::faux::faux_assistant_text_message(
+        text,
+        pa_ai::faux::FauxAssistantMessageOptions::default(),
+    ))
+}
+
+/// A model-requested compaction that commits, then sees the abort in the
+/// poll that returns its result, keeps that result. The result and the
+/// compaction row must both stand; reporting cancelled here skips the
+/// success event and the retry for work that is already durable.
+#[tokio::test]
+async fn a_committed_compaction_keeps_its_result_when_the_abort_lands_in_the_final_poll() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                id: "faux-abort-final-poll".to_string(),
+                name: Some("Faux abort final poll".to_string()),
+                reasoning: Some(false),
+                input: Some(vec![pa_types::ai::ModelInput::Text]),
+                cost: None,
+                context_window: Some(100_000),
+                max_tokens: Some(4_096),
+            }]),
+            ..Default::default()
+        });
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "## Goal\nkeep the committed compaction",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    let model = registration.get_model();
+    let agent_model = crate::session_engine::provider_adapter::json_round_trip(&model).unwrap();
+    let stream_fn = crate::session_engine::provider_adapter::real_stream_fn(None, model.clone());
+    let mut engine = create_session(SessionEngineConfig {
+        cwd,
+        agent_dir,
+        model: Some(agent_model),
+        stream_fn: Some(stream_fn),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    {
+        let mut session = engine.session.session.lock().await;
+        for index in 0..3 {
+            session
+                .append_message(compaction_turn(&format!("turn {index} with a few words")))
+                .unwrap();
+            session
+                .append_message(compaction_reply(&format!("reply {index}")))
+                .unwrap();
+        }
+    }
+    engine
+        .session
+        .set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+            keep_recent_tokens: 12,
+            ..Default::default()
+        });
+
+    let controller = pa_agent::abort::AbortController::new();
+    engine
+        .session
+        .set_kernel_state_probe(Some(Arc::new(AbortInFinalPoll {
+            controller: controller.clone(),
+        })));
+    engine.turn_boundary.schedule_compaction(None).await;
+
+    let outcome = engine
+        .consume_pending_compaction(&model, None, Some(&controller.signal()))
+        .await
+        .expect("the pending compaction is taken")
+        .expect("the committed compaction keeps its result");
+    assert!(matches!(
+        outcome,
+        crate::session_engine::compact_session::CompactOutcome::Ran(_)
+    ));
+    assert!(
+        controller.is_aborted(),
+        "the probe requested the abort after the commit"
+    );
+    assert!(
+        engine
+            .session
+            .entries()
+            .await
+            .iter()
+            .any(|entry| matches!(entry, crate::session_engine::FileEntry::Compaction { .. })),
+        "the compaction row is committed"
+    );
+}

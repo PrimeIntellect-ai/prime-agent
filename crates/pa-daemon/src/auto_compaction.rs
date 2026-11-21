@@ -101,7 +101,8 @@ impl AgentSessionEngine {
             return AutoCompactionRun::NotDue;
         };
         let outcome = {
-            // The abort race drops the summarizer request in flight; the
+            // The keep-result race drops the summarizer request in flight
+            // and keeps a result that is ready when the abort lands; the
             // signal also lands the pre-commit check inside the compaction.
             let compact = async {
                 engine
@@ -111,7 +112,7 @@ impl AgentSessionEngine {
             };
             let outcome = self
                 .runtime
-                .block_on(pa_agent::abort::race_with_abort(compact, &signal));
+                .block_on(pa_agent::abort::race_keep_result(compact, &signal));
             self.clear_auto_compaction_abort(&controller);
             outcome
         };

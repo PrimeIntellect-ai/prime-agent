@@ -411,8 +411,9 @@ impl SessionEngine {
         };
         Some(match abort {
             // The refinement is not raced — TS `abortCompaction` never
-            // aborts it.
-            Some(signal) => match pa_agent::abort::race_with_abort(compact, signal).await {
+            // aborts it. A result that is ready when the abort lands stands;
+            // `compact` checks the signal before the durable append.
+            Some(signal) => match pa_agent::abort::race_keep_result(compact, signal).await {
                 Ok(inner) => inner,
                 Err(error) => Err(error),
             },
