@@ -533,6 +533,42 @@ fn print_inline_factory_child_emits_through_its_contract() {
     assert_eq!(outputs, serde_json::json!({"line": "about tides"}));
 }
 
+/// A settled factory child's collect reports its task work idle: the inline
+/// settle already waits out background bash, so the executor need not pause
+/// the run as unverified. An ordinary child carries no task-activity flag.
+#[test]
+fn print_inline_collect_reports_a_settled_factory_child_idle() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let cell = "from rlm import _spawn\n\
+        f = await _spawn(\"finish the state\", name=\"stater\", \
+        factory={\"runId\": \"run-1\", \"specId\": \"spec\", \"stateId\": \"plan\"})\n\
+        p = await rlm.spawn(\"finish the task\", name=\"plain\")\n\
+        done = await rlm.collect([f, p], timeout_ms=60000)\n\
+        print(\"TASK_BUSY\", [(r.settled, r.factory_task_busy) for r in done])";
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython", "arguments": { "code": cell } },
+            ] },
+            "PARENT DONE",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "stater": { "responses": ["state finished"] },
+            "plain": { "responses": ["task finished"] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(&["-p", "collect the children"], &script, &kernel, &[]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let parent_text =
+        serde_json::to_string(&PrintLane::entries(&lane.parent_session_file())).unwrap();
+    assert!(
+        parent_text.contains("TASK_BUSY [(True, False), (True, None)]"),
+        "the settled factory child reads idle and the plain child carries no flag: {parent_text}"
+    );
+}
+
 /// A settled child re-tasked by its parent must keep the run open: the
 /// parent sends the follow-up, ends its turn, and the print run waits
 /// for the re-tasked child's second reply before the terminal answer.
