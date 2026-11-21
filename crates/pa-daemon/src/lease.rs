@@ -510,6 +510,16 @@ pub fn acquire_runtime_session_lease(
     session_path: &Path,
     agent_dir: &Path,
 ) -> Result<SessionLease> {
+    // The session file's directory exists BEFORE the canonicalization
+    // (a fresh agent dir's first create names a file whose parent does
+    // not): `canonical_session_path` falls back to the raw path when
+    // neither the file nor its parent resolves, and a raw-path lease
+    // under a symlinked sessions dir (macOS `/var`) then fails every
+    // later append's ownership check — the first session in a fresh
+    // agent dir silently persisted nothing.
+    if let Some(parent) = session_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let canonical = canonical_session_path(session_path);
     let root = agent_dir.join("session-leases");
     fs::create_dir_all(&root)?;
@@ -643,6 +653,39 @@ mod tests {
         drop(shared);
         let next = acquire_runtime_session_lease(&path, dir.path()).unwrap();
         assert_eq!(next.session_path, canonical_session_path(&path));
+    }
+
+    /// A fresh agent dir's FIRST lease keys the canonical path behind a
+    /// symlinked agent dir: the acquire creates the session file's
+    /// parent before canonicalizing (a fresh agent dir names a file
+    /// whose directory does not exist yet), so the lease identity and
+    /// every later append's ownership check agree on the RESOLVED path
+    /// — the raw path (with the symlinked prefix) would key the lease
+    /// and fail the first session's every append. The symlink is
+    /// explicit (never the platform's `/var`), so the pin discriminates
+    /// on every platform it runs (unix: a symlink needs no privilege).
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_agent_dirs_first_lease_keys_the_canonical_path_behind_a_symlink() {
+        let real = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let agent_dir = holder.path().join("agent");
+        std::os::unix::fs::symlink(real.path(), &agent_dir).expect("the symlink binds");
+        // The fresh agent dir: the sessions directory does not exist
+        // yet, and the session file never did.
+        let session_path = agent_dir.join("sessions").join("first.jsonl");
+        let lease = acquire_runtime_session_lease(&session_path, &agent_dir)
+            .expect("the first lease acquires");
+        // The session store creates the directory at its first append
+        // (after the lease): the canonicalization now resolves the
+        // symlink, and the lease's identity must already be that path.
+        std::fs::create_dir_all(session_path.parent().expect("the parent")).unwrap();
+        assert_eq!(
+            lease.session_path,
+            canonical_session_path(&session_path),
+            "the first lease keys the canonical path, never the raw symlinked one"
+        );
+        lease.release();
     }
 
     #[test]

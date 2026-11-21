@@ -438,6 +438,8 @@ async fn a_failed_print_run_still_drains_an_in_flight_refine() {
         offline: true,
         agents_view_requested: false,
         attach_agent: None,
+        a2a_host: None,
+        a2a_port: None,
     };
     let root_node =
         crate::print_rlm::root_node(&options, &SessionManager::in_memory(dir.path()), None);

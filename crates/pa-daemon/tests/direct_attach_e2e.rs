@@ -535,6 +535,117 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     }
 }
 
+/// The `agent_start` run-anchor attribution (the worker's delivery
+/// identity tags) must not leak to a session client on the DIRECT
+/// worker transport: the supervisor relay strips the members from its
+/// shared broadcast and the worker's own session-client fan-out strips
+/// them at the socket, so the frame a direct attach — the TUI's
+/// default upgrade — reads is the same bare TS frame the relayed
+/// observer reads. The A2A link alone consumes the tagged copy (it
+/// never uses the direct transport), so no plain session sees the
+/// Rust-only members.
+#[test]
+fn the_direct_link_reads_the_bare_agent_start() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let script_path = dir.path().join("script.json");
+    std::fs::write(
+        &script_path,
+        json!({ "responses": [ { "text": "turn-1", "delayMs": 300 } ] }).to_string(),
+    )
+    .expect("write script");
+    let _daemon = spawn_supervisor(&socket, &agent_dir);
+    wait_socket_ready(&socket);
+    let (mut client, _hello) = Client::connect(&socket);
+    client.send_command(
+        "create",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": script_path.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("create");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let identity = load_worker_identity(&agent_dir, &socket, &session_id);
+    // The supervisor-routed observer.
+    let (mut observer, _hello) = Client::connect(&socket);
+    observer.send_command(
+        "attach",
+        &json!({ "type": "attach", "activeSessionId": session_id, "clientId": "tui:4242" }),
+    );
+    let attached = observer.read_response("attach");
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+    // The direct-transport observer (the TUI's default upgrade).
+    let ticket = get_ticket(&mut client, &session_id);
+    let (mut worker, _hello) = WorkerClient::connect(&identity.socket_path);
+    let auth = peer_auth(&mut worker, &ticket);
+    assert_eq!(auth["success"], true, "peer auth failed: {auth}");
+    let attach = worker.request(
+        "attach",
+        &json!({
+            "type": "attach",
+            "activeSessionId": session_id,
+            "clientId": "e2e-direct-client",
+            "capabilities": ["attach_snapshot", "event_sequence", "slim_attach"],
+        }),
+    );
+    assert_eq!(attach["success"], true, "direct attach failed: {attach}");
+    // One admission-named prompt through the supervisor: its run's
+    // `agent_start` is the frame a tagged emission rides.
+    client.send(&json!({
+        "type": "command",
+        "id": "p1",
+        "protocol": { "name": "prime-agent.daemon", "version": 7 },
+        "clientId": "acp:777",
+        "command": {
+            "type": "prompt",
+            "activeSessionId": session_id,
+            "message": "first turn",
+            "admissionId": "e2e-admission-1",
+        },
+    }));
+    let prompted = client.read_response("p1");
+    assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
+    let relayed = loop {
+        let line = observer.read_line();
+        if line["type"] == "session_event" && line["event"]["type"] == "agent_start" {
+            break line["event"].clone();
+        }
+    };
+    let direct = loop {
+        let event = worker
+            .next_event(Duration::from_secs(10))
+            .expect("event on the direct socket");
+        if event["event"]["type"] == "agent_start" {
+            break event["event"].clone();
+        }
+    };
+    assert_eq!(
+        relayed,
+        json!({ "type": "agent_start" }),
+        "the relayed frame is the bare TS frame"
+    );
+    assert_eq!(
+        direct,
+        json!({ "type": "agent_start" }),
+        "the direct-transport frame is the same bare TS frame: {direct}"
+    );
+    client.send_command("sd", &json!({ "type": "shutdown" }));
+    let _ = client.read_response("sd");
+}
+
 #[test]
 fn unused_ticket_expires() {
     let dir = tempfile::TempDir::new().expect("temp dir");
