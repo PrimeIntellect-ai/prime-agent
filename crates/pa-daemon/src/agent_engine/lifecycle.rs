@@ -147,6 +147,7 @@ impl AgentSessionEngine {
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
             restored_model: std::sync::Mutex::new(None),
+            model_resolution_warning: std::sync::Mutex::default(),
             startup_scope: std::sync::Mutex::new(None),
             initial_selection: std::sync::RwLock::new(selection),
             effective_thinking: std::sync::RwLock::new(None),
