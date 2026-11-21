@@ -6030,7 +6030,9 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   it raises `FactoryEmitError` with the exact field
   (`verdict.decision: "ship" is not one of approve, rework`), and the
   child fixes the value and calls again. A `file` output takes a path, and
-  the file is copied beside the child's session. Each call sets the ports
+  the file is copied beside the child's session. A `file` must be a
+  top-level output: the loader refuses one inside a list or a record
+  field. Each call sets the ports
   it names. A child that ends without a required port fails its entry.
   `await rlm.factory.inputs()` gives the child its bound inputs and the
   params as values. A python state's returned dict goes through the same

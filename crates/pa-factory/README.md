@@ -44,7 +44,9 @@ rsi/
   max }`, and `resident`.
 
 Types: `text`, `int`, `float`, `bool`, `file`, `json`, `enum(a, b)`,
-`list[T]`, and record names.
+`list[T]`, and record names. A `file` output must be top-level: the loader
+refuses a `file` inside a list or a record field, because the emit copies
+only top-level file ports.
 
 Routing has two forms. `next` is unconditional. `route` switches on one
 enum or bool output, and every value needs a target. Any other condition is
