@@ -306,6 +306,19 @@ class ScanGuardTest(unittest.TestCase):
         self.assertTrue(is_scan('grep -rl "$HOME/a\\|$HOME/b" ~/Documents'))
         self.assertFalse(is_scan('echo "$HOME/\\$(x; find ~/Documents"'))
 
+    def test_options_end_at_double_dash_and_operands_are_not_options(self):
+        # Every option decision reads only real options: after `--` each
+        # token is a positional, an option's operand is not an option, and a
+        # bare `-` (stdin) is a positional.
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertFalse(is_scan('rg -- "$HOME" --files src/'))
+        self.assertFalse(is_scan('rg -g --files "$HOME/x" src/'))
+        self.assertFalse(is_scan('rg -- "$HOME" -e src/'))
+        self.assertFalse(is_scan("grep -- -r ~/Documents"))
+        self.assertTrue(is_scan("rg -- --max-depth 1 ~/Documents"))
+        self.assertTrue(is_scan("rg -e --max-depth 1 ~/Documents"))
+        self.assertTrue(is_scan("grep -r - ~/Documents"))
+
     def test_rg_value_options_do_not_displace_the_pattern(self):
         # rg's -r is --replace and takes a value, like -E/--encoding and the
         # long value options: the operand is skipped, so the quoted

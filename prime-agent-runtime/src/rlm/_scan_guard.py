@@ -36,23 +36,6 @@ def _is_home_scale_root(token: str) -> bool:
     return False
 
 
-def _is_rg_depth_bound(tokens: list[str]) -> bool:
-    """rg's --max-depth[=]N (or its --maxdepth alias) / -d N / -dN with a
-    numeric argument, also at the end of a short cluster (`-id2`, `-id 2`); a
-    bare token (the filename maxdepth.txt) never counts."""
-    for i, t in enumerate(tokens):
-        following = tokens[i + 1] if i + 1 < len(tokens) else ""
-        option, eq, value = t.partition("=")
-        if option in ("--max-depth", "--maxdepth"):
-            if (value if eq else following).isdigit():
-                return True
-        cluster = _short_cluster(t, _RG_VALUE_LETTERS)
-        if cluster is not None and cluster[-1] == "d":
-            if (t[len(cluster) + 1 :] or following).isdigit():
-                return True
-    return False
-
-
 def _is_find_depth_bound(tokens: list[str]) -> bool:
     """find's `-maxdepth N` with a numeric argument."""
     for i, t in enumerate(tokens):
@@ -548,64 +531,10 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         tokens = tokens[command_start:]
         if not tokens or tokens[0] == "timeout":
             continue
-        if tokens[0] in ("grep", "egrep", "fgrep"):
-            # Recursive classification is option tokens only: a pattern
-            # option's operand (`-e -error`: the pattern) is not an option,
-            # so it must not count as the `-r` flag.
-            recursive = False
-            skip_next = False
-            for t in tokens[1:]:
-                if skip_next:
-                    skip_next = False  # the operand of a pattern option
-                    continue
-                if t in ("-e", "--regexp", "-f", "--file"):
-                    skip_next = True
-                    continue
-                if t.startswith("--recursive"):
-                    recursive = True
-                    break
-                cluster = _short_cluster(t, _GREP_VALUE_LETTERS)
-                if cluster is None:
-                    continue
-                if cluster[-1] in _GREP_VALUE_LETTERS:
-                    # The value-taking letter ends the cluster: its operand is
-                    # attached (`-rlefoo`) or is the next token (`-rle foo`).
-                    # The letters before it are still flags.
-                    if "r" in cluster[:-1].lower():
-                        recursive = True
-                        break
-                    skip_next = len(t) == len(cluster) + 1
-                    continue
-                if "r" in cluster.lower():
-                    recursive = True
-                    break
-            if not recursive:
-                continue
-        elif tokens[0] not in ("rg", "find"):
-            continue
-        # Depth bounds are tool-specific: rg takes --max-depth/-d, find
-        # takes -maxdepth; the grep family has no depth option (a `-d2`
-        # after `-e` is the pattern, not a bound).
         rest = tokens[1:]
-        if tokens[0] == "rg":
-            if _is_rg_depth_bound(rest):
-                continue
-        elif tokens[0] == "find":
+        if tokens[0] == "find":
             if _is_find_depth_bound(rest):
                 continue
-        # grep-family and rg take their pattern as the first non-option
-        # argument — pattern text, not a scan root; a quoted pattern
-        # containing $HOME must not count as a home root (a masked pattern
-        # leaves a placeholder in its position). When the pattern came from
-        # a pattern option (-e/--regexp/-f/--file), every non-option
-        # argument is a root and none is skipped.
-        # A value-taking option's operand is skipped, so
-        # `grep -rl -m 1 "$HOME" src/` skips `1`, takes "$HOME" as the
-        # pattern, and leaves src/ the only root. rg's --files listing mode
-        # takes no pattern at all, so every positional is a path.
-        # Pattern options belong to grep-family and rg only: BSD find's
-        # `-f` supplies the hierarchy to walk, not a pattern file.
-        if tokens[0] == "find":
             # find's syntax is `find [path...] [expression]`: a `-`-led
             # token starts the expression, and everything after it (-exec
             # bodies, -newer operands, ...) is operands, not scan roots —
@@ -641,68 +570,66 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
             if not any(_is_home_scale_root(t) for t in root_tokens):
                 continue
             return True
-        takes_pattern_options = tokens[0] in ("grep", "egrep", "fgrep", "rg")
-        rg_files_mode = tokens[0] == "rg" and "--files" in rest
-        value_options = (
-            _RG_VALUE_OPTIONS if tokens[0] == "rg" else _GREP_VALUE_OPTIONS
-        )
-        value_letters = (
-            _RG_VALUE_LETTERS if tokens[0] == "rg" else _GREP_VALUE_LETTERS
-        )
-        # A value-taking short option supplies the pattern: `-ePAT` and
-        # `-fFILE` attach the operand, `-rle foo` and `-e foo` take the next
-        # token, and either way no positional argument is the pattern.
-        cluster_options: list[str] = []
-        for t in rest:
-            cluster = _short_cluster(t, value_letters)
-            if cluster is not None and cluster[-1] in value_letters:
-                cluster_options.append(cluster[-1])
-        pattern_from_option = takes_pattern_options and (
-            any(
-                t in ("-e", "--regexp", "-f", "--file")
-                or t.startswith(("--regexp=", "--file="))
-                for t in rest
-            )
-            or any(option in ("e", "f") for option in cluster_options)
-        )
-        root_tokens = []
+        if tokens[0] not in ("grep", "egrep", "fgrep", "rg"):
+            continue
+        is_rg = tokens[0] == "rg"
+        value_options = _RG_VALUE_OPTIONS if is_rg else _GREP_VALUE_OPTIONS
+        value_letters = _RG_VALUE_LETTERS if is_rg else _GREP_VALUE_LETTERS
+        # One walk makes every option decision. Options end at `--`, and an
+        # option's operand is not an option: `grep -e -r ~/x` is not
+        # recursive, and `rg -g --files` globs for `--files`. rg always
+        # recurses; the grep family needs -r, -R, or --recursive. Only rg
+        # has a depth bound (--max-depth, --maxdepth, or -d with a number).
+        recursive = is_rg
+        depth_bound = pattern_from_option = files_mode = False
+        positionals: list[str] = []
         skip_next = False
-        pattern_skipped = rg_files_mode or pattern_from_option
         seen_ddash = False
-        for t in rest:
+        for i, t in enumerate(rest):
             if skip_next:
-                skip_next = False  # the operand of a pattern option
+                skip_next = False  # an option's operand or a redirection target
                 continue
             if _is_redirect_operator(t):
                 skip_next = True  # its target is a file to write, not a root
                 continue
             if not seen_ddash and t == "--":
-                # `--` ends option parsing: the next positional is the
-                # pattern even when it starts with `-`.
                 seen_ddash = True
                 continue
-            if not seen_ddash and takes_pattern_options and t in value_options:
-                skip_next = True  # the option's operand, not the pattern
+            if seen_ddash or t == "-" or not t.startswith("-"):
+                positionals.append(t)
                 continue
-            if not seen_ddash and takes_pattern_options:
-                cluster = _short_cluster(t, value_letters)
-                if cluster is not None and cluster[-1] in value_letters:
-                    if len(t) > len(cluster) + 1:
-                        continue  # the operand rides the option's token
-                    skip_next = True  # the operand is the next token
-                    continue
-            if takes_pattern_options and t.startswith(("--regexp=", "--file=")):
+            following = rest[i + 1] if i + 1 < len(rest) else ""
+            if t.startswith("--"):
+                name, eq, value = t.partition("=")
+                recursive = recursive or t.startswith("--recursive")
+                pattern_from_option = pattern_from_option or name in ("--regexp", "--file")
+                files_mode = files_mode or (is_rg and t == "--files")
+                if is_rg and name in ("--max-depth", "--maxdepth"):
+                    depth_bound = depth_bound or (value if eq else following).isdigit()
+                skip_next = t in value_options
                 continue
-            if not pattern_skipped and tokens[0] in (
-                "grep",
-                "egrep",
-                "fgrep",
-                "rg",
-            ) and (seen_ddash or not t.startswith("-")):
-                pattern_skipped = True  # the positional pattern
-                continue
-            root_tokens.append(t)
-        if not any(_is_home_scale_root(t) for t in root_tokens):
+            # A short cluster's letters are flags up to its first value
+            # letter, which takes the rest of the token or, when nothing is
+            # attached, the next token (`-rlefoo`, `-rle foo`, `-id2`).
+            cluster = _short_cluster(t, value_letters)
+            value_letter = cluster[-1] if cluster[-1] in value_letters else ""
+            flags = cluster[:-1] if value_letter else cluster
+            recursive = recursive or "r" in flags.lower()
+            if value_letter:
+                attached = t[len(cluster) + 1 :]
+                pattern_from_option = pattern_from_option or value_letter in ("e", "f")
+                if is_rg and value_letter == "d":
+                    depth_bound = depth_bound or (attached or following).isdigit()
+                skip_next = not attached
+        if not recursive or depth_bound:
+            continue
+        # The first positional is the pattern — pattern text, not a scan
+        # root, so a quoted pattern containing $HOME never counts (a masked
+        # pattern leaves a placeholder in its place). With a pattern option
+        # (-e/--regexp/-f/--file) or rg's --files listing, which takes no
+        # pattern, every positional is a root.
+        roots = positionals if pattern_from_option or files_mode else positionals[1:]
+        if not any(_is_home_scale_root(t) for t in roots):
             continue
         return True
     return False
