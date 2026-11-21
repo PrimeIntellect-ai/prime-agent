@@ -199,8 +199,16 @@ impl NodeDocument {
             output_errors,
             output_errors_truncated: entry_flag("outputErrorsTruncated"),
             // A binding failure before any instance exists records its
-            // diagnostic on the entry, not on an instance.
-            error: text("error").or_else(|| entry_text("error")),
+            // diagnostic on the entry, not on an instance. Never borrow it
+            // for an existing instance: a foreach entry carries the failed
+            // sibling's error while its other instances stay healthy.
+            error: text("error").or_else(|| {
+                if instance.is_none() {
+                    entry_text("error")
+                } else {
+                    None
+                }
+            }),
         })
     }
 }
@@ -1011,6 +1019,17 @@ mod tests {
             text.contains("terminal_error_tail_marker"),
             "the error tail was clipped: {text}"
         );
+    }
+
+    #[test]
+    fn a_healthy_instance_does_not_borrow_the_entry_error() {
+        let reply = json!({
+            "state": {"instances": [{"entry": 0, "index": 1, "status": "done"}]},
+            "entry": {"index": 0, "status": "error", "error": "sibling 0 failed"},
+            "instance": {"entry": 0, "index": 1, "status": "done", "prompt": "healthy"},
+        });
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        assert_eq!(node.document.as_ref().unwrap().error, None);
     }
 
     #[test]
