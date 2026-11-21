@@ -524,8 +524,10 @@ pub const FACTORY_OUTPUTS_FILE: &str = "factory-outputs.json";
 pub const FACTORY_FILES_DIR: &str = "factory-files";
 
 /// Register `factory.check`: `{contract, outputs}` answers `{}` when every
-/// value fits, else one error naming every wrong field. It keeps no state,
-/// so every session has it.
+/// value fits, else one error naming every wrong field. A python state has
+/// no `factory.emit`, so a `file` port is refused: only an agent child's
+/// emit copies a file beside the session. It keeps no state, so every
+/// session has it.
 pub fn register_factory_check_host_handler(handlers: &mut HostRequestHandlers) {
     handlers.register(
         FACTORY_CHECK_REQUEST_TYPE,
@@ -537,6 +539,13 @@ pub fn register_factory_check_host_handler(handlers: &mut HostRequestHandlers) {
                 contract
                     .check(&outputs)
                     .map_err(|problems| anyhow!(problems.join("; ")))?;
+                if let Some((port, _)) = contract.outputs.iter().find(|(port, slot)| {
+                    slot.ty == pa_factory::types::Type::File && outputs.contains_key(port)
+                }) {
+                    return Err(anyhow!(
+                        "{port}: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"
+                    ));
+                }
                 Ok(json!({}))
             })
         }),

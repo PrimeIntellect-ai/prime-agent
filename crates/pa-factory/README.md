@@ -44,9 +44,10 @@ rsi/
   max }`, and `resident`.
 
 Types: `text`, `int`, `float`, `bool`, `file`, `json`, `enum(a, b)`,
-`list[T]`, and record names. A `file` output must be top-level: the loader
-refuses a `file` inside a list or a record field, because the emit copies
-only top-level file ports.
+`list[T]`, and record names. A `file` output must be top-level, and only an
+agent state can declare one: the loader refuses a `file` inside a list or a
+record field, and a `file` output on a python state, because the emit copies
+only top-level file ports and a python state has no emit.
 
 Routing has two forms. `next` is unconditional. `route` switches on one
 enum or bool output, and every value needs a target. Any other condition is

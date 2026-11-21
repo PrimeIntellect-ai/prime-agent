@@ -6036,7 +6036,8 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   it names. A child that ends without a required port fails its entry.
   `await rlm.factory.inputs()` gives the child its bound inputs and the
   params as values. A python state's returned dict goes through the same
-  check.
+  check. A python state cannot return a `file` output: only an agent
+  child's emit copies a file, so the loader refuses it.
 - Routing is `next` (a state, or a list to fan out) or `route`, a switch
   on one enum or bool output where every value needs a target. A state
   with `join = [...]` waits for every member, and each member names it in

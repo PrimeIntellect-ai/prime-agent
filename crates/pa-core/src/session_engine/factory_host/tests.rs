@@ -883,6 +883,24 @@ async fn a_wrong_typed_emit_names_the_exact_field() {
     assert_eq!(error.to_string(), expected);
 }
 
+/// A python state's outputs go through `factory.check`, which refuses a
+/// `file` port: only an agent child's `factory.emit` copies a file.
+#[tokio::test]
+async fn a_python_output_check_refuses_a_file_port() {
+    let fixture = EmitFixture::new();
+    let error = fixture
+        .request(
+            "factory.check",
+            json!({"contract": fixture.contract, "outputs": {"design": "DESIGN.md"}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "design: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"
+    );
+}
+
 /// One bad port refuses the whole emit: the valid port in the same call
 /// is not kept, no file is copied, and the ports accepted before stay
 /// exactly as they were.
