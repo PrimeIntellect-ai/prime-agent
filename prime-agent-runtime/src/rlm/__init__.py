@@ -824,8 +824,10 @@ class _RLMFactoryNamespace:
     and the API with worked examples): ``rlm.factory.help()``.
     """
 
-    async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
-        return await run_factory(spec_id, name=name)
+    async def run(
+        self, spec_id: str, *, name: str | None = None, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await run_factory(spec_id, name=name, params=params)
 
     async def status(self, run_id: str) -> dict[str, Any]:
         return await status_factory(run_id)

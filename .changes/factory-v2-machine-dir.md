@@ -1,0 +1,1 @@
+- Factory machines can be directories with a `machine.toml` graph, typed inputs and outputs, Markdown prompts, rubrics, and Python states. `prime-agent factory validate` checks a directory, `factory compile` prints its canonical spec, and `factory convert` converts a supported `MACHINE.md` machine.

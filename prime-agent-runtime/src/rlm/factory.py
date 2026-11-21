@@ -83,6 +83,7 @@ STATE_MAX_ENTRIES_DEFAULT = 1
 SUBAGENT_NAME_MAX_LENGTH = 64
 
 _NODE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+_PARAM_NAME_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 
 
 def _is_int(value: Any) -> bool:
@@ -296,6 +297,10 @@ def _validate_state_fields(
             and _is_nonempty_str(python.get("callable"))
         ):
             errors.append(f"{noun} {ref} python requires non-empty 'import' and 'callable' strings")
+        elif "path" in python and not (
+            _is_nonempty_str(python.get("path")) and os.path.isabs(python["path"])
+        ):
+            errors.append(f"{noun} {ref} python path must be an absolute directory when provided")
         if is_resident:
             errors.append(f"python {noun} {ref} cannot be resident")
         if "foreach" in state:
@@ -527,6 +532,15 @@ def validate_factory_machine(machine: Any) -> list[str]:
         errors.append("run must be an object")
         run = None
     run_budget = _validate_run_fields(run, errors)
+    params = machine.get("params")
+    param_names: set[str] = set()
+    if params is not None:
+        if isinstance(params, dict) and all(
+            isinstance(key, str) and _PARAM_NAME_PATTERN.fullmatch(key) for key in params
+        ):
+            param_names = set(params)
+        else:
+            errors.append("params must be an object keyed by lowercase identifiers")
 
     states = machine.get("states")
     if not isinstance(states, list):
@@ -565,6 +579,9 @@ def validate_factory_machine(machine: Any) -> list[str]:
         _validate_state_fields(
             state, run_budget=run_budget, states_by_id=states_by_id, noun="state", errors=errors
         )
+        for inp in state.get("inputs") or []:
+            if isinstance(inp, dict) and inp.get("name") in param_names:
+                errors.append(f"state {state_id} input {inp['name']!r} is also a param; rename the input")
         subagent = state.get("subagent")
         if isinstance(subagent, dict) and _is_nonempty_str(subagent.get("name")):
             configured_name = subagent["name"].strip()
@@ -898,7 +915,12 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
         if "when" in transition:
             transition_out["when"] = copy.deepcopy(transition["when"])
         transitions_out.append(transition_out)
-    return {"run": run, "states": states_out, "transitions": transitions_out}
+    canonical: dict[str, Any] = {"run": run}
+    if "params" in machine:
+        canonical["params"] = copy.deepcopy(machine["params"])
+    canonical["states"] = states_out
+    canonical["transitions"] = transitions_out
+    return canonical
 
 
 def canonicalize_factory_spec(spec: Any) -> dict[str, Any]:
@@ -1140,6 +1162,8 @@ PYTHON_STDERR_TAIL_CAP = 2000
 PYTHON_RUNNER = r"""
 import asyncio, importlib, inspect, json, os, sys
 sys.path.insert(0, os.getcwd())
+if len(sys.argv) > 3:
+    sys.path.insert(0, sys.argv[3])
 inputs = json.load(sys.stdin.buffer)
 result_stream = os.fdopen(os.dup(1), "w")
 os.dup2(2, 1)
@@ -1153,7 +1177,8 @@ result_stream.close()
 """The ``python -I -c`` program that runs one python state call: inputs
 arrive as JSON on stdin, everything the call prints (its own subprocesses
 included) goes to stderr, and the returned dict is the only thing written
-to stdout."""
+to stdout. A target's optional ``path`` (a machine directory's ``nodes/``)
+is searched before the working directory."""
 
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
@@ -1379,23 +1404,27 @@ def _parse_json_output(
     return None, error
 
 
-def _render_prompt(template: str, values: dict[str, str]) -> str:
-    """Render bound input values into a prompt template.
+def _render_prompt(
+    template: str, values: dict[str, str], params: "dict[str, str] | None" = None
+) -> str:
+    """Render bound input values (and the run's params) into a prompt template.
 
-    Each ``{input_name}`` placeholder is replaced in a single pass (a value
-    that itself looks like a placeholder is never re-substituted). Inputs
-    without a placeholder are appended in a trailing ``## Inputs`` section,
-    so no bound value is dropped.
+    Each ``{input_name}`` or ``{param_name}`` placeholder is replaced in a
+    single pass (a value that itself looks like a placeholder is never
+    re-substituted). Inputs without a placeholder are appended in a
+    trailing ``## Inputs`` section, so no bound value is dropped; a param
+    without one is simply not used by this prompt.
     """
-    if not values:
+    combined = {**(params or {}), **values}
+    if not combined:
         return template
-    pattern = re.compile("|".join(re.escape("{" + name + "}") for name in values))
+    pattern = re.compile("|".join(re.escape("{" + name + "}") for name in combined))
     used: set[str] = set()
 
     def _substitute(match: "re.Match[str]") -> str:
         name = match.group(0)[1:-1]
         used.add(name)
-        return values[name]
+        return combined[name]
 
     rendered = pattern.sub(_substitute, template)
     unplaced = [(name, value) for name, value in values.items() if name not in used]
@@ -1508,6 +1537,7 @@ class _PythonProcess:
                 stdin.seek(0)
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable, "-I", "-c", PYTHON_RUNNER, target["import"], target["callable"],
+                    *([target["path"]] if target.get("path") else []),
                     stdin=stdin, stdout=stdout, stderr=stderr,
                     cwd=os.getcwd(), env=env, start_new_session=True,
                 )
@@ -2974,10 +3004,17 @@ class FactoryExecutor:
                 items = value
                 continue
             bound[name] = value
+        params = run.machine.get("params") or {}
         if "python" in state.spec:
-            instance = _NodeInstance(index=state.instance_counter, prompt="", inputs=bound)
+            instance = _NodeInstance(
+                index=state.instance_counter, prompt="", inputs={**params, **bound}
+            )
             state.instance_counter += 1
             return [instance], None
+        rendered_params = {
+            name: value if isinstance(value, str) else json.dumps(value)
+            for name, value in params.items()
+        }
         # The prompt form of a bound value: json inputs as JSON text (a
         # missing optional one reads "null"), text inputs verbatim (a
         # missing optional one reads "None").
@@ -2988,7 +3025,10 @@ class FactoryExecutor:
         }
         if foreach is None:
             assert state.prompt_template is not None
-            instance = _NodeInstance(index=state.instance_counter, prompt=_render_prompt(state.prompt_template, values))
+            instance = _NodeInstance(
+                index=state.instance_counter,
+                prompt=_render_prompt(state.prompt_template, values, rendered_params),
+            )
             state.instance_counter += 1
             return [instance], None
         if items is None:
@@ -2999,7 +3039,11 @@ class FactoryExecutor:
             instances.append(
                 _NodeInstance(
                     index=state.instance_counter + len(instances),
-                    prompt=_render_prompt(state.prompt_template, {**values, foreach["over"]: instance_value}),
+                    prompt=_render_prompt(
+                        state.prompt_template,
+                        {**values, foreach["over"]: instance_value},
+                        rendered_params,
+                    ),
                 )
             )
         state.instance_counter += len(instances)
@@ -4208,19 +4252,52 @@ def default_factory_executor() -> FactoryExecutor:
     return _DEFAULT_EXECUTOR
 
 
-async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any]:
+async def run_factory(
+    spec_id: str, *, name: str | None = None, params: "dict[str, Any] | None" = None
+) -> dict[str, Any]:
     """Validate a factory spec and start a nonblocking run of it.
 
-    The argument names a stored factory entry (a runtime instance) first;
-    when no entry carries that id, it resolves a machine from the library
-    (repo directory first, user second) and runs the template directly:
-    ``await rlm.factory.run("review-sweep")`` starts the library machine
-    without creating a harness entry. Harness entries remain runtime
-    instances; machines are templates.
+    A path to a machine directory (``machine.toml``) runs that directory.
+    Otherwise the argument names a stored factory entry (a runtime
+    instance) first; when no entry carries that id, it resolves a machine
+    from the library (repo directory first, user second; within a level a
+    machine directory wins over a MACHINE.md of the same name) and runs the
+    template directly: ``await rlm.factory.run("review-sweep")`` starts the
+    library machine without creating a harness entry. Harness entries
+    remain runtime instances; machines are templates.
+
+    A machine directory is loaded, checked, and compiled by the session's
+    Rust loader (the ``factory.compile`` host request, the same one
+    ``prime-agent factory validate`` uses) with ``params`` bound; params
+    apply to machine directories only.
     """
     require_factory_enabled()
+    if params is not None and not isinstance(params, dict):
+        raise TypeError(f"params must be a dict, got {type(params).__name__}")
     executor = default_factory_executor()
     harness = executor._resolve_harness()
+    directory = _machine_dir_argument(spec_id)
+    if directory is None and harness.get("factory", spec_id) is None:
+        directory = _resolve_machine_dir(spec_id)
+    if directory is not None:
+        from . import host_request
+
+        compiled = await host_request(
+            "factory.compile", {"path": str(directory), "params": params or {}}
+        )
+        machine = MachineFile(
+            name=compiled["name"],
+            description=compiled["description"],
+            version=str(compiled["version"]),
+            author=compiled.get("author") or "",
+            spec=compiled["spec"],
+        )
+        return await executor.run_machine(machine, machine_path=directory, name=name)
+    if params:
+        raise ValueError(
+            f"params apply to machine directories (machine.toml); {spec_id!r} is a stored "
+            "factory entry or a MACHINE.md machine, which take none"
+        )
     if harness.get("factory", spec_id) is None:
         try:
             machine, path = resolve_machine(spec_id)
@@ -4529,6 +4606,10 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 MACHINE_FILE_NAME = "MACHINE.md"
+MACHINE_DIR_FILE_NAME = "machine.toml"
+"""The file that makes a directory a machine directory (the format
+``prime-agent factory validate`` checks; loaded by the session's Rust
+loader through the ``factory.compile`` host request)."""
 MACHINE_SPEC_FENCE = "machine-spec"
 MACHINES_DIR_NAME = "machines"
 MACHINE_NAME_MAX_LENGTH = 64
@@ -4993,6 +5074,46 @@ def list_machines(
     return _scan_machine_library(repo_dir=repo_dir, user_dir=user_dir)[0]
 
 
+def _machine_dir_argument(spec_id: str) -> "Path | None":
+    """The machine directory an explicit path names (``~/machines/rsi``,
+    ``./rsi``, an absolute path), or ``None`` for a plain name."""
+    if not (spec_id.startswith(("~", ".", "/")) or os.sep in spec_id):
+        return None
+    directory = Path(spec_id).expanduser().resolve()
+    if not (directory / MACHINE_DIR_FILE_NAME).is_file():
+        raise ValueError(f"{spec_id!r} is not a machine directory (no {MACHINE_DIR_FILE_NAME} in it)")
+    return directory
+
+
+def _resolve_machine_dir(
+    name: str,
+    *,
+    repo_dir: "str | Path | None" = None,
+    user_dir: "str | Path | None" = None,
+) -> "Path | None":
+    """The library machine directory carrying ``name``, if one claims it.
+
+    Levels resolve in order (repo, then user). Within a level a
+    ``<name>/machine.toml`` directory wins over ``<name>/MACHINE.md``; a
+    valid MACHINE.md machine at an earlier level keeps the name, the order
+    ``prime-agent factory list`` shows. The directory's own checks run in
+    the Rust loader, so a broken directory reports its exact errors when
+    run instead of falling through to another level.
+    """
+    if machine_name_errors(name):
+        return None
+    for _source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
+        candidate = directory / name
+        if (candidate / MACHINE_DIR_FILE_NAME).is_file():
+            return candidate
+        v1 = candidate / MACHINE_FILE_NAME
+        if v1.is_file():
+            machine, error = _read_library_machine(v1)
+            if not error and machine is not None and machine.name == name:
+                return None
+    return None
+
+
 class MachineResolutionError(ValueError):
     """One library lookup failure, with its kind.
 
@@ -5256,8 +5377,10 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
     ``{"ok": false, "errors": [...]}``. Every error surfaces as data, so
     the exact validator sentences reach the command's output verbatim.
     The payload carries only what the user typed (an op, a path, a name,
-    an out target); this process resolves every library directory itself,
-    so the kernel is the single resolution contract for list, import, and
+    an out target); ``read`` answers one MACHINE.md machine's fields and
+    spec for ``prime-agent factory convert``; this process resolves every
+    library directory itself, so the kernel is the single resolution
+    contract for list, import, and
     export alike — a fresh CLI process has no session state (stored
     entries, live runs), so export resolves the library only.
     """
@@ -5267,6 +5390,27 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
     if op == "list":
         machines, warnings = _scan_machine_library()
         return {"ok": True, "machines": machines, "warnings": warnings}
+    if op == "read":
+        path, name = payload.get("path"), payload.get("name")
+        try:
+            if isinstance(path, str) and path:
+                machine, error = _read_library_machine(Path(path).expanduser())
+                if error or machine is None:
+                    raise ValueError(error)
+            elif isinstance(name, str) and name:
+                machine, _path = resolve_machine(name)
+            else:
+                return {"ok": False, "errors": ["factory read requires a `path` or `name` string"]}
+        except (ValueError, OSError) as error:
+            return {"ok": False, "errors": [str(error)]}
+        return {
+            "ok": True,
+            "name": machine.name,
+            "description": machine.description,
+            "version": machine.version,
+            "author": machine.author,
+            "spec": machine.spec,
+        }
     if op == "import":
         if not isinstance(payload.get("path"), str) or not payload["path"]:
             return {"ok": False, "errors": ["factory import requires a `path` string"]}
@@ -5287,7 +5431,9 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
         return {"ok": True, **result}
     return {
         "ok": False,
-        "errors": [f"unknown factory cli op {op!r} (expected 'list', 'import' or 'export')"],
+        "errors": [
+            f"unknown factory cli op {op!r} (expected 'list', 'read', 'import' or 'export')"
+        ],
     }
 
 
@@ -5579,7 +5725,7 @@ data shaping — listing work items, filtering, reshaping one state's output
 for the next — where a child agent would only spend budget.
 
 - **Contract**: the executor calls `fn(inputs)` with a dict of the state's
-  declared inputs bound to raw values (a `text` input as a string, a `json`
+  declared inputs (plus the machine's params, when it has any) bound to raw values (a `text` input as a string, a `json`
   input as the parsed value, an optional input with no value as `None`;
   entry states with no declared inputs get `{}`). The function returns a
   dict whose keys are exactly the declared output names (a `text` output must be a string);
@@ -5705,6 +5851,58 @@ watched = await rlm.factory.watch(result["run_id"], 30)
 - The activity lane the daemon and TUI speak is camelCase on the wire
   (`runId`, `specId`, `timeoutMs`); the kernel API here
   (`rlm.factory.*`) is snake_case.
+
+## Machine directories
+
+A machine can also be a directory: `machine.toml` for the graph, Markdown
+prompts, TOML rubrics, and `nodes/*.py` for python states. Nothing in it is
+generated, so it shares as-is. `prime-agent factory validate <dir>` checks
+it (types, ports, routes, joins, reachability, prompt placeholders) with
+the same Rust loader a session uses; `prime-agent factory convert <name>
+--out <dir>` turns a MACHINE.md machine into one.
+
+```toml
+format = 1
+name = "review-loop"
+version = 1
+description = "Plan, judge, and route"
+
+[params]
+task = { type = "text" }          # given at start: run(..., params={"task": ...})
+
+[roles]
+judge = { model = "<provider>/<model>", thinking = "max" }
+
+[types.verdict]
+decision = "enum(approve, rework)"
+findings = "list[text]"
+
+[states.plan]
+entry = true
+agent = { prompt = "prompts/plan.md" }      # the prompt inserts {{task}}
+inputs = { verdict = "review.verdict?" }    # ? = optional
+outputs = { plan = "text" }
+max_entries = 3
+next = "review"
+
+[states.review]
+agent = { role = "judge", prompt = "prompts/review.md", rubric = "rubrics/quality.toml" }
+inputs = { plan = "plan.plan" }
+outputs = { verdict = "verdict" }
+route = { on = "verdict.decision", approve = "ship", rework = "plan" }
+```
+
+- Prompts insert params and inputs with `{{name}}`; `prompts/_context.md`
+  is prepended to every agent state. The loader appends a generated
+  Outputs section that spells out each port's type.
+- Routing is `next` (a state, or a list to fan out) or `route`, a switch
+  on one enum or bool output where every value needs a target. A state
+  with `join = [...]` waits for every member, and each member names it in
+  `next`. Any other condition is a python state that returns an enum.
+- A python state is `kind = "python"` with `run = "nodes/<file>.py:<fn>"`;
+  the function receives the declared inputs plus the params.
+- `await rlm.factory.run("<name or path>", params={...})` runs one; a
+  required param with no default must be given.
 
 ## Discovering machines
 

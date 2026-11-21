@@ -53,6 +53,19 @@ enum FactoryCommand {
         out: String,
         json: bool,
     },
+    Validate {
+        path: String,
+        json: bool,
+    },
+    Compile {
+        path: String,
+        params: Vec<String>,
+    },
+    Convert {
+        source: String,
+        out: String,
+        json: bool,
+    },
 }
 
 /// Parse the subcommand and its flags; `Err` carries a usage hint.
@@ -74,6 +87,7 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
     let mut json = false;
     let mut operands: Vec<String> = Vec::new();
     let mut out: Option<String> = None;
+    let mut params: Vec<String> = Vec::new();
     let mut rest = args[1..].iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -83,6 +97,12 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                     return Err("--out requires a file path".to_string());
                 };
                 out = Some(value.clone());
+            }
+            "--param" if subcommand == "compile" => {
+                let Some(value) = rest.next() else {
+                    return Err("--param requires name=value".to_string());
+                };
+                params.push(value.clone());
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option {other:?}"));
@@ -123,6 +143,33 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                 json,
             })
         }
+        "validate" => match operands.as_slice() {
+            [path] => Ok(FactoryCommand::Validate {
+                path: path.clone(),
+                json,
+            }),
+            _ => Err("Usage: prime-agent factory validate <dir> [--json]".to_string()),
+        },
+        "compile" => match operands.as_slice() {
+            [path] if !json => Ok(FactoryCommand::Compile {
+                path: path.clone(),
+                params,
+            }),
+            _ => {
+                Err("Usage: prime-agent factory compile <dir> [--param name=value]...".to_string())
+            }
+        },
+        "convert" => match (operands.as_slice(), out) {
+            ([source], Some(out)) => Ok(FactoryCommand::Convert {
+                source: source.clone(),
+                out,
+                json,
+            }),
+            _ => Err(
+                "Usage: prime-agent factory convert <MACHINE.md|name> --out <dir> [--json]"
+                    .to_string(),
+            ),
+        },
         _ => Err(String::new()),
     }
 }
@@ -146,6 +193,23 @@ pub fn run_factory_command(args: &[String]) -> i32 {
         FactoryCommand::List { json } => run_list(json),
         FactoryCommand::Import { path, json } => run_import(&path, json),
         FactoryCommand::Export { name, out, json } => run_export(&name, &out, json),
+        FactoryCommand::Validate { path, json } => {
+            crate::factory_dir_command::run_validate(&path, json)
+        }
+        FactoryCommand::Compile { path, params } => {
+            crate::factory_dir_command::run_compile(&path, &params)
+        }
+        FactoryCommand::Convert { source, out, json } => run_convert(&source, &out, json),
+    }
+}
+
+/// The `read` payload: a MACHINE.md path, or a library machine's name.
+fn read_payload(source: &str) -> Value {
+    let path = crate::config::expand_tilde_path(source);
+    if path.is_file() {
+        json!({"op": "read", "path": path.display().to_string()})
+    } else {
+        json!({"op": "read", "name": source})
     }
 }
 
@@ -161,6 +225,28 @@ fn import_payload(path: &std::path::Path) -> Value {
         "op": "import",
         "path": path.display().to_string(),
     })
+}
+
+/// `factory convert <MACHINE.md|name> --out <dir>`: the kernel reads and
+/// validates the v1 machine, then `pa-factory` writes it as a directory.
+fn run_convert(source: &str, out: &str, json: bool) -> i32 {
+    let payload = read_payload(source);
+    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
+        Ok(result) => {
+            if let Some(code) = print_dispatch_errors(&result) {
+                return code;
+            }
+            crate::factory_dir_command::run_convert(
+                &result,
+                &crate::config::expand_tilde_path(out),
+                json,
+            )
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            1
+        }
+    }
 }
 
 /// The `export` payload: the name and the out target the user chose.
@@ -429,6 +515,46 @@ mod tests {
                 out: "/tmp/s.MACHINE.md".to_string(),
                 json: true
             })
+        );
+    }
+
+    #[test]
+    fn parses_the_machine_directory_subcommands() {
+        assert_eq!(
+            parse_factory_command(&arg(&["validate", "~/machines/rsi", "--json"])),
+            Ok(FactoryCommand::Validate {
+                path: "~/machines/rsi".to_string(),
+                json: true
+            })
+        );
+        assert_eq!(
+            parse_factory_command(&arg(&[
+                "compile",
+                "rsi",
+                "--param",
+                "task=@task.md",
+                "--param",
+                "max_loc=300"
+            ])),
+            Ok(FactoryCommand::Compile {
+                path: "rsi".to_string(),
+                params: vec!["task=@task.md".to_string(), "max_loc=300".to_string()],
+            })
+        );
+        assert_eq!(
+            parse_factory_command(&arg(&["convert", "builder", "--out", "/tmp/builder"])),
+            Ok(FactoryCommand::Convert {
+                source: "builder".to_string(),
+                out: "/tmp/builder".to_string(),
+                json: false
+            })
+        );
+        assert!(parse_factory_command(&arg(&["convert", "builder"]))
+            .unwrap_err()
+            .starts_with("Usage: prime-agent factory convert"));
+        assert_eq!(
+            parse_factory_command(&arg(&["validate", "a", "--param", "x=1"])),
+            Err("unknown option \"--param\"".to_string())
         );
     }
 
