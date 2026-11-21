@@ -170,7 +170,9 @@ async fn drive_onboarding_pane(
         match drive.renderer {
             Renderer::Terminal { .. } => {
                 if let Some(renderer) = drive.renderer.is_terminal_mut() {
-                    if let Err(error) = crate::app::draw(renderer, view) {
+                    if let Err(error) =
+                        crate::app::draw(renderer, view, crate::app::ScrollbackFlush::Off)
+                    {
                         // A failed frame ends the pane: end a still-running login flow with it
                         // (the cooperative cancel reaches the blocking login body, so no path
                         // leaves a detached flow writing credentials).

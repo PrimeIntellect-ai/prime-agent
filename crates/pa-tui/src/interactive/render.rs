@@ -386,6 +386,9 @@ impl Renderer {
         let mut out = std::io::stdout();
         view.stream_flush_to(&mut out, width as usize, height as usize)?;
         out.flush()?;
+        // The flush just appended the transcript's rows onto the main screen: the settle
+        // delta must adopt them as written, or the next settle re-appends them.
+        view.rebase_transcript_delta_base(width as usize);
         Ok(())
     }
 
@@ -542,6 +545,6 @@ pub(crate) fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
 }
 
 /// The main-screen exit flush is on unless `PRIME_AGENT_TUI_EXIT_FLUSH=0` opts out.
-fn exit_flush_enabled() -> bool {
+pub(crate) fn exit_flush_enabled() -> bool {
     std::env::var_os("PRIME_AGENT_TUI_EXIT_FLUSH").is_none_or(|value| value != "0")
 }
