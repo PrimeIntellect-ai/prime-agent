@@ -14548,5 +14548,62 @@ class FactoryRunTombstoneTest(_ExecutorTestCase):
         self.assertFalse(_frame_has_lone_surrogate(record), "a lone surrogate rode the status answer")
 
 
+class FactoryPrintDurabilityTest(_ExecutorTestCase):
+    """A daemonless (``--print``) host keeps its children in its own process,
+    so ``resume`` refuses any run that process did not start and names the
+    daemon as the durable path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        artifact_temp = TemporaryDirectory()
+        self.addCleanup(artifact_temp.cleanup)
+        previous = {name: os.environ.get(name) for name in ("RLM_SESSION_DIR", "RLM_DAEMONLESS")}
+
+        def restore() -> None:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.addCleanup(restore)
+        os.environ["RLM_SESSION_DIR"] = str(artifact_temp.name)
+        os.environ["RLM_DAEMONLESS"] = "1"
+
+    async def paused_run(self) -> str:
+        self.host.outcomes["implement"] = {"status": "error", "error": "boom"}
+        self.store_machine({"states": [{"id": "implement", "entry": True, "subagent": "worker"}]})
+        run_id = (await self.start())["run_id"]
+        run = self.executor._runs[run_id]
+        await self.wait_until(lambda: run.state != "running")
+        self.assertEqual(run.state, "paused")
+        self.executor._persist_run(run, force=True)
+        return run_id
+
+    @async_test
+    async def test_resume_refuses_a_run_an_earlier_print_process_started(self) -> None:
+        run_id = await self.paused_run()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        for target in (run_id, "never-started"):
+            with self.assertRaises(ValueError) as raised:
+                await rlm_module.rlm.factory.resume(target)
+            self.assertIn("run machines under the daemon", str(raised.exception))
+        self.assertEqual(restarted._runs[run_id].state, "paused")
+
+    @async_test
+    async def test_resume_continues_a_run_this_print_process_started(self) -> None:
+        run_id = await self.paused_run()
+        resumed = await rlm_module.rlm.factory.resume(run_id)
+        self.assertEqual(resumed["state"], "running")
+
+    @async_test
+    async def test_daemon_resume_of_an_unknown_run_is_not_a_print_refusal(self) -> None:
+        os.environ["RLM_DAEMONLESS"] = ""
+        with self.assertRaisesRegex(ValueError, "unknown factory run 'never-started'"):
+            await rlm_module.rlm.factory.resume("never-started")
+
+
 if __name__ == "__main__":
     unittest.main()

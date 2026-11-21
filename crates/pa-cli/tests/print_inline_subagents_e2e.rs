@@ -569,6 +569,39 @@ fn print_inline_collect_reports_a_settled_factory_child_idle() {
     );
 }
 
+/// A print session's children live in its own process, so its factory runs
+/// end with it: resuming a run this process did not start refuses and names
+/// the daemon path.
+#[test]
+fn print_factory_resume_refuses_a_run_this_process_did_not_start() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    std::fs::write(
+        lane.agent_dir.join("settings.json"),
+        r#"{"factory": {"enabled": true}}"#,
+    )
+    .unwrap();
+    let cell = "try:\n    await rlm.factory.resume(\"run-from-an-earlier-process\")\n\
+        except ValueError as error:\n    print(\"REFUSED\", error)";
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython", "arguments": { "code": cell } },
+            ] },
+            "PARENT DONE",
+        ],
+        "repeatLastResponse": true,
+    });
+    let (stdout, stderr, code) = lane.run(&["-p", "resume the run"], &script, &kernel, &[]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let parent_text =
+        serde_json::to_string(&PrintLane::entries(&lane.parent_session_file())).unwrap();
+    assert!(
+        parent_text.contains("REFUSED") && parent_text.contains("run machines under the daemon"),
+        "the print host refuses the resume and names the daemon: {parent_text}"
+    );
+}
+
 /// A settled child re-tasked by its parent must keep the run open: the
 /// parent sends the follow-up, ends its turn, and the print run waits
 /// for the re-tasked child's second reply before the terminal answer.
