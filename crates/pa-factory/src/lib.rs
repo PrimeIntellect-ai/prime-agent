@@ -15,6 +15,7 @@ mod emit;
 mod graph;
 mod load;
 mod machine;
+pub mod run;
 pub mod types;
 
 pub use compile::compile;

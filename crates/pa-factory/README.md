@@ -54,6 +54,28 @@ enum or bool output, and every value needs a target. Any other condition is
 a python state that returns an enum. A `join` state waits for every member,
 and each member names it in `next`.
 
+## Run model
+
+The `run` module holds the rules of a live run. The executor owns the
+clock, the children, and the files; it gives the time to each call.
+
+- Status: `running`, `paused` (escalate, budget, `max_transitions`,
+  `max_children`), `stopping`, `done`, `failed`, `stopped`. Only a
+  `RunEvent` changes the status. An event that the status does not accept
+  returns an `IllegalTransition` and changes nothing.
+- Joins: a join fires when every member has a settle. Each combination of
+  member settles fires one time. A blocked fire (the target has no entries
+  left) consumes the combination. A `max_transitions` pause does not.
+- Run budget: active time is wall time less paused time. When active time
+  is more than `budget`, the next admission pauses the run one time.
+- Child budget: agent children count against `max_children`; python
+  states do not. The run pauses one time.
+- `max_transitions`: the next fire after the limit pauses the run one
+  time. The default is 10 for each state, up to 10,000.
+- State budget: the child's own run time, else the wall time, is measured
+  against the state's `budget`. A python call's time limit is the state's
+  budget, then the run's, then 60 s.
+
 ## Scope
 
 - Load a machine directory into [`Machine`] with every problem reported as
@@ -69,7 +91,8 @@ and each member names it in `next`.
 
 ## Non-goals
 
-- Running machines, spawning children, or reading sessions.
+- Spawning children, reading sessions, or reading a clock. The run model
+  decides; the executor acts.
 - Model catalog resolution: roles carry selectors; the session resolves
   them at spawn time.
 - Library resolution: callers decide which directories to load.
