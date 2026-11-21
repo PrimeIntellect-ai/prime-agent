@@ -7,6 +7,19 @@ use super::{
     AgentMessage, DaemonClientCapability, DaemonClientId, DaemonCommandId, DaemonProtocolInfo,
     DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
 };
+use std::time::Duration;
+
+/// The activity poll cadence: the interval the TUI fires its periodic
+/// refreshes at — the session's shells and factory refreshes, the
+/// agents view's activity counts, and the factory
+/// page's overview re-ask of the supervisor's `overview` action
+/// ([`DaemonCommand::FactoryActivity`]). The daemon's factory
+/// live-freshness bound is two of these windows — serving runs one
+/// read behind the cadence, the second window is the slack that keeps
+/// a healthy owner's rows live — so every poll, the daemon's bound,
+/// and the cadence tests read this one constant instead of matching
+/// copies.
+pub const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// One page of the display transcript (the branch in order, each compaction as its
 /// summary row), bounded by entry-id cursors.

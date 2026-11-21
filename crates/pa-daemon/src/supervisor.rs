@@ -6,6 +6,7 @@
 mod accept_loop;
 mod adoption;
 mod clients;
+mod factory_overview;
 mod launch_budget;
 mod notes;
 mod options;
@@ -54,6 +55,7 @@ pub(crate) use clients::client_command_payload;
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
 pub(crate) use routing::{
     client_route_timeout, ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS, WORKER_NOT_CONNECTED,
+    WORKER_READ_TIMED_OUT,
 };
 
 // Called only by the supervision sibling module and in-file tests; lib-target unused.
@@ -225,6 +227,21 @@ pub struct Supervisor {
     /// cleared by a landed `compaction_end`.
     pub(crate) compaction_journal:
         std::sync::Mutex<Option<crate::compaction_supervision::TerminalCompactionJournal>>,
+    /// The factory overview's live half: the last rows each resident
+    /// owner's kernel answered through the non-arming `peek` read, each
+    /// stamped with its read time, plus the live warnings that carry a
+    /// real read failure. The overview request SERVES this snapshot and
+    /// never awaits a kernel read; guarded per-owner background refreshes
+    /// update it, so one busy owner can neither stall the reply nor hold
+    /// another owner's refresh back — and rows older than two page poll
+    /// windows serve with the saved marker, never as unqualified live.
+    pub(crate) factory_live: std::sync::Mutex<factory_overview::FactoryLiveCache>,
+    /// The overview's durable-record cache: the last projection of every
+    /// record file the catalog scan read, keyed by path with the file's
+    /// last-seen modification time (`factory_overview` owns the scan's
+    /// use). Each scan prunes entries for records it no longer projects,
+    /// so the cache holds exactly the records the page still lists.
+    pub(crate) factory_records: std::sync::Arc<factory_overview::FactoryRecordsCache>,
 }
 
 impl Supervisor {
@@ -288,6 +305,8 @@ impl Supervisor {
             passive_scan_pending: std::sync::atomic::AtomicBool::new(false),
             passive_catalog_epoch: std::sync::atomic::AtomicU64::new(0),
             compaction_journal: std::sync::Mutex::new(None),
+            factory_live: std::sync::Mutex::new(factory_overview::FactoryLiveCache::default()),
+            factory_records: std::sync::Arc::new(factory_overview::FactoryRecordsCache::default()),
         })
     }
 
