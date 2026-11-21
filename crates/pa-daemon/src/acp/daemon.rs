@@ -286,6 +286,10 @@ pub(crate) struct HostedSession {
     /// The event mapping state lives and dies with the session, like TS.
     mapping: WireMappingState,
     observed_children: std::collections::HashSet<String>,
+    /// The injected steering messages by `messageId`, with their text. The
+    /// lock is held across a steering request, so one session's steering
+    /// requests run one at a time.
+    steering: Arc<Mutex<HashMap<String, String>>>,
 }
 
 struct ActiveTurn {
@@ -768,6 +772,25 @@ async fn cancel_order(params: &Value, state: &Arc<Mutex<DaemonAcpState>>) -> Can
     let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
         return CancelOrder::None;
     };
+    let steering = {
+        let guard = state.lock().await;
+        if guard.session_close_done.is_some() {
+            return CancelOrder::WaitForClose {
+                session_id: session_id.to_string(),
+            };
+        }
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| hosted.acp_session_id == session_id)
+            .map(|hosted| Arc::clone(&hosted.steering))
+    };
+    let Some(steering) = steering else {
+        return CancelOrder::None;
+    };
+    // Serialize cancel admission with steering. A cancel must not mark the
+    // turn between a steer's admission check and its worker receipt.
+    let _steering = steering.lock().await;
     let mut guard = state.lock().await;
     if guard.session_close_done.is_some() {
         return CancelOrder::WaitForClose {
@@ -1048,6 +1071,10 @@ async fn handle_incoming(
         "session/set_config_option" => {
             handle_set_config_option(id, params, link, state, tx).await;
         }
+        // The ACP SDKs send extension methods with a leading `_`.
+        "_session/steering" => {
+            handle_session_steering(id, params, link, state, tx).await;
+        }
         other => {
             let _ = tx.send(jsonrpc::error_response(
                 &id,
@@ -1202,6 +1229,7 @@ pub(crate) async fn admit_session(
         assistant_stop_reason: None,
         mapping: WireMappingState::default(),
         observed_children: std::collections::HashSet::new(),
+        steering: Arc::default(),
     };
     // The ACP MCP servers ride the wire command, not a local manager.
     let replace_skipped = resolved.is_empty() && state.lock().await.mcp_server_names.is_empty();
@@ -1486,30 +1514,165 @@ async fn handle_session_prompt(
     let _ = tx.send(reply);
 }
 
+/// `_session/steering`: hand the text to the running prompt turn through the
+/// worker's steering lane. The worker admits it only while that turn is busy
+/// (`requireBusy`, checked under the lock that enqueues), and the turn's
+/// final idle barrier drains the lane, so an injected message is consumed
+/// before the prompt answers; with no running turn nothing is delivered.
+async fn handle_session_steering(
+    id: Value,
+    params: Value,
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    tx: producer::FrameSink,
+) {
+    let request = match types::SteeringParams::parse(&params) {
+        Ok(request) => request,
+        Err(reason) => {
+            let _ = tx.send(invalid_params(&id, reason));
+            return;
+        }
+    };
+    let steering = state
+        .lock()
+        .await
+        .session
+        .as_ref()
+        .filter(|hosted| hosted.acp_session_id == request.session_id)
+        .map(|hosted| Arc::clone(&hosted.steering));
+    let Some(steering) = steering else {
+        let _ = tx.send(super::internal_error(
+            &id,
+            &format!("Unknown ACP session: {}", request.session_id),
+        ));
+        return;
+    };
+    let mut injected = steering.lock().await;
+    if let Some(text) = request
+        .message_id
+        .as_ref()
+        .and_then(|message_id| injected.get(message_id))
+    {
+        let reply = if *text == request.text {
+            jsonrpc::response(&id, &json!({ "outcome": "injected" }))
+        } else {
+            invalid_params(&id, "messageId was already used with different content")
+        };
+        let _ = tx.send(reply);
+        return;
+    }
+    let daemon_session_id = {
+        let guard = state.lock().await;
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| {
+                hosted.acp_session_id == request.session_id
+                    && guard.session_close_done.is_none()
+                    && hosted.turn.as_ref().is_some_and(|turn| !turn.cancelled)
+            })
+            .map(|hosted| hosted.daemon_active_session_id.clone())
+    };
+    let queued = match daemon_session_id {
+        None => false,
+        Some(daemon_session_id) => {
+            match steer_running_turn(link, daemon_session_id, &request.text).await {
+                Ok(queued) => queued,
+                Err(error) => {
+                    let _ = tx.send(super::internal_error(&id, &error.to_string()));
+                    return;
+                }
+            }
+        }
+    };
+    let receipt = if queued {
+        if let Some(message_id) = request.message_id {
+            injected.insert(message_id, request.text);
+        }
+        json!({ "outcome": "injected" })
+    } else {
+        json!({ "outcome": "promptRequired", "reason": "noRunningTurn" })
+    };
+    let _ = tx.send(jsonrpc::response(&id, &receipt));
+}
+
+/// Send one `steer` with `requireBusy`; `Ok(false)` when the worker had no
+/// running turn to take it.
+async fn steer_running_turn(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: String,
+    text: &str,
+) -> anyhow::Result<bool> {
+    let response = link
+        .request(DaemonCommand::Steer {
+            id: None,
+            active_session_id: daemon_session_id,
+            message: text.to_string(),
+            require_busy: Some(true),
+            input: pa_types::daemon::PromptInput {
+                content: None,
+                images: None,
+                streaming_behavior: None,
+                queue_if_busy: None,
+                expand_prompt_templates: None,
+                source: None,
+                agent_message_id: None,
+                custom_message: None,
+                queue_key: None,
+                prefix_messages: None,
+                admission_id: None,
+                rlm_notice_nonce: None,
+            },
+            rest: Map::default(),
+        })
+        .await?;
+    if !response.success {
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
+    }
+    Ok(response
+        .data
+        .and_then(|data| data.get("queued").and_then(Value::as_bool))
+        == Some(true))
+}
+
+fn invalid_params(id: &Value, reason: &str) -> Value {
+    jsonrpc::error_response(
+        id,
+        jsonrpc::INVALID_PARAMS,
+        "Invalid params",
+        Some(&json!({ "reason": reason })),
+    )
+}
+
 /// Release this prompt's turn slot, after its stop sequence if it was
 /// cancelled. A slot holding another prompt's turn (close + new while
 /// this prompt ran) is left alone.
 async fn release_turn_slot(state: &Arc<Mutex<DaemonAcpState>>, admission_id: &str) {
-    let mut cancel_task = {
-        let mut guard = state.lock().await;
-        let Some(hosted) = guard.session.as_mut() else {
+    let (mut cancel_task, steering) = {
+        let guard = state.lock().await;
+        let Some(hosted) = guard.session.as_ref().filter(|hosted| {
+            hosted
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.admission_id == admission_id)
+        }) else {
             return;
         };
-        let Some(turn) = hosted.turn.as_mut() else {
-            return;
-        };
-        if turn.admission_id != admission_id {
-            return;
-        }
-        hosted.cancel_task.clone()
+        (hosted.cancel_task.clone(), Arc::clone(&hosted.steering))
     };
     if let Some(cancel_task) = cancel_task.as_mut() {
         let _ = cancel_task.changed().await;
     }
-    if let Some(hosted) = state.lock().await.session.as_mut() {
+    let _steering = steering.lock().await;
+    if let Some(hosted) = state.lock().await.session.as_mut().filter(|hosted| {
         hosted
             .turn
-            .take_if(|turn| turn.admission_id == admission_id);
+            .as_ref()
+            .is_some_and(|turn| turn.admission_id == admission_id)
+    }) {
+        hosted.turn = None;
     }
 }
 
@@ -1537,12 +1700,7 @@ fn cancelled_response(id: &Value) -> Value {
 /// SDK validates the request schema; the Rust port validates the blocks it
 /// actually reads.
 fn prompt_block_error(id: &Value, error: &types::PromptBlockError) -> Value {
-    jsonrpc::error_response(
-        id,
-        jsonrpc::INVALID_PARAMS,
-        "Invalid params",
-        Some(&json!({ "reason": error.to_string() })),
-    )
+    invalid_params(id, &error.to_string())
 }
 
 /// Run one admitted prompt turn and return its reply frame.
@@ -1963,18 +2121,27 @@ async fn handle_session_close(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let cancel_task = {
+    let (cancel_task, steering) = {
         let guard = state.lock().await;
-        guard
+        let hosted = guard
             .session
             .as_ref()
-            .filter(|hosted| hosted.acp_session_id == session_id)
-            .and_then(|hosted| hosted.cancel_task.clone())
+            .filter(|hosted| hosted.acp_session_id == session_id);
+        (
+            hosted.and_then(|hosted| hosted.cancel_task.clone()),
+            hosted.map(|hosted| Arc::clone(&hosted.steering)),
+        )
     };
     if let Some(mut cancel_task) = cancel_task {
         let _ = cancel_task.changed().await;
     }
+    let Some(steering) = steering else {
+        state.lock().await.session_close_done = None;
+        let _ = close_done.send(true);
+        return;
+    };
     let (acp_session_id, daemon_session_id, config, producer, admission_id) = {
+        let _steering = steering.lock().await;
         let mut guard = state.lock().await;
         let Some(hosted) = guard
             .session
@@ -2135,6 +2302,7 @@ mod tests {
             assistant_stop_reason: None,
             mapping: WireMappingState::default(),
             observed_children: std::collections::HashSet::new(),
+            steering: Arc::default(),
         }
     }
 
@@ -2339,6 +2507,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn steering_reaches_only_a_running_turn_and_dedupes_by_message_id() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::clone(&pending),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let worker = tokio::spawn(async move {
+            let mut steers = Vec::new();
+            while let Some(line) = commands.recv().await {
+                let envelope: DaemonCommandEnvelope = serde_json::from_str(&line).unwrap();
+                let DaemonCommand::Steer {
+                    message,
+                    require_busy,
+                    ..
+                } = envelope.command
+                else {
+                    panic!("unexpected command: {:?}", envelope.command);
+                };
+                steers.push((message, require_busy));
+                let reply = pending.lock().unwrap().remove(&envelope.id).unwrap();
+                reply
+                    .send(DaemonResponse {
+                        id: Some(envelope.id),
+                        command: "steer".to_string(),
+                        success: true,
+                        data: Some(json!({ "queued": true })),
+                        error: None,
+                        error_info: None,
+                    })
+                    .unwrap();
+            }
+            steers
+        });
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let (tx, mut replies) = mpsc::unbounded_channel();
+        let mut steer = async |params: Value| {
+            handle_session_steering(json!(1), params, &link, &state, tx.clone()).await;
+            replies.recv().await.unwrap()
+        };
+        let params = |text: &str| {
+            json!({
+                "sessionId": "acp-1",
+                "prompt": [{ "type": "text", "text": text }, { "type": "text", "text": "two" }],
+                "messageId": "m1",
+                "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+            })
+        };
+
+        let idle = steer(params("one")).await;
+        assert_eq!(
+            idle["result"],
+            json!({ "outcome": "promptRequired", "reason": "noRunningTurn" })
+        );
+        state.lock().await.session.as_mut().unwrap().turn = Some(ActiveTurn {
+            admission_id: "prompt-admission:1".to_string(),
+            cancelled: false,
+        });
+        assert_eq!(
+            steer(params("one")).await["result"],
+            json!({ "outcome": "injected" })
+        );
+        assert_eq!(
+            steer(params("one")).await["result"],
+            json!({ "outcome": "injected" })
+        );
+        let conflict = steer(params("changed")).await;
+        assert_eq!(conflict["error"]["code"], jsonrpc::INVALID_PARAMS);
+        let empty = steer(json!({ "sessionId": "acp-1", "prompt": [] })).await;
+        assert_eq!(empty["error"]["code"], jsonrpc::INVALID_PARAMS);
+        let unknown =
+            steer(json!({ "sessionId": "nope", "prompt": [{ "type": "text", "text": "x" }] }))
+                .await;
+        assert_eq!(
+            unknown["error"]["data"]["details"],
+            "Unknown ACP session: nope"
+        );
+
+        drop(link);
+        assert_eq!(
+            worker.await.unwrap(),
+            vec![("one\ntwo".to_string(), Some(true))],
+            "only the first running-turn steer reaches the worker"
+        );
+    }
+
     #[test]
     fn arm_cancel_arms_a_running_turn_a_stop_retry_or_nothing() {
         let mut running = state(Some(hosted_session()));
@@ -2385,5 +2645,34 @@ mod tests {
             arm_cancel_locked("acp-1", &mut stopping),
             CancelOrder::None
         ));
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_while_steering_holds_its_gate() {
+        let mut initial = state(Some(hosted_session()));
+        initial.session.as_mut().unwrap().turn = Some(ActiveTurn {
+            admission_id: "prompt-admission:1".to_string(),
+            cancelled: false,
+        });
+        let state = Arc::new(Mutex::new(initial));
+        let steering = Arc::clone(&state.lock().await.session.as_ref().unwrap().steering);
+        let steer_in_progress = steering.lock().await;
+        let cancel = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { cancel_order(&json!({ "sessionId": "acp-1" }), &state).await }
+        });
+        tokio::task::yield_now().await;
+        let guard = state.lock().await;
+        let hosted = guard.session.as_ref().unwrap();
+        assert!(
+            !hosted.cancelling && !hosted.turn.as_ref().unwrap().cancelled,
+            "cancellation waits at the steering admission gate"
+        );
+        drop(guard);
+        drop(steer_in_progress);
+        let CancelOrder::Armed(stop) = cancel.await.unwrap() else {
+            panic!("the cancel starts after the steer settles");
+        };
+        assert_eq!(stop.admission_id.as_deref(), Some("prompt-admission:1"));
     }
 }

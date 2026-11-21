@@ -56,7 +56,7 @@ impl TurnRunner {
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
-                if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
+                if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     None
                 } else if core.steering.front().is_some() {

@@ -45,7 +45,7 @@ pub fn run_skills_command(args: &[String]) -> i32 {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let resources = match crate::prompt_command::load_session_resources(&cwd, &get_agent_dir()) {
-        Ok((resources, _generic_servers)) => resources,
+        Ok((_settings, resources, _generic_servers)) => resources,
         Err(error) => {
             eprintln!("Error: {error:#}");
             return 1;
