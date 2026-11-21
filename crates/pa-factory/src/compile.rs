@@ -214,11 +214,13 @@ fn compile_state(machine: &Machine, state: &State) -> Result<Value, Diagnostic> 
             .map(|output| json!({"name": output.name, "type": port_kind(&output.slot.ty)}))
             .collect();
         out.insert("outputs".to_string(), Value::Array(outputs));
-        out.insert(
-            "emit".to_string(),
-            Contract::for_outputs(machine, &state.outputs).to_json(),
-        );
     }
+    // Every state carries the contract, even with no outputs: its bound
+    // inputs still need `factory.inputs` in the child.
+    out.insert(
+        "emit".to_string(),
+        Contract::for_outputs(machine, &state.outputs).to_json(),
+    );
     for (key, value) in [
         ("max_entries", state.max_entries),
         ("retries", state.retries),
