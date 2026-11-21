@@ -713,6 +713,8 @@ impl ReplKernelManager {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<u64>,
+        instance: Option<u64>,
     ) -> anyhow::Result<Value> {
         if !self.is_running() {
             return Err(anyhow!("Kernel is not running"));
@@ -733,6 +735,8 @@ impl ReplKernelManager {
             "runId": run_id,
             "specId": spec_id,
             "timeoutMs": timeout_ms,
+            "entry": entry,
+            "instance": instance,
         });
         if let Err(error) = self.inner.write_line(&frame).await {
             lock(&self.inner.guarded)
