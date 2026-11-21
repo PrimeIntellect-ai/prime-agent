@@ -381,11 +381,12 @@ impl NodeView {
     /// Retire the request one delivery answered, when no newer fetch
     /// replaced it. A rebind can move the view to another session while a
     /// fetch is in flight, so that reply can never land; its epoch would
-    /// otherwise stay set and every later refresh would skip the view.
+    /// otherwise stay set and every later refresh would skip the view. The
+    /// requested selector stays: the retry must fetch the instance the
+    /// user opened, not the latest one.
     pub fn retire_request(&mut self, request_epoch: u64) {
         if self.request_epoch == Some(request_epoch) {
             self.request_epoch = None;
-            self.requested_selector = None;
         }
     }
 
@@ -1266,6 +1267,7 @@ mod tests {
         assert!(node.request_in_flight());
         node.retire_request(2);
         assert!(!node.request_in_flight());
-        assert_eq!(node.target().instance, None);
+        // The retry still asks for the instance the request named.
+        assert_eq!(node.target().instance, Some((0, 2)));
     }
 }
