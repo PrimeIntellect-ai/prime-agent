@@ -335,7 +335,7 @@ fn acp_initialize_matches_the_ts_golden() {
     assert_eq!(info["title"], "Prime Agent");
     assert_eq!(
         result["_meta"],
-        json!({ "ai.primeintellect.prime-agent": {} })
+        json!({ "ai.primeintellect.prime-agent": {}, "steering": { "supported": true } })
     );
 }
 
@@ -1461,7 +1461,7 @@ fn acp_daemon_attached_close_keeps_the_worker_and_new_rebinds_it() {
 }
 
 #[test]
-fn acp_daemon_attached_prompt_during_cancel_is_refused() {
+fn acp_daemon_attached_prompt_and_steering_during_cancel_are_refused() {
     // A prompt behind a cancel is refused while the stop runs, and the
     // cancelled response comes after the stop, so a resend right after it
     // runs.
@@ -1486,11 +1486,28 @@ fn acp_daemon_attached_prompt_during_cancel_is_refused() {
     );
     client.wait_update("agent_message_chunk", TIMEOUT);
     client.notify("session/cancel", &json!({ "sessionId": session_id }));
+    let steer = client.request(
+        "_session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "during the stop" }],
+        }),
+    );
     let second = client.request(
         "session/prompt",
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "behind the stop" }] }),
     );
-    let (second_response, _) = client.wait_response(second, TIMEOUT);
+    let (second_response, second_frames) = client.wait_response(second, TIMEOUT);
+    let steer_response = second_frames
+        .iter()
+        .find(|frame| frame["id"] == json!(steer))
+        .cloned()
+        .unwrap_or_else(|| client.wait_response(steer, TIMEOUT).0);
+    assert_eq!(
+        steer_response["result"],
+        json!({ "outcome": "promptRequired", "reason": "noRunningTurn" }),
+        "the steer cannot enter a turn whose cancel has begun: {steer_response}"
+    );
     assert_eq!(
         second_response["error"]["code"], -32603,
         "the prompt behind the cancel is refused: {second_response}"
@@ -1825,6 +1842,109 @@ fn acp_daemon_attached_image_only_prompt_reaches_the_session() {
             { "type": "text", "text": "" },
             { "type": "image", "data": png, "mimeType": "image/png" },
         ])
+    );
+}
+
+/// The verifiers `AgentRun.steer()` contract over the ACP SDK's extension
+/// method form (`_session/steering`): idle steering is refused without a
+/// turn, a steer during a running turn reaches the model inside that turn
+/// before the prompt answers, and a `messageId` retry delivers once.
+#[test]
+fn acp_steering_reaches_the_running_turn_before_the_prompt_answers() {
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to steer mid-turn" },
+            "STEERED-OK",
+        ] }),
+    );
+    let socket = client.socket.clone();
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let steering = |text: &str| {
+        json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": text }],
+            "messageId": "steer-1",
+            "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+        })
+    };
+    let no_turn = json!({ "outcome": "promptRequired", "reason": "noRunningTurn" });
+
+    let idle = client.request("_session/steering", &steering("too early"));
+    let (idle_response, _) = client.wait_response(idle, TIMEOUT);
+    assert_eq!(idle_response["result"], no_turn, "{idle_response}");
+
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    client.wait_update("agent_message_chunk", TIMEOUT);
+    let steer = client.request("_session/steering", &steering("STEER-NOTE"));
+    let (steer_response, before_receipt) = client.wait_response(steer, TIMEOUT);
+    assert_eq!(
+        steer_response["result"],
+        json!({ "outcome": "injected" }),
+        "{steer_response}"
+    );
+    assert!(
+        before_receipt
+            .iter()
+            .all(|frame| frame["id"] != json!(prompt)),
+        "the prompt answered before the steer was injected"
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_end_turn(&prompt_response);
+    assert!(
+        before_receipt.iter().chain(&updates).any(|update| {
+            update["params"]["update"]["content"] == json!({ "type": "text", "text": "STEERED-OK" })
+        }),
+        "the steered model call answers inside the prompt turn: {updates:?}"
+    );
+
+    let retry = client.request("_session/steering", &steering("STEER-NOTE"));
+    let (retry_response, _) = client.wait_response(retry, TIMEOUT);
+    assert_eq!(retry_response["result"], json!({ "outcome": "injected" }));
+    let conflict = client.request("_session/steering", &steering("other text"));
+    let (conflict_response, _) = client.wait_response(conflict, TIMEOUT);
+    assert_eq!(
+        conflict_response["error"]["code"], -32602,
+        "{conflict_response}"
+    );
+    let mut after = steering("after the turn");
+    after["messageId"] = json!("steer-2");
+    let after = client.request("_session/steering", &after);
+    let (after_response, _) = client.wait_response(after, TIMEOUT);
+    assert_eq!(after_response["result"], no_turn, "{after_response}");
+
+    let list = daemon_request(&socket, "steer-list", &json!({ "type": "list" }));
+    let active_session_id = &list["data"]["sessions"][0]["activeSessionId"];
+    let messages = daemon_request(
+        &socket,
+        "steer-msgs",
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+    );
+    let user_texts: Vec<&Value> = messages["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| &message["content"])
+        .collect();
+    assert_eq!(
+        user_texts.len(),
+        2,
+        "the prompt and one steer reached the model: {user_texts:?}"
+    );
+    assert!(
+        user_texts[1].to_string().contains("STEER-NOTE"),
+        "the steer is the second user message: {user_texts:?}"
     );
 }
 
