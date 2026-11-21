@@ -652,7 +652,7 @@ impl SessionUi {
             let open_machine = view
                 .library_view
                 .as_ref()
-                .and_then(|library| library.open_machine_name());
+                .and_then(crate::factory_view::LibraryView::open_machine_name);
             if let Some(name) = open_machine {
                 self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
                 self.spawn_library_graph_fetch(name);

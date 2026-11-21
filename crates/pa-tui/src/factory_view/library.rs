@@ -185,6 +185,7 @@ impl LibraryView {
         self.detail.as_ref().map(|detail| detail.name.clone())
     }
 
+    #[must_use]
     pub fn selected_machine(&self) -> Option<&LibraryMachine> {
         self.machines.get(self.selected)
     }
