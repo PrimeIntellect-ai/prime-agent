@@ -637,11 +637,12 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
 
 def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
     """Replace every $(...) or process-substitution <(...)/>(...) span
-    (paren-depth matched, quote-aware) and backtick span with a placeholder,
-    returning the parent text with bodies blanked plus the bodies themselves:
-    the bodies execute, so they are command text — but they are scanned
-    separately, so a quoted separator inside one must never split the parent
-    command."""
+    (paren-depth matched, quote-aware) and backtick span with placeholders,
+    returning the parent text plus the bodies themselves: the bodies execute,
+    so they are command text — but they are scanned separately, so a quoted
+    separator inside one must never split the parent command. The
+    placeholders are not whitespace, so a span stays in its word:
+    `"$HOME/$(x)/repo"` is one deep path, not the root `$HOME/`."""
 
     def _is_escaped(at: int) -> bool:
         # A backslash-escaped `\$(` or backtick is literal data, not a
@@ -692,11 +693,8 @@ def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
                 body = "".join(chars[i + 2 : j])
                 if body.strip():
                     bodies.append(body)
-                # Blank the whole span in the parent: the body is scanned
-                # on its own.
                 for k in range(i, j + 1):
-                    chars[k] = " "
-                chars[i] = _MASK_PLACEHOLDER
+                    chars[k] = _MASK_PLACEHOLDER
                 i = j
             else:
                 # An unmatched `$(` has no closing paren ahead: the suffix is
@@ -712,8 +710,7 @@ def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
                 if body.strip():
                     bodies.append(body)
                 for k in range(i, j + 1):
-                    chars[k] = " "
-                chars[i] = _MASK_PLACEHOLDER
+                    chars[k] = _MASK_PLACEHOLDER
                 i = j
         i += 1
     return "".join(chars), bodies

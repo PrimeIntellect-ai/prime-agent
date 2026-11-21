@@ -319,6 +319,14 @@ class ScanGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("rg -e --max-depth 1 ~/Documents"))
         self.assertTrue(is_scan("grep -r - ~/Documents"))
 
+    def test_substitution_inside_a_word_keeps_the_path_depth(self):
+        # A substitution's output joins its word, so the masked span must
+        # stay in that word: `"$HOME/$(x)/repo"` is a deep path.
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertFalse(is_scan('find "$HOME/$(printf work)/repo"'))
+        self.assertFalse(is_scan("find ~/`printf work`/repo"))
+        self.assertTrue(is_scan('find "$HOME/$(printf Documents)"'))
+
     def test_rg_value_options_do_not_displace_the_pattern(self):
         # rg's -r is --replace and takes a value, like -E/--encoding and the
         # long value options: the operand is skipped, so the quoted
