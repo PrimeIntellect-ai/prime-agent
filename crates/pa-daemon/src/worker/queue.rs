@@ -818,24 +818,31 @@ pub(crate) fn admit_kernel_notice(
     // The creator binding: the completion row's pid resolves against the
     // launch table (the launch-time observation), and the binding leaves
     // with its use — one entry per launch, consumed by its own notice.
-    let creator = row
+    let binding = row
         .details
         .as_ref()
         .and_then(|details| details.get("pid"))
         .and_then(Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok())
         .and_then(|pid| {
-            let creator = core_guard
+            let binding = core_guard
                 .kernel_bash_creators
                 .iter()
                 .position(|binding| binding.0 == pid)
-                .and_then(|index| core_guard.kernel_bash_creators.remove(index))
-                .map(|(_pid, creator, _scoped)| creator);
-            if creator.is_some() {
+                .and_then(|index| core_guard.kernel_bash_creators.remove(index));
+            if binding.is_some() {
                 core_guard.kernel_bash_activity.notify_waiters();
             }
-            creator
+            binding
         });
+    // The creating delivery's identity and the batch-isolation flag ride
+    // the notice: a delivery-scoped task's completion turn restamps its
+    // nested child spawns and background launches, so the task keeps its
+    // continuation chain.
+    let (creator, delivery_scoped) = match binding {
+        Some((_pid, creator, scoped)) => (Some(creator), scoped),
+        None => (None, false),
+    };
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
     } else {
@@ -860,7 +867,7 @@ pub(crate) fn admit_kernel_notice(
             // The producer's own provenance flag: busy or idle, the
             // row stays the session's kernel notice.
             kernel_notice: true,
-            delivery_scoped: false,
+            delivery_scoped,
         });
     }
     // The checkpoint re-locks the core (documented order: recovery lock
