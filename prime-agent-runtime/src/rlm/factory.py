@@ -5345,6 +5345,26 @@ def _machine_to_mermaid_lines(machine: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _mermaid_id_is_safe(node_id: str) -> bool:
+    """True when a dag node id can be written as a mermaid flowchart id.
+
+    Mermaid reserves keywords (lowercase ``end`` closes a subgraph, and
+    ``graph``/``subgraph``/``style``/``class`` begin statements) and reads
+    punctuation as syntax, so an id may be a perfectly valid dag id and
+    still produce unrenderable text."""
+    if not node_id or node_id.lower() in _MERMAID_RESERVED_WORDS:
+        return False
+    first = node_id[0]
+    if not (first.isalpha() or first == "_"):
+        return False
+    return all(character.isalnum() or character in "_-" for character in node_id)
+
+
+_MERMAID_RESERVED_WORDS = frozenset(
+    {"end", "graph", "flowchart", "subgraph", "style", "class", "classdef", "click", "linkstyle"}
+)
+
+
 def _dag_to_mermaid_lines(dag: dict[str, Any]) -> list[str]:
     """Dag form: a ``flowchart TB`` over the effective dependency edges.
 
@@ -5352,28 +5372,65 @@ def _dag_to_mermaid_lines(dag: dict[str, Any]) -> list[str]:
     annotation when the node declares a ``foreach``: ``foreach: over
     <input> (max N)``); every node's effective dependencies
     (``depends_on`` plus every ``inputs[].from`` source) render as one
-    edge each. Dag node ids are mermaid-flowchart-safe as written
-    (hyphens parse in flowchart ids), so no aliasing is needed here.
+    edge each. An id mermaid cannot read as an id (a keyword such as
+    ``end``, or punctuation) is aliased to a generated id and carries its
+    original spelling as the label.
     """
     nodes = dag.get("nodes") if isinstance(dag.get("nodes"), list) else []
     lines = ["flowchart TB"]
+    aliases: dict[str, str] = {}
+    taken = {node["id"] for node in nodes
+             if isinstance(node, dict) and isinstance(node.get("id"), str)}
+
+    def render_id(node_id: str) -> str:
+        if _mermaid_id_is_safe(node_id):
+            return node_id
+        if node_id not in aliases:
+            counter = len(aliases)
+            alias = f"m{counter}"
+            while alias in taken:
+                counter += 1
+                alias = f"m{counter}"
+            taken.add(alias)
+            aliases[node_id] = alias
+        return aliases[node_id]
+
+    def label_for(node: dict[str, Any], node_id: str) -> str:
+        text = _mermaid_label(node_id)
+        foreach = node.get("foreach")
+        if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
+            text += (f"<br/>foreach: over {_mermaid_label(foreach['over'])} "
+                     f"(max {foreach.get('max')})")
+        return text
+
     for node in nodes:
         if not isinstance(node, dict) or not isinstance(node.get("id"), str):
             continue
         node_id = node["id"]
+        rendered = render_id(node_id)
+        if rendered != node_id:
+            lines.append(f'    {rendered}["{label_for(node, node_id)}"]')
+            continue
         foreach = node.get("foreach")
         if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
             lines.append(
-                f'    {node_id}["{node_id}<br/>foreach: over '
+                f'    {rendered}["{node_id}<br/>foreach: over '
                 f'{_mermaid_label(foreach["over"])} (max {foreach.get("max")})"]'
             )
         else:
-            lines.append(f"    {node_id}")
+            lines.append(f"    {rendered}")
+    declared: set[str] = set()
     for node in nodes:
         if not isinstance(node, dict) or not isinstance(node.get("id"), str):
             continue
+        target = render_id(node["id"])
+        declared.add(target)
         for dependency in _effective_dag_edges(node):
-            lines.append(f"    {dependency} --> {node['id']}")
+            source = render_id(dependency)
+            if source != dependency and source not in declared:
+                declared.add(source)
+                lines.insert(1, f'    {source}["{_mermaid_label(dependency)}"]')
+            lines.append(f"    {source} --> {target}")
     return lines
 
 
