@@ -667,13 +667,14 @@ impl Worker {
                 let launch_core = Arc::clone(&core);
                 concrete.set_kernel_bash_launch_observer(std::sync::Arc::new(move |pid| {
                     let mut core = launch_core.lock().unwrap();
+                    let delivery_scoped = core.running_delivery_scoped;
                     let creator = core
                         .running_client_admissions
                         .first()
                         .cloned()
                         .or_else(|| core.running_wire_admissions.first().cloned());
                     if let Some(creator) = creator {
-                        record_kernel_bash_creator(&mut core, pid, creator);
+                        record_kernel_bash_creator(&mut core, pid, creator, delivery_scoped);
                     }
                 }));
                 // The binding's other half: a handle whose activity
@@ -774,7 +775,32 @@ impl Worker {
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
                     let closed = || engine.session_is_closed();
-                    if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
+                    // A delivery-scoped launch's completion keeps the
+                    // delivery's own route: its notice turn is the waiting
+                    // task's continuation, and the inbox's shared arrival
+                    // row would carry no delivery identity. Every other
+                    // notice keeps main's inbox routing.
+                    let scoped_notice = {
+                        let pid = notice
+                            .row
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("pid"))
+                            .and_then(Value::as_u64)
+                            .and_then(|pid| u32::try_from(pid).ok());
+                        match pid {
+                            Some(pid) => {
+                                let core = notice_core.lock().unwrap();
+                                core.kernel_bash_creators
+                                    .iter()
+                                    .any(|(bound, _, scoped)| *bound == pid && *scoped)
+                            }
+                            None => false,
+                        }
+                    };
+                    if !scoped_notice
+                        && crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir)
+                    {
                         if let (Some(inbox), Some(fields)) = (
                             engine.inbox(),
                             pa_core::session_engine::inbox::inbox_notice_fields(&notice),
@@ -1453,16 +1479,24 @@ pub(crate) const MAX_KERNEL_BASH_CREATORS: usize = 256;
 
 /// Bind one kernel `bash()` launch to the delivery whose turn ran: the
 /// completion notice names only the pid, and it arrives long after the
-/// creating turn. The activity-end observation below drops the binding
-/// of a handle whose result the kernel consumed in-cell (no notice
-/// will ever name it), so the table tracks live launches, not every
-/// launch ever made.
-fn record_kernel_bash_creator(core: &mut SessionCore, pid: u32, creator: String) {
+/// creating turn. The scoped flag keeps a delivery-scoped launch's
+/// completion on the delivery's own route (the inbox's shared arrival
+/// row carries no delivery identity). The activity-end observation
+/// below drops the binding of a handle whose result the kernel consumed
+/// in-cell (no notice will ever name it), so the table tracks live
+/// launches, not every launch ever made.
+fn record_kernel_bash_creator(
+    core: &mut SessionCore,
+    pid: u32,
+    creator: String,
+    delivery_scoped: bool,
+) {
     core.kernel_bash_creators.retain(|binding| binding.0 != pid);
     if core.kernel_bash_creators.len() >= MAX_KERNEL_BASH_CREATORS {
         core.kernel_bash_creators.pop_front();
     }
-    core.kernel_bash_creators.push_back((pid, creator));
+    core.kernel_bash_creators
+        .push_back((pid, creator, delivery_scoped));
 }
 
 /// Whether one parked item is a CLIENT'S OWN delivery — a plain prompt,

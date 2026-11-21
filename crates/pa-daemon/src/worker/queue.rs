@@ -831,7 +831,7 @@ pub(crate) fn admit_kernel_notice(
                 .iter()
                 .position(|binding| binding.0 == pid)
                 .and_then(|index| core_guard.kernel_bash_creators.remove(index))
-                .map(|(_pid, creator)| creator);
+                .map(|(_pid, creator, _scoped)| creator);
             if creator.is_some() {
                 core_guard.kernel_bash_activity.notify_waiters();
             }

@@ -739,7 +739,7 @@ impl Worker {
                         std::sync::Arc::clone(&core.kernel_bash_activity),
                         core.kernel_bash_creators
                             .iter()
-                            .any(|(_, creator)| creator == admission),
+                            .any(|(_, creator, _)| creator == admission),
                     )
                 };
                 if holds {
@@ -750,7 +750,7 @@ impl Worker {
                         let core = self.core.lock().unwrap();
                         core.kernel_bash_creators
                             .iter()
-                            .any(|(_, creator)| creator == admission)
+                            .any(|(_, creator, _)| creator == admission)
                     };
                     if still_holds {
                         settled_bash.await;
