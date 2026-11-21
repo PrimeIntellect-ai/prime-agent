@@ -203,12 +203,15 @@ fn decode_label(text: &str) -> String {
                 _ => None,
             }
         };
-        match decoded {
-            Some(ch) if ch.is_control() => out.push(' '),
-            Some(ch) => out.push(ch),
-            None => out.push_str(&rest[at..=at + end]),
+        if let Some(ch) = decoded {
+            out.push(if ch.is_control() { ' ' } else { ch });
+            rest = &rest[at + end + 1..];
+        } else {
+            // Not an entity: keep the hash and rescan from the next
+            // character, so an ordinary hash never eats a later entity.
+            out.push('#');
+            rest = &rest[at + 1..];
         }
-        rest = &rest[at + end + 1..];
     }
     out.push_str(rest);
     out
@@ -660,5 +663,15 @@ A["before --> after"] -->|then --> continue| B(["Review --> now"]) --> C[finish 
         // A control entity decodes to a space, never to a control character.
         assert_eq!(transitions[1].when.as_deref(), Some("note here"));
         assert_eq!(transitions[2].when.as_deref(), Some("\"quoted\""));
+    }
+
+    #[test]
+    fn an_ordinary_hash_never_eats_a_later_entity() {
+        let super::Mermaid::Diagram { transitions, .. } =
+            parse_mermaid("stateDiagram-v2\na --> b: Issue #123: #quot;yes#quot;\n").unwrap()
+        else {
+            panic!("expected diagram")
+        };
+        assert_eq!(transitions[0].when.as_deref(), Some("Issue #123: \"yes\""));
     }
 }
