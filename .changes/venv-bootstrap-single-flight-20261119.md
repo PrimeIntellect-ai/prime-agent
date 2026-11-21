@@ -1,0 +1,1 @@
+- Fixed concurrent kernel setup deleting the live Python environment during a rebuild, which made running sessions fail with a missing interpreter; a rebuild now builds beside the live environment and swaps it in when complete, and one process builds while the others wait for its result.
