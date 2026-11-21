@@ -75,6 +75,16 @@ clock, the children, and the files; it gives the time to each call.
 - State budget: the child's own run time, else the wall time, is measured
   against the state's `budget`. A python call's time limit is the state's
   budget, then the run's, then 60 s.
+- Owner: a run has one owner session (`OwnedRun`). All sessions can read
+  the run. Only the owner can change it; another session gets
+  `OwnershipError::NotOwner` with the owner's name. When the owner ends,
+  the executor calls `abandon`. The run is then `Abandoned` and claimable
+  until a session calls `take_over`. A takeover cannot remove a live
+  owner.
+- Quiescence: an entry settles only when every child it admitted settled
+  and the executor committed its result (outputs or failure). No clock
+  settles an entry. A run is quiescent when no settle waits for
+  evaluation and every entry settled.
 
 ## Scope
 
