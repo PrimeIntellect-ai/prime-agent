@@ -1,5 +1,5 @@
-//! The rules a live run follows: its status, its joins, its budgets, and
-//! its transitions.
+//! The rules a live run follows: its status, its joins, its budgets, its
+//! transitions, its owner, and its quiescence.
 //!
 //! The executor owns the clock, the children, and the files. This module
 //! owns the decisions. Each call that reads time takes it from the caller
@@ -9,6 +9,8 @@
 
 mod budget;
 mod join;
+mod ownership;
+mod quiescence;
 mod status;
 mod transitions;
 
@@ -19,6 +21,10 @@ use serde_json::Value;
 use budget::RunClock;
 pub use budget::{python_time_limit_ms, state_budget_overrun, PYTHON_TIME_LIMIT_MS_DEFAULT};
 pub use join::{JoinClaim, JoinOutcome, SourceProgress};
+pub use ownership::{OwnedRun, Ownership, OwnershipError};
+pub use quiescence::{
+    run_quiescent, EntryPhase, EntryResult, EntrySettlement, IllegalSettle, SettleEvent,
+};
 pub use status::{IllegalTransition, PauseReason, RunEvent, RunStatus};
 pub use transitions::{Guard, Sources, SpecError, Transition, TransitionIndex};
 
