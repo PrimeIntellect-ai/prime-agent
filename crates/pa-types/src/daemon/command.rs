@@ -606,7 +606,13 @@ pub enum DaemonCommand {
         rest: JsonMap,
     },
     /// The `/factory` view's bridge lane over the session kernel's factory
-    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
+    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`, and the
+    /// arming-free `peek` the all-session overview's live reads ride),
+    /// plus the supervisor-owned read-only `overview` action: every
+    /// daemon-known session's active runs, assembled by the supervisor
+    /// (the live halves through each owner kernel's non-arming `peek`,
+    /// the saved halves from the durable run records), never forwarded
+    /// to a kernel as `overview`.
     /// Rust-native extension, advertised by the `factory_activity` capability.
     FactoryActivity {
         #[serde(default, skip_serializing_if = "Option::is_none")]
