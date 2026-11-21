@@ -1022,6 +1022,21 @@ mod tests {
     }
 
     #[test]
+    fn node_fetch_errors_render_without_terminal_controls() {
+        let mut node = NodeView::loading("run", "worker");
+        node.set_error("fetch failed\u{1b}]52;c;ZXZpbA==\u{7}");
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .render(&theme, 80, &KeybindingsManager::new(), 12)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("Error: fetch failed"), "{text:?}");
+        assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
+    }
+
+    #[test]
     fn a_healthy_instance_does_not_borrow_the_entry_error() {
         let reply = json!({
             "state": {"instances": [{"entry": 0, "index": 1, "status": "done"}]},
