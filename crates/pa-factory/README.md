@@ -47,8 +47,8 @@ rsi/
   max }`, and `resident`.
 
 Paths: each file that the machine names (a prompt, a rubric, a node, an
-asset) must be a relative path inside the machine directory. A `.` or `..`
-part is an error. A symlink whose target is outside the directory is an
+asset) must be a relative path inside the machine directory. An empty,
+`.`, or `..` part is an error. A symlink whose target is outside the directory is an
 error. Both errors name the path and the machine directory; the symlink
 error also names the target. An asset input is a `text` input. A missing
 asset is a load error, so `factory validate` and `factory compile` report

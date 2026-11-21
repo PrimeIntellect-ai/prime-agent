@@ -200,15 +200,51 @@ def _effective_output_types(state: dict[str, Any]) -> dict[str, str]:
 
 
 def _input_sources(node: dict[str, Any]) -> list[str]:
-    """Source node ids referenced by the node's inputs."""
+    """Source node ids referenced by the node's inputs (an asset input
+    names a file, not a node)."""
     sources: list[str] = []
     for inp in _port_list(node, "inputs"):
         if not isinstance(inp, dict):
             continue
         source = inp.get("from")
-        if isinstance(source, str) and "." in source:
+        if isinstance(source, str) and "." in source and not _is_asset_reference(source):
             sources.append(source.partition(".")[0])
     return sources
+
+
+ASSET_PREFIX = "assets/"
+
+
+def _is_asset_reference(source: Any) -> bool:
+    """True when an input's ``from`` names a machine asset
+    (``assets/<path>``). A state id cannot contain ``/``, so an asset
+    reference is never a ``<state>.<port>`` reference."""
+    return isinstance(source, str) and source.startswith(ASSET_PREFIX)
+
+
+def _resolve_asset(machine_dir: Path, reference: str) -> Path:
+    """The real path of the asset ``reference`` inside ``machine_dir``.
+
+    The Rust loader uses the same rule: the path is relative and has no
+    empty, ``.``, or ``..`` part; its real path (after each symlink) stays
+    under the real machine directory; and it is a file. Raises
+    ``ValueError`` that names the asset path and the machine directory
+    (and the target of a symlink that leaves the directory).
+    """
+    if reference.startswith("/") or any(part in ("", ".", "..") for part in reference.split("/")):
+        raise ValueError(f"{reference!r} must be a relative path inside the machine directory {machine_dir}")
+    try:
+        directory = machine_dir.resolve(strict=True)
+        target = (machine_dir / reference).resolve(strict=True)
+    except FileNotFoundError:
+        raise ValueError(f"{reference!r} does not exist in the machine directory {machine_dir}") from None
+    except OSError as error:
+        raise ValueError(f"cannot read {reference}: {error}") from None
+    if not target.is_relative_to(directory):
+        raise ValueError(f"{reference!r} escapes the machine directory {machine_dir}: it resolves to {target}")
+    if not target.is_file():
+        raise ValueError(f"cannot read {reference}: not a file")
+    return target
 
 
 def _is_machine_form(spec: Any) -> bool:
@@ -264,10 +300,13 @@ def _validate_state_fields(
     states_by_id: dict[str, dict[str, Any]],
     noun: str,
     errors: list[str],
+    machine_dir: Path | None = None,
 ) -> None:
     """Field rules shared by dag nodes (noun="node") and machine states
     (noun="state"): subagent forms, lifecycle, budgets, retries, failure
-    policies, port lists, foreach, and the resident exclusions."""
+    policies, port lists, foreach, and the resident exclusions. An asset
+    input must be a file in ``machine_dir``; with no machine directory, an
+    asset input is an error."""
     ref = state["id"]
     # Presence-based checks like the run block: an explicit JSON null on a
     # typed field is rejected with the field's own message instead of
@@ -406,6 +445,20 @@ def _validate_state_fields(
             seen_input_names.add(name)
         if port_type not in PORT_TYPES:
             errors.append(f"{noun} {ref} input {name!r} type must be 'text' or 'json'")
+        if _is_asset_reference(source):
+            if port_type != "text" or optional:
+                errors.append(f"{noun} {ref} input {name!r} reads an asset: an asset input is a required text input")
+            elif machine_dir is None:
+                errors.append(
+                    f"{noun} {ref} input {name!r} reads the asset {source!r}: "
+                    "only a run of a machine directory has assets"
+                )
+            else:
+                try:
+                    _resolve_asset(machine_dir, source)
+                except ValueError as error:
+                    errors.append(f"{noun} {ref} input {name!r}: {error}")
+            continue
         if not isinstance(source, str) or "." not in source:
             errors.append(
                 f"{noun} {ref} input {name!r} requires a 'from' reference of the form '<node_id>.<output_name>'"
@@ -514,7 +567,7 @@ def _validate_guard(
         )
 
 
-def validate_factory_machine(machine: Any) -> list[str]:
+def validate_factory_machine(machine: Any, *, machine_dir: Path | None = None) -> list[str]:
     """Dry-run validation for a machine-form factory spec.
 
     Returns a list of human-readable error sentences; an empty list means
@@ -583,7 +636,12 @@ def validate_factory_machine(machine: Any) -> list[str]:
     seen_subagent_names: dict[str, str] = {}
     for state_id, state in states_by_id.items():
         _validate_state_fields(
-            state, run_budget=run_budget, states_by_id=states_by_id, noun="state", errors=errors
+            state,
+            run_budget=run_budget,
+            states_by_id=states_by_id,
+            noun="state",
+            errors=errors,
+            machine_dir=machine_dir,
         )
         for inp in state.get("inputs") or []:
             if isinstance(inp, dict) and inp.get("name") in param_names:
@@ -646,7 +704,9 @@ def validate_factory_machine(machine: Any) -> list[str]:
         # are rejected -- the self-input check is the machine-form mirror of
         # the dag compiler's "node b cannot depend on itself" rule.
         for inp in _port_list(state, "inputs"):
-            if not isinstance(inp, dict) or inp.get("optional"):
+            # An asset is always there to bind, so an entry state can
+            # require one.
+            if not isinstance(inp, dict) or inp.get("optional") or _is_asset_reference(inp.get("from")):
                 continue
             if state.get("entry") is True:
                 errors.append(
@@ -851,7 +911,7 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
 # ---------------------------------------------------------------------------
 
 
-def validate_factory_spec(spec: Any) -> list[str]:
+def validate_factory_spec(spec: Any, *, machine_dir: Path | None = None) -> list[str]:
     """Dry-run validation for a factory spec in either form.
 
     Detects the form first: a spec carrying "states" or "transitions" is
@@ -866,7 +926,7 @@ def validate_factory_spec(spec: Any) -> list[str]:
     if _is_machine_form(spec) and "nodes" in spec:
         return ["pass either dag or machine form, not both"]
     if _is_machine_form(spec):
-        return validate_factory_machine(spec)
+        return validate_factory_machine(spec, machine_dir=machine_dir)
     machine, errors = compile_factory_dag(spec)
     if errors:
         return errors
@@ -929,15 +989,17 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
-def canonicalize_factory_spec(spec: Any) -> dict[str, Any]:
+def canonicalize_factory_spec(spec: Any, *, machine_dir: Path | None = None) -> dict[str, Any]:
     """Validate a spec in either form and return the canonical MACHINE form.
 
     Raises ``ValueError`` with the joined error list when the spec is
     invalid (including the both-forms rejection). Dag specs compile to
     machine form first, so the executor sees one shape:
-    ``{"run": ..., "states": [...], "transitions": [...]}``.
+    ``{"run": ..., "states": [...], "transitions": [...]}``. Asset inputs
+    resolve inside ``machine_dir``, the directory of a machine-directory
+    run; a missing or escaping asset is an error that names the asset.
     """
-    errors = validate_factory_spec(spec)
+    errors = validate_factory_spec(spec, machine_dir=machine_dir)
     if errors:
         raise ValueError("; ".join(errors))
     assert isinstance(spec, dict)  # validated above
@@ -1789,6 +1851,11 @@ class FactoryRun:
     # status payload carries it with a one-line remedy (the M6 class), so
     # an operator reads WHAT failed from status() instead of archaeology.
     last_error: str | None = None
+    # The machine directory of a machine-directory run: asset inputs
+    # resolve inside it. The assets the run read, by asset path: each
+    # asset is read on its first use, and later entries bind the same text.
+    assets_dir: Path | None = None
+    assets: dict[str, str] = field(default_factory=dict)
     states: dict[str, _StateRun] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     transitions_from: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
@@ -1894,7 +1961,12 @@ class FactoryExecutor:
         return await self._launch_run(run)
 
     async def run_machine(
-        self, machine: MachineFile, *, machine_path: Path | None = None, name: str | None = None
+        self,
+        machine: MachineFile,
+        *,
+        machine_path: Path | None = None,
+        assets_dir: Path | None = None,
+        name: str | None = None,
     ) -> dict[str, Any]:
         """Validate a library machine and start a run of it.
 
@@ -1904,13 +1976,16 @@ class FactoryExecutor:
         stored entry's (``canonicalize_factory_spec``), the run records the
         machine's name as its spec id, and the result reports the machine
         fields so a caller can trace the run back to the library file.
+        ``assets_dir`` is the directory of a machine-directory run; its
+        asset inputs resolve there.
         """
-        canonical = canonicalize_factory_spec(machine.spec)
+        canonical = canonicalize_factory_spec(machine.spec, machine_dir=assets_dir)
         harness = self._resolve_harness()
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
         run = self._create_run(machine.name, canonical, resolved, name=name)
+        run.assets_dir = assets_dir
         result = await self._launch_run(run)
         result["machine"] = machine.name
         if machine_path is not None:
@@ -2983,6 +3058,20 @@ class FactoryExecutor:
         items: list[Any] | None = None
         for inp in state.spec.get("inputs") or []:
             name, port_type, source = inp["name"], inp["type"], inp["from"]
+            if _is_asset_reference(source):
+                text = run.assets.get(source)
+                if text is None:
+                    # Validation resolved every asset input inside the
+                    # run's machine directory; the read re-checks the path,
+                    # because the file can change after the run started.
+                    assert run.assets_dir is not None
+                    try:
+                        text = _resolve_asset(run.assets_dir, source).read_text(encoding="utf-8")
+                    except (ValueError, OSError) as error:
+                        return None, f"input {name!r}: {error}"
+                    run.assets[source] = text
+                bound[name] = text
+                continue
             src_id, _, src_output = source.partition(".")
             source_state = run.states.get(src_id)
             latest = source_state.latest_settle() if source_state is not None else None
@@ -4441,7 +4530,7 @@ async def run_factory(
             author=compiled.get("author") or "",
             spec=compiled["spec"],
         )
-        return await executor.run_machine(machine, machine_path=directory, name=name)
+        return await executor.run_machine(machine, machine_path=directory, assets_dir=directory, name=name)
     if params:
         raise ValueError(
             f"params apply to machine directories (machine.toml); {spec_id!r} is a stored "
@@ -6064,6 +6153,10 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   `next`. Any other condition is a python state that returns an enum.
 - A python state is `kind = "python"` with `run = "nodes/<file>.py:<fn>"`;
   the function receives the declared inputs plus the params.
+- An input `name = "assets/<path>"` reads a file of the directory's
+  `assets/` tree as text. The path stays inside the directory (no `..`,
+  no symlink that leaves it); a missing asset fails before the run starts.
+  The run reads each asset one time, on its first use.
 - `await rlm.factory.run("<name or path>", params={...})` runs one; a
   required param with no default must be given.
 
