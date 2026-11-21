@@ -132,6 +132,16 @@ async fn spawn_fake_supervisor(
                     let id = value["id"].as_str().unwrap_or_default().to_string();
                     let command = value["command"].clone();
                     let command_type: &str = command["type"].as_str().unwrap_or_default();
+                    if command_type == "get_state" {
+                        if let Some(gate) = child_subagents
+                            .state_gate
+                            .as_ref()
+                            .filter(|gate| gate.armed.swap(false, Ordering::SeqCst))
+                        {
+                            gate.copied.notify_one();
+                            gate.release.notified().await;
+                        }
+                    }
                     let response = match command_type {
                         _ if matches!(
                             (child, command_type),
@@ -401,6 +411,8 @@ struct FakeChildSubagents {
     peer_gate: Option<Arc<FakePeerGate>>,
     /// Holds the task `prompt` in flight: the worker has not accepted it yet.
     prompt_gate: Option<Arc<FakePeerGate>>,
+    /// Holds one `get_state` answer: the worker has not answered yet.
+    state_gate: Option<Arc<FakePeerGate>>,
 }
 
 #[derive(Default)]
@@ -524,6 +536,81 @@ async fn collect_reports_factory_task_work_separately_from_turn_settlement() {
         "the child turn stays settled: {settled:?}"
     );
     assert_eq!(settled[0].factory_task_busy, Some(false));
+}
+
+/// The task-activity write is part of the direct read: while one refresh
+/// holds the record for it, the next refresh cannot start its worker round
+/// trip. The unreachable arm proves a failed read also records its
+/// unverified `None` inside the direct-observation lock.
+#[tokio::test]
+async fn factory_task_activity_is_written_inside_the_direct_observation() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate::default());
+    let child_state = Arc::new(FakeChildSubagents {
+        state_gate: Some(Arc::clone(&gate)),
+        ..FakeChildSubagents::default()
+    });
+    // A parked idle wait keeps the settle watcher out of the gate.
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        10_000,
+        FakeKill::Success,
+        FakeChild::Unreachable,
+        child_state,
+    )
+    .await;
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+                contract: None,
+            }),
+        })
+        .await
+        .expect("spawn must succeed against the fake supervisor");
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    let direct_observation = Arc::clone(&record.lock().await.direct_observation);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !record.lock().await.prompt_admitted {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the spawned task prompt must be admitted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    record.lock().await.factory_task_busy = Some(true);
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let collect = {
+        let sessions = sessions.clone();
+        let child_id = handle.rlm_child_id.clone();
+        tokio::spawn(async move { sessions.collect(vec![child_id], 0).await })
+    };
+    gate.copied.notified().await;
+    // Hold the record so the refresh parks on its task-activity write while
+    // still holding the direct observation.
+    let record_guard = record.lock().await;
+    gate.release.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        direct_observation.try_lock().is_err(),
+        "the task-activity write must finish before the direct observation releases"
+    );
+    drop(record_guard);
+    let results = collect
+        .await
+        .expect("collect task")
+        .expect("collect the unreachable child");
+    assert_eq!(results[0].factory_task_busy, None);
+    assert_eq!(record.lock().await.factory_task_busy, None);
 }
 
 #[tokio::test]
