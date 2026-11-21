@@ -100,6 +100,10 @@ pub(crate) struct FactoryLiveCache {
     /// The owners with a background read in flight: at most one read per
     /// owner, so a poll never stacks requests on one kernel.
     pub(crate) in_flight: BTreeSet<String>,
+    /// The owners in the resident list of the latest refresh: a read that
+    /// lands after its owner passivated must not restamp the rows that
+    /// refresh pruned, or a gone session would paint as live for a poll.
+    pub(crate) resident: BTreeSet<String>,
 }
 
 /// Two activity-poll windows ([`ACTIVITY_POLL_INTERVAL`] in pa-types,
@@ -452,12 +456,14 @@ impl Supervisor {
         // An owner that left the resident list is gone from this refresh:
         // its kernel with it, so its cached rows must not stay (a
         // passivated owner's runs list from its durable record alone).
-        let resident: BTreeSet<&str> = owners.iter().map(|owner| owner.id.as_str()).collect();
-        cache.rows.retain(|id, _| resident.contains(id.as_str()));
-        cache.read_at.retain(|id, _| resident.contains(id.as_str()));
-        cache
-            .warnings
-            .retain(|id, _| resident.contains(id.as_str()));
+        // The resident set also gates the fold: a read already in flight
+        // when the owner leaves must not restamp the rows pruned here.
+        let resident: BTreeSet<String> =
+            owners.iter().map(|owner| owner.id.clone()).collect();
+        cache.resident.clone_from(&resident);
+        cache.rows.retain(|id, _| resident.contains(id));
+        cache.read_at.retain(|id, _| resident.contains(id));
+        cache.warnings.retain(|id, _| resident.contains(id));
         for owner in owners {
             if !cache.in_flight.insert(owner.id.clone()) {
                 continue; // its last read still pending: never stack a second
@@ -510,6 +516,12 @@ impl Supervisor {
     fn fold_factory_live(&self, owner: &str, outcome: Option<anyhow::Result<DaemonResponse>>) {
         let mut cache = self.factory_live.lock().unwrap();
         cache.in_flight.remove(owner);
+        // The read outlived its owner's residency: the refresh that
+        // removed the owner pruned its rows, and this late fold must not
+        // put them back (the durable record alone answers now).
+        if !cache.resident.contains(owner) {
+            return;
+        }
         match outcome {
             // Not route-ready yet: no live rows, no warning.
             None => {
@@ -1388,6 +1400,14 @@ mod tests {
             data: None,
             error_info: None,
         });
+        // The fold gate: production only folds a read the refresh spawned
+        // for a resident owner, so seed the resident set the refresh owns.
+        supervisor
+            .factory_live
+            .lock()
+            .unwrap()
+            .resident
+            .insert("busy".to_string());
         // A successful read replaces the owner's rows and stamps them.
         supervisor.fold_factory_live("busy", Some(healthy));
         {
@@ -1488,6 +1508,60 @@ mod tests {
                 "the resident that stays keeps its rows through its boot window"
             );
         }
+    }
+
+    /// A read already in flight when its owner passivates must not
+    /// restamp the rows the prune dropped: the owner is gone from the
+    /// page, and its durable record alone answers.
+    #[tokio::test]
+    async fn a_late_read_never_restamps_a_passivated_owners_rows() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        {
+            let mut cache = supervisor.factory_live.lock().unwrap();
+            cache
+                .rows
+                .insert("gone".to_string(), vec![json!({ "runId": "run-gone" })]);
+            cache.read_at.insert("gone".to_string(), Instant::now());
+            cache.in_flight.insert("gone".to_string());
+        }
+        // The passivation refresh prunes the rows but cannot cancel the
+        // read already in flight.
+        supervisor.spawn_factory_live_refresh(&[]);
+        {
+            let cache = supervisor.factory_live.lock().unwrap();
+            assert!(!cache.rows.contains_key("gone"));
+            assert!(cache.in_flight.contains("gone"));
+        }
+        // The late read lands after the prune: it must not put the rows
+        // back or restamp them.
+        supervisor.fold_factory_live(
+            "gone",
+            Some(Ok(DaemonResponse {
+                id: None,
+                command: "factory_activity".to_string(),
+                success: true,
+                error: None,
+                data: Some(json!({ "runs": [{ "runId": "run-gone" }] })),
+                error_info: None,
+            })),
+        );
+        let cache = supervisor.factory_live.lock().unwrap();
+        assert!(
+            !cache.rows.contains_key("gone"),
+            "the late fold adds no rows"
+        );
+        assert!(
+            !cache.read_at.contains_key("gone"),
+            "the late fold restamps nothing"
+        );
+        assert!(!cache.in_flight.contains("gone"));
     }
 
     /// A memory-only resident (no session file: the saved catalog never
