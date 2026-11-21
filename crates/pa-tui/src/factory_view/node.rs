@@ -147,6 +147,13 @@ impl NodeDocument {
                 None
             }
         };
+        let entry_text = |field: &str| {
+            entry
+                .get(field)
+                .and_then(Value::as_str)
+                .map(scrub)
+                .filter(|text| !text.is_empty())
+        };
         let number = |field: &str| {
             instance
                 .and_then(|instance| instance.get(field))
@@ -191,7 +198,9 @@ impl NodeDocument {
             outputs_truncated: entry_flag("outputsTruncated"),
             output_errors,
             output_errors_truncated: entry_flag("outputErrorsTruncated"),
-            error: text("error"),
+            // A binding failure before any instance exists records its
+            // diagnostic on the entry, not on an instance.
+            error: text("error").or_else(|| entry_text("error")),
         })
     }
 }
@@ -1002,6 +1011,31 @@ mod tests {
             text.contains("terminal_error_tail_marker"),
             "the error tail was clipped: {text}"
         );
+    }
+
+    #[test]
+    fn an_entry_error_reaches_the_document_without_an_instance() {
+        let reply = json!({
+            "state": {"instances": []},
+            "entry": {
+                "index": 3,
+                "status": "error",
+                "error": "input 'items' from state 'src' is unavailable",
+            },
+            "instance": null,
+        });
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        assert_eq!(
+            node.document.as_ref().unwrap().error.as_deref(),
+            Some("input 'items' from state 'src' is unavailable")
+        );
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("is unavailable"), "{text}");
     }
 
     #[test]

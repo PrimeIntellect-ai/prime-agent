@@ -4,10 +4,15 @@ use serde_json::json;
 
 thread_local! {
     static ORDERING_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LABEL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) fn count_ordering_visit() {
     ORDERING_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+pub(super) fn count_label_scan() {
+    LABEL_SCANS.with(|scans| scans.set(scans.get() + 1));
 }
 
 fn plain(diagram: &BlockDiagram) -> String {
@@ -488,5 +493,37 @@ fn back_edge_guards_clear_forward_wires_on_their_departure_row() {
     assert!(
         departure.contains(&format!(" {label} ")),
         "a crossing replaced a guard character:\n{text}"
+    );
+}
+
+#[test]
+fn many_back_edges_fail_the_size_guard_before_label_work() {
+    let states: Vec<_> = (0..300).map(|i| state(&format!("s{i}"), i == 0)).collect();
+    let mut transitions: Vec<_> = (0..299)
+        .map(|i| transition(&[&states[i].id], &states[i + 1].id, None))
+        .collect();
+    transitions.extend((1..300).map(|i| {
+        transition(
+            &[&states[i].id],
+            &states[0].id,
+            Some(json!({"output": "route", "op": "eq", "value": "again"})),
+        )
+    }));
+    LABEL_SCANS.with(|scans| scans.set(0));
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    );
+    assert_eq!(diagram.lines.len(), 1);
+    assert!(
+        plain(&diagram).contains("300 states"),
+        "{}",
+        plain(&diagram)
+    );
+    assert_eq!(
+        LABEL_SCANS.with(std::cell::Cell::get),
+        0,
+        "label work ran before the back-edge size guard"
     );
 }

@@ -422,11 +422,23 @@ pub(crate) fn block_diagram(
 
     // Back edges take gutter columns, the shortest span innermost.
     backs.sort_by_key(|back| layer[back.from] - layer[back.to]);
+    // Each back edge costs at least a departure row, an arrival row, and
+    // two gutter columns, so 4 * backs^2 cells is a floor. Reject before
+    // the label pass when that floor alone exceeds the canvas bound.
+    if 4usize
+        .saturating_mul(backs.len())
+        .saturating_mul(backs.len())
+        > MAX_DIAGRAM_CELLS
+    {
+        return too_large();
+    }
     // A back-edge label shares its departure row with the band's forward
     // wires and with the vertical drops of later back edges; a crossing
     // cell would replace a label character. Start each label past the last
     // wire it would cross, and put the gutter beyond the shifted label.
     let crossing_columns = |band: usize| -> Vec<usize> {
+        #[cfg(test)]
+        tests::count_label_scan();
         let mut columns: Vec<usize> = layers[band - 1]
             .iter()
             .filter(|&&item| !outgoing[item].is_empty())
