@@ -69,6 +69,7 @@ impl Graph {
     fn edge(&mut self, from: &str, to: &str, label: Option<String>) {
         self.node(from);
         self.node(to);
+        let label = label.map(|label| decode_label(&label));
         self.edges.push(FactoryTransition {
             from: vec![from.to_string()],
             to: to.to_string(),
@@ -90,7 +91,9 @@ impl Graph {
                 subagent: None,
                 python: None,
                 model: None,
-                label: Some(labels.get(id).cloned().unwrap_or_default()),
+                label: Some(decode_label(
+                    labels.get(id).map(String::as_str).unwrap_or_default(),
+                )),
             })
             .collect();
         Mermaid::Diagram {
@@ -169,6 +172,46 @@ fn split_state_declaration(rest: &str) -> Option<(String, String)> {
 fn bare_id(token: &str) -> Option<String> {
     let id = token.split_whitespace().next()?;
     (id != "[*]").then(|| id.to_string())
+}
+
+/// Decode Mermaid's label escapes — `#34;` (numeric), `#x22;` (hex), and
+/// the named `#quot;`/`#amp;`/`#lt;`/`#gt;`/`#nbsp;` — so a generated guard
+/// label reads as its text instead of entity codes. A decoded control
+/// character becomes a space: the mermaid source is scrubbed at its seam,
+/// and an entity must not carry one past it.
+fn decode_label(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('#') {
+        out.push_str(&rest[..at]);
+        let Some(end) = rest[at..].find(';') else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        let code = &rest[at + 1..at + end];
+        let decoded = if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        } else if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_digit()) {
+            code.parse().ok().and_then(char::from_u32)
+        } else {
+            match code {
+                "quot" => Some('"'),
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "nbsp" => Some(' '),
+                _ => None,
+            }
+        };
+        match decoded {
+            Some(ch) if ch.is_control() => out.push(' '),
+            Some(ch) => out.push(ch),
+            None => out.push_str(&rest[at..=at + end]),
+        }
+        rest = &rest[at + end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// An edge's right side: the target id and the `: label` that names the
@@ -595,5 +638,27 @@ A["before --> after"] -->|then --> continue| B(["Review --> now"]) --> C[finish 
         assert!(
             matches!(&segments[..], [super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n")
         );
+    }
+
+    #[test]
+    fn label_entities_decode_to_their_text() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid(
+            "stateDiagram-v2\nstate \"Review#59; done\" as a\na --> b: verdict.approved eq #34;yes#34;\nb --> a: note#10;here\nc --> d: #x22;quoted#x22;\n",
+        )
+        .unwrap()
+        else {
+            panic!("expected diagram")
+        };
+        assert_eq!(states[0].label.as_deref(), Some("Review; done"));
+        assert_eq!(
+            transitions[0].when.as_deref(),
+            Some("verdict.approved eq \"yes\"")
+        );
+        // A control entity decodes to a space, never to a control character.
+        assert_eq!(transitions[1].when.as_deref(), Some("note here"));
+        assert_eq!(transitions[2].when.as_deref(), Some("\"quoted\""));
     }
 }
