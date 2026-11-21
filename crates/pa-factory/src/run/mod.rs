@@ -1,5 +1,5 @@
 //! The rules a live run follows: its status, its joins, its budgets, its
-//! transitions, its owner, and its quiescence.
+//! transitions, its owner, its quiescence, and the payload of each entry.
 //!
 //! The executor owns the clock, the children, and the files. This module
 //! owns the decisions. Each call that reads time takes it from the caller
@@ -10,7 +10,9 @@
 mod budget;
 mod join;
 mod ownership;
+mod payload;
 mod quiescence;
+mod selector;
 mod status;
 mod transitions;
 
@@ -22,9 +24,14 @@ use budget::RunClock;
 pub use budget::{python_time_limit_ms, state_budget_overrun, PYTHON_TIME_LIMIT_MS_DEFAULT};
 pub use join::{JoinClaim, JoinOutcome, SourceProgress};
 pub use ownership::{OwnedRun, Ownership, OwnershipError};
+pub use payload::{
+    plan_payloads, Bind, BindError, BindFailure, Binding, FanOut, Payload, PayloadPlan, PlanError,
+    PlanProblem, PortType, SourceView,
+};
 pub use quiescence::{
     run_quiescent, EntryPhase, EntryResult, EntrySettlement, IllegalSettle, SettleEvent,
 };
+pub use selector::{Selection, Selector, SelectorError, Settle, Unavailable};
 pub use status::{IllegalTransition, PauseReason, RunEvent, RunStatus};
 pub use transitions::{Guard, Sources, SpecError, Transition, TransitionIndex};
 
