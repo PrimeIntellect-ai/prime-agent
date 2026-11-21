@@ -252,6 +252,12 @@ pub struct ExecuteOptions {
     /// [`ExecuteResult::timed_out_after_ms`]. `None` and zero disable it; the
     /// runtime bootstrap and state ops never arm it.
     pub cell_timeout_ms: Option<u64>,
+    /// The runtime's OWN bootstrap execute: the host sends it after every
+    /// restore attempt (a refused restore included), so it is internal
+    /// machinery, never a gate-permitted command. The runtime marks the
+    /// names it binds as runtime-owned (never snapshotted) and keeps it
+    /// from releasing the factory boot arm.
+    pub runtime_bootstrap: bool,
 }
 
 /// A typed request from Python code running in the kernel to the host.

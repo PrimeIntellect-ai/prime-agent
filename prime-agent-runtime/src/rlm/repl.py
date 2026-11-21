@@ -197,6 +197,16 @@ def _fail_pending_host_requests() -> None:
             future.set_exception(RuntimeError("host connection closed; host_request cannot be answered"))
 
 
+def teardown_started() -> bool:
+    """Whether the kernel's shutdown teardown already began: an explicit
+    shutdown request or a host EOF, both of which set the flag BEFORE any
+    pending host request is failed (the loop thread's teardown half), so a
+    transport failure that arrives after it is host loss, not a business
+    verdict. The flag is set only on the kernel's real shutdown path, never
+    by an exception handler."""
+    return _host_closed
+
+
 def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
     """Reader-thread half of the host bridge; late/unknown replies are dropped."""
     assert _loop is not None
@@ -652,6 +662,21 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
 
 async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     global _cell_counter
+    # The runtime's OWN bootstrap execute never counts as the host's
+    # release: the provisioner sends it after every restore attempt
+    # (a refused restore included), so arming on it would collect
+    # persisted runs before the host's gates permitted any command.
+    if not req.get("runtime_bootstrap"):
+        # The first executed command the host dispatches is the
+        # factory arm's release: no restore ran (a fresh namespace)
+        # or the restore already proved itself, and the host only
+        # dispatches past the gates it owns — the persisted runs may
+        # arm now that execution is permitted. This replaces the
+        # boot-time arm (a reader boot that never executes must never
+        # collect runs).
+        from .factory import boot_arm_persisted_runs
+
+        boot_arm_persisted_runs()
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
@@ -1284,6 +1309,17 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
             "max_bytes": req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES),
             "max_variable_bytes": req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
         }
+    elif not result.get("failed"):
+        # A clean restore completion is the factory arm's FIRST release:
+        # every saved name revived, so the persisted runs may arm. A
+        # partial restore (lost names) leaves them frozen — the resumed
+        # namespace is degraded and the runs wait for an explicit
+        # command. This replaces the boot-time arm (a kernel booted to
+        # read a payload must never collect runs before the read is
+        # proven; the first execute below is the other release).
+        from .factory import boot_arm_persisted_runs
+
+        boot_arm_persisted_runs()
     _send({"event": "done", "id": rid, "status": "ok", **result})
 
 

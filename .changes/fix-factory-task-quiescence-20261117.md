@@ -1,0 +1,1 @@
+- Factory output repair waits for confirmed idle task activity, marks missing activity observations UNVERIFIED, and keeps child ownership until retirement succeeds.

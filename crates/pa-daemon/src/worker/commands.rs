@@ -66,7 +66,7 @@ impl Worker {
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
-            "get_state" => self.handle_get_state(),
+            "get_state" => self.handle_get_state(payload),
             "get_messages" => self.handle_get_messages(payload),
             "get_session_messages" => self.handle_get_session_messages(payload).await,
             "get_session_header" => self.handle_get_session_header(),
@@ -383,17 +383,23 @@ impl Worker {
         response_success(None, "abort_and_send_queued", None)
     }
 
-    fn handle_get_state(&self) -> DaemonResponse {
+    fn handle_get_state(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("get_state") {
             return response;
         }
         let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
-        response_success(
-            None,
-            "get_state",
-            Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-        )
+        drop(core);
+        let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
+        if payload.get("taskObservation").and_then(Value::as_str) == Some("factory") {
+            if let Some(object) = data.as_object_mut() {
+                object.insert(
+                    "outstandingBackgroundJobs".to_string(),
+                    json!(self.outstanding_background_jobs()),
+                );
+            }
+        }
+        response_success(None, "get_state", Some(data))
     }
 
     /// `get_session_header`: the persisted session header line (TS wraps it
