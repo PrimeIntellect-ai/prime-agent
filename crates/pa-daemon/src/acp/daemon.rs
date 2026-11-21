@@ -772,6 +772,25 @@ async fn cancel_order(params: &Value, state: &Arc<Mutex<DaemonAcpState>>) -> Can
     let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
         return CancelOrder::None;
     };
+    let steering = {
+        let guard = state.lock().await;
+        if guard.session_close_done.is_some() {
+            return CancelOrder::WaitForClose {
+                session_id: session_id.to_string(),
+            };
+        }
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| hosted.acp_session_id == session_id)
+            .map(|hosted| Arc::clone(&hosted.steering))
+    };
+    let Some(steering) = steering else {
+        return CancelOrder::None;
+    };
+    // Serialize cancel admission with steering. A cancel must not mark the
+    // turn between a steer's admission check and its worker receipt.
+    let _steering = steering.lock().await;
     let mut guard = state.lock().await;
     if guard.session_close_done.is_some() {
         return CancelOrder::WaitForClose {
@@ -1631,26 +1650,29 @@ fn invalid_params(id: &Value, reason: &str) -> Value {
 /// cancelled. A slot holding another prompt's turn (close + new while
 /// this prompt ran) is left alone.
 async fn release_turn_slot(state: &Arc<Mutex<DaemonAcpState>>, admission_id: &str) {
-    let mut cancel_task = {
-        let mut guard = state.lock().await;
-        let Some(hosted) = guard.session.as_mut() else {
+    let (mut cancel_task, steering) = {
+        let guard = state.lock().await;
+        let Some(hosted) = guard.session.as_ref().filter(|hosted| {
+            hosted
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.admission_id == admission_id)
+        }) else {
             return;
         };
-        let Some(turn) = hosted.turn.as_mut() else {
-            return;
-        };
-        if turn.admission_id != admission_id {
-            return;
-        }
-        hosted.cancel_task.clone()
+        (hosted.cancel_task.clone(), Arc::clone(&hosted.steering))
     };
     if let Some(cancel_task) = cancel_task.as_mut() {
         let _ = cancel_task.changed().await;
     }
-    if let Some(hosted) = state.lock().await.session.as_mut() {
+    let _steering = steering.lock().await;
+    if let Some(hosted) = state.lock().await.session.as_mut().filter(|hosted| {
         hosted
             .turn
-            .take_if(|turn| turn.admission_id == admission_id);
+            .as_ref()
+            .is_some_and(|turn| turn.admission_id == admission_id)
+    }) {
+        hosted.turn = None;
     }
 }
 
@@ -2099,18 +2121,27 @@ async fn handle_session_close(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let cancel_task = {
+    let (cancel_task, steering) = {
         let guard = state.lock().await;
-        guard
+        let hosted = guard
             .session
             .as_ref()
-            .filter(|hosted| hosted.acp_session_id == session_id)
-            .and_then(|hosted| hosted.cancel_task.clone())
+            .filter(|hosted| hosted.acp_session_id == session_id);
+        (
+            hosted.and_then(|hosted| hosted.cancel_task.clone()),
+            hosted.map(|hosted| Arc::clone(&hosted.steering)),
+        )
     };
     if let Some(mut cancel_task) = cancel_task {
         let _ = cancel_task.changed().await;
     }
+    let Some(steering) = steering else {
+        state.lock().await.session_close_done = None;
+        let _ = close_done.send(true);
+        return;
+    };
     let (acp_session_id, daemon_session_id, config, producer, admission_id) = {
+        let _steering = steering.lock().await;
         let mut guard = state.lock().await;
         let Some(hosted) = guard
             .session
@@ -2614,5 +2645,34 @@ mod tests {
             arm_cancel_locked("acp-1", &mut stopping),
             CancelOrder::None
         ));
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_while_steering_holds_its_gate() {
+        let mut initial = state(Some(hosted_session()));
+        initial.session.as_mut().unwrap().turn = Some(ActiveTurn {
+            admission_id: "prompt-admission:1".to_string(),
+            cancelled: false,
+        });
+        let state = Arc::new(Mutex::new(initial));
+        let steering = Arc::clone(&state.lock().await.session.as_ref().unwrap().steering);
+        let steer_in_progress = steering.lock().await;
+        let cancel = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { cancel_order(&json!({ "sessionId": "acp-1" }), &state).await }
+        });
+        tokio::task::yield_now().await;
+        let guard = state.lock().await;
+        let hosted = guard.session.as_ref().unwrap();
+        assert!(
+            !hosted.cancelling && !hosted.turn.as_ref().unwrap().cancelled,
+            "cancellation waits at the steering admission gate"
+        );
+        drop(guard);
+        drop(steer_in_progress);
+        let CancelOrder::Armed(stop) = cancel.await.unwrap() else {
+            panic!("the cancel starts after the steer settles");
+        };
+        assert_eq!(stop.admission_id.as_deref(), Some("prompt-admission:1"));
     }
 }

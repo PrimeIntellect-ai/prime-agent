@@ -1461,7 +1461,7 @@ fn acp_daemon_attached_close_keeps_the_worker_and_new_rebinds_it() {
 }
 
 #[test]
-fn acp_daemon_attached_prompt_during_cancel_is_refused() {
+fn acp_daemon_attached_prompt_and_steering_during_cancel_are_refused() {
     // A prompt behind a cancel is refused while the stop runs, and the
     // cancelled response comes after the stop, so a resend right after it
     // runs.
@@ -1486,11 +1486,28 @@ fn acp_daemon_attached_prompt_during_cancel_is_refused() {
     );
     client.wait_update("agent_message_chunk", TIMEOUT);
     client.notify("session/cancel", &json!({ "sessionId": session_id }));
+    let steer = client.request(
+        "_session/steering",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": "during the stop" }],
+        }),
+    );
     let second = client.request(
         "session/prompt",
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "behind the stop" }] }),
     );
-    let (second_response, _) = client.wait_response(second, TIMEOUT);
+    let (second_response, second_frames) = client.wait_response(second, TIMEOUT);
+    let steer_response = second_frames
+        .iter()
+        .find(|frame| frame["id"] == json!(steer))
+        .cloned()
+        .unwrap_or_else(|| client.wait_response(steer, TIMEOUT).0);
+    assert_eq!(
+        steer_response["result"],
+        json!({ "outcome": "promptRequired", "reason": "noRunningTurn" }),
+        "the steer cannot enter a turn whose cancel has begun: {steer_response}"
+    );
     assert_eq!(
         second_response["error"]["code"], -32603,
         "the prompt behind the cancel is refused: {second_response}"
