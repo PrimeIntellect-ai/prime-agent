@@ -849,7 +849,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
     (
         format!("Inbox: {summary}"),
         format!(
-            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with rlm.inbox.read()."
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
         ),
     )
 }
@@ -859,7 +859,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
 #[must_use]
 pub fn reminder_notice(count: usize) -> String {
     let noun = if count == 1 { "message" } else { "messages" };
-    format!("[inbox reminder] {count} {noun} still waiting — rlm.inbox.read()")
+    format!("[inbox reminder] {count} {noun} still waiting. Read them with msgs = await rlm.inbox.read().")
 }
 
 // The notice rows' wire vocabulary — the customType, the notice-class
@@ -1573,7 +1573,7 @@ mod tests {
         assert_eq!(preview, "Inbox: 1 new message (bash-done)");
         assert_eq!(
             text,
-            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read()."
         );
         let same_class = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
@@ -1583,7 +1583,7 @@ mod tests {
         assert_eq!(preview, "Inbox: 2 new bash-done messages");
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with msgs = await rlm.inbox.read()."
         );
         let batch = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
@@ -1597,7 +1597,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with msgs = await rlm.inbox.read()."
         );
     }
 
@@ -1709,11 +1709,11 @@ mod tests {
     fn reminder_notice_names_the_wait() {
         assert_eq!(
             reminder_notice(3),
-            "[inbox reminder] 3 messages still waiting — rlm.inbox.read()"
+            "[inbox reminder] 3 messages still waiting. Read them with msgs = await rlm.inbox.read()."
         );
         assert_eq!(
             reminder_notice(1),
-            "[inbox reminder] 1 message still waiting — rlm.inbox.read()"
+            "[inbox reminder] 1 message still waiting. Read them with msgs = await rlm.inbox.read()."
         );
     }
 
@@ -1827,7 +1827,7 @@ mod tests {
     #[test]
     fn inbox_notice_row_carries_the_text_and_the_sender_identity() {
         let arrival = format!(
-            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
         );
         let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
         for (class, text) in [
