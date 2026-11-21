@@ -1050,11 +1050,14 @@ pub(crate) fn admit_inbox_notice_locked(
             agent_message: None,
             queue_key: Some(INBOX_ARRIVAL_QUEUE_KEY.to_string()),
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible,
             policy,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     Ok(queued)
@@ -1276,11 +1279,14 @@ pub(crate) fn admit_inbox_reminder(
             agent_message: None,
             queue_key: Some(INBOX_REMINDER_QUEUE_KEY.to_string()),
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible,
             policy,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     drop(core_guard);

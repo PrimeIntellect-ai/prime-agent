@@ -666,11 +666,14 @@ async fn queued_inbox_notices_mark_their_own_rider() {
             agent_message: None,
             queue_key: None,
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
         // The busy-queued arrival row: its custom twin IS the provenance.
         core.steering.push_back(QueuedItem {
@@ -681,11 +684,14 @@ async fn queued_inbox_notices_mark_their_own_rider() {
             agent_message: None,
             queue_key: Some("inbox:arrival".to_string()),
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let snapshot = {
@@ -732,11 +738,14 @@ async fn an_idle_inbox_notice_rides_only_the_inbox_rider() {
             agent_message: None,
             queue_key: Some("inbox:arrival".to_string()),
             admission_id: None,
+            client_admission_id: None,
             images: Vec::new(),
             done: None,
             queue_visible: false,
             policy: TurnPolicy::Injected,
             forced_batch: false,
+            kernel_notice: false,
+            delivery_scoped: false,
         });
     }
     let snapshot = {
