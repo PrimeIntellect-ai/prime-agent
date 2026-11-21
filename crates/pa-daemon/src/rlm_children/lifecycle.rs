@@ -349,11 +349,19 @@ impl SupervisorChildSessionsInner {
 
     /// The child's live session summary (`get_state`): the busy verdict,
     /// the note, and the tool count read one round trip.
-    pub(super) async fn child_state(&self, active_session_id: &str) -> Result<Value> {
+    pub(super) async fn child_state(
+        &self,
+        active_session_id: &str,
+        factory_task_observation: bool,
+    ) -> Result<Value> {
+        let mut rest = Map::default();
+        if factory_task_observation {
+            rest.insert("taskObservation".to_string(), json!("factory"));
+        }
         let command = DaemonCommand::GetState {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Map::default(),
+            rest,
         };
         self.command(&command, STATE_TIMEOUT_MS).await
     }
@@ -363,7 +371,7 @@ impl SupervisorChildSessionsInner {
     /// running while any descendant does). `Err` means the child cannot be
     /// reached right now.
     pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
-        let state = self.child_state(active_session_id).await?;
+        let state = self.child_state(active_session_id, false).await?;
         Ok(child_busy_flags(&state))
     }
 
@@ -441,7 +449,7 @@ impl SupervisorChildSessionsInner {
                 return false;
             }
         }
-        let (active_session_id, direct_observation, recheck_idle, session_file, running) = {
+        let (active_session_id, direct_observation, recheck_idle, session_file, running, factory) = {
             let record = record.lock().await;
             (
                 record.active_session_id.clone(),
@@ -450,6 +458,7 @@ impl SupervisorChildSessionsInner {
                     || matches!(record.run.verdict(), Some(RunVerdict::Cancelled(_))),
                 record.session_file.clone().filter(|path| !path.is_empty()),
                 record.run.is_running(),
+                record.factory,
             )
         };
         let state = {
@@ -457,7 +466,7 @@ impl SupervisorChildSessionsInner {
             let request_order = self
                 .observation_requests
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let state = self.child_state(&active_session_id).await;
+            let state = self.child_state(&active_session_id, factory).await;
             if let Ok(state) = &state {
                 self.observe_live_state(
                     record,
@@ -469,6 +478,9 @@ impl SupervisorChildSessionsInner {
             }
             state
         };
+        if factory {
+            record.lock().await.factory_task_busy = state.as_ref().ok().and_then(factory_task_busy);
+        }
         let busy = matches!(&state, Ok(state) if child_busy_flags(state));
         if busy || state.is_err() {
             return busy;
@@ -1018,6 +1030,15 @@ fn child_busy_flags(state: &Value) -> bool {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             > 0
+}
+
+/// Factory task observers require the opt-in field; absence cannot prove the
+/// background lanes quiescent and therefore keeps that child unsettled.
+fn factory_task_busy(state: &Value) -> Option<bool> {
+    state
+        .get("outstandingBackgroundJobs")
+        .and_then(Value::as_u64)
+        .map(|count| count > 0)
 }
 
 #[cfg(test)]

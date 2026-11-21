@@ -624,6 +624,7 @@ impl ReplKernelManager {
         self.enqueue_request(
             Request::Execute {
                 code: code.to_string(),
+                runtime_bootstrap: opts.runtime_bootstrap,
             },
             opts,
             execution_timeout_ms,

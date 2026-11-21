@@ -36,6 +36,7 @@ impl SupervisorChildSessionsInner {
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
             status: record.roster_status(),
+            factory: record.factory,
             answer_preview: record.answer_preview.clone(),
             error: record
                 .run
@@ -609,6 +610,7 @@ fn ledger_child_records(
             direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             factory: edge.factory.is_some(),
+            factory_task_busy: None,
             prompt_admitted: true,
             retirement: Retirement::live(),
             usage_registration_forgotten: false,

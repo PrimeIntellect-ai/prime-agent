@@ -396,3 +396,71 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
         "the run boundary cleared the note: {summary:?}"
     );
 }
+
+/// Factory child task observers opt in to the existing aggregate; ordinary
+/// summaries keep their unchanged wire shape.
+#[allow(clippy::await_holding_lock)] // faux registry is process-global for this worker flow
+#[tokio::test]
+async fn get_state_reports_background_jobs_only_for_factory_task_observation() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!(
+        "pa-worker-task-observation-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let worker = std::sync::Arc::new(Worker::new(
+        WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "task-observation".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "engine": "faux", "responses": ["ready"] })),
+        },
+        None,
+    ));
+    let created = worker
+        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    // Public's aggregate counts live `bash()` handles plus queued
+    // `[bash-done]` notices (no detached-cell lane), so the pending
+    // completion delivery is a bash notice here.
+    admit_kernel_notice(
+        &worker.recovery,
+        &worker.core,
+        &std::sync::Arc::new(tokio::sync::Notify::new()),
+        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
+        || false,
+    );
+
+    let ordinary = worker.dispatch("get_state", &json!({})).await;
+    assert!(ordinary.success, "get_state failed: {ordinary:?}");
+    assert!(
+        ordinary
+            .data
+            .as_ref()
+            .unwrap_or(&Value::Null)
+            .get("outstandingBackgroundJobs")
+            .is_none(),
+        "ordinary summaries retain their existing wire shape"
+    );
+    let observed = worker
+        .dispatch("get_state", &json!({ "taskObservation": "factory" }))
+        .await;
+    assert!(
+        observed.success,
+        "factory task observation failed: {observed:?}"
+    );
+    assert_eq!(
+        observed.data.as_ref().unwrap_or(&Value::Null)["outstandingBackgroundJobs"],
+        json!(1),
+        "the opt-in reports the pending completion delivery"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

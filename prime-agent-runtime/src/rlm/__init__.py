@@ -110,6 +110,8 @@ class RLMChildResult:
 
     `answer_text` is the child's full final answer (the settle-binding
     lane, host-bounded); `answer_preview` is the compact roster preview.
+    `factory_task_busy` reports factory-only background work separately from
+    turn settlement: `None` means the activity was not observed.
     """
 
     rlm_child_id: str
@@ -123,6 +125,7 @@ class RLMChildResult:
     duration_ms: int | None = None
     tool_use_count: int | None = None
     replied_since_task: bool | None = None
+    factory_task_busy: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -486,6 +489,9 @@ def _child_result_from_payload(payload: Any) -> RLMChildResult:
     replied = payload.get("replied_since_task")
     if replied is not None and not isinstance(replied, bool):
         raise RuntimeError("rlm.collect entry has invalid replied_since_task")
+    factory_task_busy = payload.get("factory_task_busy")
+    if factory_task_busy is not None and not isinstance(factory_task_busy, bool):
+        raise RuntimeError("rlm.collect entry has invalid factory_task_busy")
     return RLMChildResult(
         rlm_child_id=child_id,
         session_name=_optional_str("session_name"),
@@ -498,6 +504,7 @@ def _child_result_from_payload(payload: Any) -> RLMChildResult:
         duration_ms=_optional_int("duration_ms"),
         tool_use_count=_optional_int("tool_use_count"),
         replied_since_task=replied,
+        factory_task_busy=factory_task_busy,
     )
 
 

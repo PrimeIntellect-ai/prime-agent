@@ -632,6 +632,7 @@ async fn start_kernel_impl(
             &bootstrap_code,
             ExecuteOptions {
                 signal: Some(dispose_signal.clone()),
+                runtime_bootstrap: true,
                 ..Default::default()
             },
             Some(BOOTSTRAP_EXECUTION_TIMEOUT_MS),

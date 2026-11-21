@@ -962,6 +962,7 @@ impl RlmSubagentHost for InlineHost {
                         session_dir: Some(child.node.session_dir.clone()),
                         status: if unsettled { "running" } else { state.status },
                         settled: !unsettled,
+                        factory_task_busy: None,
                         answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
                         answer_text: state.answer_text.clone(),
                         error: state.error.clone(),
