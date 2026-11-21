@@ -213,19 +213,24 @@ pub(crate) async fn acquire_bootstrap_lock(
                 let lock_guard = LockGuard(lock_dir.clone());
                 // A process can die after moving the live venv aside but before
                 // moving its candidate into place. Recover that venv before the
-                // generic sweep removes dead staging entries.
-                // Recovery is best effort: when a complete aside cannot be
-                // renamed (for example a Windows process still holds it), the
-                // rebuild below still repairs the live path.
-                let _ = super::venv::recover_interrupted_venv_swap(venv);
-                // Nothing live can own these entries: the lock is held.
-                let parent = lock_dir.parent().unwrap_or(Path::new("/"));
-                for base in [venv.file_name(), lock_dir.file_name()]
-                    .into_iter()
-                    .flatten()
-                    .map(|name| name.to_string_lossy().to_string())
-                {
-                    sweep_stale_staging(parent, &base, BOOTSTRAP_STAGING_STALE_AFTER);
+                // generic sweep removes dead staging entries. Recovery is best
+                // effort: when a complete aside cannot be renamed (for example
+                // a Windows process still holds it), the rebuild below still
+                // repairs the live path.
+                let recovered = super::venv::recover_interrupted_venv_swap(venv).is_ok();
+                // Sweep only after a successful recovery: a failed restore
+                // leaves the complete aside as the last good tree, and the
+                // dead owner in its name would make the sweep delete it.
+                if recovered {
+                    // Nothing live can own these entries: the lock is held.
+                    let parent = lock_dir.parent().unwrap_or(Path::new("/"));
+                    for base in [venv.file_name(), lock_dir.file_name()]
+                        .into_iter()
+                        .flatten()
+                        .map(|name| name.to_string_lossy().to_string())
+                    {
+                        sweep_stale_staging(parent, &base, BOOTSTRAP_STAGING_STALE_AFTER);
+                    }
                 }
                 return Ok(Some(lock_guard));
             }
