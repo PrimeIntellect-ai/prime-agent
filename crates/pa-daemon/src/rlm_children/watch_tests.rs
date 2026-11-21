@@ -479,6 +479,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
                 run_id: "run".to_string(),
                 spec_id: "spec".to_string(),
                 state_id: "state".to_string(),
+                contract: None,
             }),
         })
         .await

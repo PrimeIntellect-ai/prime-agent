@@ -55,8 +55,10 @@ and each member names it in `next`.
 
 - Load a machine directory into [`Machine`] with every problem reported as
   a [`Diagnostic`] (`file: key.path: message`).
-- Check types (`types::check_value`) with exact value paths, shared by
-  params today and typed outputs later.
+- Check types (`types::check_value`) with exact value paths, for params
+  and for outputs: each state's [`Contract`] (written into the canonical
+  spec as `emit`) is what a child's `rlm.factory.emit` and a python
+  state's returned dict are checked against.
 - Compile to the canonical v1 machine spec (`run`, `params`, `states`,
   `transitions`) the Python executor validates and runs. Prompts gain the
   shared context, the rubric, and a generated Outputs section.
@@ -71,8 +73,9 @@ and each member names it in `next`.
 
 ## Public API
 
-`load_machine_dir`, `compile`, `convert_spec`, `parse_duration_ms`, the
-`types` module, and the model types re-exported from the crate root.
+`load_machine_dir`, `compile`, `convert_spec`, `Contract`,
+`parse_duration_ms`, the `types` module, and the model types re-exported
+from the crate root.
 
 ## Dependencies
 

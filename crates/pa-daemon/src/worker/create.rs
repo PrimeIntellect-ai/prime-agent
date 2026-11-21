@@ -182,6 +182,7 @@ impl Worker {
         let factory_child = payload
             .get("runtimeMetadata")
             .is_some_and(|metadata| metadata.get("factory").is_some());
+        let factory_contract = create_payload_factory_contract(payload);
         let thinking = payload
             .get("thinking")
             .and_then(Value::as_str)
@@ -609,6 +610,7 @@ impl Worker {
             child_script: child_script.clone(),
             semantic_spawn,
             factory_child,
+            factory_contract,
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }
@@ -787,6 +789,18 @@ pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<Str
     // The factory lane advertises only while its opt-in gate reads
     // enabled (`factory.enabled`, default off).
     crate::factory_activity::advertised_server_capabilities(agent_dir)
+}
+
+/// A factory child's output contract from its create's runtime metadata
+/// (`factoryContract`, set by the spawn that carried it). The durable
+/// create of a respawned child replays it, so the contract survives a
+/// restart.
+fn create_payload_factory_contract(payload: &Value) -> Option<Value> {
+    payload
+        .get("runtimeMetadata")
+        .and_then(|metadata| metadata.get("factoryContract"))
+        .filter(|contract| contract.is_object())
+        .cloned()
 }
 
 /// RLM depth fields of a create payload: `(depth, max_depth)`. Values must

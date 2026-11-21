@@ -161,6 +161,12 @@ pub struct RlmFactoryTag {
     pub run_id: String,
     pub spec_id: String,
     pub state_id: String,
+    /// The state's output contract (a `pa_factory::Contract` plus the
+    /// bound `inputs`), handed to the child's `factory.emit` through its
+    /// create's runtime metadata. It is never part of the ledger's spawn
+    /// edge.
+    #[serde(skip)]
+    pub contract: Option<Value>,
 }
 
 /// Validated `rlm.create_session` request handed to the host.
@@ -675,7 +681,14 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory"],
+        &[
+            "name",
+            "model",
+            "thinking",
+            "cwd",
+            "factory",
+            "factoryContract",
+        ],
     )?;
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
@@ -688,7 +701,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     let thinking =
         normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?.map(String::from);
     let cwd = cwd_kwarg(&kwargs, OPERATION)?;
-    let factory = match kwargs.get("factory") {
+    let mut factory: Option<RlmFactoryTag> = match kwargs.get("factory") {
         None | Some(Value::Null) => None,
         Some(tag) => Some(serde_json::from_value(tag.clone()).map_err(|_| {
             anyhow::anyhow!(
@@ -696,6 +709,14 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
             )
         })?),
     };
+    match (kwargs.get("factoryContract"), factory.as_mut()) {
+        (None | Some(Value::Null), _) => {}
+        (Some(contract @ Value::Object(_)), Some(tag)) => tag.contract = Some(contract.clone()),
+        (Some(Value::Object(_)), None) => {
+            anyhow::bail!("{OPERATION} factoryContract needs the factory run tag")
+        }
+        (Some(_), _) => anyhow::bail!("{OPERATION} factoryContract must be an object"),
+    }
     Ok(RlmSpawnRequest {
         prompt: prompt.to_string(),
         name,
@@ -1372,6 +1393,7 @@ mod tests {
                 "kwargs": {
                     "name": "worker", "model": "p/m", "thinking": "High", "cwd": "lanes/a",
                     "factory": { "runId": "r1", "specId": "sw", "stateId": "build" },
+                    "factoryContract": { "outputs": [{ "name": "verdict", "type": "text" }], "records": {}, "inputs": {} },
                 }
             }),
         )
@@ -1399,6 +1421,9 @@ mod tests {
                 run_id: "r1".to_string(),
                 spec_id: "sw".to_string(),
                 state_id: "build".to_string(),
+                contract: Some(
+                    json!({ "outputs": [{ "name": "verdict", "type": "text" }], "records": {}, "inputs": {} })
+                ),
             })
         );
         drop(requests);

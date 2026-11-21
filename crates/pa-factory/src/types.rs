@@ -7,7 +7,7 @@
 //! is left out.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use serde_json::Value;
 
@@ -27,6 +27,30 @@ pub enum Type {
     List(Box<Type>),
     /// A record declared under `[types.<name>]`.
     Record(String),
+}
+
+impl fmt::Display for Type {
+    /// The machine.toml spelling: `text`, `enum(a, b)`, `list[finding]`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text => f.write_str("text"),
+            Self::Int => f.write_str("int"),
+            Self::Float => f.write_str("float"),
+            Self::Bool => f.write_str("bool"),
+            Self::File => f.write_str("file"),
+            Self::Json => f.write_str("json"),
+            Self::Enum(values) => write!(f, "enum({})", values.join(", ")),
+            Self::List(item) => write!(f, "list[{item}]"),
+            Self::Record(name) => f.write_str(name),
+        }
+    }
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mark = if self.optional { "?" } else { "" };
+        write!(f, "{}{mark}", self.ty)
+    }
 }
 
 /// A type in a position that may be optional (an output or a record field).

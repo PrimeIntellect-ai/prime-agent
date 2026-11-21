@@ -748,8 +748,9 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
                 "params": {"who": "World"},
                 "states": [{
                     "id": "greet", "entry": true,
-                    "subagent": {"prompt": "Greet {who}.\n\n## Outputs\n\nYour whole final answer becomes the `line` output."},
+                    "subagent": {"prompt": "Greet {who}.\n\n## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.factory.emit(line=...)\n\n- `line`: text\n\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it."},
                     "outputs": [{"name": "line", "type": "text"}],
+                    "emit": {"outputs": [{"name": "line", "type": "text"}], "records": {}},
                 }],
                 "transitions": [],
             },
@@ -765,4 +766,195 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
             machine_dir.display()
         )
     );
+}
+
+/// A temp session dir, a cwd holding `DESIGN.md`, and the emit and check
+/// handlers registered for a contract with a file port and a record port.
+struct EmitFixture {
+    _dir: tempfile::TempDir,
+    session_dir: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+    contract: serde_json::Value,
+    handlers: crate::kernel::shared::HostRequestHandlers,
+}
+
+impl EmitFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        let cwd = dir.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("DESIGN.md"), "# Design\n").unwrap();
+        let contract = json!({
+            "outputs": [
+                {"name": "design", "type": "file"},
+                {"name": "verdict", "type": "verdict"},
+            ],
+            "records": {"verdict": [["decision", "enum(approve, rework)"]]},
+            "inputs": {"task": "fix it", "plan": {"steps": 2}},
+        });
+        let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+        super::register_factory_emit_host_handlers(
+            contract.clone(),
+            session_dir.clone(),
+            cwd.clone(),
+            &mut handlers,
+        );
+        super::register_factory_check_host_handler(&mut handlers);
+        Self {
+            _dir: dir,
+            session_dir,
+            cwd,
+            contract,
+            handlers,
+        }
+    }
+
+    async fn request(
+        &self,
+        request_type: &str,
+        data: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let handler = self.handlers.get(request_type).unwrap().clone();
+        handler(crate::kernel::shared::HostRequestPayload { data }).await
+    }
+
+    fn outputs_file(&self) -> std::path::PathBuf {
+        self.session_dir.join(super::FACTORY_OUTPUTS_FILE)
+    }
+
+    fn written(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self.outputs_file()).unwrap()).unwrap()
+    }
+}
+
+/// A valid emit is accepted: the file port is copied beside the session,
+/// each call merges into the outputs file, and the reply names the
+/// required ports still owed.
+#[tokio::test]
+async fn a_valid_emit_merges_into_the_outputs_file_and_copies_file_ports() {
+    let fixture = EmitFixture::new();
+    let copy = fixture.session_dir.join("factory-files/design/DESIGN.md");
+    assert_eq!(
+        fixture
+            .request("factory.emit", json!({"outputs": {"design": "DESIGN.md"}}))
+            .await
+            .unwrap(),
+        json!({"accepted": ["design"], "missing": ["verdict"]})
+    );
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# Design\n");
+    assert_eq!(
+        fixture
+            .request(
+                "factory.emit",
+                json!({"outputs": {"verdict": {"decision": "approve"}}})
+            )
+            .await
+            .unwrap(),
+        json!({"accepted": ["verdict"], "missing": []})
+    );
+    assert_eq!(
+        fixture.written(),
+        json!({"design": copy.display().to_string(), "verdict": {"decision": "approve"}})
+    );
+}
+
+/// A wrong-typed value fails with its exact field path, in `factory.emit`
+/// and in the `factory.check` a python state's outputs pass through.
+#[tokio::test]
+async fn a_wrong_typed_emit_names_the_exact_field() {
+    let fixture = EmitFixture::new();
+    let wrong = json!({"verdict": {"decision": "ship"}});
+    let expected = "verdict.decision: \"ship\" is not one of approve, rework";
+    let error = fixture
+        .request("factory.emit", json!({"outputs": wrong}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), expected);
+    let error = fixture
+        .request(
+            "factory.check",
+            json!({"contract": fixture.contract, "outputs": wrong}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), expected);
+}
+
+/// One bad port refuses the whole emit: the valid port in the same call
+/// is not kept, no file is copied, and the ports accepted before stay
+/// exactly as they were.
+#[tokio::test]
+async fn a_refused_emit_writes_nothing() {
+    let fixture = EmitFixture::new();
+    fixture
+        .request(
+            "factory.emit",
+            json!({"outputs": {"verdict": {"decision": "rework"}}}),
+        )
+        .await
+        .unwrap();
+    let before = std::fs::read(fixture.outputs_file()).unwrap();
+    let error = fixture
+        .request(
+            "factory.emit",
+            json!({"outputs": {"verdict": {"decision": "approve"}, "design": "MISSING.md"}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "design: cannot read {}: No such file or directory (os error 2)",
+            fixture.cwd.join("MISSING.md").display()
+        )
+    );
+    assert_eq!(std::fs::read(fixture.outputs_file()).unwrap(), before);
+    assert!(!fixture.session_dir.join(super::FACTORY_FILES_DIR).exists());
+}
+
+/// `factory.inputs` answers the values bound into the child's contract.
+#[tokio::test]
+async fn factory_inputs_answers_the_bound_inputs() {
+    let fixture = EmitFixture::new();
+    assert_eq!(
+        fixture.request("factory.inputs", json!({})).await.unwrap(),
+        json!({"inputs": {"task": "fix it", "plan": {"steps": 2}}})
+    );
+}
+
+/// Two emits at the same time both merge: the read-merge-write is one
+/// critical section per session dir, so neither call loses the ports of
+/// the other.
+#[test]
+fn concurrent_emits_both_merge() {
+    let fixture = EmitFixture::new();
+    let emits: Vec<_> = [
+        json!({"design": "DESIGN.md"}),
+        json!({"verdict": {"decision": "approve"}}),
+    ]
+    .into_iter()
+    .map(|outputs| {
+        let (contract, session_dir, cwd) = (
+            fixture.contract.clone(),
+            fixture.session_dir.clone(),
+            fixture.cwd.clone(),
+        );
+        std::thread::spawn(move || {
+            super::emit_outputs(&contract, &session_dir, &cwd, &json!({"outputs": outputs}))
+        })
+    })
+    .collect();
+    for emit in emits {
+        emit.join().unwrap().unwrap();
+    }
+    let mut ports: Vec<String> = fixture
+        .written()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    ports.sort();
+    assert_eq!(ports, ["design", "verdict"]);
 }
