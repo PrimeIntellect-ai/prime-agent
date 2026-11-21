@@ -686,7 +686,7 @@ fn emit_outputs(
         STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&staging, serde_json::to_vec_pretty(&merged)?)?;
-    std::fs::rename(&staging, &outputs_path)?;
+    crate::platform::rename_onto(&staging, &outputs_path)?;
     Ok(json!({ "accepted": accepted, "missing": contract.missing(&merged) }))
 }
 

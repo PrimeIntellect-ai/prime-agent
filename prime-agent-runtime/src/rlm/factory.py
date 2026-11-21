@@ -3316,9 +3316,13 @@ class FactoryExecutor:
             try:
                 await host_request("factory.check", {"contract": state.spec["emit"], "outputs": outputs})
             except RuntimeError as error:
+                if entry.status != "running":
+                    return
                 await self._apply_instance_failure(
                     run, state, entry, instance, f"python state output: {error}", retry=True
                 )
+                return
+            if entry.status != "running":
                 return
         instance.status = "done"
         instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
@@ -3639,7 +3643,7 @@ class FactoryExecutor:
         failures = []
         for out in declared:
             name = out["name"]
-            if all(name in emitted for emitted in per_instance):
+            if out.get("type", "").endswith("?") or all(name in emitted for emitted in per_instance):
                 continue
             error = f"output {name!r} was never emitted (rlm.factory.emit)"
             self._event(run, "output_capture_failed", node=state.state_id, entry=entry.index, port=name, error=error)

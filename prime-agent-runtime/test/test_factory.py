@@ -7425,6 +7425,18 @@ class FactoryEmitTest(_ExecutorTestCase):
         )
 
     @async_test
+    async def test_an_optional_output_may_be_left_out(self) -> None:
+        machine = self.machine()
+        machine["states"][0]["outputs"].append({"name": "note", "type": "text"})
+        machine["states"][0]["emit"]["outputs"].append({"name": "note", "type": "text?"})
+        self.emitted("child-1", {"plan": {"steps": 2}})
+        self.emitted("child-2", {"report": "built"})
+        self.store_machine(machine)
+        status = await self.run_to_end()
+
+        self.assertEqual(status["state"], "done")
+
+    @async_test
     async def test_a_required_output_never_emitted_fails_the_entry(self) -> None:
         self.emitted("child-1", {})
         self.store_machine(self.machine())
