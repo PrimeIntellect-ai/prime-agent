@@ -327,6 +327,32 @@ class ScanGuardTest(unittest.TestCase):
         self.assertFalse(is_scan("find ~/`printf work`/repo"))
         self.assertTrue(is_scan('find "$HOME/$(printf Documents)"'))
 
+    def test_find_action_words_are_not_a_depth_bound(self):
+        # The words of -exec/-ok run as a command, so their -maxdepth does not
+        # bound the outer walk; a bound after the action's `;` or `{} +` still
+        # counts, and a glued grouping paren is not part of the number.
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertTrue(is_scan("find ~ -type d -exec find {} -maxdepth 1 \\;"))
+        self.assertTrue(is_scan("find ~/Documents -ok find {} -maxdepth 1 ';'"))
+        self.assertFalse(is_scan("find ~ -exec echo {} \\; -maxdepth 1"))
+        self.assertFalse(is_scan("find ~ -exec echo {} + -maxdepth 2"))
+        self.assertFalse(is_scan("(find ~ -maxdepth 2)"))
+        self.assertFalse(is_scan("(rg needle ~ --max-depth 2)"))
+        self.assertFalse(is_scan("(rg needle ~ -d 2)"))
+
+    def test_leading_redirections_do_not_hide_the_command(self):
+        # Bash allows redirections before the command word.
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertTrue(is_scan("2>/dev/null find ~"))
+        self.assertTrue(is_scan('> /tmp/results rg needle "$HOME"'))
+        self.assertTrue(is_scan("LC_ALL=C 2>&1 grep -rl needle ~/Documents"))
+        self.assertFalse(is_scan("2>/dev/null find ~ -maxdepth 1"))
+
+    def test_grep_dereference_recursive_is_recursive(self):
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertTrue(is_scan("grep --dereference-recursive needle ~/Documents"))
+        self.assertFalse(is_scan("grep --dereference-recursive needle src/"))
+
     def test_rg_value_options_do_not_displace_the_pattern(self):
         # rg's -r is --replace and takes a value, like -E/--encoding and the
         # long value options: the operand is skipped, so the quoted
@@ -368,6 +394,8 @@ class ScanGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("if find ~/Documents -name x; then echo y; fi"))
         self.assertTrue(is_scan("! find ~/Documents"))
         self.assertTrue(is_scan("time rg needle ~/Documents"))
+        self.assertTrue(is_scan("time -p find ~/Documents"))
+        self.assertTrue(is_scan("time -p -- find ~/Documents"))
         self.assertFalse(is_scan("if true; then timeout 60 find ~/Documents; fi"))
         self.assertFalse(is_scan("if true; then echo find ~/Documents; fi"))
 

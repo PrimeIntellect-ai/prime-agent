@@ -37,9 +37,25 @@ def _is_home_scale_root(token: str) -> bool:
 
 
 def _is_find_depth_bound(tokens: list[str]) -> bool:
-    """find's `-maxdepth N` with a numeric argument."""
+    """find's `-maxdepth N` with a numeric argument. The words of an -exec,
+    -execdir, -ok, or -okdir action are a command, not find options:
+    `find ~ -exec find {} -maxdepth 1 \\;` has no bound. The action ends at
+    `;`, which reaches here masked (`\\;` or `';'` leaves placeholders only),
+    or at `{} +`. A grouping paren glued to N (`(find ~ -maxdepth 2)`) is
+    not part of N."""
+    in_action = False
     for i, t in enumerate(tokens):
-        if t == "-maxdepth" and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+        if in_action:
+            in_action = bool(t.strip(_MASK_PLACEHOLDER)) and not (
+                t == "+" and tokens[i - 1] == "{}"
+            )
+        elif t in ("-exec", "-execdir", "-ok", "-okdir"):
+            in_action = True
+        elif (
+            t == "-maxdepth"
+            and i + 1 < len(tokens)
+            and tokens[i + 1].rstrip(")").isdigit()
+        ):
             return True
     return False
 
@@ -54,6 +70,10 @@ _REDIRECT_OPERATORS = frozenset(
 def _is_redirect_operator(token: str) -> bool:
     """A redirection operator token, with its optional fd prefix (`2>`)."""
     return token.lstrip("0123456789") in _REDIRECT_OPERATORS
+
+
+# A redirection with its target in the same token (`2>/dev/null`, `>out`).
+_ATTACHED_REDIRECT = re.compile(r"[0-9]*(?:&>>|&>|>>|>\||>&|<&|<>|>|<)\S")
 
 
 # Options whose operand is the next token, so that operand is neither the
@@ -511,22 +531,35 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
     # inside the segment: their `&` is not a separator.
     for segment in re.split(r"&&|\|\||;|\||\n|(?<![<>])&(?!>)", masked):
         tokens = segment.split()
-        # Leading grouping operators, reserved words, and assignment words:
-        # `(find ...)`, `{ ...; }`, `then find ...`, `! find ...`, and
-        # `LC_ALL=C find ...` run the same command, so the shape must survive
-        # them. Walk by index and strip all prefixes at once: popping the head
-        # or copying one character per round is quadratic in the number of
-        # prefixes.
+        # Leading grouping operators, reserved words, assignment words, and
+        # redirections: `(find ...)`, `{ ...; }`, `then find ...`,
+        # `! find ...`, `time -p find ...`, `LC_ALL=C find ...`, and
+        # `2>/dev/null find ...` run the same command, so the shape must
+        # survive them. Walk by index and strip all prefixes at once: popping
+        # the head or copying one character per round is quadratic in the
+        # number of prefixes.
         command_start = 0
+        previous = ""
         while command_start < len(tokens):
             stripped = tokens[command_start].lstrip("({")
+            if _is_redirect_operator(stripped):
+                command_start += 2  # the operator and its target
+                previous = ""
+                continue
+            # bash's `time` takes `-p`, then `--`, before its pipeline.
+            time_option = (previous == "time" and stripped in ("-p", "--")) or (
+                previous == "-p" and stripped == "--"
+            )
             if (
                 stripped
                 and stripped not in _COMMAND_PREFIX_WORDS
                 and not _ASSIGNMENT_WORD.match(stripped)
+                and not _ATTACHED_REDIRECT.match(stripped)
+                and not time_option
             ):
                 tokens[command_start] = stripped
                 break
+            previous = stripped
             command_start += 1
         tokens = tokens[command_start:]
         if not tokens or tokens[0] == "timeout":
@@ -578,8 +611,10 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         # One walk makes every option decision. Options end at `--`, and an
         # option's operand is not an option: `grep -e -r ~/x` is not
         # recursive, and `rg -g --files` globs for `--files`. rg always
-        # recurses; the grep family needs -r, -R, or --recursive. Only rg
-        # has a depth bound (--max-depth, --maxdepth, or -d with a number).
+        # recurses; the grep family needs -r, -R, --recursive, or
+        # --dereference-recursive. Only rg has a depth bound (--max-depth,
+        # --maxdepth, or -d with a number; a glued grouping paren is not part
+        # of the number).
         recursive = is_rg
         depth_bound = pattern_from_option = files_mode = False
         positionals: list[str] = []
@@ -601,11 +636,12 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
             following = rest[i + 1] if i + 1 < len(rest) else ""
             if t.startswith("--"):
                 name, eq, value = t.partition("=")
-                recursive = recursive or t.startswith("--recursive")
+                recursive = recursive or name in ("--recursive", "--dereference-recursive")
                 pattern_from_option = pattern_from_option or name in ("--regexp", "--file")
                 files_mode = files_mode or (is_rg and t == "--files")
                 if is_rg and name in ("--max-depth", "--maxdepth"):
-                    depth_bound = depth_bound or (value if eq else following).isdigit()
+                    operand = value if eq else following
+                    depth_bound = depth_bound or operand.rstrip(")").isdigit()
                 skip_next = t in value_options
                 continue
             # A short cluster's letters are flags up to its first value
@@ -619,7 +655,8 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
                 attached = t[len(cluster) + 1 :]
                 pattern_from_option = pattern_from_option or value_letter in ("e", "f")
                 if is_rg and value_letter == "d":
-                    depth_bound = depth_bound or (attached or following).isdigit()
+                    operand = attached or following
+                    depth_bound = depth_bound or operand.rstrip(")").isdigit()
                 skip_next = not attached
         if not recursive or depth_bound:
             continue
