@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::load::{routed_slot, CONTEXT_FILE, MACHINE_FILE};
-use crate::machine::{Diagnostic, Machine, State, Work};
+use crate::machine::{Diagnostic, Machine, Reference, State, Work};
 use crate::types::Type;
 
 pub(crate) fn check(machine: &Machine) -> Vec<Diagnostic> {
@@ -73,7 +73,11 @@ fn check_inputs(machine: &Machine, state: &State, report: &mut impl FnMut(String
                 format!("{:?} is also a param; rename the input", input.name),
             );
         }
-        let Some(source) = machine.state(&input.state) else {
+        let Reference::Port(selector) = &input.from else {
+            // The loader checked the asset path; an asset is always there.
+            continue;
+        };
+        let Some(source) = machine.state(&selector.state) else {
             report(at, format!("{:?} names no state", input.to_string()));
             continue;
         };
@@ -82,12 +86,12 @@ fn check_inputs(machine: &Machine, state: &State, report: &mut impl FnMut(String
                 at,
                 format!(
                     "{} is resident; nothing can read from a resident",
-                    input.state
+                    selector.state
                 ),
             );
             continue;
         }
-        if source.output(&input.port).is_none() {
+        if source.output(&selector.port).is_none() {
             let ports: Vec<&str> = source
                 .outputs
                 .iter()
@@ -97,8 +101,8 @@ fn check_inputs(machine: &Machine, state: &State, report: &mut impl FnMut(String
                 at.clone(),
                 format!(
                     "{} has no output {:?} (it has: {})",
-                    input.state,
-                    input.port,
+                    selector.state,
+                    selector.port,
                     if ports.is_empty() {
                         "none".to_string()
                     } else {
@@ -107,7 +111,7 @@ fn check_inputs(machine: &Machine, state: &State, report: &mut impl FnMut(String
                 ),
             );
         }
-        if input.state == state.id && !input.optional {
+        if selector.state == state.id && !input.optional {
             report(
                 at.clone(),
                 "a state cannot require its own output: mark the self-input optional with ?"
@@ -146,10 +150,13 @@ fn check_shape(machine: &Machine, state: &State, report: &mut impl FnMut(String,
                 format!("{:?} is not an input of this state", foreach.over),
             ),
             Some(input) => {
-                let ty = machine
-                    .state(&input.state)
-                    .and_then(|source| source.output(&input.port))
-                    .map(|output| &output.slot.ty);
+                let ty = match &input.from {
+                    Reference::Port(selector) => machine
+                        .state(&selector.state)
+                        .and_then(|source| source.output(&selector.port))
+                        .map(|output| &output.slot.ty),
+                    Reference::Asset(_) => Some(&Type::Text),
+                };
                 if !matches!(ty, Some(Type::List(_) | Type::Json) | None) {
                     report(
                         format!("{at}.foreach.over"),

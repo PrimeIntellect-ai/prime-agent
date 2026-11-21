@@ -20,6 +20,8 @@ rsi/
     pr-quality.toml   [[rule]] id, check, default severity
   nodes/
     triage.py         python states: plain functions
+  assets/             optional; files that states read as inputs
+    style.md
 ```
 
 `machine.toml` keys:
@@ -37,11 +39,20 @@ rsi/
 - `[states.<id>]`: an agent state has `agent = { prompt = "prompts/x.md",
   role = "...", rubric = "rubrics/x.toml", name = "label" }`; a python state
   has `kind = "python"` and `run = "nodes/x.py:function"`. Both take
-  `entry`, `inputs = { name = "state.port" }` (`?` when optional),
+  `entry`, `inputs = { name = "state.port" }` (`?` when optional) or
+  `inputs = { name = "assets/<path>" }` (an asset, always required),
   `outputs = { port = "type" }`, `next` (a state or a list), `route = { on =
   "port" | "port.field", <value> = "<state>" }`, `join = [...]`,
   `max_entries`, `retries`, `budget`, `failure_policy`, `foreach = { over,
   max }`, and `resident`.
+
+Paths: each file that the machine names (a prompt, a rubric, a node, an
+asset) must be a relative path inside the machine directory. A `.` or `..`
+part is an error. A symlink whose target is outside the directory is an
+error. Both errors name the path and the machine directory; the symlink
+error also names the target. An asset input is a `text` input. A missing
+asset is a load error, so `factory validate` and `factory compile` report
+it with the asset path.
 
 Types: `text`, `int`, `float`, `bool`, `file`, `json`, `enum(a, b)`,
 `list[T]`, and record names. A `file` output must be top-level, and only an
@@ -96,6 +107,11 @@ clock, the children, and the files; it gives the time to each call.
   settled source has no value. An optional input binds `null`, but waits
   for another state that is live. A foreach input gives one record for
   each item, up to `max`.
+- Assets: an [`AssetCache`] holds the assets of one run. `plan_payloads`
+  checks that each asset input names a file in the machine directory, and
+  fails with the asset path when it does not. The plan reads no asset.
+  `PayloadPlan::bind` reads an asset on its first use. Later binds in the
+  same run use the cached text, also when the file changes.
 
 ## Scope
 
@@ -120,7 +136,8 @@ clock, the children, and the files; it gives the time to each call.
 
 ## Public API
 
-`load_machine_dir`, `compile`, `convert_spec`, `Contract`,
+`load_machine_dir`, `compile`, `convert_spec`, `Contract`, `AssetCache`,
+`AssetPath`, `AssetError`, `Reference`,
 `parse_duration_ms`, the `types` module, and the model types re-exported
 from the crate root.
 

@@ -1,0 +1,22 @@
+format = 1
+name = "outline-draft"
+version = 1
+description = "Plan an outline for a topic, then write a draft from the outline and the style guide asset"
+
+[params]
+topic = { type = "text", description = "The topic of the draft" }
+
+[types.outline]
+title = "text"
+sections = "list[text]"
+
+[states.plan]
+entry = true
+agent = { prompt = "prompts/plan.md" }
+outputs = { outline = "outline" }
+next = "draft"
+
+[states.draft]
+agent = { prompt = "prompts/draft.md" }
+inputs = { outline = "plan.outline", style = "assets/style.md" }
+outputs = { draft = "text" }

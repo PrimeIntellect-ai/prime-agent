@@ -6,16 +6,17 @@
 //! so one `factory validate` run lists everything to fix.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
 use toml::Spanned;
 
+use crate::asset::AssetError;
 use crate::duration::parse_duration_ms;
 use crate::machine::{
-    Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall, Route,
-    Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
+    Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall,
+    Reference, Route, Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
 };
 use crate::types::{self, parse_slot, parse_type, record_names, Records, Slot, Type};
 
@@ -566,40 +567,16 @@ fn read_text_file(
     problems: &mut Vec<Diagnostic>,
     presence: Presence,
 ) -> Option<String> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
-        problems.push(Diagnostic::new(
-            MACHINE_FILE,
-            at,
-            format!("{relative:?} must be a relative path inside the machine directory"),
-        ));
-        return None;
-    }
-    let full = dir.join(path);
-    // A relative in-dir path can still LEAVE the dir through a symlink:
-    // `prompts/a.md -> /tmp/secret` passes the text check and hands the
-    // machine outside content (a probe at this fix's head read
-    // /tmp/probe-secret.txt into a child prompt). When the file exists,
-    // its canonicalized path must stay under the canonical machine dir —
-    // a symlink pointing outside is a load error, before any text is
-    // read. A missing file falls through to the read attempt below,
-    // which reports it with its own diagnostic.
-    if let (Ok(dir_canonical), Ok(full_canonical)) = (dir.canonicalize(), full.canonicalize()) {
-        if !full_canonical.starts_with(&dir_canonical) {
-            problems.push(Diagnostic::new(
-                MACHINE_FILE,
-                at,
-                format!(
-                    "{relative:?} escapes the machine directory (a symlink pointing outside it)"
-                ),
-            ));
+    // A missing file falls through to the read below, which reports it
+    // with its own diagnostic (or skips an optional file).
+    let full = match crate::asset::resolve(dir, relative) {
+        Ok(full) => full,
+        Err(AssetError::Missing { .. }) => dir.join(relative),
+        Err(error) => {
+            problems.push(Diagnostic::new(MACHINE_FILE, at, error.to_string()));
             return None;
         }
-    }
+    };
     match std::fs::read(&full) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(text) if text.trim().is_empty() => {
@@ -717,14 +694,26 @@ fn build_state(
             Some(reference) => (reference, true),
             None => (from.as_str(), false),
         };
-        match reference.split_once('.') {
-            Some((state, port)) if !state.is_empty() && !port.is_empty() && !port.contains('.') => inputs.push(Input {
+        match Reference::parse(reference) {
+            Ok(Reference::Asset(_)) if optional => problems.push(Diagnostic::new(
+                MACHINE_FILE,
+                &key,
+                "an asset input cannot be optional: remove the ?",
+            )),
+            Ok(Reference::Asset(asset)) => match crate::asset::check(dir, &asset) {
+                Ok(_) => inputs.push(Input {
+                    name,
+                    from: Reference::Asset(asset),
+                    optional,
+                }),
+                Err(error) => problems.push(Diagnostic::new(MACHINE_FILE, &key, error.to_string())),
+            },
+            Ok(from) => inputs.push(Input {
                 name,
-                state: state.to_string(),
-                port: port.to_string(),
+                from,
                 optional,
             }),
-            _ => problems.push(Diagnostic::new(MACHINE_FILE, &key, format!("{from:?} must name a state's output as \"<state>.<port>\" (add ? when optional)"))),
+            Err(_) => problems.push(Diagnostic::new(MACHINE_FILE, &key, format!("{from:?} must name a state's output as \"<state>.<port>\" or an asset as \"assets/<path>\" (add ? when optional)"))),
         }
     }
 

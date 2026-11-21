@@ -1,0 +1,3 @@
+- Use short sentences.
+- Use one main fact in each sentence.
+- Write each section as one paragraph.

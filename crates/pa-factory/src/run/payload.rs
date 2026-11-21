@@ -1,12 +1,14 @@
 //! Payloads: the typed input record of one state entry.
 //!
 //! Each input of a state is a [`Binding`]: a name, a port type, and a
-//! [`Selector`] that names a parent output. [`plan_payloads`] reads every
-//! binding of a canonical spec before the run starts. A reference to a
-//! state or a port that does not exist fails there, with the port named.
-//! At run time, [`PayloadPlan::bind`] copies the selected values into a
-//! [`Payload`]. The values stay typed JSON. No value goes through a text
-//! template.
+//! [`Reference`]. The reference is a [`Selector`] that names a parent
+//! output, or an asset of the machine directory. [`plan_payloads`] reads
+//! every binding of a canonical spec before the run starts. A reference to
+//! a state, a port, or an asset that does not exist fails there, with the
+//! port or the asset path named. At run time, [`PayloadPlan::bind`] copies
+//! the selected values into a [`Payload`]. It reads each asset through the
+//! run's [`AssetCache`]. The values stay typed JSON. No value goes through
+//! a text template.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -14,6 +16,8 @@ use std::fmt;
 use serde_json::{Map, Value};
 
 use super::selector::{Selection, Selector, SelectorError, Settle, Unavailable};
+use crate::asset::{AssetCache, AssetError};
+use crate::machine::Reference;
 
 /// The type of an input or output port in a canonical spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +50,7 @@ impl fmt::Display for PortType {
 pub struct Binding {
     pub name: String,
     pub ty: PortType,
-    pub selector: Selector,
+    pub from: Reference,
     /// An optional input binds `null` when its source has no value.
     pub optional: bool,
 }
@@ -137,26 +141,49 @@ impl PayloadPlan {
         &self.bindings
     }
 
-    /// Bind each input from the latest settle of its source.
+    /// Bind each input from the latest settle of its source, or from the
+    /// text of its asset.
     ///
     /// A required input waits until its source settles. An optional input
     /// binds `null` when its source has no value, but it waits when its
     /// source is another state that is live. An optional foreach input
     /// with no value binds no items. A required input whose source
-    /// settled with no value fails the entry.
-    pub fn bind<'a>(&self, source: impl Fn(&str) -> SourceView<'a>) -> Bind {
+    /// settled with no value fails the entry. An asset input reads the
+    /// asset through `assets`, so the run reads each asset one time.
+    pub fn bind<'a>(
+        &self,
+        source: impl Fn(&str) -> SourceView<'a>,
+        assets: &mut AssetCache,
+    ) -> Bind {
         let mut fields = Map::new();
         let mut fan = None;
         for binding in &self.bindings {
-            let view = source(&binding.selector.state);
+            let failed = |failure| {
+                Bind::Failed(BindError {
+                    input: binding.name.clone(),
+                    from: binding.from.clone(),
+                    failure,
+                })
+            };
+            let selector = match &binding.from {
+                Reference::Port(selector) => selector,
+                Reference::Asset(asset) => match assets.load(asset) {
+                    Ok(text) => {
+                        fields.insert(binding.name.clone(), Value::String(text.to_string()));
+                        continue;
+                    }
+                    Err(error) => return failed(BindFailure::Asset(error)),
+                },
+            };
+            let view = source(&selector.state);
             let over = self
                 .foreach
                 .as_ref()
                 .filter(|foreach| foreach.over == binding.name);
-            let value = match binding.selector.select(view.settles) {
+            let value = match selector.select(view.settles) {
                 Selection::Value(value) => value,
                 Selection::NotSettled
-                    if binding.optional && view.live && binding.selector.state != self.state =>
+                    if binding.optional && view.live && selector.state != self.state =>
                 {
                     return Bind::Wait;
                 }
@@ -171,20 +198,12 @@ impl PayloadPlan {
                 }
                 Selection::NotSettled => return Bind::Wait,
                 Selection::Unavailable(reason) => {
-                    return Bind::Failed(BindError {
-                        input: binding.name.clone(),
-                        selector: binding.selector.clone(),
-                        failure: BindFailure::Unavailable(reason),
-                    });
+                    return failed(BindFailure::Unavailable(reason));
                 }
             };
             if let Some(foreach) = over {
                 let Value::Array(items) = value else {
-                    return Bind::Failed(BindError {
-                        input: binding.name.clone(),
-                        selector: binding.selector.clone(),
-                        failure: BindFailure::NotAList,
-                    });
+                    return failed(BindFailure::NotAList);
                 };
                 fan = Some((foreach.clone(), items.clone()));
                 continue;
@@ -203,7 +222,7 @@ impl PayloadPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindError {
     pub input: String,
-    pub selector: Selector,
+    pub from: Reference,
     pub failure: BindFailure,
 }
 
@@ -212,39 +231,40 @@ pub enum BindFailure {
     Unavailable(Unavailable),
     /// The foreach input is not a JSON list.
     NotAList,
+    /// The asset changed after the plan and cannot be read.
+    Asset(AssetError),
 }
 
 impl fmt::Display for BindError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             input,
-            selector,
+            from,
             failure,
         } = self;
         match failure {
             BindFailure::Unavailable(reason) => {
-                write!(
-                    f,
-                    "input {input:?} from {selector} is unavailable: {reason}"
-                )
+                write!(f, "input {input:?} from {from} is unavailable: {reason}")
             }
             BindFailure::NotAList => {
-                write!(
-                    f,
-                    "foreach input {input:?} from {selector} is not a JSON list"
-                )
+                write!(f, "foreach input {input:?} from {from} is not a JSON list")
             }
+            BindFailure::Asset(error) => write!(f, "input {input:?}: {error}"),
         }
     }
 }
 
 /// Read and check the inputs of every state of a canonical spec, by
-/// state id.
+/// state id. Each asset input must be a file in the machine directory of
+/// `assets`. The plan does not read the asset.
 ///
 /// # Errors
 ///
 /// Returns every [`PlanError`] in the spec.
-pub fn plan_payloads(spec: &Value) -> Result<BTreeMap<String, PayloadPlan>, Vec<PlanError>> {
+pub fn plan_payloads(
+    spec: &Value,
+    assets: &AssetCache,
+) -> Result<BTreeMap<String, PayloadPlan>, Vec<PlanError>> {
     let states: Vec<&Value> = spec
         .get("states")
         .and_then(Value::as_array)
@@ -268,7 +288,7 @@ pub fn plan_payloads(spec: &Value) -> Result<BTreeMap<String, PayloadPlan>, Vec<
         let mut names = BTreeSet::new();
         for raw in port_list(state, "inputs") {
             let name = raw.get("name").and_then(Value::as_str).unwrap_or_default();
-            match read_binding(raw, &by_id) {
+            match read_binding(raw, &by_id, assets) {
                 Err(found) => problem(name, found),
                 Ok(_) if !names.insert(name) => problem(name, PlanProblem::DuplicateInput),
                 Ok(binding) => bindings.push(binding),
@@ -314,7 +334,11 @@ fn port_list<'a>(state: &'a Value, key: &str) -> impl Iterator<Item = &'a Value>
         .flatten()
 }
 
-fn read_binding(raw: &Value, by_id: &BTreeMap<&str, &Value>) -> Result<Binding, PlanProblem> {
+fn read_binding(
+    raw: &Value,
+    by_id: &BTreeMap<&str, &Value>,
+    assets: &AssetCache,
+) -> Result<Binding, PlanProblem> {
     let malformed = |what: &str| PlanProblem::Malformed(what.to_string());
     let name = raw
         .get("name")
@@ -335,7 +359,21 @@ fn read_binding(raw: &Value, by_id: &BTreeMap<&str, &Value>) -> Result<Binding, 
         .get("from")
         .and_then(Value::as_str)
         .ok_or_else(|| malformed("from is not text"))?;
-    let selector = Selector::parse(reference).map_err(PlanProblem::Selector)?;
+    let selector = match Reference::parse(reference).map_err(PlanProblem::Selector)? {
+        Reference::Asset(asset) => {
+            if ty != PortType::Text || optional {
+                return Err(malformed("an asset input is a required text input"));
+            }
+            assets.check(&asset).map_err(PlanProblem::Asset)?;
+            return Ok(Binding {
+                name: name.to_string(),
+                ty,
+                from: Reference::Asset(asset),
+                optional,
+            });
+        }
+        Reference::Port(selector) => selector,
+    };
     let source = by_id
         .get(selector.state.as_str())
         .ok_or_else(|| PlanProblem::UnknownState(selector.state.clone()))?;
@@ -360,7 +398,7 @@ fn read_binding(raw: &Value, by_id: &BTreeMap<&str, &Value>) -> Result<Binding, 
     Ok(Binding {
         name: name.to_string(),
         ty,
-        selector,
+        from: Reference::Port(selector),
         optional,
     })
 }
@@ -391,6 +429,8 @@ pub enum PlanProblem {
     },
     /// The foreach input is not a json input of the state.
     ForeachOver,
+    /// The asset is missing or leaves the machine directory.
+    Asset(AssetError),
 }
 
 impl fmt::Display for PlanError {
@@ -422,6 +462,7 @@ impl fmt::Display for PlanError {
             PlanProblem::ForeachOver => {
                 f.write_str("foreach.over is not a json input of this state")
             }
+            PlanProblem::Asset(error) => write!(f, "{error}"),
         }
     }
 }
