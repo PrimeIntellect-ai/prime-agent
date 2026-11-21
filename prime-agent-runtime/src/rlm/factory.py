@@ -3543,6 +3543,16 @@ class FactoryExecutor:
         if state is None:
             raise ValueError(f"unknown state {state_id!r} in run {run_id!r}")
         entries = state.entries
+        # The state's prompt template for the node view; a promptless
+        # (python) state sends none so the view keeps its placeholder.
+        template = state.prompt_template
+        template_truncated = False
+        if template is not None:
+            template_truncated = len(template.encode("utf-8")) > NODE_PROMPT_CAP
+            if template_truncated:
+                template = template.encode("utf-8")[:NODE_PROMPT_CAP].decode(
+                    "utf-8", errors="ignore"
+                )
         if not entries:
             if entry_at is not None:
                 raise ValueError(
@@ -3552,6 +3562,8 @@ class FactoryExecutor:
                 "run_id": run.run_id,
                 "spec_id": run.spec_id,
                 "name": run.name,
+                "template": template,
+                "template_truncated": template_truncated,
                 "state": self._state_report(state, include_answer=False),
                 "entry": None,
                 "instance": None,
@@ -3631,6 +3643,8 @@ class FactoryExecutor:
             "run_id": run.run_id,
             "spec_id": run.spec_id,
             "name": run.name,
+            "template": template,
+            "template_truncated": template_truncated,
             "state": self._state_report(state, include_answer=False),
             "entry": {
                 "index": entry.index,

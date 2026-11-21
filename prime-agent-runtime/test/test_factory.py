@@ -7228,6 +7228,38 @@ class FactoryPythonStateTest(_ExecutorTestCase):
         return next(entry for entry in status["nodes"] if entry["id"] == node_id)
 
     @async_test
+    async def test_node_activity_reports_the_state_prompt_template(self) -> None:
+        self.host.outcomes["work"] = {"status": "done", "answer": "counted"}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "plan",
+                        "entry": True,
+                        "python": self.py("plan"),
+                        "outputs": [{"name": "items", "type": "json"}, {"name": "mode", "type": "text"}],
+                    },
+                    state("work", subagent={"prompt": "Count the planned items"}),
+                ],
+                "transitions": [{"from": "plan", "to": "work"}],
+            }
+        )
+        result = await self.start()
+        await self.finish(result)
+        templates = {}
+        for state_id in ("plan", "work"):
+            reply = await self.executor.activity(
+                {"action": "node", "runId": result["run_id"], "specId": state_id}
+            )
+            templates[state_id] = (reply["template"], reply["templateTruncated"])
+        # A python state declares no prompt: the reply sends no template, so
+        # the view keeps its "no prompt template" text.
+        self.assertEqual(
+            templates,
+            {"plan": (None, False), "work": ("Count the planned items", False)},
+        )
+
+    @async_test
     async def test_python_states_route_and_bind_like_agent_states(self) -> None:
         self.host.outcomes["work"] = {"status": "done", "answer": '```json\n{"count": 2}\n```'}
         self.store_machine(
