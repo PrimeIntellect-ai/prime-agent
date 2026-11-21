@@ -889,6 +889,7 @@ async fn stop_session_work(
         id: None,
         active_session_id: daemon_session_id.to_string(),
         wait_for_rlm_quiescence: None,
+        timeout_ms: None,
         rest: Map::default(),
     })
     .await?;
