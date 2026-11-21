@@ -7213,22 +7213,34 @@ class FactoryNodeActivityTest(_ExecutorTestCase):
     @async_test
     async def test_node_activity_tracks_subagent_answer_truncation_at_capture(self) -> None:
         long_answer = "x" * (ANSWER_BINDING_CAP + 1)
-        for capture in ("done", "provisional", "refresh", "retry-short"):
+        clipped = long_answer[:ANSWER_BINDING_CAP]
+        cases = {
+            "done": (clipped, True, False),
+            "provisional": (clipped, True, True),
+            "refresh": (clipped, True, False),
+            "retry-short": ("short", False, False),
+            # The retry's exit carries no text: the clipped provisional
+            # answer and its warning both stay.
+            "retry-silent": (clipped, True, True),
+        }
+        for capture, expected in cases.items():
             with self.subTest(capture=capture):
                 host = (
                     LateAnswerHost(clock=self.clock, late_children={"child-1"})
                     if capture == "refresh" else FakeHost(clock=self.clock)
                 )
                 host.outcomes["work"] = {"status": "done", "answer": long_answer}
-                if capture in ("provisional", "retry-short"):
+                if capture in ("provisional", "retry-short", "retry-silent"):
                     host.child_outcomes["child-1"] = {
                         "status": "error", "error": "task exited", "answer": long_answer,
                     }
                 if capture == "retry-short":
                     host.child_outcomes["child-2"] = {"status": "done", "answer": "short"}
+                if capture == "retry-silent":
+                    host.child_outcomes["child-2"] = {"status": "error", "error": "task exited"}
                 spec_id = f"capture-{capture}"
                 self.store_factory({"run": {"failure_policy": "continue"}, "nodes": [
-                    self.node("work", retries=1 if capture == "retry-short" else 0,
+                    self.node("work", retries=1 if capture.startswith("retry") else 0,
                               outputs=[{"name": "out", "type": "text"}]),
                 ]}, spec_id=spec_id)
                 with patch.object(rlm_module, "host_request", host):
@@ -7237,11 +7249,10 @@ class FactoryNodeActivityTest(_ExecutorTestCase):
                 reply = await self.executor.activity({
                     "action": "node", "runId": result["run_id"], "specId": "work",
                 })
-                expected_answer = "short" if capture == "retry-short" else long_answer[:ANSWER_BINDING_CAP]
                 self.assertEqual(
                     (reply["instance"]["answer"], reply["instance"]["answerTruncated"],
                      reply["instance"]["provisional"]),
-                    (expected_answer, capture != "retry-short", capture == "provisional"),
+                    expected,
                 )
 
     @async_test
@@ -7350,6 +7361,9 @@ class FactoryPythonStateTest(_ExecutorTestCase):
                     (reply["instance"]["answer"], reply["instance"]["answerTruncated"]),
                     (answer[:cap], len(answer) > cap),
                 )
+                # A python state declares no prompt: the reply sends no
+                # template, so the view keeps its "no prompt template" text.
+                self.assertIsNone(reply["template"])
                 self.assertEqual(json.loads(reply["entry"]["outputs"]), outputs)
 
     @async_test

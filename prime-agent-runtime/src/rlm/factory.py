@@ -2310,12 +2310,14 @@ class FactoryExecutor:
         if state is None:
             raise ValueError(f"unknown state {state_id!r} in run {run_id!r}")
         entries = state.entries
-        template = state.prompt_template or ""
-        template_truncated = len(template.encode("utf-8")) > NODE_PROMPT_CAP
-        if template_truncated:
-            template = template.encode("utf-8")[:NODE_PROMPT_CAP].decode(
-                "utf-8", errors="ignore"
-            )
+        template = state.prompt_template
+        template_truncated = False
+        if template is not None:
+            template_truncated = len(template.encode("utf-8")) > NODE_PROMPT_CAP
+            if template_truncated:
+                template = template.encode("utf-8")[:NODE_PROMPT_CAP].decode(
+                    "utf-8", errors="ignore"
+                )
         if not entries:
             if entry_at is not None:
                 raise ValueError(
@@ -3681,10 +3683,10 @@ class FactoryExecutor:
             # instance and the state reads needs-verify instead of silently
             # counting the exit as settled work.
             captured = result.answer_text or result.answer_preview or ""
-            instance.answer_truncated = len(captured) > ANSWER_BINDING_CAP
             exit_answer = captured[:ANSWER_BINDING_CAP] or None
             if exit_answer:
                 instance.answer = exit_answer
+                instance.answer_truncated = len(captured) > ANSWER_BINDING_CAP
                 instance.provisional = True
                 instance.capture_failed = False  # the preserved text is an exit now
             # Child failures retry (same rendered prompt, attempts+1) while
