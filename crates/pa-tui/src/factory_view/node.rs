@@ -349,6 +349,18 @@ impl NodeView {
         self.error = None;
     }
 
+    /// Move the walk to another instance: it drops the fetch the previous
+    /// selection had in flight and the error row that fetch set, so the
+    /// document never reads as failed while it shows another instance's
+    /// good reply.
+    fn move_selection(&mut self, selected: Option<usize>, viewport_rows: usize) {
+        self.selected = selected;
+        self.scroll_to_selected(viewport_rows);
+        self.request_epoch = None;
+        self.requested_selector = None;
+        self.error = None;
+    }
+
     fn scroll_to_selected(&mut self, viewport_rows: usize) {
         self.scroll = self.selected.map_or(0, |index| {
             index.saturating_sub(visible_rows(viewport_rows, self.error.is_some()) - 1)
@@ -364,6 +376,17 @@ impl NodeView {
     /// Whether the mounted view is waiting for a node-document reply.
     pub fn request_in_flight(&self) -> bool {
         self.request_epoch.is_some()
+    }
+
+    /// Retire the request one delivery answered, when no newer fetch
+    /// replaced it. A rebind can move the view to another session while a
+    /// fetch is in flight, so that reply can never land; its epoch would
+    /// otherwise stay set and every later refresh would skip the view.
+    pub fn retire_request(&mut self, request_epoch: u64) {
+        if self.request_epoch == Some(request_epoch) {
+            self.request_epoch = None;
+            self.requested_selector = None;
+        }
     }
 
     /// Apply a node-document reply only if no newer instance fetch replaced it.
@@ -437,10 +460,7 @@ impl NodeView {
                 None => self.instances.len().checked_sub(1),
             };
             if selected != self.selected {
-                self.selected = selected;
-                self.scroll_to_selected(viewport_rows);
-                self.request_epoch = None;
-                self.requested_selector = None;
+                self.move_selection(selected, viewport_rows);
             }
             return true;
         }
@@ -453,10 +473,7 @@ impl NodeView {
                 None => (!self.instances.is_empty()).then_some(0),
             };
             if selected != self.selected {
-                self.selected = selected;
-                self.scroll_to_selected(viewport_rows);
-                self.request_epoch = None;
-                self.requested_selector = None;
+                self.move_selection(selected, viewport_rows);
             }
             return true;
         }
@@ -509,12 +526,21 @@ impl NodeView {
             }
         }
         if self.instances.is_empty() {
+            // No document yet reads as loading, and a failed first fetch
+            // reads as its error row alone; only a settled reply that
+            // carries an entry may claim the state created no instance.
             let text = if self.never_entered {
-                "  not yet entered"
+                Some("  not yet entered")
+            } else if self.document.is_some() {
+                Some("  no instances were created")
+            } else if self.error.is_none() {
+                Some("  loading…")
             } else {
-                "  no instances were created"
+                None
             };
-            plain_line(&mut rows, theme, text, ThemeColor::Muted);
+            if let Some(text) = text {
+                plain_line(&mut rows, theme, text, ThemeColor::Muted);
+            }
         }
         if self.selected_selector() != self.document_selector() {
             return rows;
@@ -1189,5 +1215,57 @@ mod tests {
         assert!(node.handle_key("down", &keybindings, 20));
         assert_eq!(node.selected_selector(), Some((0, 1)));
         assert_eq!(node.document_selector(), Some((0, 0)));
+    }
+
+    #[test]
+    fn the_loading_mount_reads_as_loading_not_as_an_empty_node() {
+        let document_text = |node: &NodeView| {
+            node.document_lines(None, 80)
+                .into_iter()
+                .flatten()
+                .map(|span| span.content)
+                .collect::<String>()
+        };
+        let mut node = NodeView::loading("run", "worker");
+        assert!(document_text(&node).contains("loading…"));
+        assert!(!document_text(&node).contains("no instances were created"));
+        node.set_error("request failed".to_string());
+        assert!(!document_text(&node).contains("no instances were created"));
+        assert!(!document_text(&node).contains("loading…"));
+        node.error = None;
+        node.merge_reply(&json!({
+            "state": {"instances": []},
+            "entry": {"index": 0, "status": "pending"},
+            "instance": null,
+        }));
+        let text = document_text(&node);
+        assert!(text.contains("no instances were created"));
+        assert!(!text.contains("loading…"));
+    }
+
+    #[test]
+    fn moving_the_walk_clears_the_previous_fetch_error() {
+        let mut node = NodeView::parse_reply("run", "worker", &reply_with_instances(2)).unwrap();
+        let keybindings = KeybindingsManager::new();
+        assert!(node.handle_key("down", &keybindings, 20));
+        node.set_request_epoch(1, Some((0, 1)));
+        assert!(node.apply_request_result(1, Err("request failed".to_string())));
+        assert_eq!(node.error.as_deref(), Some("request failed"));
+        assert!(node.handle_key("up", &keybindings, 20));
+        assert_eq!(node.selected_selector(), Some((0, 0)));
+        assert_eq!(node.document_selector(), Some((0, 0)));
+        assert!(node.error.is_none());
+    }
+
+    #[test]
+    fn retiring_a_superseded_request_drops_only_its_own_epoch() {
+        let mut node = NodeView::loading("run", "worker");
+        node.set_request_epoch(1, Some((0, 1)));
+        node.set_request_epoch(2, Some((0, 2)));
+        node.retire_request(1);
+        assert!(node.request_in_flight());
+        node.retire_request(2);
+        assert!(!node.request_in_flight());
+        assert_eq!(node.target().instance, None);
     }
 }

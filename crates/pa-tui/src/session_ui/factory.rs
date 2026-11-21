@@ -516,15 +516,19 @@ impl super::SessionUi {
                 request_epoch,
                 result,
             } => {
-                if session == self.active_session_id {
-                    let node = view
-                        .factory_view
-                        .as_mut()
-                        .and_then(|factory_view| factory_view.node.as_mut())
-                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
-                    self.dirty |=
-                        node.is_some_and(|node| node.apply_request_result(request_epoch, result));
-                }
+                let node = view
+                    .factory_view
+                    .as_mut()
+                    .and_then(|factory_view| factory_view.node.as_mut())
+                    .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                let landed = fold_node_delivery(
+                    node,
+                    &self.active_session_id,
+                    &session,
+                    request_epoch,
+                    result,
+                );
+                self.dirty |= landed;
                 return;
             }
             other => other,
@@ -652,10 +656,32 @@ fn factory_child_selection(
     Some((SessionSelection::open_summary(summary)?, rlm_depth))
 }
 
+/// Fold one `node` delivery into the mounted view. A delivery for the
+/// current session lands when no newer fetch replaced it; one a rebind
+/// superseded retires its epoch instead — its reply can never land, and a
+/// preserved view left in flight would skip every later refresh.
+fn fold_node_delivery(
+    node: Option<&mut crate::factory_view::node::NodeView>,
+    current_session: &str,
+    session: &str,
+    request_epoch: u64,
+    result: Result<Value, String>,
+) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if session == current_session {
+        node.apply_request_result(request_epoch, result)
+    } else {
+        node.retire_request(request_epoch);
+        false
+    }
+}
+
 #[cfg(test)]
 mod fold_tests {
     use super::super::SessionUi;
-    use super::{factory_child_selection, SessionIdentity, SessionSelection};
+    use super::{factory_child_selection, fold_node_delivery, SessionIdentity, SessionSelection};
     use serde_json::json;
 
     /// A factory child opens through the roster: among this session's
@@ -728,5 +754,39 @@ mod fold_tests {
         let runs = taken.expect("the well-formed batch is taken");
         assert_eq!(runs.len(), 1);
         assert_eq!(cache["runs"][0]["runId"], "r2");
+    }
+
+    /// A rebind moves the view to a new active session while a node fetch
+    /// is in flight: that reply can never land, so its delivery retires the
+    /// epoch instead of leaving the preserved view in flight forever.
+    #[test]
+    fn a_rebind_superseded_node_delivery_retires_its_request() {
+        use crate::factory_view::node::NodeView;
+        let mut node = NodeView::loading("run", "worker");
+        node.set_request_epoch(3, Some((0, 1)));
+        let superseded = json!({
+            "state": {"instances": [{"entry": 0, "index": 0, "status": "running"}]},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "late"},
+        });
+        assert!(!fold_node_delivery(
+            Some(&mut node),
+            "new-session",
+            "old-session",
+            3,
+            Ok(superseded),
+        ));
+        assert!(!node.request_in_flight());
+        assert_eq!(node.target().instance, None);
+
+        node.set_request_epoch(4, None);
+        assert!(fold_node_delivery(
+            Some(&mut node),
+            "same-session",
+            "same-session",
+            4,
+            Err("timeout".to_string()),
+        ));
+        assert_eq!(node.error.as_deref(), Some("timeout"));
     }
 }
