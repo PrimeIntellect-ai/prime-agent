@@ -756,7 +756,10 @@ class ReplTest(unittest.TestCase):
             ("from-import", "from subprocess import run\nrun(['ls'])"),
             ("os-system", "import os\nos.system('ls')"),
             ("os-popen", "os.popen('ls')"),
+            ("os-getoutput", "import os\nos.getoutput('ls')"),
+            ("os-getstatusoutput", "os.getstatusoutput('ls')"),
             ("from-os", "from os import system\nsystem('ls')"),
+            ("from-os-getoutput", "from os import getoutput\ngetoutput('ls')"),
             ("pty", "import pty\npty.spawn('/bin/sh')"),
         ):
             events = self.repl.execute(rid, code)
@@ -4357,6 +4360,252 @@ class OwnerExitWaitTest(unittest.TestCase):
         ):
             self.repl_module._wait_owner_posix(self.owner.pid, os.getppid())
         sleep.assert_called_once()
+
+
+class CellSpanGuardTest(unittest.TestCase):
+    """The in-cell span guard runs on the host's own cell limit: a cell still
+    running at that limit is interrupted through the SIGINT path and settles
+    as a teaching error (CellSpanGuard). Short cells run untouched, the kernel
+    stays usable, and a request with no limit keeps the guard disarmed even
+    where the host wires completion notices."""
+
+    def guarded_repl(self) -> ReplProcess:
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        # The guard arms only in sessions whose host wires completion
+        # notices (the bootstrap flips the flag from the host-handler
+        # registry); the test host simulates the daemon's registration.
+        repl.execute(
+            "wire",
+            "from rlm.bash import _set_completion_notices_wired\n"
+            "_set_completion_notices_wired(True)",
+        )
+        return repl
+
+    def execute_limited(self, repl: ReplProcess, rid: str, code: str, timeout_ms: int) -> list[dict]:
+        """One execute frame carrying the host's cell limit, the way the
+        manager sends it (`ExecuteOptions::cell_timeout_ms`)."""
+        repl.send({"type": "execute", "id": rid, "code": code, "timeout_ms": timeout_ms})
+        return repl.until_done(rid)
+
+    def test_an_unwired_host_keeps_long_cells_untouched(self):
+        # A host without completion notices has no [bash-done] wake, so the
+        # guard's teaching promise cannot hold there: it stays disarmed and
+        # a cell past the limit runs unbounded as on main (the wired twin
+        # interrupts the same shape at the limit).
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        events = self.execute_limited(
+            repl, "slow", "import time\ntime.sleep(1.5)\ndone = True", 400
+        )
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "done")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+    def test_long_compute_cell_is_interrupted_with_the_teaching_error(self):
+        # Pure compute: no banned shape, invisible to the discipline screen,
+        # and blocking — exactly the single-giant-cell shape the boundary
+        # notices cannot reach.
+        repl = self.guarded_repl()
+        repl.send(
+            {"type": "execute", "id": "long", "code": "n = 0\nwhile True:\n    n += 1", "timeout_ms": 500}
+        )
+        events = repl.until_done("long")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.5s cell limit", error["evalue"])
+        self.assertIn("[cell-span]", "\n".join(error["traceback"]))
+        self.assertIn("bash()", "\n".join(error["traceback"]))
+        self.assertEqual(one(events, "done")["status"], "error")
+        # The kernel stays usable and the interrupted cell's prior state
+        # persists in the namespace.
+        events = repl.execute("after", "n > 0")
+        self.assertEqual(one(events, "result")["text"], "True")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_a_bounded_cell_past_the_limit_settles_at_the_guard_not_at_its_end(self):
+        # The request's limit, not the cell, decides: 1.5s of work under a
+        # 400ms limit settles with the teaching error long before the cell
+        # would have ended.
+        repl = self.guarded_repl()
+        started = time.monotonic()
+        events = self.execute_limited(repl, "bounded", "import time\ntime.sleep(1.5)", 400)
+        elapsed = time.monotonic() - started
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertLess(elapsed, 1.0, "the guard fires at the request limit, not at the cell's end")
+
+    def test_await_suspended_cell_is_interrupted_at_the_limit(self):
+        repl = self.guarded_repl()
+        repl.send(
+            {
+                "type": "execute",
+                "id": "parked",
+                "code": "import asyncio\nawait asyncio.get_running_loop().create_future()",
+                "timeout_ms": 500,
+            }
+        )
+        events = repl.until_done("parked")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_short_cells_run_untouched(self):
+        repl = self.guarded_repl()
+        events = self.execute_limited(repl, "quick", "40 + 2", 1000)
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_the_guard_stays_armed_through_result_rendering(self):
+        # The cell body returns at once, but its __repr__ outlives the limit:
+        # rendering is still this cell's span, so the teaching error replaces
+        # the value instead of a bare KeyboardInterrupt or an ok outcome.
+        repl = self.guarded_repl()
+        events = self.execute_limited(
+            repl,
+            "slow-repr",
+            "import time\n"
+            "class Slow:\n"
+            "    def __repr__(self):\n"
+            "        time.sleep(1.5)\n"
+            "        return 'slow'\n"
+            "Slow()",
+            400,
+        )
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.4s cell limit", error["evalue"])
+        self.assertIsNone(one(events, "result"))
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_an_interrupt_during_the_close_reports_the_span_teaching(self):
+        # The guard can fire while the request closes its interrupt window.
+        # The close sits inside the guarded region, so that interrupt still
+        # becomes the teaching, and the retry finishes the half-run close
+        # instead of letting the request escape to the bare-error backstop.
+        repl = self.guarded_repl()
+        repl.execute(
+            "arm-close",
+            "import rlm.repl as repl_module\n"
+            "repl_module._span_guard_fired['close'] = 0.4\n"
+            "real_finish = repl_module._finish_request\n"
+            "raised = []\n"
+            "def finish(rid):\n"
+            "    if rid == 'close' and not raised:\n"
+            "        raised.append(True)\n"
+            "        raise KeyboardInterrupt\n"
+            "    return real_finish(rid)\n"
+            "repl_module._finish_request = finish",
+        )
+        events = repl.execute("close", "1 + 1")
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.4s cell limit", error["evalue"])
+        self.assertIsNone(one(events, "result"))
+        self.assertEqual(one(events, "done")["status"], "error")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_no_announced_limit_keeps_the_guard_disarmed(self):
+        # An absent field and an explicit 0 both mean the session runs with
+        # no cell limit (the setting is off): the guard must not invent one.
+        repl = self.guarded_repl()
+        repl.send({"type": "execute", "id": "absent", "code": "import time\ntime.sleep(1.5)\nseen = True"})
+        events = repl.until_done("absent")
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = self.execute_limited(repl, "zero", "import time\ntime.sleep(1.5)\nseen = True", 0)
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "seen")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+
+class SpanGuardBudgetTest(unittest.TestCase):
+    """The guard's clock arithmetic: the host's limit is the budget, the
+    timer sits a lead inside it (the watchdog's clock starts earlier, so a
+    guard at the bare limit loses the race), and no limit disarms it."""
+
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import rlm.repl as repl_module
+
+        self.repl_module = repl_module
+
+    def test_the_budget_is_the_host_limit_in_seconds(self):
+        self.assertEqual(self.repl_module._span_guard_budget(60_000), 60.0)
+        self.assertEqual(self.repl_module._span_guard_budget(400), 0.4)
+        self.assertEqual(self.repl_module._span_guard_budget(180_000), 180.0)
+
+    def test_no_limit_disarms_the_guard(self):
+        for raw in (None, 0, -1, "500", True):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.repl_module._span_guard_budget(raw), 0.0)
+
+    def test_the_timer_fires_inside_the_limit(self):
+        for budget in (0.4, 60.0, 180.0):
+            with self.subTest(budget=budget):
+                delay = self.repl_module._span_guard_delay(budget)
+                self.assertLess(delay, budget, "the guard must beat the watchdog's clock")
+                self.assertGreater(delay, 0.0)
+
+    def test_the_lead_is_a_quarter_second_bounded_by_a_quarter_of_the_limit(self):
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(60.0), 59.75)
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(180.0), 179.75)
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(0.4), 0.3)
+
+
+class ProtocolFrameAtomicityTest(unittest.TestCase):
+    """An interrupt raised by the handler must not tear a protocol frame: the
+    write blocks SIGINT on the main thread, so the signal lands after the last
+    byte instead of splitting the frame the host is parsing."""
+
+    def test_interrupt_during_a_display_write_keeps_the_frame_whole(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        cell = "\n".join(
+            [
+                "import os",
+                "import rlm.repl as repl_module",
+                "real_write = repl_module.os.write",
+                "armed = []",
+                "def write(fd, data):",
+                "    if fd == repl_module._protocol_fd and len(data) > 4096 and not armed:",
+                "        armed.append(True)",
+                "        sent = real_write(fd, bytes(data[:4096]))",
+                # The span guard's own path: mark the rid, then SIGINT the
+                # main thread while the frame is only partly on the wire.
+                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        return sent",
+                "    return real_write(fd, data)",
+                "repl_module.os.write = write",
+                "try:",
+                "    repl_module.emit({'text/plain': 'x' * 200000})",
+                "finally:",
+                "    repl_module.os.write = real_write",
+            ]
+        )
+        repl.send({"type": "execute", "id": "tear", "code": cell})
+        events = repl.until_done("tear")
+        display = one(events, "display")
+        self.assertIsNotNone(display, f"events: {events}")
+        self.assertEqual(len(display["data"]["text/plain"]), 200000)
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
 
 
 if __name__ == "__main__":
