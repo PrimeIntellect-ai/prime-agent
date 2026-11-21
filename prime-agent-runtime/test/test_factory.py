@@ -81,6 +81,7 @@ from rlm.factory import (
     _child_name,
     _guard_passes,
     _parse_json_output,
+    _resolve_machine_dir,
     _scan_machine_library,
     _spawn_label,
     canonicalize_factory_spec,
@@ -1240,6 +1241,9 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             "declares both subagent and python": {"python": python, "subagent": "worker"},
             "python requires non-empty 'import' and 'callable' strings": {"python": {"import": "tools"}},
             "python state a cannot be resident": {"python": python, "lifecycle": "resident"},
+            "state a python path must be an absolute directory when provided": {
+                "python": {**python, "path": "nodes"}
+            },
             "python state a cannot use foreach": {
                 "python": python,
                 "inputs": [{"name": "xs", "type": "json", "from": "b.xs"}],
@@ -1256,6 +1260,34 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             }
             errors = validate_factory_machine(machine)
             self.assertTrue(any(expected in error for error in errors), (expected, errors))
+
+    def test_params(self) -> None:
+        machine = {
+            "params": {"task": "ship it", "max_loc": 400},
+            "states": [state("a", entry=True)],
+            "transitions": [],
+        }
+        self.assertEqual(validate_factory_machine(machine), [])
+        self.assertEqual(canonicalize_factory_spec(machine)["params"], {"task": "ship it", "max_loc": 400})
+        self.assertNotIn("params", canonicalize_factory_spec({"states": [state("a", entry=True)]}))
+        for params in (["task"], {"Task": "x"}, {"1x": 1}):
+            self.assertEqual(
+                validate_factory_machine({**machine, "params": params}),
+                ["params must be an object keyed by lowercase identifiers"],
+                repr(params),
+            )
+        colliding = {
+            "params": {"items": []},
+            "states": [
+                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
+                state("b", inputs=[{"name": "items", "type": "json", "from": "a.items"}]),
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        self.assertEqual(
+            validate_factory_machine(colliding),
+            ["state b input 'items' is also a param; rename the input"],
+        )
 
     def test_subagent_required(self) -> None:
         missing = {"states": [{"id": "a", "entry": True}], "transitions": []}
@@ -2825,6 +2857,9 @@ class FakeHost:
         self.gates: dict[tuple[str, int], asyncio.Event] = {}
         self.gate_entries: dict[tuple[str, int], asyncio.Event] = {}
         self._call_indices: dict[str, int] = {}
+        # factory.compile replies by machine directory path (the Rust
+        # loader's answer, scripted).
+        self.compiled: dict[str, dict[str, Any]] = {}
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -2981,6 +3016,8 @@ class FakeHost:
         if request_type == "factory.progress":
             self.notices.append(payload)
             return {}
+        if request_type == "factory.compile":
+            return self.compiled[(payload or {})["path"]]
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
 
@@ -7220,6 +7257,96 @@ class FactoryPythonStateTest(_ExecutorTestCase):
 # ---------------------------------------------------------------------------
 
 
+class FactoryMachineDirectoryTest(_ExecutorTestCase):
+    """Machine directories (machine.toml) run through the factory.compile
+    host request: the Rust loader's spec, with params bound into prompts and
+    python inputs, and python states imported from the directory."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.library = user_machines_dir()
+        self.machine_dir = self.library / "review"
+        (self.machine_dir / "nodes").mkdir(parents=True)
+        (self.machine_dir / "machine.toml").write_text("format = 1\n", encoding="utf-8")
+        (self.machine_dir / "nodes" / "review_nodes.py").write_text(
+            "def plan(inputs):\n    return {'items': [inputs['task'], inputs['max_loc']]}\n",
+            encoding="utf-8",
+        )
+        self.host.compiled[str(self.machine_dir)] = {
+            "name": "review",
+            "version": 3,
+            "description": "Plan and review",
+            "author": None,
+            "spec": {
+                "run": {},
+                "params": {"task": "ship it", "max_loc": 400},
+                "states": [
+                    {
+                        "id": "plan",
+                        "entry": True,
+                        "python": {
+                            "import": "review_nodes",
+                            "callable": "plan",
+                            "path": str(self.machine_dir / "nodes"),
+                        },
+                        "outputs": [{"name": "items", "type": "json"}],
+                    },
+                    {
+                        "id": "work",
+                        "subagent": {"prompt": "Do {items} for {task}, at most {max_loc} lines."},
+                        "inputs": [{"name": "items", "type": "json", "from": "plan.items"}],
+                    },
+                ],
+                "transitions": [{"from": "plan", "to": "work"}],
+            },
+        }
+
+    @async_test
+    async def test_a_machine_directory_runs_with_its_params(self) -> None:
+        self.host.outcomes["work"] = {"status": "done", "answer": "done"}
+        result = await rlm_module.rlm.factory.run("review", params={"task": "ship it"})
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(result["machine_path"], str(self.machine_dir))
+        self.assertEqual(
+            self.host.calls_of("factory.compile"),
+            [{"path": str(self.machine_dir), "params": {"task": "ship it"}}],
+        )
+        # The python state imported from the directory and received the
+        # params; the prompt rendered both, and no unused param was
+        # appended as an input.
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("work")],
+            ['Do ["ship it", 400] for ship it, at most 400 lines.'],
+        )
+
+    @async_test
+    async def test_params_need_a_machine_directory(self) -> None:
+        self.store_machine({"states": [state("a", entry=True)]})
+        with self.assertRaisesRegex(ValueError, "params apply to machine directories"):
+            await rlm_module.rlm.factory.run("sw", params={"task": "x"})
+
+    def test_directories_resolve_per_level_before_machine_files(self) -> None:
+        repo = self.library.parent / "repo"
+        user = self.library
+        bundled = repo_machines_dir() / "builder" / MACHINE_FILE_NAME
+        (repo / "builder").mkdir(parents=True)
+        shutil.copy(bundled, repo / "builder" / MACHINE_FILE_NAME)
+        (user / "builder").mkdir()
+        (user / "builder" / "machine.toml").write_text("format = 1\n", encoding="utf-8")
+        (repo / "both").mkdir()
+        (repo / "both" / MACHINE_FILE_NAME).write_text("broken", encoding="utf-8")
+        (repo / "both" / "machine.toml").write_text("format = 1\n", encoding="utf-8")
+        resolve = lambda name: _resolve_machine_dir(name, repo_dir=repo, user_dir=user)  # noqa: E731
+        # A valid MACHINE.md at an earlier level keeps its name.
+        self.assertIsNone(resolve("builder"))
+        self.assertEqual(resolve("review"), user / "review")
+        self.assertEqual(resolve("both"), repo / "both")
+        self.assertIsNone(resolve("absent"))
+
+
 class FactoryGraphWatchTest(_ExecutorTestCase):
     """The graph snapshot (structure fused with live state), the bounded
     watch, and the host bridge's out-of-band activity handler. The shared
@@ -8853,6 +8980,28 @@ class MachineCliDispatchTest(unittest.TestCase):
         })
         env.start()
         self.addCleanup(env.stop)
+
+    def test_read_answers_one_machine(self) -> None:
+        read = cli_dispatch({"op": "read", "path": str(self.source_path)})
+        self.assertEqual(
+            read,
+            {
+                "ok": True,
+                "name": "sweep",
+                "description": "A machine that sweeps.",
+                "version": read["version"],
+                "author": read["author"],
+                "spec": valid_dag(),
+            },
+        )
+        self.assertEqual(
+            cli_dispatch({"op": "read", "name": "absent"})["ok"],
+            False,
+        )
+        self.assertEqual(
+            cli_dispatch({"op": "read"}),
+            {"ok": False, "errors": ["factory read requires a `path` or `name` string"]},
+        )
 
     def test_import_dispatch_persists_into_the_user_library(self) -> None:
         result = cli_dispatch({"op": "import", "path": str(self.source_path)})

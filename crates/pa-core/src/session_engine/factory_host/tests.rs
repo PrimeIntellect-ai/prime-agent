@@ -712,3 +712,57 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
         .to_string();
     assert_eq!(error, "factory activity timeoutMs must be at most 60000");
 }
+
+/// `factory.compile` loads a machine directory with the shared Rust loader
+/// and answers the canonical spec, or every load problem in one error.
+#[tokio::test]
+async fn factory_compile_answers_the_spec_or_every_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("hello");
+    std::fs::create_dir_all(machine_dir.join("prompts")).unwrap();
+    std::fs::write(
+        machine_dir.join("machine.toml"),
+        "format = 1\nname = \"hello\"\nversion = 1\ndescription = \"Say hello\"\n\n[params]\nwho = { type = \"text\" }\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\noutputs = { line = \"text\" }\n",
+    )
+    .unwrap();
+    std::fs::write(machine_dir.join("prompts/greet.md"), "Greet {{who}}.\n").unwrap();
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers);
+    let handler = handlers
+        .get(super::FACTORY_COMPILE_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call =
+        |data: serde_json::Value| handler(crate::kernel::shared::HostRequestPayload { data });
+
+    let reply =
+        call(json!({"path": machine_dir.display().to_string(), "params": {"who": "World"}}))
+            .await
+            .unwrap();
+    assert_eq!(
+        reply,
+        json!({
+            "name": "hello", "version": 1, "description": "Say hello", "author": null,
+            "spec": {
+                "run": {},
+                "params": {"who": "World"},
+                "states": [{
+                    "id": "greet", "entry": true,
+                    "subagent": {"prompt": "Greet {who}.\n\n## Outputs\n\nYour whole final answer becomes the `line` output."},
+                    "outputs": [{"name": "line", "type": "text"}],
+                }],
+                "transitions": [],
+            },
+        })
+    );
+    let error = call(json!({"path": machine_dir.display().to_string()}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{}: machine.toml: params.who: required: pass it when the live machine starts (who=text)",
+            machine_dir.display()
+        )
+    );
+}

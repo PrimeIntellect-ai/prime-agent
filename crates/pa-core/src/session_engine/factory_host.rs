@@ -23,9 +23,11 @@
 use std::path::PathBuf;
 
 use anyhow::anyhow;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
-use crate::kernel::shared::{FACTIVITY_WATCH_TIMEOUT_MS_CAP, FACTORY_ACTIVITY_ACTIONS};
+use crate::kernel::shared::{
+    host_handler, HostRequestHandlers, FACTIVITY_WATCH_TIMEOUT_MS_CAP, FACTORY_ACTIVITY_ACTIONS,
+};
 use crate::models::registry::ModelRegistry;
 use crate::models::resolver::find_exact_model_reference_match;
 use pa_types::ai::Model as AiModel;
@@ -460,6 +462,50 @@ impl FactoryActivityRequest {
             timeout_ms,
         })
     }
+}
+
+/// The kernel host request that loads and compiles a machine directory.
+pub const FACTORY_COMPILE_REQUEST_TYPE: &str = "factory.compile";
+
+/// Register `factory.compile`, the shared loader used by CLI and sessions.
+pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers) {
+    handlers.register(
+        FACTORY_COMPILE_REQUEST_TYPE,
+        host_handler(|payload| {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || compile_machine_dir(&payload.data))
+                    .await
+                    .map_err(|error| anyhow!("factory.compile stopped: {error}"))?
+            })
+        }),
+    );
+}
+
+fn compile_machine_dir(data: &Value) -> anyhow::Result<Value> {
+    let path = data
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| anyhow!("factory.compile requires a machine directory path"))?;
+    let params = match data.get("params") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(params)) => params.clone(),
+        Some(_) => return Err(anyhow!("factory.compile params must be an object")),
+    };
+    let dir = PathBuf::from(path);
+    let joined = |problems: Vec<pa_factory::Diagnostic>| {
+        let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
+        anyhow!("{}: {}", dir.display(), lines.join("; "))
+    };
+    let machine = pa_factory::load_machine_dir(&dir).map_err(joined)?;
+    let spec = pa_factory::compile(&machine, &params).map_err(joined)?;
+    Ok(json!({
+        "name": machine.name,
+        "version": machine.version,
+        "description": machine.description,
+        "author": machine.author,
+        "spec": spec,
+    }))
 }
 
 // The unit battery lives in the child module (factory_host::tests).
