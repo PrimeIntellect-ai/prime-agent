@@ -8,6 +8,7 @@
 //! state's [`Contract`] checks the values its child emits.
 //! It reads files and nothing else: no sessions, no spawning, no network.
 
+mod asset;
 mod compile;
 mod convert;
 mod duration;
@@ -18,12 +19,13 @@ mod machine;
 pub mod run;
 pub mod types;
 
+pub use asset::{AssetCache, AssetError, AssetPath};
 pub use compile::compile;
 pub use convert::{convert_spec, DirFile, MachineMeta};
 pub use duration::parse_duration_ms;
 pub use emit::Contract;
 pub use load::{load_machine_dir, CONTEXT_FILE, MACHINE_FILE};
 pub use machine::{
-    Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall, Route,
-    Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
+    Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall,
+    Reference, Route, Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
 };

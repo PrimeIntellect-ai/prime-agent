@@ -617,3 +617,44 @@ fn guards_are_refused_with_the_guard_spelled_out() {
         ]
     );
 }
+
+/// The ship state reads `assets/notes/style.md` as its `style` input.
+const STYLE_ASSET: (&str, &str) = (
+    "inputs = { plan = \"design.plan\" }\noutputs = { url = \"text\" }",
+    "inputs = { plan = \"design.plan\", style = \"assets/notes/style.md\" }\noutputs = { url = \"text\" }",
+);
+
+#[test]
+fn an_asset_input_compiles_as_a_text_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine = MACHINE.replacen(STYLE_ASSET.0, STYLE_ASSET.1, 1);
+    write_dir(dir.path(), &machine, FILES);
+    write_dir(
+        dir.path(),
+        &machine,
+        &[("assets/notes/style.md", "Be brief.\n")],
+    );
+    let machine = load_machine_dir(dir.path()).unwrap();
+    let mut params = Map::new();
+    params.insert("task".to_string(), json!("t"));
+    let spec = compile(&machine, &params).unwrap();
+    assert_eq!(
+        spec["states"][4]["inputs"],
+        json!([
+            {"name": "plan", "type": "text", "from": "design.plan"},
+            {"name": "style", "type": "text", "from": "assets/notes/style.md"},
+        ])
+    );
+}
+
+#[test]
+fn an_unresolvable_asset_is_a_load_error_with_its_path() {
+    let found = problems(&[STYLE_ASSET], &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with(
+            "machine.toml: states.ship.inputs.style: \"assets/notes/style.md\" does not exist in the machine directory"
+        ),
+        "{found:?}"
+    );
+}

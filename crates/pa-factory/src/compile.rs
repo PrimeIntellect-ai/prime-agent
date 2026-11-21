@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 
 use crate::emit::Contract;
 use crate::load::{routed_slot, MACHINE_FILE};
-use crate::machine::{Agent, Diagnostic, Machine, State, Work};
+use crate::machine::{Agent, Diagnostic, Machine, Reference, State, Work};
 use crate::types::{self, check_value, record_names, Type};
 
 /// Compile `machine` with the params given at start.
@@ -194,11 +194,15 @@ fn compile_state(machine: &Machine, state: &State) -> Result<Value, Diagnostic> 
             .inputs
             .iter()
             .map(|input| {
-                let kind = machine
-                    .state(&input.state)
-                    .and_then(|source| source.output(&input.port))
-                    .map_or("json", |output| port_kind(&output.slot.ty));
-                let mut binding = json!({"name": input.name, "type": kind, "from": format!("{}.{}", input.state, input.port)});
+                let kind = match &input.from {
+                    Reference::Port(selector) => machine
+                        .state(&selector.state)
+                        .and_then(|source| source.output(&selector.port))
+                        .map_or("json", |output| port_kind(&output.slot.ty)),
+                    Reference::Asset(_) => "text",
+                };
+                let mut binding =
+                    json!({"name": input.name, "type": kind, "from": input.from.to_string()});
                 if input.optional {
                     binding["optional"] = json!(true);
                 }

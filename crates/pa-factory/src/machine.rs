@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::asset::AssetPath;
+use crate::run::{Selector, SelectorError};
 use crate::types::{Records, Slot, Type};
 
 /// The format version this build reads and writes (`format = 1`).
@@ -154,19 +156,51 @@ pub struct PythonCall {
     pub function: String,
 }
 
-/// One input binding: `name = "state.port"` (`?` when optional).
+/// One input binding: `name = "state.port"` or `name = "assets/<path>"`
+/// (`?` when optional; an asset input is never optional).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
     pub name: String,
-    pub state: String,
-    pub port: String,
+    pub from: Reference,
     pub optional: bool,
 }
 
 impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mark = if self.optional { "?" } else { "" };
-        write!(f, "{}.{}{mark}", self.state, self.port)
+        write!(f, "{}{mark}", self.from)
+    }
+}
+
+/// What an input reads: an output port of a state, or a machine asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reference {
+    Port(Selector),
+    Asset(AssetPath),
+}
+
+impl Reference {
+    /// Read a `from` reference: `assets/<path>` names an asset, and any
+    /// other text is a `<state>.<port>` selector.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`SelectorError`] of a reference that is not an asset
+    /// and not a valid selector.
+    pub fn parse(reference: &str) -> Result<Self, SelectorError> {
+        match AssetPath::parse(reference) {
+            Some(asset) => Ok(Self::Asset(asset)),
+            None => Selector::parse(reference).map(Self::Port),
+        }
+    }
+}
+
+impl fmt::Display for Reference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Port(selector) => write!(f, "{selector}"),
+            Self::Asset(asset) => write!(f, "{asset}"),
+        }
     }
 }
 
