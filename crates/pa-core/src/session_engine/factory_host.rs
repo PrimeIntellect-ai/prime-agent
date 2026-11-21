@@ -22,7 +22,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use anyhow::anyhow;
@@ -604,17 +603,42 @@ fn outputs_from(value: Option<&Value>, request: &str) -> anyhow::Result<Map<Stri
 /// loses the ports of the other.
 static EMIT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
-/// Gives each emit its own staging file name.
-static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
-
 fn emit_lock(session_dir: &Path) -> Arc<Mutex<()>> {
     let registry = EMIT_LOCKS.get_or_init(Mutex::default);
     let mut locks = registry.lock().unwrap_or_else(PoisonError::into_inner);
     locks.entry(session_dir.to_path_buf()).or_default().clone()
 }
 
+/// The directories one emit copied its file ports into. Until the outputs
+/// file that references them is committed nothing points at them, so a
+/// failed emit removes them on drop and leaves no stray copies behind.
+struct StagedFiles {
+    dirs: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl Drop for StagedFiles {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for dir in &self.dirs {
+            // Best effort: the emit already reports its own error, and an
+            // unreferenced copy left behind is never read.
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 /// Check the values, copy the file ports, and merge one emit into the
 /// outputs file.
+///
+/// Each emit copies its file ports under a directory of its own and the
+/// outputs file references those copies, so an emit never overwrites a
+/// file an earlier emit published. The copies become visible only with
+/// the outputs commit: a failed emit leaves the committed outputs and
+/// their files as they were, and two concurrent emits never pair one
+/// call's values with the other's bytes.
 fn emit_outputs(
     contract_json: &Value,
     session_dir: &Path,
@@ -631,6 +655,8 @@ fn emit_outputs(
     let mut problems = contract.check(&outputs).err().unwrap_or_default();
     // A file port names a file the child wrote. It must exist now, and
     // downstream states read the copy, not the path of the child.
+    let emit_id = uuid::Uuid::new_v4().to_string();
+    let files_dir = session_dir.join(FACTORY_FILES_DIR);
     let mut copies: Vec<(String, PathBuf, PathBuf)> = Vec::new();
     for (port, value) in &outputs {
         let is_file = contract
@@ -645,7 +671,7 @@ fn emit_outputs(
                 let name = source
                     .file_name()
                     .map_or_else(|| port.clone().into(), ToOwned::to_owned);
-                let target = session_dir.join(FACTORY_FILES_DIR).join(port).join(name);
+                let target = files_dir.join(port).join(&emit_id).join(name);
                 copies.push((port.clone(), source, target));
             }
             Ok(_) => problems.push(format!("{port}: {} is not a file", source.display())),
@@ -657,13 +683,18 @@ fn emit_outputs(
     if !problems.is_empty() {
         return Err(anyhow!(problems.join("; ")));
     }
-    for (port, source, target) in copies {
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(&source, &target)
+    let mut staged = StagedFiles {
+        dirs: Vec::new(),
+        committed: false,
+    };
+    for (port, source, target) in &copies {
+        let dir = files_dir.join(port).join(&emit_id);
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| anyhow!("{port}: cannot create {}: {error}", dir.display()))?;
+        staged.dirs.push(dir);
+        std::fs::copy(source, target)
             .map_err(|error| anyhow!("{port}: cannot copy {}: {error}", source.display()))?;
-        outputs.insert(port, json!(target.display().to_string()));
+        outputs.insert(port.clone(), json!(target.display().to_string()));
     }
     let outputs_path = session_dir.join(FACTORY_OUTPUTS_FILE);
     let lock = emit_lock(session_dir);
@@ -678,15 +709,27 @@ fn emit_outputs(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
         Err(error) => return Err(anyhow!("cannot read {FACTORY_OUTPUTS_FILE}: {error}")),
     };
+    // The copies this emit replaces: only a directory this function
+    // created (`<files>/<port>/<emit id>`) is ever removed.
+    let superseded: Vec<PathBuf> = copies
+        .iter()
+        .filter_map(|(port, ..)| {
+            let dir = Path::new(merged.get(port)?.as_str()?).parent()?;
+            (dir.parent() == Some(files_dir.join(port).as_path())).then(|| dir.to_path_buf())
+        })
+        .collect();
     let accepted: Vec<String> = outputs.keys().cloned().collect();
     merged.extend(outputs);
     std::fs::create_dir_all(session_dir)?;
-    let staging = session_dir.join(format!(
-        "{FACTORY_OUTPUTS_FILE}.{}.tmp",
-        STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
+    let staging = session_dir.join(format!("{FACTORY_OUTPUTS_FILE}.{emit_id}.tmp"));
     std::fs::write(&staging, serde_json::to_vec_pretty(&merged)?)?;
     crate::platform::rename_onto(&staging, &outputs_path)?;
+    staged.committed = true;
+    for dir in superseded {
+        // Best effort: the emit is committed and nothing references the
+        // old copy any more.
+        let _ = std::fs::remove_dir_all(dir);
+    }
     Ok(json!({ "accepted": accepted, "missing": contract.missing(&merged) }))
 }
 
