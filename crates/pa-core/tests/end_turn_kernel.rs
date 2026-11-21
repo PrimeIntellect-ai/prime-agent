@@ -186,8 +186,6 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         tools: Vec::new(),
         custom_system_prompt: None,
         prompt_guidelines: Vec::new(),
-        generic_mcp_servers: Vec::new(),
-        allow_recursion: None,
         session_manager: Some(session),
         extra_host_handlers: None,
         conversation_log_path: None,

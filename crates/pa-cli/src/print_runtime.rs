@@ -845,8 +845,6 @@ pub(crate) async fn build_headless_engine_with(
             tools: builtin_tools(&config.cwd),
             custom_system_prompt: config.system_prompt.clone(),
             prompt_guidelines: config.append_system_prompt.clone(),
-            generic_mcp_servers: vec![],
-            allow_recursion: None,
             session_manager: Some(session_manager),
             extra_host_handlers,
             conversation_log_path: None,

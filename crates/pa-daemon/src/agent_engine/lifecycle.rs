@@ -1107,8 +1107,6 @@ impl AgentSessionEngine {
             tools: vec![],
             custom_system_prompt: create_resources.system_prompt,
             prompt_guidelines: create_resources.append_system_prompt,
-            generic_mcp_servers: vec![],
-            allow_recursion: None,
             session_manager: Some(session_manager),
             extra_host_handlers: self.extra_host_handlers(),
             conversation_log_path: session_file,

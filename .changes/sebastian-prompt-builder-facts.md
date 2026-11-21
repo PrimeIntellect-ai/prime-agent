@@ -1,0 +1,1 @@
+- `prime-agent prompt` now prints the prompt a fresh daemon root session gets: it includes a discovered `APPEND_SYSTEM.md` and the image-input line, and it resolves `--model` like the CLI flag (fuzzy selectors preview the resolved model's additions, an unknown model is an error). Without `--model`, it uses the session's default model.
