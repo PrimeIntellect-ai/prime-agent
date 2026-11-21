@@ -67,15 +67,15 @@ impl Worker {
         )
     }
 
-    /// `agent_messages_pause`: set the flag, drop every queued agent-message item, answer the
-    /// safety status.
+    /// `agent_messages_pause`: set the flag, drop every queued direct-route agent-message
+    /// item (inbox records stay: they already hold success receipts), answer the safety
+    /// status.
     pub(crate) fn handle_agent_messages_pause(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("agent_messages_pause") {
             return response;
         }
         self.agent_messages.set_paused(true);
-        let cleared = self.clear_queued_agent_messages();
-        let _ = cleared;
+        self.clear_queued_agent_messages(false);
         response_success(
             None,
             "agent_messages_pause",
@@ -102,7 +102,7 @@ impl Worker {
         if let Err(response) = self.require_created("agent_messages_clear") {
             return response;
         }
-        let cleared = self.clear_queued_agent_messages();
+        let cleared = self.clear_queued_agent_messages(true);
         response_success(None, "agent_messages_clear", Some(cleared))
     }
 
@@ -122,8 +122,9 @@ impl Worker {
     }
 
     /// Remove the queued agent-message items from both lanes (never
-    /// client-queued prompts), in the `{ steering, followUp }` shape.
-    fn clear_queued_agent_messages(&self) -> Value {
+    /// client-queued prompts) and, when asked, the inbox's not-yet-announced
+    /// agent messages, in the `{ steering, followUp }` shape.
+    fn clear_queued_agent_messages(&self, withdraw_unannounced_inbox: bool) -> Value {
         let mut core = self.core.lock().unwrap();
         let mut steering = Vec::new();
         let mut follow_up = Vec::new();
@@ -143,33 +144,52 @@ impl Worker {
             }
         }
         core.follow_up = retained_follow_up;
-        // The inbox-routed deliveries: the durable records leave the
-        // store too (a clear that reports the messages gone must take
-        // them out of `rlm.inbox.read()`), and the wake rows that
-        // referred to them refresh over what is left (an emptied inbox
-        // leaves no stale notice or reminder). The withdraw and the
-        // refresh run under the same core lock as the admission, so a
-        // delivery that raced the clear either lands before it (and
-        // leaves) or waits for it (and stays).
+        // The inbox-routed deliveries: only the not-yet-announced batch
+        // leaves the store (a clear that reports the messages gone must
+        // take them out of `rlm.inbox.read()`) — the agent messages of the
+        // batch the still-queued arrival row covers. A delivered notice
+        // already told the agent about the rest, so they stay readable.
+        // A restored row arrives with an empty batch, so a clear right
+        // after a restart takes nothing rather than guess; ids already
+        // read are simply not found. The withdraw and the refresh run
+        // under the same core lock as the admission, so a delivery that
+        // raced the clear either lands before it (and leaves) or waits for
+        // it (and stays). A pause blocks new deliveries only: accepted
+        // inbox records keep their success receipts.
         let mut withdrawn_texts = Vec::new();
         let mut wake_on_follow_up = false;
-        if let Some(inbox) = self.agent_engine.as_ref().and_then(|engine| engine.inbox()) {
-            // The batch rides ONE wake row (it never splits), so the
-            // row's lane before the refresh is the withdrawn prompts'
-            // lane in the reply; no row means older unread records only,
-            // and they follow the delivery default (steering).
-            wake_on_follow_up = core.follow_up.iter().any(|item| {
+        let inbox = self
+            .agent_engine
+            .as_ref()
+            .and_then(|engine| engine.inbox())
+            .filter(|_| withdraw_unannounced_inbox);
+        if let Some(inbox) = inbox {
+            let is_arrival_row = |item: &crate::worker::QueuedItem| {
                 item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
-            });
-            let withdrawn =
-                inbox.withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE);
-            if !withdrawn.is_empty() {
-                withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
-                crate::worker::refresh_inbox_wake_rows_locked(
-                    &mut core,
-                    &self.inbox_arrivals,
-                    &inbox,
-                );
+            };
+            // The batch rides ONE wake row (it never splits), so the
+            // row's lane is the withdrawn prompts' lane in the reply.
+            wake_on_follow_up = core.follow_up.iter().any(is_arrival_row);
+            if wake_on_follow_up || core.steering.iter().any(is_arrival_row) {
+                let ids = self
+                    .inbox_arrivals
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| {
+                        message.class == pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE
+                    })
+                    .map(|message| message.id.clone())
+                    .collect();
+                let withdrawn = inbox.withdraw_ids(&ids);
+                if !withdrawn.is_empty() {
+                    withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
+                    crate::worker::refresh_inbox_wake_rows_locked(
+                        &mut core,
+                        &self.inbox_arrivals,
+                        &inbox,
+                    );
+                }
             }
         }
         // The withdrawn prompts report like the direct route's marker

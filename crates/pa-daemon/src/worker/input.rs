@@ -423,14 +423,31 @@ impl Worker {
                 .inbox()
                 .map(|inbox| (std::sync::Arc::clone(engine), inbox))
         });
+        // A closing session with the inbox on takes no delivery: no lane
+        // row or wake would announce it, so the sender sees the refusal
+        // instead of a receipt for a message nothing delivers. The check
+        // follows the store lookup: the closing paths mark the session
+        // closed before they retire its store, so a store missing because
+        // of a close is always seen as closed here (never a raw row on a
+        // retiring session).
+        if inbox_on
+            && self
+                .agent_engine
+                .as_ref()
+                .is_some_and(|engine| engine.session_is_closed())
+        {
+            return response_failure(
+                None,
+                "worker_deliver_message",
+                "Target session is closed",
+                None,
+            );
+        }
         if let Some((engine, inbox)) = inbox_route {
-            let (id, queued, target) = {
+            let (id, target) = {
                 let (core, inputs) = self.summary_inputs();
                 let id =
                     pa_core::session_engine::agent_messaging::create_agent_session_message_id();
-                // The closed-branch receipt's sample; the live path's
-                // receipt follows the admission's own under-lock sample.
-                let queued = core.busy;
                 let summary = self.summary_locked(&core, inputs);
                 // The receiving session's endpoint for the receipt's `target`.
                 let mut target = json!({
@@ -444,7 +461,7 @@ impl Worker {
                 if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
                     target["sessionName"] = json!(name);
                 }
-                (id, queued, target)
+                (id, target)
             };
             // The provenance the targeted reads filter on: the sender
             // name, the message id, and the family relationship.
@@ -458,32 +475,6 @@ impl Worker {
                 text: prompt,
                 meta,
             };
-            if engine.session_is_closed() {
-                // A closed session takes no lane row and no wake (the
-                // notice sink drops the same way): the message stays
-                // durable in the inbox, so a reopened session reads it.
-                // The append is atomic with the retire: the slot's own
-                // mutex covers the identity re-check and the journal
-                // append, so a `clear_inbox` racing this delivery either
-                // waits for the append (the replacement's build opens
-                // the journal only after the clear, with the record
-                // already on disk) or lands first and refuses here —
-                // two stores never race the same journal across the
-                // swap.
-                if engine
-                    .push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
-                    .is_none()
-                {
-                    return response_failure(
-                        None,
-                        "worker_deliver_message",
-                        "Target session is closed",
-                        None,
-                    );
-                }
-                let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
-                return response_success(None, "worker_deliver_message", Some(receipt));
-            }
             let closed_engine = std::sync::Arc::clone(&engine);
             // The admission answers whether ITS busy sample parked the
             // notice: the receipt's `deliveryStatus` follows that sample,
@@ -514,22 +505,6 @@ impl Worker {
             // the worker to deliver it (no client reopens the session).
             let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
             return response_success(None, "worker_deliver_message", Some(receipt));
-        }
-        // A retiring session with the inbox on but no store left takes
-        // no lane row either: refuse instead of injecting the raw row
-        // the kernel-notice sink would drop.
-        if inbox_on
-            && self
-                .agent_engine
-                .as_ref()
-                .is_some_and(|engine| engine.session_is_closed())
-        {
-            return response_failure(
-                None,
-                "worker_deliver_message",
-                "Target session is closed",
-                None,
-            );
         }
         let (id, queued, snapshot, target) = {
             let (mut core, inputs) = self.summary_inputs();
