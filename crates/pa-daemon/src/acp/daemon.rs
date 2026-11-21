@@ -20,6 +20,7 @@
 //! `get_available_models` for discovery, `set_model` /
 //! `set_thinking_level` for the applied selection.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2333,9 +2334,12 @@ mod tests {
         let (_frames_tx, frames) = mpsc::unbounded_channel();
         let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let link = Arc::new(DaemonLink {
+            client_kind: "acp".to_string(),
             writer,
             pending: Arc::clone(&pending),
+            tags: Arc::new(std::sync::Mutex::new(HashMap::new())),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closed_signal: Arc::new(tokio::sync::Notify::new()),
             frames: Mutex::new(frames),
             protocol_version: DAEMON_PROTOCOL_VERSION,
             next_request_id: std::sync::atomic::AtomicU64::new(0),
