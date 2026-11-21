@@ -706,3 +706,4 @@ fn delivery_scoped_rows_never_batch_with_other_deliveries() {
             "the queue's front delivered alone: {batch:?}"
         );
     }
+}
