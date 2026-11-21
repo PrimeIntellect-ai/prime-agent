@@ -106,13 +106,20 @@ impl super::SessionUi {
         if selection_changed
             || matches!(
                 action,
-                Some(LibraryViewAction::Close | LibraryViewAction::DrillIn { .. })
+                Some(
+                    LibraryViewAction::Close
+                        | LibraryViewAction::Back
+                        | LibraryViewAction::DrillIn { .. }
+                )
             )
         {
             self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
         }
         match action {
             Some(LibraryViewAction::None) | None => {}
+            // Backing out to the list fences the drill-in's pending reply;
+            // the epoch bump above is what drops it.
+            Some(LibraryViewAction::Back) => {}
             Some(LibraryViewAction::Close) => {
                 view.library_view = None;
                 self.library_view_session = None;

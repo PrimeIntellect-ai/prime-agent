@@ -125,6 +125,9 @@ pub enum LibraryViewAction {
     DrillIn { name: String },
     /// Esc or ctrl+c on the list: close the page.
     Close,
+    /// Esc inside a drill-in: back out to the list. The session fences the
+    /// drill-in's pending request with this action.
+    Back,
 }
 
 /// The machine library page: the machine list, the selection, the open
@@ -265,7 +268,8 @@ impl LibraryView {
             if self.detail.is_some() {
                 self.detail = None;
                 self.detail_scroll = 0;
-                return LibraryViewAction::None;
+                self.error = None;
+                return LibraryViewAction::Back;
             }
             return LibraryViewAction::Close;
         }
@@ -660,8 +664,9 @@ mod tests {
             text.contains("state \"entry\" as entry"),
             "the mermaid state line rides the panel: {text}"
         );
-        // Esc backs out to the list first; the second Esc closes.
-        assert_eq!(view.handle_key("escape", &kb()), LibraryViewAction::None);
+        // Esc backs out to the list first (the Back action fences the
+        // drill-in's pending reply); the second Esc closes.
+        assert_eq!(view.handle_key("escape", &kb()), LibraryViewAction::Back);
         assert!(plain(&view.render(&theme(), 100, &kb(), 30)).contains("machine library"));
         assert_eq!(view.handle_key("escape", &kb()), LibraryViewAction::Close);
     }
