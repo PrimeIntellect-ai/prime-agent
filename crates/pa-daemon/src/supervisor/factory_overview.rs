@@ -458,8 +458,7 @@ impl Supervisor {
         // passivated owner's runs list from its durable record alone).
         // The resident set also gates the fold: a read already in flight
         // when the owner leaves must not restamp the rows pruned here.
-        let resident: BTreeSet<String> =
-            owners.iter().map(|owner| owner.id.clone()).collect();
+        let resident: BTreeSet<String> = owners.iter().map(|owner| owner.id.clone()).collect();
         cache.resident.clone_from(&resident);
         cache.rows.retain(|id, _| resident.contains(id));
         cache.read_at.retain(|id, _| resident.contains(id));
