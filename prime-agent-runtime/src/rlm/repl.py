@@ -34,6 +34,7 @@ from typing import Any
 
 from .factory import schedule_activity
 from .bash import _kill_live_handles, _rehydrate_persistent_shells
+from .discipline import CellDeclinedError, declined_reason
 
 PROTOCOL_VERSION = 3
 
@@ -594,6 +595,25 @@ def _interrupt_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     return {"event": "error", "id": cell_id, "ename": "KeyboardInterrupt", "evalue": "", "traceback": lines}
 
 
+def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
+    """A declined cell's error event: the failed-cell header the host's result
+    rendering carries, with the decline's teaching message as the exception
+    line (the cell never ran, so there are no frames to show)."""
+    message = _cap_text(_safe_str(error))
+    return {
+        "event": "error",
+        "id": cell_id,
+        "ename": type(error).__name__,
+        "evalue": message,
+        "traceback": _cap_traceback_lines(
+            [
+                "Traceback (most recent call last):\n",
+                f"{type(error).__name__}: {message}\n",
+            ]
+        ),
+    }
+
+
 def _compile_cell(code: str, filename: str) -> tuple[list[types.CodeType], bool]:
     """Compile a cell; a trailing expression compiles separately in eval mode."""
     linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
@@ -659,6 +679,23 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
     try:
+        declined = declined_reason(req["code"])
+        if declined is not None:
+            # Refused before it runs: nothing executed, so the decline's
+            # teaching message is the whole result. Same drain/finish/send
+            # order as a completed cell.
+            try:
+                _drain_output()
+            finally:
+                with _interrupt_lock:
+                    # An interrupt parked while the screen ran belongs to
+                    # this cell, never to the next one.
+                    if cell_id in _inflight:
+                        _consume_pending_interrupt(cell_id)
+                    _finish_locked(cell_id)
+            _send(_declined_event(cell_id, declined))
+            _send({"event": "done", "id": cell_id, "status": "error"})
+            return
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))

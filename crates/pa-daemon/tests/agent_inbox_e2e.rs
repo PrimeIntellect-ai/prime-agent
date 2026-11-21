@@ -292,7 +292,8 @@ fn inbox_script(request: usize) -> Vec<String> {
 /// notice queues behind the busy run) and then reads the inbox itself —
 /// the drain seam must withdraw the queued row, so the model answers
 /// the read's tool result (request 2) with no stale notice wake in
-/// between. Any fourth request is an unexpected wake.
+/// between. Any fourth request is an unexpected wake. The wait is 4s
+/// because the kernel declines an in-cell sleep of 5s or longer.
 fn drain_run_script(request: usize) -> Vec<String> {
     match request {
         0 => [
@@ -323,7 +324,7 @@ fn drain_run_script(request: usize) -> Vec<String> {
                         "id": "call-drain-2",
                         "type": "function",
                         "function": python_cell(
-                            "import asyncio\nawait asyncio.sleep(5)\nfrom rlm import inbox\nmsgs = await inbox.read()\nprint(('drained', len(msgs)))"
+                            "import asyncio\nawait asyncio.sleep(4)\nfrom rlm import inbox\nmsgs = await inbox.read()\nprint(('drained', len(msgs)))"
                         )
                     }]
                 }),
