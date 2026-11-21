@@ -42,8 +42,14 @@ import sys
 from pathlib import Path
 
 
+_DURATION_MAP_PATH = Path(__file__).with_name("ci_test_shard_durations.json")
+_DURATION_DATA = json.loads(_DURATION_MAP_PATH.read_text(encoding="utf-8"))
+
+
 def shard_of(unit_id: str, total: int) -> int:
     # Keep byte-identical with scripts/ci_test_shard.py.
+    if total == _DURATION_DATA["total"] and unit_id in _DURATION_DATA["assignments"]:
+        return _DURATION_DATA["assignments"][unit_id] - 1
     import zlib
     return zlib.crc32(unit_id.encode("utf-8")) % total
 
