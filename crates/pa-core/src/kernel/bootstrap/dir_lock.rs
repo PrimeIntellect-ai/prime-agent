@@ -190,6 +190,33 @@ impl Drop for LockGuard {
     }
 }
 
+/// Recover an interrupted swap, then sweep dead staging entries.
+///
+/// A process can die after moving the live venv aside but before moving its
+/// candidate into place. Recovery is best effort: when a complete aside cannot
+/// be renamed (for example a Windows process still holds it), the rebuild
+/// repairs the live path. The sweep runs only after a successful recovery: a
+/// failed restore leaves the complete aside as the last good tree, and the dead
+/// owner in its name would make the sweep delete it.
+fn recover_then_sweep(
+    venv: &Path,
+    lock_dir: &Path,
+    recover: impl FnOnce(&Path) -> anyhow::Result<()>,
+) {
+    if recover(venv).is_err() {
+        return;
+    }
+    // Nothing live can own these entries: the lock is held.
+    let parent = lock_dir.parent().unwrap_or(Path::new("/"));
+    for base in [venv.file_name(), lock_dir.file_name()]
+        .into_iter()
+        .flatten()
+        .map(|name| name.to_string_lossy().to_string())
+    {
+        sweep_stale_staging(parent, &base, BOOTSTRAP_STAGING_STALE_AFTER);
+    }
+}
+
 /// Serialize concurrent bootstraps across processes on the same venv.
 ///
 /// Single flight: the caller that publishes the lock is the only builder.
@@ -211,27 +238,7 @@ pub(crate) async fn acquire_bootstrap_lock(
         match try_acquire_dir_lock(&lock_dir)? {
             DirLockAttempt::Acquired => {
                 let lock_guard = LockGuard(lock_dir.clone());
-                // A process can die after moving the live venv aside but before
-                // moving its candidate into place. Recover that venv before the
-                // generic sweep removes dead staging entries. Recovery is best
-                // effort: when a complete aside cannot be renamed (for example
-                // a Windows process still holds it), the rebuild below still
-                // repairs the live path.
-                let recovered = super::venv::recover_interrupted_venv_swap(venv).is_ok();
-                // Sweep only after a successful recovery: a failed restore
-                // leaves the complete aside as the last good tree, and the
-                // dead owner in its name would make the sweep delete it.
-                if recovered {
-                    // Nothing live can own these entries: the lock is held.
-                    let parent = lock_dir.parent().unwrap_or(Path::new("/"));
-                    for base in [venv.file_name(), lock_dir.file_name()]
-                        .into_iter()
-                        .flatten()
-                        .map(|name| name.to_string_lossy().to_string())
-                    {
-                        sweep_stale_staging(parent, &base, BOOTSTRAP_STAGING_STALE_AFTER);
-                    }
-                }
+                recover_then_sweep(venv, &lock_dir, super::venv::recover_interrupted_venv_swap);
                 return Ok(Some(lock_guard));
             }
             DirLockAttempt::Held | DirLockAttempt::Reclaimed => {
@@ -418,6 +425,26 @@ mod tests {
             "new interpreter"
         );
         assert!(!aside.exists(), "the leader sweeps the old aside");
+    }
+
+    #[test]
+    fn a_failed_restore_keeps_the_dead_aside() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let lock_dir = root.path().join("kernel-venv.bootstrap.lock");
+        let aside = root
+            .path()
+            .join(format!("kernel-venv.old-{}-x", dead_pid()));
+        std::fs::create_dir_all(&aside).unwrap();
+
+        recover_then_sweep(&venv, &lock_dir, |_| {
+            anyhow::bail!("cannot rename the aside")
+        });
+
+        assert!(
+            aside.exists(),
+            "a failed restore must keep the aside as the last good tree"
+        );
     }
 
     #[tokio::test(start_paused = true)]
