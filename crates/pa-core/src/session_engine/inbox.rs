@@ -35,9 +35,9 @@ pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
 pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
     "(inbox persistence failed; messages are memory-only)";
 
-pub use pa_types::inbox_notice::{
-    INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED,
-    INBOX_CLASS_CHILD_FAILED, INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
+use pa_types::inbox_notice::{
+    INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED, INBOX_CLASS_CHILD_FAILED,
+    INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
 };
 
 /// The coalescing batch state the daemon's notice sink owns: the
@@ -940,7 +940,9 @@ pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut Ho
 mod tests {
     use super::*;
     use crate::kernel::shared::HostRequestPayload;
-    use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER};
+    use pa_types::inbox_notice::{
+        INBOX_CLASS_AGENT_MESSAGE, INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER,
+    };
     use std::io::Write as _;
 
     fn message(id: &str, class: &str, arrived_at_ms: u64, text: &str) -> InboxMessage {

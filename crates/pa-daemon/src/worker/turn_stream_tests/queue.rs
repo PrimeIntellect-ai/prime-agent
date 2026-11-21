@@ -1285,7 +1285,7 @@ async fn a_draining_turn_sweeps_the_queued_reminder_and_parks_settled() {
     // The unread message a reminder row announces.
     inbox.push(
         pa_core::session_engine::inbox::InboxNotice {
-            class: pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            class: pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
             sender: Some("the command".to_string()),
             text: "the command finished".to_string(),
             meta: json!({ "pid": 4321 }),

@@ -161,8 +161,7 @@ impl Worker {
             wake_on_follow_up = core.follow_up.iter().any(|item| {
                 item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
             });
-            let withdrawn =
-                inbox.withdraw_class(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE);
+            let withdrawn = inbox.withdraw_class(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE);
             if !withdrawn.is_empty() {
                 withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
                 crate::worker::refresh_inbox_wake_rows_locked(

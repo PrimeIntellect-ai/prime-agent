@@ -39,7 +39,7 @@ fn inbox_notice(class: &'static str, text: &str) -> pa_core::session_engine::inb
 /// command's pid and command disambiguate the completion).
 fn bash_done_notice(pid: u32, command: &str) -> pa_core::session_engine::inbox::InboxNotice {
     pa_core::session_engine::inbox::InboxNotice {
-        class: pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+        class: pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
         sender: Some(command.to_string()),
         text: format!("[bash-done pid:{pid} exit:0]"),
         meta: serde_json::json!({ "pid": pid, "command": command, "exitCode": 0 }),
@@ -104,7 +104,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
             "[bash-done pid:4321 exit:0]",
         ),
         Lane::Steering,
@@ -161,10 +161,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
     );
     let (count, _, classes) = inbox.count();
     assert_eq!(count, 1);
-    assert_eq!(
-        classes[pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE],
-        1
-    );
+    assert_eq!(classes[pa_types::inbox_notice::INBOX_CLASS_BASH_DONE], 1);
     // The arrival is journal busy evidence.
     assert!(
         WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
@@ -186,10 +183,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "first",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "first"),
         Lane::Steering,
         || false,
         None,
@@ -201,7 +195,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
         Lane::Steering,
@@ -214,10 +208,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "third",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "third"),
         Lane::Steering,
         || false,
         None,
@@ -248,10 +239,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "first",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "first"),
         Lane::Steering,
         || false,
         None,
@@ -266,7 +254,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
         Lane::Steering,
@@ -306,10 +294,7 @@ async fn the_reminder_repeats_while_the_inbox_stays_unread() {
         "an empty inbox never reminds"
     );
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "waiting",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
     admit_inbox_reminder(
@@ -437,7 +422,7 @@ async fn a_drained_read_withdraws_its_queued_wake_rows() {
     // emptied-store rule, never an unconditional one.
     inbox.push(
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+            pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
             "freshly waiting",
         ),
         pa_core::autonomous::now_millis(),
@@ -867,7 +852,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
         Lane::Steering,
@@ -1025,7 +1010,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "still waiting",
         ),
         Lane::Steering,
@@ -1040,7 +1025,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
         .unwrap()
         .push(pa_core::session_engine::inbox::InboxMessage {
             id: "inbox-ghost".to_string(),
-            class: pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS.to_string(),
+            class: pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS.to_string(),
             arrived_at_ms: 5,
             sender: Some("gone".to_string()),
             text: "drained elsewhere".to_string(),
@@ -1093,7 +1078,7 @@ async fn a_withdrawal_of_the_last_message_of_its_batch_drops_the_batches_row() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "still waiting",
         ),
         Lane::Steering,
@@ -1189,7 +1174,7 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
         &successor,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "successor milestone",
         ),
         Lane::Steering,
@@ -1462,7 +1447,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
         Lane::Steering,
@@ -1532,10 +1517,7 @@ async fn a_closed_session_refuses_the_arrival() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "late",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "late"),
         Lane::Steering,
         || true,
         None,
@@ -1588,10 +1570,7 @@ async fn a_reminder_row_moved_to_follow_up_still_coalesces() {
     let (worker, inbox, _arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "waiting",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
     admit_inbox_reminder(
@@ -1662,10 +1641,7 @@ async fn the_disabled_interval_reminder_never_admits_but_keeps_polling() {
     );
     engine.set_inbox(std::sync::Arc::clone(&inbox));
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "waiting",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
     crate::agent_inbox::spawn_inbox_reminder(
@@ -1724,10 +1700,7 @@ async fn the_disabled_inbox_never_admits_a_reminder() {
     );
     engine.set_inbox(std::sync::Arc::clone(&inbox));
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "waiting",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
     crate::agent_inbox::spawn_inbox_reminder(
@@ -1782,10 +1755,7 @@ async fn a_closed_session_keeps_the_reminder_polling_for_the_next_session() {
     );
     engine.set_inbox(std::sync::Arc::clone(&inbox));
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "waiting",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
     crate::agent_inbox::spawn_inbox_reminder(
@@ -1847,10 +1817,7 @@ async fn an_interval_flip_to_zero_during_the_wait_never_admits() {
     );
     engine.set_inbox(std::sync::Arc::clone(&inbox));
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "waiting",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "waiting"),
         1_000,
     );
     crate::agent_inbox::spawn_inbox_reminder(
@@ -2263,10 +2230,7 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
         engine
             .push_to_live_inbox(
                 &inbox,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "first",
-                ),
+                inbox_notice(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE, "first",),
                 1_000,
             )
             .is_some(),
@@ -2280,10 +2244,7 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
         engine
             .push_to_live_inbox(
                 &inbox,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "stale",
-                ),
+                inbox_notice(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE, "stale",),
                 2_000,
             )
             .is_none(),
@@ -2299,7 +2260,7 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
             .push_to_live_inbox(
                 &inbox,
                 inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                    pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
                     "still stale",
                 ),
                 3_000,
@@ -2311,10 +2272,7 @@ async fn a_retired_slot_refuses_the_closed_sessions_append_atomically() {
         engine
             .push_to_live_inbox(
                 &replacement,
-                inbox_notice(
-                    pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-                    "retried",
-                ),
+                inbox_notice(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE, "retried",),
                 4_000,
             )
             .is_some(),
@@ -2345,7 +2303,7 @@ async fn a_replaced_inbox_refuses_the_open_sessions_append() {
         &inbox,
         &worker.inbox_arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+            pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
             "for the retired store",
         ),
         Lane::Steering,
@@ -2384,10 +2342,7 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "first",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "first"),
         Lane::Steering,
         || false,
         None,
@@ -2398,10 +2353,7 @@ async fn a_follow_up_arrival_keeps_a_queued_steering_notice() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
-            "second",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE, "second"),
         Lane::FollowUp,
         || false,
         None,
@@ -2441,10 +2393,7 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "first",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "first"),
         Lane::Steering,
         || false,
         None,
@@ -2479,7 +2428,7 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
         Lane::Steering,
@@ -2513,10 +2462,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "first",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "first"),
         Lane::Steering,
         || false,
         None,
@@ -2528,7 +2474,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "second",
         ),
         Lane::Steering,
@@ -2559,7 +2505,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     // A targeted read takes the bash-done message: the batch trims and
     // both rows re-render over what is left.
     let taken = inbox.drain_matching(&pa_core::session_engine::inbox::InboxReadFilter {
-        class: Some(pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE.to_string()),
+        class: Some(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE.to_string()),
         ..Default::default()
     });
     assert_eq!(taken.len(), 1);
@@ -2739,10 +2685,7 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
     worker.core.lock().unwrap().busy = true;
     // An older message waits without ever being covered by the row.
     inbox.push(
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "older",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "older"),
         500,
     );
     let _ = admit_inbox_notice(
@@ -2751,10 +2694,7 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
         &notify,
         &inbox,
         &arrivals,
-        inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
-            "covered",
-        ),
+        inbox_notice(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE, "covered"),
         Lane::Steering,
         || false,
         None,
@@ -2805,7 +2745,7 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
         &inbox,
         &arrivals,
         inbox_notice(
-            pa_core::session_engine::inbox::INBOX_CLASS_FACTORY_PROGRESS,
+            pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS,
             "recovery survivor full body",
         ),
         Lane::Steering,

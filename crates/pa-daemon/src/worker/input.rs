@@ -445,7 +445,7 @@ impl Worker {
                 meta["relationship"] = json!(relationship.as_str());
             }
             let notice = pa_core::session_engine::inbox::InboxNotice {
-                class: pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                class: pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
                 sender: Some(sender_name),
                 text: prompt,
                 meta,
