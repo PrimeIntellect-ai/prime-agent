@@ -1,0 +1,1 @@
+- A child of a directory machine hands back its outputs with `await rlm.factory.emit(...)`. Each value is checked against the declared type before anything is kept, a wrong value raises `FactoryEmitError` with the exact field, and `file` outputs are copied beside the child's session. `await rlm.factory.inputs()` gives the child its bound inputs and params.

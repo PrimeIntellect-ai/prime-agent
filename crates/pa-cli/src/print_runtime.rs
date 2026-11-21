@@ -868,6 +868,7 @@ pub(crate) async fn build_headless_engine_with(
             progress_note_emit: None,
             rlm_depth,
             factory_child,
+            factory_contract: None,
             daemonless: true,
             model_info: Some(model.clone()),
             // The kernel boots in the background at creation; a spawned

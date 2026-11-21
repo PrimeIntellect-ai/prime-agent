@@ -726,7 +726,7 @@ fn build_state(
                         format!("unknown type {missing:?}; declare it under [types.{missing}]"),
                     ));
                 } else if slot.optional {
-                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "optional outputs need typed emit (rlm.factory.emit); this build captures outputs from the final answer, so every output is required"));
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "optional outputs are not supported yet; every output is required, and the child must emit each one"));
                 } else {
                     outputs.push(Output { name, slot });
                 }

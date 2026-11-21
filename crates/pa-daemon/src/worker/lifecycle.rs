@@ -366,6 +366,7 @@ impl Worker {
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
                 factory_child: false,
+                factory_contract: None,
             }) {
             Ok(()) => self.reseed_rlm_children().await,
             Err(error) => eprintln!("pa-daemon: replacement identity rebind failed: {error:#}"),

@@ -103,7 +103,18 @@ fn problems(edits: &[(&str, &str)], extra: &[(&str, &str)]) -> Vec<String> {
     }
 }
 
-const OUTPUTS_VERDICT: &str = "## Outputs\n\nEnd your final answer with one fenced ```json block holding a single object with exactly these keys:\n\n- `verdict`: a verdict\n\nA verdict is an object with these fields:\n  - `decision`: one of approve | rework\n  - `findings`: a list of finding objects\n\nA finding is an object with these fields:\n  - `severity`: one of blocker | nit\n  - `at`: text";
+const VERDICT_PORTS: &str = "- `verdict`: a verdict\n\nA verdict is an object with these fields:\n  - `decision`: one of approve | rework\n  - `findings`: a list of finding objects\n\nA finding is an object with these fields:\n  - `severity`: one of blocker | nit\n  - `at`: text\n";
+
+/// The generated Outputs section for an `emit(<call>)` with `ports` lines.
+fn outputs(call: &str, ports: &str) -> String {
+    format!(
+        "## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.factory.emit({call})\n\n{ports}\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it. Your inputs, as typed values, are `await rlm.factory.inputs()`."
+    )
+}
+
+fn finding_record() -> Value {
+    json!([["severity", "enum(blocker, nit)"], ["at", "text"]])
+}
 
 #[test]
 fn compiles_the_base_machine_to_the_executor_spec() {
@@ -122,34 +133,37 @@ fn compiles_the_base_machine_to_the_executor_spec() {
             {
                 "id": "design", "entry": true,
                 "subagent": {
-                    "prompt": "Task: {task}\n\nWrite a plan under {max_loc} lines.\n\nRework: {rework}\n\n## Outputs\n\nYour whole final answer becomes the `plan` output.",
+                    "prompt": format!("Task: {{task}}\n\nWrite a plan under {{max_loc}} lines.\n\nRework: {{rework}}\n\n{}", outputs("plan=...", "- `plan`: text\n")),
                     "model": "m/builder",
                 },
                 "inputs": [{"name": "rework", "type": "json", "from": "triage.rework", "optional": true}],
                 "outputs": [{"name": "plan", "type": "text"}],
+                "emit": {"outputs": [{"name": "plan", "type": "text"}], "records": {}},
                 "max_entries": 3,
             },
             {
                 "id": "review-a",
                 "subagent": {
-                    "prompt": format!("Task: {{task}}\n\nReview this plan:\n\n{{plan}}\n\n{rubric}\n\n{OUTPUTS_VERDICT}"),
+                    "prompt": format!("Task: {{task}}\n\nReview this plan:\n\n{{plan}}\n\n{rubric}\n\n{}", outputs("verdict=...", VERDICT_PORTS)),
                     "name": "judge-a",
                     "model": "prime-inference/anthropic/claude-opus-5.5",
                     "thinking": "max",
                 },
                 "inputs": [{"name": "plan", "type": "text", "from": "design.plan"}],
                 "outputs": [{"name": "verdict", "type": "json"}],
+                "emit": {"outputs": [{"name": "verdict", "type": "verdict"}], "records": {"finding": finding_record(), "verdict": [["decision", "enum(approve, rework)"], ["findings", "list[finding]"]]}},
             },
             {
                 "id": "review-b",
                 "subagent": {
-                    "prompt": format!("Task: {{task}}\n\nReview this plan:\n\n{{plan}}\n\n{OUTPUTS_VERDICT}"),
+                    "prompt": format!("Task: {{task}}\n\nReview this plan:\n\n{{plan}}\n\n{}", outputs("verdict=...", VERDICT_PORTS)),
                     "name": "judge-b",
                     "model": "prime-inference/anthropic/claude-opus-5.5",
                     "thinking": "max",
                 },
                 "inputs": [{"name": "plan", "type": "text", "from": "design.plan"}],
                 "outputs": [{"name": "verdict", "type": "json"}],
+                "emit": {"outputs": [{"name": "verdict", "type": "verdict"}], "records": {"finding": finding_record(), "verdict": [["decision", "enum(approve, rework)"], ["findings", "list[finding]"]]}},
             },
             {
                 "id": "triage",
@@ -159,12 +173,14 @@ fn compiles_the_base_machine_to_the_executor_spec() {
                     {"name": "b", "type": "json", "from": "review-b.verdict"},
                 ],
                 "outputs": [{"name": "action", "type": "json"}, {"name": "rework", "type": "json"}],
+                "emit": {"outputs": [{"name": "action", "type": "enum(ship, rework)"}, {"name": "rework", "type": "list[finding]"}], "records": {"finding": finding_record()}},
             },
             {
                 "id": "ship",
-                "subagent": {"prompt": "Task: {task}\n\nShip {plan}.\n\n## Outputs\n\nYour whole final answer becomes the `url` output."},
+                "subagent": {"prompt": format!("Task: {{task}}\n\nShip {{plan}}.\n\n{}", outputs("url=...", "- `url`: text\n"))},
                 "inputs": [{"name": "plan", "type": "text", "from": "design.plan"}],
                 "outputs": [{"name": "url", "type": "text"}],
+                "emit": {"outputs": [{"name": "url", "type": "text"}], "records": {}},
             },
         ],
         "transitions": [
@@ -335,7 +351,7 @@ fn every_load_error_names_its_place() {
                 "outputs = { url = \"text?\" }",
             )],
             &[],
-            "optional outputs need typed emit",
+            "optional outputs are not supported yet",
         ),
         (
             &[(
@@ -463,14 +479,17 @@ fn guard_free_bundled_seeds_convert_and_compile_to_the_same_machine() {
             "run": {"budget_ms": 900_000, "max_parallel": 8, "failure_policy": "escalate"},
             "states": [
                 {"id": "scope", "entry": true, "subagent": {"prompt": true, "name": "builder-scope"},
-                 "outputs": [{"name": "outline", "type": "json"}], "budget_ms": 240_000},
+                 "outputs": [{"name": "outline", "type": "json"}],
+                 "emit": {"outputs": [{"name": "outline", "type": "json"}], "records": {}}, "budget_ms": 240_000},
                 {"id": "notes", "subagent": {"prompt": true, "name": "builder-notes"},
                  "inputs": [{"name": "outline", "type": "json", "from": "scope.outline"}],
-                 "outputs": [{"name": "section", "type": "text"}], "budget_ms": 240_000,
+                 "outputs": [{"name": "section", "type": "text"}],
+                 "emit": {"outputs": [{"name": "section", "type": "text"}], "records": {}}, "budget_ms": 240_000,
                  "foreach": {"over": "outline", "max": 8}},
                 {"id": "collect", "subagent": {"prompt": true, "name": "build-collector"},
                  "inputs": [{"name": "sections", "type": "text", "from": "notes.section"}],
-                 "outputs": [{"name": "merged", "type": "text"}], "budget_ms": 240_000},
+                 "outputs": [{"name": "merged", "type": "text"}],
+                 "emit": {"outputs": [{"name": "merged", "type": "text"}], "records": {}}, "budget_ms": 240_000},
             ],
             "transitions": [{"from": "scope", "to": "notes"}, {"from": "notes", "to": "collect"}],
         })

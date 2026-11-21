@@ -661,6 +661,7 @@ mod tests {
             run_id: "0123456789ab".to_string(),
             spec_id: "sw".to_string(),
             state_id: "build".to_string(),
+            contract: None,
         };
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         for (child_id, file) in [("sub-live", &live_file), ("sub-gone", &gone_file)] {

@@ -296,6 +296,9 @@ pub struct AgentSessionEngine {
     /// Whether this session runs a factory state (its create carried a
     /// factory run tag): selects the child prompt's factory line.
     factory_child: std::sync::atomic::AtomicBool,
+    /// The factory state's output contract from the create, which the
+    /// engine registers as the child's `factory.emit` and `factory.inputs`.
+    factory_contract: std::sync::Mutex<Option<serde_json::Value>>,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,

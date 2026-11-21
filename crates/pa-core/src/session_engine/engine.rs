@@ -2,7 +2,7 @@
 //! The session subscribes persistence listeners on the caller's reactor, so
 //! `create_session` is async.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pa_agent::agent::{Agent, AgentInitialState, AgentOptions};
@@ -61,6 +61,9 @@ pub struct SessionEngineConfig {
     /// Whether this session is a factory state's child (its spawn carried a
     /// factory run tag); selects the child prompt's factory line.
     pub factory_child: bool,
+    /// A factory child's output contract (its spawn's `factoryContract`):
+    /// registers the child's `factory.emit` and `factory.inputs`.
+    pub factory_contract: Option<serde_json::Value>,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -234,7 +237,16 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if let Some(traces) = traces {
         session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
     }
-    let wiring = super::runtime_wiring::wire_session_runtime(
+    // A factory child's accepted outputs live beside its session file,
+    // where the parent's executor reads them. A daemon worker's engine
+    // session is not persisted (the worker owns the durable file), so the
+    // conversation-log path gives the directory there.
+    let factory_outputs_dir = session_manager
+        .get_session_file()
+        .or(config.conversation_log_path.as_deref())
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let mut wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
         super::runtime_wiring::RlmWiring {
@@ -247,6 +259,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.queued_goal_context_purge.clone(),
         config.cron_store.clone(),
     );
+    if let (Some(contract), Some(dir)) = (config.factory_contract.clone(), factory_outputs_dir) {
+        super::factory_host::register_factory_emit_host_handlers(
+            contract,
+            dir,
+            config.cwd.clone(),
+            &mut wiring.handlers,
+        );
+    }
 
     let refinement_settings = settings.reopen();
     let service_tier_preference = settings.get_default_service_tier();

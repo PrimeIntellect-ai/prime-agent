@@ -330,6 +330,12 @@ def _validate_state_fields(
             '{"python": {"import": "<module>", "callable": "<function>"}})'
         )
 
+    if "emit" in state:
+        # The output contract a machine directory's compiler writes; its
+        # types are checked in Rust (factory.emit / factory.check).
+        emit = state.get("emit")
+        if not (isinstance(emit, dict) and isinstance(emit.get("outputs"), list)):
+            errors.append(f"{noun} {ref} emit must be an object with an outputs list")
     if "budget_ms" in state:
         budget = state.get("budget_ms")
         if not _is_positive_int(budget):
@@ -901,7 +907,7 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
             "retries": state.get("retries", NODE_RETRIES_DEFAULT),
             "failure_policy": state.get("failure_policy", run_policy),
         }
-        for key in ("subagent", "python", "budget_ms", "inputs", "outputs", "foreach"):
+        for key in ("subagent", "python", "budget_ms", "inputs", "outputs", "foreach", "emit"):
             if key in state:
                 state_out[key] = copy.deepcopy(state[key])
         states_out.append(state_out)
@@ -1021,6 +1027,7 @@ def topological_order(nodes: list[dict[str, Any]]) -> list[str]:
 __all__ = [
     "FACTORY_DISABLED_MESSAGE",
     "FACTORY_HELP",
+    "FactoryEmitError",
     "FactoryExecutor",
     "FactoryRun",
     "MachineFile",
@@ -1151,6 +1158,54 @@ _INFRA_ERROR_MARKERS = (
     "child worker unreachable",
     "supervisor link",
 )
+
+FACTORY_OUTPUTS_FILE = "factory-outputs.json"
+"""A factory child's accepted outputs, beside its session file: the
+child's ``factory.emit`` host request writes it, the executor reads it."""
+
+
+class FactoryEmitError(ValueError):
+    """``rlm.factory.emit`` refused a value: the message names every wrong
+    field (``verdict.findings[0].severity: 'high' is not one of ...``)."""
+
+
+async def emit_factory_outputs(outputs: dict[str, Any]) -> dict[str, Any]:
+    """Hand this factory child's outputs to the factory (``rlm.factory.emit``).
+
+    Every value is checked against the state's declared types before
+    anything is kept; a wrong value raises ``FactoryEmitError`` with the
+    exact field, so fix it and call again. A ``file`` output takes a path
+    (``str`` or ``Path``) and the file is copied. Returns ``{"accepted":
+    [...], "missing": [...]}``, the required outputs still owed.
+    """
+    from . import host_request
+
+    values = {name: os.fspath(value) if isinstance(value, os.PathLike) else value for name, value in outputs.items()}
+    try:
+        return await host_request("factory.emit", {"outputs": values})
+    except RuntimeError as error:
+        raise FactoryEmitError(_emit_error_text(str(error))) from None
+
+
+async def factory_inputs() -> dict[str, Any]:
+    """This factory child's bound inputs and the machine's params, as values."""
+    from . import host_request
+
+    try:
+        reply = await host_request("factory.inputs", {})
+    except RuntimeError as error:
+        raise FactoryEmitError(_emit_error_text(str(error))) from None
+    return reply.get("inputs") or {}
+
+
+def _emit_error_text(error: str) -> str:
+    if "is not available in this session" in error:
+        return (
+            "rlm.factory.emit and rlm.factory.inputs work only in a child spawned by a "
+            "machine directory's state (machine.toml)"
+        )
+    return error
+
 
 PYTHON_STATE_TIMEOUT_MS_DEFAULT = 60_000
 """A python call's time limit when neither the state nor the run sets
@@ -1631,6 +1686,7 @@ class _NodeInstance:
     # deferral (run()/resume(), allow_backoff=False) consumes an attempt
     # but never counts toward the backoff episode.
     child_id: str | None = None
+    session_dir: str | None = None  # the child's session dir: its emitted outputs live there
     spawned_at: float | None = None
     duration_ms: int | None = None
     answer: str | None = None  # the binding lane's captured answer (ANSWER_BINDING_CAP)
@@ -1639,7 +1695,7 @@ class _NodeInstance:
     # exit's last assistant text as delivered work (the M4 class).
     error: str | None = None
     tool_uses: int = 0
-    inputs: dict[str, Any] | None = None  # a python state's bound inputs; re-runs reuse them
+    inputs: dict[str, Any] | None = None  # bound inputs and params; re-runs reuse them
     process: "_PythonProcess | None" = None  # a python state's running call
     deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
@@ -3028,6 +3084,7 @@ class FactoryExecutor:
             instance = _NodeInstance(
                 index=state.instance_counter,
                 prompt=_render_prompt(state.prompt_template, values, rendered_params),
+                inputs={**params, **bound},
             )
             state.instance_counter += 1
             return [instance], None
@@ -3044,6 +3101,7 @@ class FactoryExecutor:
                         {**values, foreach["over"]: instance_value},
                         rendered_params,
                     ),
+                    inputs={**params, **bound, foreach["over"]: item},
                 )
             )
         state.instance_counter += len(instances)
@@ -3092,6 +3150,7 @@ class FactoryExecutor:
 
         instance.attempt += 1
         child_name = _spawn_label(state.name, run.run_id, state.state_id, instance.index, instance.attempt)
+        contract = state.spec.get("emit")
         try:
             handle = await _spawn(
                 instance.prompt,
@@ -3099,6 +3158,7 @@ class FactoryExecutor:
                 model=state.model,
                 thinking=state.thinking,
                 factory={"runId": run.run_id, "specId": run.spec_id, "stateId": state.state_id},
+                factory_contract=None if contract is None else {**contract, "inputs": instance.inputs or {}},
             )
         except RuntimeError as exc:
             last_error = str(exc)
@@ -3147,6 +3207,7 @@ class FactoryExecutor:
             await self._retract_admission(run, state, entry, instance)
             return "stopped"
         instance.child_id = handle.rlm_child_id
+        instance.session_dir = str(handle.session_dir)
         instance.spawned_at = self._now_fn()
         instance.status = "running"
         instance.rate_limit_streak = 0
@@ -3248,6 +3309,17 @@ class FactoryExecutor:
         if isinstance(outputs, str):
             await self._apply_instance_failure(run, state, entry, instance, outputs, retry=True)
             return
+        if "emit" in state.spec:
+            # The same Rust check a child's emit passes through.
+            from . import host_request
+
+            try:
+                await host_request("factory.check", {"contract": state.spec["emit"], "outputs": outputs})
+            except RuntimeError as error:
+                await self._apply_instance_failure(
+                    run, state, entry, instance, f"python state output: {error}", retry=True
+                )
+                return
         instance.status = "done"
         instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
         self._event(
@@ -3376,7 +3448,10 @@ class FactoryExecutor:
             )
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
             entry.answer = self._entry_answer(entry)
-            capture_failure = await self._capture_outputs(run, state, entry)
+            if "emit" in state.spec:
+                capture_failure = self._emitted_outputs(run, state, entry)
+            else:
+                capture_failure = await self._capture_outputs(run, state, entry)
             if entry.status != "running":
                 return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
@@ -3527,6 +3602,49 @@ class FactoryExecutor:
                 errors[name] = error
         entry.outputs = outputs
         entry.output_errors = errors
+
+    def _emitted_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
+        """Read what each child emitted into ``entry.outputs``.
+
+        The child's ``factory.emit`` already checked every value and wrote
+        the accepted ones to its outputs file in one step, so this reads
+        and gathers them: a foreach entry joins text ports with blank lines
+        and turns every other port into a list in item order. Returns the
+        joined failure reason when a child did not emit a required port,
+        ``None`` when every port has a value.
+        """
+        declared = state.spec["emit"].get("outputs") or []
+        kinds = _declared_port_types(state.spec, "outputs")
+        per_instance: list[dict[str, Any]] = []
+        for instance in entry.instances:
+            emitted: dict[str, Any] = {}
+            if instance.session_dir is not None:
+                try:
+                    loaded = json.loads((Path(instance.session_dir) / FACTORY_OUTPUTS_FILE).read_text("utf-8"))
+                    emitted = loaded if isinstance(loaded, dict) else {}
+                except (OSError, ValueError):
+                    emitted = {}
+            per_instance.append(emitted)
+        if state.spec.get("foreach") is None:
+            entry.outputs = per_instance[0] if per_instance else {}
+        else:
+            entry.outputs = {}
+            for out in declared:
+                values = [emitted[out["name"]] for emitted in per_instance if out["name"] in emitted]
+                if values:
+                    entry.outputs[out["name"]] = (
+                        "\n\n".join(str(value) for value in values) if kinds.get(out["name"]) == "text" else values
+                    )
+        entry.output_errors = {}
+        failures = []
+        for out in declared:
+            name = out["name"]
+            if all(name in emitted for emitted in per_instance):
+                continue
+            error = f"output {name!r} was never emitted (rlm.factory.emit)"
+            self._event(run, "output_capture_failed", node=state.state_id, entry=entry.index, port=name, error=error)
+            failures.append(error)
+        return "; ".join(failures) or None
 
     async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
         """Capture the settle's outputs, retrying the capture once.
@@ -5902,6 +6020,17 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
 - Prompts insert params and inputs with `{{name}}`; `prompts/_context.md`
   is prepended to every agent state. The loader appends a generated
   Outputs section that spells out each port's type.
+- A child of a directory machine hands back its outputs with
+  `await rlm.factory.emit(<port>=<value>, ...)`. The call checks every
+  value against the declared types and keeps nothing when one is wrong:
+  it raises `FactoryEmitError` with the exact field
+  (`verdict.decision: "ship" is not one of approve, rework`), and the
+  child fixes the value and calls again. A `file` output takes a path, and
+  the file is copied beside the child's session. Each call sets the ports
+  it names. A child that ends without a required port fails its entry.
+  `await rlm.factory.inputs()` gives the child its bound inputs and the
+  params as values. A python state's returned dict goes through the same
+  check.
 - Routing is `next` (a state, or a list to fan out) or `route`, a switch
   on one enum or bool output where every value needs a target. A state
   with `join = [...]` waits for every member, and each member names it in
@@ -5944,7 +6073,8 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   `max_entries`, `max_transitions`, and `run.max_children` (total
   admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.
-- Outputs bind from the child's full final answer (the collect envelope
+- In a stored spec (no emit contract), outputs bind from the child's full
+  final answer (the collect envelope
   carries it; the executor caps its own capture at 65,536 characters,
   the same bound the daemon puts on the envelope's answer text): a
   fenced json output block binds whole as long as it fits that cap (a

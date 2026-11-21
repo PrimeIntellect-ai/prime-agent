@@ -2860,6 +2860,11 @@ class FakeHost:
         # factory.compile replies by machine directory path (the Rust
         # loader's answer, scripted).
         self.compiled: dict[str, dict[str, Any]] = {}
+        # Where spawned children's session dirs live (their emitted
+        # outputs files); None keeps the fixed /tmp names.
+        self.session_root: Path | None = None
+        # factory.check refusals by output name (the Rust check, scripted).
+        self.check_errors: dict[str, str] = {}
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -2961,10 +2966,11 @@ class FakeHost:
             self.counter += 1
             child_id = f"child-{self.counter}"
             self.children[child_id] = {"name": name, "node": node_id}
+            root = self.session_root if self.session_root is not None else Path("/tmp")
             return {
                 "rlm_child_id": child_id,
                 "name": name,
-                "session_dir": f"/tmp/{child_id}",
+                "session_dir": str(root / child_id),
                 "model": "fake-model",
             }
         self.calls.append((request_type, payload))
@@ -3018,6 +3024,11 @@ class FakeHost:
             return {}
         if request_type == "factory.compile":
             return self.compiled[(payload or {})["path"]]
+        if request_type == "factory.check":
+            errors = [self.check_errors[name] for name in payload["outputs"] if name in self.check_errors]
+            if errors:
+                raise RuntimeError("; ".join(errors))
+            return {}
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
 
@@ -7345,6 +7356,110 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
         self.assertEqual(resolve("review"), user / "review")
         self.assertEqual(resolve("both"), repo / "both")
         self.assertIsNone(resolve("absent"))
+
+
+class FactoryEmitTest(_ExecutorTestCase):
+    """States with an emit contract (machine directories): the child gets
+    the contract and its bound inputs at spawn, and its outputs come from
+    the outputs file its ``factory.emit`` calls wrote."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.host.session_root = Path(temp.name)
+
+    def emitted(self, child_id: str, outputs: dict[str, Any]) -> None:
+        child_dir = self.host.session_root / child_id
+        child_dir.mkdir(parents=True, exist_ok=True)
+        (child_dir / factory_module.FACTORY_OUTPUTS_FILE).write_text(json.dumps(outputs), encoding="utf-8")
+
+    def machine(self) -> dict[str, Any]:
+        return {
+            "params": {"task": "ship it"},
+            "states": [
+                state(
+                    "plan",
+                    entry=True,
+                    subagent={"prompt": "Plan {task}."},
+                    outputs=[{"name": "plan", "type": "json"}],
+                    emit={"outputs": [{"name": "plan", "type": "plan"}], "records": {"plan": [["steps", "int"]]}},
+                    retries=0,
+                ),
+                state(
+                    "build",
+                    subagent={"prompt": "Build {plan}."},
+                    inputs=[{"name": "plan", "type": "json", "from": "plan.plan"}],
+                    outputs=[{"name": "report", "type": "text"}],
+                    emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                    retries=0,
+                ),
+            ],
+            "transitions": [{"from": "plan", "to": "build"}],
+        }
+
+    async def run_to_end(self) -> dict[str, Any]:
+        result = await self.start()
+        await self.executor._runs[result["run_id"]].task
+        return await rlm_module.rlm.factory.status(result["run_id"])
+
+    @async_test
+    async def test_the_child_gets_its_contract_with_the_bound_inputs(self) -> None:
+        self.emitted("child-1", {"plan": {"steps": 2}})
+        self.emitted("child-2", {"report": "built"})
+        self.store_machine(self.machine())
+        status = await self.run_to_end()
+
+        self.assertEqual(status["state"], "done")
+        build = self.host.spawn_calls("build")[0]
+        # The value the plan child emitted binds into the next prompt and
+        # into the next child's inputs, beside the params.
+        self.assertEqual(build["prompt"], 'Build {"steps": 2}.')
+        self.assertEqual(
+            build["kwargs"]["factoryContract"],
+            {
+                "outputs": [{"name": "report", "type": "text"}],
+                "records": {},
+                "inputs": {"task": "ship it", "plan": {"steps": 2}},
+            },
+        )
+
+    @async_test
+    async def test_a_required_output_never_emitted_fails_the_entry(self) -> None:
+        self.emitted("child-1", {})
+        self.store_machine(self.machine())
+        status = await self.run_to_end()
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(plan["error"], "output 'plan' was never emitted (rlm.factory.emit)")
+        self.assertEqual(self.host.spawn_calls("build"), [])
+
+    @async_test
+    async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
+        nodes = Path(self.host.session_root) / "nodes"
+        nodes.mkdir()
+        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 'two'}}\n", encoding="utf-8")
+        machine = self.machine()
+        machine["states"][0] = {
+            **machine["states"][0],
+            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
+        }
+        del machine["states"][0]["subagent"]
+        self.host.check_errors["plan"] = "plan.steps: expected int, got text \"two\""
+        self.store_machine(machine)
+        status = await self.run_to_end()
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(plan["error"], 'python state output: plan.steps: expected int, got text "two"')
+
+    @async_test
+    async def test_emit_raises_factory_emit_error_outside_a_factory_child(self) -> None:
+        async def refuse(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            raise RuntimeError(f'host request type "{request_type}" is not available in this session')
+
+        with patch.object(rlm_module, "host_request", refuse):
+            with self.assertRaisesRegex(rlm_module.FactoryEmitError, "work only in a child spawned by"):
+                await rlm_module.rlm.factory.emit(plan={"steps": 2})
 
 
 class FactoryGraphWatchTest(_ExecutorTestCase):
