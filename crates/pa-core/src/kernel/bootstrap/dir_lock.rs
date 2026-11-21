@@ -214,7 +214,10 @@ pub(crate) async fn acquire_bootstrap_lock(
                 // A process can die after moving the live venv aside but before
                 // moving its candidate into place. Recover that venv before the
                 // generic sweep removes dead staging entries.
-                super::venv::recover_interrupted_venv_swap(venv)?;
+                // Recovery is best effort: when a complete aside cannot be
+                // renamed (for example a Windows process still holds it), the
+                // rebuild below still repairs the live path.
+                let _ = super::venv::recover_interrupted_venv_swap(venv);
                 // Nothing live can own these entries: the lock is held.
                 let parent = lock_dir.parent().unwrap_or(Path::new("/"));
                 for base in [venv.file_name(), lock_dir.file_name()]
