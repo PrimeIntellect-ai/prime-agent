@@ -39,7 +39,31 @@ impl Guard {
                 }
             }
         }
-        *current == self.value
+        json_equal(current, &self.value)
+    }
+}
+
+/// The kernel's `_json_equal`: numbers compare by value (`1` equals `1.0`),
+/// and a list or an object never matches a guard value.
+fn json_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Array(_), _)
+        | (Value::Object(_), _)
+        | (_, Value::Array(_))
+        | (_, Value::Object(_)) => false,
+        (Value::Number(a), Value::Number(b)) => {
+            if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
+                return a == b;
+            }
+            if let (Some(a), Some(b)) = (a.as_u64(), b.as_u64()) {
+                return a == b;
+            }
+            match (a.as_f64(), b.as_f64()) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+        }
+        (a, b) => a == b,
     }
 }
 

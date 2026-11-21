@@ -321,6 +321,28 @@ fn a_guard_compares_the_routed_value_strictly() {
 }
 
 #[test]
+fn a_numeric_guard_matches_by_value_and_never_matches_a_container() {
+    let numeric = Guard {
+        port: "count".to_string(),
+        path: None,
+        value: json!(1),
+    };
+    let one_float = json!({"count": 1.0}).as_object().unwrap().clone();
+    let one_int = json!({"count": 1}).as_object().unwrap().clone();
+    let list = json!({"count": [1]}).as_object().unwrap().clone();
+    let two = json!({"count": 2}).as_object().unwrap().clone();
+    assert_eq!(
+        [
+            numeric.passes(&one_int),
+            numeric.passes(&one_float),
+            numeric.passes(&list),
+            numeric.passes(&two)
+        ],
+        [true, true, false, false]
+    );
+}
+
+#[test]
 fn the_index_lists_a_join_under_every_source() {
     let run = start(&json!({}));
     let outgoing = |state: &str| -> Vec<usize> {
