@@ -58,11 +58,20 @@ pub fn parse_request(body: &Value) -> Result<IncomingRequest, Value> {
             None,
         ));
     };
-    let id = object.get("id").cloned().unwrap_or(Value::Null);
-    // JSON-RPC 2.0: a request id is a string, a number, or null (a
-    // notification). Object, array, and boolean ids are malformed; the
-    // A2A surface answers them before any side effect runs.
-    if !id.is_string() && !id.is_number() {
+    // A notification omits the member; this surface answers requests
+    // only, so a missing id stays an invalid request.
+    let Some(id) = object.get("id").cloned() else {
+        return Err(error_response(
+            &Value::Null,
+            INVALID_REQUEST,
+            "Invalid Request",
+            None,
+        ));
+    };
+    // JSON-RPC 2.0: a request id is a string, a number, or null. Object,
+    // array, and boolean ids are malformed; the A2A surface answers them
+    // before any side effect runs.
+    if !id.is_string() && !id.is_number() && !id.is_null() {
         return Err(error_response(
             &Value::Null,
             INVALID_REQUEST,
@@ -242,8 +251,8 @@ mod tests {
             assert_eq!(reply["error"]["code"], INVALID_REQUEST, "id {id}");
             assert_eq!(reply["id"], Value::Null, "the reply id is null: {id}");
         }
-        // The legal shapes still parse.
-        for id in [json!("abc"), json!(1), json!(-7)] {
+        // The legal shapes still parse, an explicit null included.
+        for id in [json!("abc"), json!(1), json!(-7), Value::Null] {
             let request = json!({ "jsonrpc": "2.0", "id": id, "method": "GetTask" });
             assert!(parse_request(&request).is_ok(), "id {id}");
         }
