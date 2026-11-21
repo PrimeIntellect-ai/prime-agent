@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 
 use dir_lock::acquire_bootstrap_lock;
 pub use runtime_code::{
@@ -38,7 +38,7 @@ pub struct KernelPythonSkill {
 
 /// The default extra packages pre-installed in the kernel venv and promised to
 /// the model in the system prompt.
-pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 12] = [
+pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 13] = [
     // (uvArg, importName, promptLabel)
     ("requests", "requests", "requests"),
     ("httpx", "httpx", "httpx"),
@@ -52,6 +52,7 @@ pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 12] = [
     ("lxml", "lxml", "lxml"),
     ("pydantic", "pydantic", "pydantic"),
     ("tyro", "tyro", "tyro"),
+    ("pillow", "PIL", "Pillow"),
 ];
 
 #[must_use]
@@ -235,6 +236,27 @@ async fn ensure_kernel_python_uncached(
     ensure_kernel_venv(options, python_skills, venv, project).await
 }
 
+/// Replace the live venv with a freshly built candidate.
+///
+/// The build writes `candidate` while `venv` keeps serving; only a finished
+/// candidate is renamed into place. A later bootstrap recovers the old venv if
+/// the process is killed during the two-rename swap.
+async fn rebuild_kernel_venv(
+    venv: &std::path::Path,
+    candidate: &std::path::Path,
+    build: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    if let Err(error) = build.await {
+        let _ = std::fs::remove_dir_all(candidate);
+        return Err(error);
+    }
+    if let Err(error) = venv::swap_venv_into_place(candidate, venv) {
+        let _ = std::fs::remove_dir_all(candidate);
+        return Err(error);
+    }
+    Ok(())
+}
+
 async fn ensure_kernel_venv(
     options: &EnsureKernelPythonOptions,
     python_skills: &[BootstrapPythonSkill],
@@ -253,8 +275,12 @@ async fn ensure_kernel_venv(
         return Ok(python);
     }
 
-    let release_lock = match acquire_bootstrap_lock(&venv).await {
-        Ok(release_lock) => release_lock,
+    let venv_ready = || kernel_ready(&python_str, &venv, &runtime_identity, python_skills);
+    let release_lock = match acquire_bootstrap_lock(&venv, &venv_ready).await {
+        // A leader finished while this caller waited: adopt its venv instead
+        // of rebuilding it a second time.
+        Ok(None) => return Ok(python),
+        Ok(Some(release_lock)) => release_lock,
         Err(error) if dir_lock::lock_creation_denied(&error) => {
             return unwritable_venv(options, &python, &venv, &runtime_identity, &error);
         }
@@ -286,16 +312,24 @@ async fn ensure_kernel_venv(
         options.report("› setting up python kernel (one-time, ~30s)…");
         if had_venv {
             options.report("rebuilding kernel venv");
-            std::fs::remove_dir_all(&venv)
-                .with_context(|| format!("removing {}", venv.display()))?;
         }
-        bootstrap_venv(
+        // Build beside the live path and swap the finished candidate in: a
+        // session that already resolved this venv keeps a working interpreter
+        // for the whole build, and a failed build leaves the live venv as it
+        // was. Deleting the live path first left every concurrent session
+        // with "python: No such file or directory" until the rebuild ended.
+        let candidate = venv::venv_candidate_path(&venv);
+        rebuild_kernel_venv(
             &venv,
-            &source_dir,
-            &runtime_identity,
-            python_skills,
-            options,
-            project,
+            &candidate,
+            bootstrap_venv(
+                &candidate,
+                &source_dir,
+                &runtime_identity,
+                python_skills,
+                options,
+                project,
+            ),
         )
         .await?;
         Ok(python)
@@ -342,6 +376,126 @@ fn unwritable_venv(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_failed_swap_restores_the_live_venv() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let live_python = venv.join("bin/python");
+        std::fs::create_dir_all(live_python.parent().unwrap()).unwrap();
+        std::fs::write(&live_python, "old").unwrap();
+        // The build never produced its candidate: the swap must fail with the
+        // old venv back in place, not with the live path missing.
+        let candidate = venv::venv_candidate_path(&venv);
+        let error = venv::swap_venv_into_place(&candidate, &venv).unwrap_err();
+        assert!(format!("{error:#}").contains("moving"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&live_python).unwrap(), "old");
+        let leftovers: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".old-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the restore consumes the aside: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn recovery_restores_a_complete_venv_aside_before_a_partial_live_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let python = kernel_venv_python(&venv);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, "old interpreter").unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        let aside = root.path().join(format!(
+            "kernel-venv.old-{}-interrupted",
+            std::process::id()
+        ));
+        std::fs::rename(&venv, &aside).unwrap();
+
+        // Simulate death after the new candidate was renamed to the live path
+        // but before it became structurally complete.
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("partial"), "incomplete replacement").unwrap();
+
+        venv::recover_interrupted_venv_swap(&venv).unwrap();
+
+        assert_eq!(std::fs::read_to_string(python).unwrap(), "old interpreter");
+        assert!(venv.join("pyvenv.cfg").is_file());
+        assert!(!aside.exists(), "recovery consumes the restored aside");
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_keeps_the_live_venv_until_the_candidate_is_swapped_in() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let live_python = kernel_venv_python(&venv);
+        std::fs::create_dir_all(live_python.parent().unwrap()).unwrap();
+        std::fs::write(&live_python, "old").unwrap();
+        let candidate = venv::venv_candidate_path(&venv);
+        let served = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&served);
+        let live = live_python.clone();
+        let staging = candidate.clone();
+        rebuild_kernel_venv(&venv, &candidate, async move {
+            // The whole point: while the candidate builds, the live venv still
+            // serves the sessions that already resolved it.
+            observed.store(live.exists(), std::sync::atomic::Ordering::SeqCst);
+            let python = kernel_venv_python(&staging);
+            std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+            std::fs::write(python, "new").unwrap();
+            std::fs::write(staging.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            "the live venv must keep serving for the whole build"
+        );
+        assert_eq!(std::fs::read_to_string(&live_python).unwrap(), "new");
+        assert!(!candidate.exists(), "the candidate is consumed by the swap");
+        let leftovers: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".old-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the swap leaves no old venv: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn the_kernel_bootstrap_installs_pillow_for_attach_image() {
+        assert!(default_rlm_extra_uv_args().contains(&"pillow"));
+        assert!(default_rlm_extra_import_names().contains(&"PIL"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_adopts_a_venv_that_becomes_ready_instead_of_rebuilding() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let lock = root.path().join("kernel-venv.bootstrap.lock");
+        // A live owner holds the lock; the venv becomes usable while the
+        // waiter polls.
+        std::fs::write(&lock, format!("{}\n", std::process::id())).unwrap();
+        let acquired = acquire_bootstrap_lock(&venv, &|| true).await;
+        let acquired = acquired.expect("a ready venv ends the wait");
+        assert!(
+            acquired.is_none(),
+            "a waiter never becomes a second builder"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            format!("{}\n", std::process::id()),
+            "the waiter leaves the owner's lock alone"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn lock_timeout_prevents_venv_rebuild() {
         let root = tempfile::tempdir().unwrap();
@@ -349,7 +503,10 @@ mod tests {
         std::fs::create_dir(&venv).unwrap();
         let sentinel = venv.join("owner-state");
         std::fs::write(&sentinel, "another bootstrap owns this venv").unwrap();
-        let owner = acquire_bootstrap_lock(&venv).await.unwrap();
+        let owner = acquire_bootstrap_lock(&venv, &|| false)
+            .await
+            .unwrap()
+            .unwrap();
         let options = EnsureKernelPythonOptions {
             // Fail before any destructive operation or network access if the
             // caller regresses and enters setup without acquiring the lock.

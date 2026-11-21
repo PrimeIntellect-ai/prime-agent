@@ -127,8 +127,106 @@ pub(crate) fn lock_creation_denied(error: &anyhow::Error) -> bool {
         })
 }
 
+/// A leftover staging entry beside the venv or its lock is removed when the
+/// pid in its name is dead or when it is older than this horizon.
+///
+/// Windows cannot remove a directory while a process still runs the old
+/// interpreter, so a finished rebuild can leave its `.old-*` aside behind.
+const BOOTSTRAP_STAGING_STALE_AFTER: Duration = Duration::from_hours(1);
+
+/// The staging kinds a bootstrap leaves behind: venv candidates, recovered
+/// partial venvs, old asides, and lock publication candidates or stale renames.
+const BOOTSTRAP_STAGING_KINDS: [&str; 4] = ["candidate-", "old-", "partial-", "stale-"];
+
+/// Best-effort removal of staging leftovers beside the venv and its lock.
+///
+/// Runs only while the caller holds the bootstrap lock, so no live bootstrap
+/// owns a matching entry. An entry whose embedded pid is dead, or that is
+/// older than `horizon`, is removed; a removal failure is ignored, because the
+/// sweep must never fail the bootstrap (a Windows aside still in use fails
+/// here and is retried by the next acquisition).
+pub(crate) fn sweep_stale_staging(dir: &Path, base: &str, horizon: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{base}.");
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(pid_rest) = BOOTSTRAP_STAGING_KINDS
+            .iter()
+            .find_map(|kind| rest.strip_prefix(kind))
+        else {
+            continue;
+        };
+        let pid = strict_pid(Some(pid_rest.split('-').next().unwrap_or("")));
+        let age = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok());
+        let stale =
+            pid.is_some_and(|pid| !is_process_alive(pid)) || age.is_some_and(|age| age >= horizon);
+        if stale {
+            let path = entry.path();
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+        }
+    }
+}
+
+/// Releases the bootstrap lock when the leader's guard drops.
+pub(crate) struct LockGuard(PathBuf);
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Recover an interrupted swap, then sweep dead staging entries.
+///
+/// A process can die after moving the live venv aside but before moving its
+/// candidate into place. Recovery is best effort: when a complete aside cannot
+/// be renamed (for example a Windows process still holds it), the rebuild
+/// repairs the live path. The sweep runs only after a successful recovery: a
+/// failed restore leaves the complete aside as the last good tree, and the dead
+/// owner in its name would make the sweep delete it.
+fn recover_then_sweep(
+    venv: &Path,
+    lock_dir: &Path,
+    recover: impl FnOnce(&Path) -> anyhow::Result<()>,
+) {
+    if recover(venv).is_err() {
+        return;
+    }
+    // Nothing live can own these entries: the lock is held.
+    let parent = lock_dir.parent().unwrap_or(Path::new("/"));
+    for base in [venv.file_name(), lock_dir.file_name()]
+        .into_iter()
+        .flatten()
+        .map(|name| name.to_string_lossy().to_string())
+    {
+        sweep_stale_staging(parent, &base, BOOTSTRAP_STAGING_STALE_AFTER);
+    }
+}
+
 /// Serialize concurrent bootstraps across processes on the same venv.
-pub(crate) async fn acquire_bootstrap_lock(venv: &Path) -> anyhow::Result<impl Drop> {
+///
+/// Single flight: the caller that publishes the lock is the only builder.
+/// Every other caller polls `ready` while it waits and returns `None` once the
+/// leader's venv is usable, so waiters never rebuild and never fail a wait
+/// that the leader was about to win.
+pub(crate) async fn acquire_bootstrap_lock(
+    venv: &Path,
+    ready: &(dyn Fn() -> bool + Sync),
+) -> anyhow::Result<Option<impl Drop>> {
     let lock_dir = venv.with_file_name(format!(
         "{}{}",
         venv.file_name().unwrap_or_default().to_string_lossy(),
@@ -139,16 +237,20 @@ pub(crate) async fn acquire_bootstrap_lock(venv: &Path) -> anyhow::Result<impl D
     loop {
         match try_acquire_dir_lock(&lock_dir)? {
             DirLockAttempt::Acquired => {
-                struct Guard(PathBuf);
-                impl Drop for Guard {
-                    fn drop(&mut self) {
-                        let _ = std::fs::remove_file(&self.0);
-                    }
-                }
-                return Ok(Guard(lock_dir));
+                let lock_guard = LockGuard(lock_dir.clone());
+                recover_then_sweep(venv, &lock_dir, super::venv::recover_interrupted_venv_swap);
+                return Ok(Some(lock_guard));
             }
             DirLockAttempt::Held | DirLockAttempt::Reclaimed => {
+                // The leader may have finished between attempts: a ready venv
+                // ends the wait without a second rebuild.
+                if ready() {
+                    return Ok(None);
+                }
                 if tokio::time::Instant::now() >= deadline {
+                    if ready() {
+                        return Ok(None);
+                    }
                     anyhow::bail!(
                         "Timed out after {} seconds waiting for the Python kernel bootstrap lock at {}. \
                          Another Prime Agent process may still be setting up this runtime. \
@@ -170,6 +272,180 @@ pub(crate) async fn acquire_bootstrap_lock(venv: &Path) -> anyhow::Result<impl D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::bootstrap::kernel_venv_python;
+
+    /// A pid that is certainly dead: a child that has already exited. A huge
+    /// constant will not do: the maximum pid casts to -1, and a signal probe
+    /// with -1 succeeds, so it would read as a live process.
+    fn dead_pid() -> u32 {
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    /// The interpreter and `pyvenv.cfg` that `uv venv` writes, at this
+    /// platform's layout.
+    fn write_complete_venv(venv: &Path, interpreter: &str) {
+        let python = kernel_venv_python(venv);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(python, interpreter).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    }
+
+    #[test]
+    fn the_staging_sweep_removes_dead_entries_and_keeps_live_ones() {
+        let root = tempfile::tempdir().unwrap();
+        // A pid that is certainly gone: every dead-pid leftover is swept.
+        let dead = dead_pid();
+        let aside = root.path().join(format!("kernel-venv.old-{dead}-1111"));
+        std::fs::create_dir_all(aside.join("bin")).unwrap();
+        let candidate = root
+            .path()
+            .join(format!("kernel-venv.candidate-{dead}-2222"));
+        std::fs::write(&candidate, "half-built").unwrap();
+        // This process is alive: its entry is not litter.
+        let live = root
+            .path()
+            .join(format!("kernel-venv.old-{}-3333", std::process::id()));
+        std::fs::create_dir_all(&live).unwrap();
+        // Unrelated siblings never match the staging kinds.
+        let other = root.path().join("kernel-venv.elsewhere");
+        std::fs::write(&other, "x").unwrap();
+
+        sweep_stale_staging(root.path(), "kernel-venv", BOOTSTRAP_STAGING_STALE_AFTER);
+
+        assert!(!aside.exists(), "a dead pid's aside is swept");
+        assert!(!candidate.exists(), "a dead pid's candidate is swept");
+        assert!(live.exists(), "a live pid's entry is kept");
+        assert!(other.exists(), "an unrelated sibling is kept");
+    }
+
+    #[test]
+    fn the_staging_sweep_removes_entries_past_the_age_horizon() {
+        let root = tempfile::tempdir().unwrap();
+        // No parseable pid: only age can condemn this entry. A zero horizon
+        // makes every entry at least as old as the horizon.
+        let unnamed = root.path().join("kernel-venv.stale-nopid");
+        std::fs::write(&unnamed, "x").unwrap();
+        sweep_stale_staging(root.path(), "kernel-venv", Duration::ZERO);
+        assert!(!unnamed.exists(), "an entry past the horizon is swept");
+    }
+
+    #[tokio::test]
+    async fn acquiring_the_lock_sweeps_a_dead_bootstraps_aftermath() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let dead = dead_pid();
+        let aside = root.path().join(format!("kernel-venv.old-{dead}-4444"));
+        std::fs::create_dir_all(&aside).unwrap();
+        let lock_candidate = root
+            .path()
+            .join(format!("kernel-venv.bootstrap.lock.candidate-{dead}-5555"));
+        std::fs::write(&lock_candidate, "0").unwrap();
+
+        let guard = acquire_bootstrap_lock(&venv, &|| false).await.unwrap();
+        assert!(guard.is_some(), "the sweep runs under the acquired lock");
+        assert!(!aside.exists(), "the leader swept the dead aside");
+        assert!(
+            !lock_candidate.exists(),
+            "the leader swept the dead lock candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_leader_restores_a_complete_venv_left_aside_by_a_killed_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let dead = dead_pid();
+        let aside = root
+            .path()
+            .join(format!("kernel-venv.old-{dead}-interrupted"));
+        write_complete_venv(&aside, "working interpreter");
+        std::fs::write(
+            venv.with_file_name("kernel-venv.bootstrap.lock"),
+            format!("{dead}\n"),
+        )
+        .unwrap();
+
+        let guard = acquire_bootstrap_lock(&venv, &|| false).await.unwrap();
+        assert!(guard.is_some());
+        assert!(kernel_venv_python(&venv).is_file());
+        assert!(venv.join("pyvenv.cfg").is_file());
+        assert!(!aside.exists(), "the restored aside is no longer staged");
+    }
+
+    #[tokio::test]
+    async fn a_new_leader_replaces_a_partial_live_venv_from_a_complete_aside() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let dead = dead_pid();
+        let aside = root
+            .path()
+            .join(format!("kernel-venv.old-{dead}-interrupted"));
+        write_complete_venv(&aside, "working interpreter");
+        std::fs::create_dir_all(venv.join("lib/python3.11/site-packages")).unwrap();
+        std::fs::write(
+            venv.with_file_name("kernel-venv.bootstrap.lock"),
+            format!("{dead}\n"),
+        )
+        .unwrap();
+
+        let guard = acquire_bootstrap_lock(&venv, &|| false).await.unwrap();
+        assert!(guard.is_some());
+        assert!(kernel_venv_python(&venv).is_file());
+        assert!(venv.join("pyvenv.cfg").is_file());
+        assert!(!aside.exists(), "the restored aside is no longer staged");
+    }
+
+    #[tokio::test]
+    async fn a_new_leader_keeps_a_complete_live_venv_over_an_old_aside() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        // A swap killed after its second rename leaves both trees complete.
+        let aside = root
+            .path()
+            .join(format!("kernel-venv.old-{}-finished", dead_pid()));
+        write_complete_venv(&venv, "new interpreter");
+        write_complete_venv(&aside, "old interpreter");
+
+        let guard = acquire_bootstrap_lock(&venv, &|| false).await.unwrap();
+        assert!(guard.is_some());
+        assert_eq!(
+            std::fs::read_to_string(kernel_venv_python(&venv)).unwrap(),
+            "new interpreter"
+        );
+        assert!(!aside.exists(), "the leader sweeps the old aside");
+    }
+
+    #[test]
+    fn a_failed_restore_keeps_the_dead_aside() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let lock_dir = root.path().join("kernel-venv.bootstrap.lock");
+        let aside = root
+            .path()
+            .join(format!("kernel-venv.old-{}-x", dead_pid()));
+        std::fs::create_dir_all(&aside).unwrap();
+
+        recover_then_sweep(&venv, &lock_dir, |_| {
+            anyhow::bail!("cannot rename the aside")
+        });
+
+        assert!(
+            aside.exists(),
+            "a failed restore must keep the aside as the last good tree"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn live_pid_file_has_a_bounded_wait_without_removing_the_owner() {
@@ -182,7 +458,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             BOOTSTRAP_LOCK_WAIT + Duration::from_secs(1),
-            acquire_bootstrap_lock(&venv),
+            acquire_bootstrap_lock(&venv, &|| false),
         )
         .await
         .expect("lock acquisition must return an error rather than wait forever");
@@ -206,7 +482,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             BOOTSTRAP_LOCK_WAIT + Duration::from_secs(1),
-            acquire_bootstrap_lock(&venv),
+            acquire_bootstrap_lock(&venv, &|| false),
         )
         .await
         .expect("legacy lock acquisition must also have a deadline");
@@ -219,14 +495,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let venv = root.path().join("kernel-venv");
         let lock = root.path().join("kernel-venv.bootstrap.lock");
-        let owner = acquire_bootstrap_lock(&venv).await.unwrap();
-        let mut waiter = Box::pin(acquire_bootstrap_lock(&venv));
+        let owner = acquire_bootstrap_lock(&venv, &|| false)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut waiter = Box::pin(acquire_bootstrap_lock(&venv, &|| false));
         assert!(matches!(
             futures::poll!(&mut waiter),
             std::task::Poll::Pending
         ));
         drop(owner);
-        let successor = waiter.await.unwrap();
+        let successor = waiter.await.unwrap().unwrap();
         assert!(lock.exists());
         drop(successor);
         assert!(!lock.exists());
@@ -237,8 +516,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let venv = root.path().join("kernel-venv");
         let lock = root.path().join("kernel-venv.bootstrap.lock");
-        let owner = acquire_bootstrap_lock(&venv).await.unwrap();
-        let mut waiter = Box::pin(acquire_bootstrap_lock(&venv));
+        let owner = acquire_bootstrap_lock(&venv, &|| false)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut waiter = Box::pin(acquire_bootstrap_lock(&venv, &|| false));
         assert!(matches!(
             futures::poll!(&mut waiter),
             std::task::Poll::Pending
