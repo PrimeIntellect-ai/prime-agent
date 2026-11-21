@@ -180,8 +180,11 @@ fn bare_id(token: &str) -> Option<String> {
 /// character becomes a space: the mermaid source is scrubbed at its seam,
 /// and an entity must not carry one past it.
 fn decode_label(text: &str) -> String {
+    // Generated foreach labels join their two lines with an HTML break;
+    // the terminal renderer reads text, so break to a space.
+    let text = text.replace("<br/>", " ");
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    let mut rest = text.as_str();
     while let Some(at) = rest.find('#') {
         out.push_str(&rest[..at]);
         let Some(end) = rest[at..].find(';') else {
@@ -468,7 +471,13 @@ fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
         return None;
     }
     let length = line.chars().take_while(|ch| *ch == delimiter).count();
-    (length >= 3).then(|| (delimiter, length, &line[length..]))
+    let info = &line[length..];
+    // CommonMark: a backtick fence's info string cannot contain a
+    // backtick, so a line of inline triple-backtick code is not a fence.
+    if delimiter == '`' && info.contains('`') {
+        return None;
+    }
+    (length >= 3).then_some((delimiter, length, info))
 }
 
 #[cfg(test)]
@@ -673,5 +682,34 @@ A["before --> after"] -->|then --> continue| B(["Review --> now"]) --> C[finish 
             panic!("expected diagram")
         };
         assert_eq!(transitions[0].when.as_deref(), Some("Issue #123: \"yes\""));
+    }
+
+    #[test]
+    fn generated_foreach_labels_drop_the_break_tag() {
+        let super::Mermaid::Diagram { states, .. } =
+            parse_mermaid("flowchart TB\nplan[\"plan<br/>foreach: over items (max 2)\"]\n")
+                .unwrap()
+        else {
+            panic!("expected graph")
+        };
+        assert_eq!(
+            states[0].label.as_deref(),
+            Some("plan foreach: over items (max 2)")
+        );
+    }
+
+    #[test]
+    fn inline_triple_backticks_do_not_swallow_a_later_mermaid_fence() {
+        let text = "```code``` stays inline.\n\n```mermaid\nflowchart TB\nA --> B\n```\n";
+        let segments = super::split_mermaid_fences(text);
+        assert_eq!(segments.len(), 2);
+        let super::FileSegment::Text(prose) = &segments[0] else {
+            panic!("expected prose")
+        };
+        assert!(prose.contains("```code``` stays inline."), "{prose}");
+        let super::FileSegment::Mermaid(graph) = &segments[1] else {
+            panic!("expected mermaid")
+        };
+        assert_eq!(graph, "flowchart TB\nA --> B\n");
     }
 }

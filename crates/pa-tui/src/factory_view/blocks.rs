@@ -422,12 +422,51 @@ pub(crate) fn block_diagram(
 
     // Back edges take gutter columns, the shortest span innermost.
     backs.sort_by_key(|back| layer[back.from] - layer[back.to]);
+    // A back-edge label shares its departure row with the band's forward
+    // wires and with the vertical drops of later back edges; a crossing
+    // cell would replace a label character. Start each label past the last
+    // wire it would cross, and put the gutter beyond the shifted label.
+    let crossing_columns = |band: usize| -> Vec<usize> {
+        let mut columns: Vec<usize> = layers[band - 1]
+            .iter()
+            .filter(|&&item| !outgoing[item].is_empty())
+            .map(|&item| center(item))
+            .collect();
+        columns.extend(
+            backs
+                .iter()
+                .filter(|back| layer[back.from] + 1 == band)
+                .map(|back| center(back.from)),
+        );
+        columns
+    };
+    let label_starts: Vec<Option<usize>> = backs
+        .iter()
+        .map(|back| {
+            back.label.as_ref().map(|label| {
+                let text_width = label.chars().count() + 2;
+                let mut start = center(back.from) + 2;
+                loop {
+                    let crossing = crossing_columns(layer[back.from] + 1)
+                        .into_iter()
+                        .filter(|column| *column >= start && *column < start + text_width)
+                        .max();
+                    match crossing {
+                        Some(column) => start = column + 1,
+                        None => break,
+                    }
+                }
+                start
+            })
+        })
+        .collect();
     let gutter_start = backs
         .iter()
-        .filter_map(|back| {
-            back.label
-                .as_ref()
-                .map(|label| center(back.from) + 4 + label.chars().count())
+        .zip(&label_starts)
+        .filter_map(|(back, start)| {
+            start.map(|start| {
+                start + back.label.as_ref().map_or(0, |label| label.chars().count()) + 2
+            })
         })
         .max()
         .unwrap_or(0)
@@ -684,7 +723,8 @@ pub(crate) fn block_diagram(
         canvas.vertical(center(back.to), arrival, arrow);
         canvas.put(center(back.to), arrow, "▼", Role::Arrow);
         if let Some(label) = &back.label {
-            canvas.label(center(back.from) + 2, departure, &format!(" {label} "));
+            let start = label_starts[k].unwrap_or_else(|| center(back.from) + 2);
+            canvas.label(start, departure, &format!(" {label} "));
         }
     }
 

@@ -123,6 +123,12 @@ impl NodeDocument {
                 .map(scrub)
                 .filter(|text| !text.is_empty())
         };
+        let raw_text = |field: &str| {
+            instance
+                .and_then(|instance| instance.get(field))
+                .and_then(Value::as_str)
+                .map(scrub)
+        };
         let flag = |field: &str| {
             instance
                 .and_then(|instance| instance.get(field))
@@ -130,13 +136,27 @@ impl NodeDocument {
                 .unwrap_or(false)
         };
         let entry_flag = |field: &str| entry.get(field).and_then(Value::as_bool).unwrap_or(false);
+        // A preview trimmed to nothing still carries its flag: keep the
+        // empty section so the view can show the truncation warning instead
+        // of hiding the field.
+        let preview = |field: &str, truncated: &str| {
+            let value = raw_text(field);
+            if value.as_ref().is_some_and(|value| !value.is_empty()) || flag(truncated) {
+                Some(value.unwrap_or_default())
+            } else {
+                None
+            }
+        };
         let number = |field: &str| {
             instance
                 .and_then(|instance| instance.get(field))
                 .and_then(Value::as_u64)
         };
         let outputs = match entry.get("outputs") {
-            Some(Value::String(outputs)) => Some(scrub(outputs)).filter(|text| !text.is_empty()),
+            Some(Value::String(outputs)) => {
+                let outputs = scrub(outputs);
+                (!outputs.is_empty() || entry_flag("outputsTruncated")).then_some(outputs)
+            }
             None | Some(Value::Null) => None,
             Some(_) => return None,
         };
@@ -161,9 +181,9 @@ impl NodeDocument {
             session_dir: text("sessionDir"),
             prompt: text("prompt").unwrap_or_default(),
             prompt_truncated: flag("promptTruncated"),
-            inputs: text("inputs"),
+            inputs: preview("inputs", "inputsTruncated"),
             inputs_truncated: flag("inputsTruncated"),
-            answer: text("answer"),
+            answer: preview("answer", "answerTruncated"),
             answer_truncated: flag("answerTruncated"),
             provisional: flag("provisional"),
             capture_failed: flag("captureFailed"),
@@ -622,17 +642,21 @@ impl NodeView {
         rows.push(vec![Span::raw("")]);
         section(&mut rows, "realized prompt");
         if document.prompt.is_empty() {
-            let text = if document.entry.is_some()
-                && document.index.is_none()
-                && matches!(document.status.as_str(), "done" | "error" | "cancelled")
-            {
-                "    (the entry settled without creating an instance)"
-            } else if document.capture_failed {
-                "    (the answer capture failed; no realized prompt is available)"
+            if document.prompt_truncated {
+                plain_line(&mut rows, theme, "    … (truncated)", ThemeColor::Warning);
             } else {
-                "    (not yet entered — nothing realized)"
-            };
-            plain_line(&mut rows, theme, text, ThemeColor::Muted);
+                let text = if document.entry.is_some()
+                    && document.index.is_none()
+                    && matches!(document.status.as_str(), "done" | "error" | "cancelled")
+                {
+                    "    (the entry settled without creating an instance)"
+                } else if document.capture_failed {
+                    "    (the answer capture failed; no realized prompt is available)"
+                } else {
+                    "    (not yet entered — nothing realized)"
+                };
+                plain_line(&mut rows, theme, text, ThemeColor::Muted);
+            }
         } else {
             markdown(&mut rows, &document.prompt);
             if document.prompt_truncated {
@@ -689,7 +713,14 @@ impl NodeView {
         if let Some(error) = &document.error {
             rows.push(vec![Span::raw("")]);
             section(&mut rows, "error");
-            plain_line(&mut rows, theme, &format!("    {error}"), ThemeColor::Error);
+            for line in error.lines() {
+                let styled = if let Some(theme) = theme {
+                    vec![theme.fg_span(ThemeColor::Error, format!("    {line}"))]
+                } else {
+                    vec![Span::raw(format!("    {line}"))]
+                };
+                rows.extend(wrap_line(&styled, width));
+            }
         }
         rows
     }
@@ -949,6 +980,58 @@ mod tests {
         for value in [input, output, output_error] {
             assert!(text.contains(&value), "clipped value: {value}");
         }
+    }
+
+    #[test]
+    fn long_daemon_errors_wrap_instead_of_clipping_their_tail() {
+        let error = format!(
+            "Traceback (most recent call last):\n{}ValueError: terminal_error_tail_marker",
+            "  File \"worker.py\", line 1, in <module>\n".repeat(8)
+        );
+        let mut reply = reply_with_instances(1);
+        reply["instance"]["error"] = json!(error);
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .render(&theme, 40, &KeybindingsManager::new(), 200)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(
+            text.contains("terminal_error_tail_marker"),
+            "the error tail was clipped: {text}"
+        );
+    }
+
+    #[test]
+    fn previews_truncated_to_empty_keep_their_sections_and_warnings() {
+        let reply = json!({
+            "state": {"instances": [{"entry": 0, "index": 0, "status": "done"}]},
+            "entry": {"index": 0, "status": "done", "outputs": "", "outputsTruncated": true},
+            "instance": {
+                "index": 0, "status": "done",
+                "prompt": "", "promptTruncated": true,
+                "inputs": "", "inputsTruncated": true,
+                "answer": "", "answerTruncated": true,
+            },
+        });
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let document = node.document.as_ref().unwrap();
+        assert_eq!(document.inputs.as_deref(), Some(""));
+        assert_eq!(document.answer.as_deref(), Some(""));
+        assert_eq!(document.outputs.as_deref(), Some(""));
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        for section in ["realized prompt", "inputs", "answer", "outputs"] {
+            assert!(text.contains(section), "missing {section}: {text}");
+        }
+        assert!(!text.contains("not yet entered"), "{text}");
+        assert_eq!(text.matches("truncated").count(), 4, "{text}");
     }
 
     #[test]

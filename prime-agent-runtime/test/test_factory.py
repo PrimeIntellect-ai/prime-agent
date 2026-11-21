@@ -9598,6 +9598,31 @@ class FactoryFrameCapTest(unittest.TestCase):
         self.assertEqual(rows[-1]["runId"], "t30", "the newest terminal row survived")
         self.assertLess(len(rows), 31, "terminal rows dropped oldest-first to fit")
 
+    def test_a_node_template_is_trimmed_against_the_frame_cap(self) -> None:
+        # The node reply's template is capped in source bytes, but JSON
+        # escaping and the other fields can still push the wrapper over
+        # the wire cap. The template must be a shrink candidate, or the
+        # whole node request fails with the loud wire-cap error.
+        template = "x" * 400_000
+        frame = {
+            "event": "done",
+            "id": "r",
+            "status": "ok",
+            "result": {
+                "template": template,
+                "templateTruncated": False,
+                "state": {"instances": []},
+                "entry": None,
+                "instance": None,
+            },
+        }
+        factory_module._cap_node_presentation_frame(frame)
+        self.assertLessEqual(len(json.dumps(frame)), factory_module.FACTORY_FRAME_CAP)
+        self.assertEqual(frame["status"], "ok")
+        self.assertTrue(frame["result"]["templateTruncated"])
+        self.assertLess(len(frame["result"]["template"]), len(template))
+        self.assertTrue(template.startswith(frame["result"]["template"]))
+
     def test_a_live_row_never_silently_drops(self) -> None:
         # The endgame: only live rows remain and the frame still cannot
         # fit — the cap fails loudly instead of silently dropping a live

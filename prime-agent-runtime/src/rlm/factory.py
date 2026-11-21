@@ -7049,6 +7049,9 @@ def _cap_node_presentation_frame(frame: dict[str, Any]) -> None:
             )
             if isinstance(instance.get(field), str) and instance[field]
         )
+    template = result.get("template")
+    if isinstance(template, str) and template:
+        candidates.append((result, "template", result, "templateTruncated"))
     while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
         candidates = [
             candidate

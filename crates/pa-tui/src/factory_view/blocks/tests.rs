@@ -451,3 +451,42 @@ fn crossing_routes_leave_a_gap_without_hiding_real_junctions() {
     assert_eq!(junction.0[2][2], Cell::Line(LEFT | RIGHT | DOWN));
     assert_eq!(line_char(LEFT | RIGHT | DOWN), '┬');
 }
+
+#[test]
+fn back_edge_guards_clear_forward_wires_on_their_departure_row() {
+    let states = vec![
+        state("a", true),
+        state("b", false),
+        state("c", false),
+        state("e", false),
+        state("d", false),
+    ];
+    let label = "rework after every inspection pass";
+    let transitions = vec![
+        transition(&["a"], "b", None),
+        transition(&["a"], "c", None),
+        transition(&["a"], "e", None),
+        transition(&["b"], "d", None),
+        transition(&["c"], "d", None),
+        transition(&["e"], "d", None),
+        transition(
+            &["c"],
+            "a",
+            Some(json!({"output": "route", "op": "eq", "value": label})),
+        ),
+    ];
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+    );
+    let text = plain(&diagram);
+    let departure = text
+        .lines()
+        .find(|row| row.contains(&format!(" {label} ")))
+        .unwrap_or_else(|| panic!("the full back-edge guard must survive its row:\n{text}"));
+    assert!(
+        departure.contains(&format!(" {label} ")),
+        "a crossing replaced a guard character:\n{text}"
+    );
+}
