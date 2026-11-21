@@ -1760,6 +1760,9 @@ class _NodeInstance:
     spawned_at: float | None = None
     duration_ms: int | None = None
     answer: str | None = None  # the binding lane's captured answer (ANSWER_BINDING_CAP)
+    answer_truncated: bool = False  # the capture clipped a longer answer at
+    # ANSWER_BINDING_CAP; the node report flags it instead of inferring it
+    # from the already-capped text
     provisional: bool = False  # the answer came from a child EXIT, not a
     # settle: the state reads needs-verify instead of silently counting the
     # exit's last assistant text as delivered work (the M4 class).
@@ -2294,9 +2297,10 @@ class FactoryExecutor:
         instance_at: int | None = None,
     ) -> dict[str, Any]:
         """One state's node document (the ``node`` lane's reply): the
-        state's live report (the instance list), the selected entry's
-        settle-output preview, and the selected instance's realized prompt,
-        inputs, and answer — capped and flagged, never silently truncated.
+        state's live report (the instance list) and prompt template,
+        the selected entry's settle-output preview, and the selected
+        instance's realized prompt, inputs, and answer — capped and
+        flagged, never silently truncated.
         Stored settle outputs remain full. The default selection is the
         latest entry and its latest instance, or no instance for an empty
         entry, or neither for a state never entered; selectors pick any
@@ -2306,6 +2310,12 @@ class FactoryExecutor:
         if state is None:
             raise ValueError(f"unknown state {state_id!r} in run {run_id!r}")
         entries = state.entries
+        template = state.prompt_template or ""
+        template_truncated = len(template.encode("utf-8")) > NODE_PROMPT_CAP
+        if template_truncated:
+            template = template.encode("utf-8")[:NODE_PROMPT_CAP].decode(
+                "utf-8", errors="ignore"
+            )
         if not entries:
             if entry_at is not None:
                 raise ValueError(
@@ -2315,6 +2325,8 @@ class FactoryExecutor:
                 "run_id": run.run_id,
                 "spec_id": run.spec_id,
                 "name": run.name,
+                "template": template,
+                "template_truncated": template_truncated,
                 "state": self._state_report(state, include_answer=False),
                 "entry": None,
                 "instance": None,
@@ -2352,14 +2364,11 @@ class FactoryExecutor:
                 inputs_text = inputs_text.encode("utf-8")[:NODE_INPUTS_CAP].decode(
                     "utf-8", errors="ignore"
                 )
+        # The capture caps the answer at ANSWER_BINDING_CAP and records
+        # whether it clipped a longer one; the stored text cannot answer
+        # that itself.
         answer = instance.answer if instance is not None else None
-        answer_truncated = bool(
-            answer and len(answer.encode("utf-8")) > ANSWER_BINDING_CAP
-        )
-        if answer_truncated and answer is not None:
-            answer = answer.encode("utf-8")[:ANSWER_BINDING_CAP].decode(
-                "utf-8", errors="ignore"
-            )
+        answer_truncated = instance.answer_truncated if instance is not None else False
         outputs_text = None
         outputs_truncated = False
         if entry.outputs is not None:
@@ -2392,6 +2401,8 @@ class FactoryExecutor:
             "run_id": run.run_id,
             "spec_id": run.spec_id,
             "name": run.name,
+            "template": template,
+            "template_truncated": template_truncated,
             "state": self._state_report(state, include_answer=False),
             "entry": {
                 "index": entry.index,
@@ -3597,7 +3608,9 @@ class FactoryExecutor:
             if entry.status != "running":
                 return
         instance.status = "done"
-        instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
+        answer = json.dumps(outputs, separators=(",", ":"))
+        instance.answer_truncated = len(answer) > ANSWER_BINDING_CAP
+        instance.answer = answer[:ANSWER_BINDING_CAP]
         self._event(
             run,
             "settled",
@@ -3667,9 +3680,9 @@ class FactoryExecutor:
             # died without reporting; the answer is preserved on the
             # instance and the state reads needs-verify instead of silently
             # counting the exit as settled work.
-            exit_answer = (
-                (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
-            )
+            captured = result.answer_text or result.answer_preview or ""
+            instance.answer_truncated = len(captured) > ANSWER_BINDING_CAP
+            exit_answer = captured[:ANSWER_BINDING_CAP] or None
             if exit_answer:
                 instance.answer = exit_answer
                 instance.provisional = True
@@ -3698,9 +3711,9 @@ class FactoryExecutor:
         # keeps the whole fenced JSON; the 160-character roster preview is
         # the fallback (older hosts, a capture that raced a worker
         # teardown). Both are capped locally at ANSWER_BINDING_CAP.
-        instance.answer = (
-            (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
-        )
+        captured = result.answer_text or result.answer_preview or ""
+        instance.answer_truncated = len(captured) > ANSWER_BINDING_CAP
+        instance.answer = captured[:ANSWER_BINDING_CAP] or None
         instance.provisional = False  # a real settle supersedes any exit capture
         instance.capture_failed = False
         self._event(
@@ -4034,10 +4047,16 @@ class FactoryExecutor:
                 result = by_child.get(instance.child_id or "")
                 if result is None:
                     continue
-                answer = (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
+                captured = result.answer_text or result.answer_preview or ""
+                answer = captured[:ANSWER_BINDING_CAP] or None
                 if answer and (instance.answer is None or len(answer) > len(instance.answer)):
                     instance.answer = answer
                     changed = True
+                # The reported text cannot say whether it was clipped: the
+                # capture that produced it owns the flag, so a longer source
+                # with the same capped prefix still flags.
+                if answer and instance.answer == answer:
+                    instance.answer_truncated = len(captured) > ANSWER_BINDING_CAP
             if changed:
                 entry.answer = self._entry_answer(entry)
             missing = any(
