@@ -603,35 +603,57 @@ impl Worker {
         // own text below; a queue mutation's delete and the cancel sweep
         // send their own).
         let mut dropped_agent_rows = Vec::new();
+        let mut dropped_done = Vec::new();
         // The inbox arrival row stays: it covers mail that is still
         // waiting unannounced, and nothing else would wake the agent for
         // it.
         let is_arrival_row = |item: &QueuedItem| {
             item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
         };
-        let drain_lane =
-            |lane: &mut VecDeque<QueuedItem>, dropped_agent_rows: &mut Vec<Value>| -> Vec<String> {
-                let (kept, cleared): (VecDeque<_>, VecDeque<_>) =
-                    lane.drain(..).partition(is_arrival_row);
-                *lane = kept;
-                cleared
-                    .into_iter()
-                    .map(|item| {
-                        if let Some(id) = item.admission_id.as_deref() {
-                            self.prompt_admissions.clear(id);
-                        }
-                        if item.agent_message.is_some() {
-                            dropped_agent_rows.extend(item.custom_message);
-                        }
-                        item.message
-                    })
-                    .collect()
-            };
-        let steering: Vec<String> = drain_lane(&mut core.steering, &mut dropped_agent_rows);
-        let follow_up: Vec<String> = drain_lane(&mut core.follow_up, &mut dropped_agent_rows);
+        let drain_lane = |lane: &mut VecDeque<QueuedItem>,
+                          dropped_agent_rows: &mut Vec<Value>,
+                          dropped_done: &mut Vec<oneshot::Sender<TurnSettle>>|
+         -> Vec<String> {
+            let (kept, cleared): (VecDeque<_>, VecDeque<_>) =
+                lane.drain(..).partition(is_arrival_row);
+            *lane = kept;
+            cleared
+                .into_iter()
+                .map(|mut item| {
+                    if let Some(id) = item.admission_id.as_deref() {
+                        self.prompt_admissions.clear(id);
+                    }
+                    if item.agent_message.is_some() {
+                        dropped_agent_rows.extend(item.custom_message);
+                    }
+                    if let Some(done) = item.done.take() {
+                        dropped_done.push(done);
+                    }
+                    item.message
+                })
+                .collect()
+        };
+        let steering: Vec<String> = drain_lane(
+            &mut core.steering,
+            &mut dropped_agent_rows,
+            &mut dropped_done,
+        );
+        let follow_up: Vec<String> = drain_lane(
+            &mut core.follow_up,
+            &mut dropped_agent_rows,
+            &mut dropped_done,
+        );
         clear_withdrawn_progress_note(&core, self.engine.as_ref());
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
+        // The dropped waiters learn the withdrawal after the lock (the
+        // settle is a channel write, never a core mutation — the same
+        // contract the cancel sweep and the queue mutation's delete
+        // send). The clear's own text names the operator action (TS
+        // `clearQueue`), distinct from a row's delete.
+        for done in dropped_done {
+            let _ = done.send(TurnSettle::Withdrawn(QUEUED_PROMPT_CLEARED.to_string()));
+        }
         // The verdict refresh rides the same checkpoint as the snapshot: a stale
         // busy=true from the cleared items' admission must not revive an empty session.
         self.checkpoint_queue(QueueCheckpoint::Settle {
