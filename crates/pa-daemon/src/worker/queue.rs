@@ -604,9 +604,7 @@ pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 /// notice rides the lane the arrival requested (agent messages honor
 /// their delivery mode; notices ride steering), never demoting a
 /// queued steering notice to follow-up, and a replacement clears the
-/// key from both lanes first, so a batch never splits. Answers the
-/// capacity refusal when the gate rejects the arrival (the sink passes
-/// a permissive gate).
+/// key from both lanes first, so a batch never splits.
 #[allow(clippy::too_many_arguments)] // the admission's gates and seams ride as separate handles (lock-order reasons)
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
@@ -617,10 +615,6 @@ pub(crate) fn admit_inbox_notice(
     notice: pa_core::session_engine::inbox::InboxNotice,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
-    capacity_error: impl Fn(
-        &std::collections::VecDeque<QueuedItem>,
-        &std::collections::VecDeque<QueuedItem>,
-    ) -> Option<String>,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
     // The busy sample, the batch, and the push share ONE critical
@@ -634,7 +628,6 @@ pub(crate) fn admit_inbox_notice(
         notice,
         lane,
         session_is_closed,
-        capacity_error,
         engine,
     )?;
     // The busy-evidence checkpoint: the notice is undelivered live
@@ -662,10 +655,6 @@ pub(crate) fn admit_inbox_notice_locked(
     notice: pa_core::session_engine::inbox::InboxNotice,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
-    capacity_error: impl Fn(
-        &std::collections::VecDeque<QueuedItem>,
-        &std::collections::VecDeque<QueuedItem>,
-    ) -> Option<String>,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
     // A notice that raced past the sink's first check is refused here
@@ -673,12 +662,6 @@ pub(crate) fn admit_inbox_notice_locked(
     // journal durable, which is honest — it did arrive.
     if session_is_closed() {
         return Err("Target session is closed".to_string());
-    }
-    // The capacity gate, re-sampled under this same lock with the lane
-    // lengths it reads here: concurrent arrivals can never pass one
-    // stale sample together.
-    if let Some(error) = capacity_error(&core_guard.steering, &core_guard.follow_up) {
-        return Err(error);
     }
     // The append is atomic with the session swap: the route-fetched store
     // is identity-checked under the slot's own mutex (push_to_live_inbox),

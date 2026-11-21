@@ -100,7 +100,6 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                     },
                     Lane::Steering,
                     || false,
-                    |_, _| None,
                     None,
                 );
                 assert_eq!(
