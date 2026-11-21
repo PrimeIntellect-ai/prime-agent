@@ -389,14 +389,17 @@ impl Worker {
         }
         let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
+        // Read the bash lane while the same core guard is held: a notice
+        // dequeued into a new turn between the summary and the count would
+        // otherwise report an idle turn with no outstanding work.
+        let outstanding = (payload.get("taskObservation").and_then(Value::as_str)
+            == Some("factory"))
+        .then(|| self.outstanding_background_jobs_locked(&core));
         drop(core);
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
-        if payload.get("taskObservation").and_then(Value::as_str) == Some("factory") {
+        if let Some(outstanding) = outstanding {
             if let Some(object) = data.as_object_mut() {
-                object.insert(
-                    "outstandingBackgroundJobs".to_string(),
-                    json!(self.outstanding_background_jobs()),
-                );
+                object.insert("outstandingBackgroundJobs".to_string(), json!(outstanding));
             }
         }
         response_success(None, "get_state", Some(data))

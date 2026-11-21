@@ -462,5 +462,11 @@ async fn get_state_reports_background_jobs_only_for_factory_task_observation() {
         json!(1),
         "the opt-in reports the pending completion delivery"
     );
+    // The handler takes the summary and the bash lane under one core guard.
+    // The locked variant is the same read over a held guard (a helper that
+    // re-locked the core would deadlock here).
+    let core = worker.core.lock().unwrap();
+    assert_eq!(worker.outstanding_background_jobs_locked(&core), 1);
+    drop(core);
     let _ = std::fs::remove_dir_all(&dir);
 }
