@@ -466,9 +466,11 @@ impl PublicAuthority {
     /// the URL names no servable authority: no host, or a port
     /// outside the TCP range).
     pub(crate) fn parse(url: &str) -> Option<Self> {
-        let (https, rest) = match url.strip_prefix("https://") {
-            Some(rest) => (true, rest),
-            None => (false, url.strip_prefix("http://").unwrap_or(url)),
+        // The scheme compares case-insensitively (RFC 3986 §3.1).
+        let (https, rest) = match url.split_once("://") {
+            Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => (true, rest),
+            Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => (false, rest),
+            _ => (false, url),
         };
         let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
         let (name, port) = split_host_port(authority)?;
@@ -679,9 +681,10 @@ mod tests {
     }
 
     /// The public-authority gate matches the name case-insensitively
-    /// (RFC 9110 §7.2) and the port modulo the URL scheme's default:
-    /// a front's forwarded `Host` in either default-port form serves,
-    /// while any other port — or any other name — stays refused.
+    /// (RFC 9110 §7.2) and the port modulo the URL scheme's default (the
+    /// scheme itself in any case, RFC 3986 §3.1): a front's forwarded
+    /// `Host` in either default-port form serves, while any other port —
+    /// or any other name — stays refused.
     #[test]
     fn the_public_authority_gate_matches_case_and_default_ports() {
         let https = PublicAuthority::parse("https://Agent.Example.com/")
@@ -713,6 +716,11 @@ mod tests {
         assert!(http.matches_host("agent.example.com"));
         assert!(http.matches_host("agent.example.com:80"));
         assert!(!http.matches_host("agent.example.com:443"));
+        let upper = PublicAuthority::parse("HTTPS://agent.example.com/")
+            .expect("the URL names an authority");
+        assert!(upper.matches_host("agent.example.com"));
+        assert!(upper.matches_host("agent.example.com:443"));
+        assert!(!upper.matches_host("agent.example.com:80"));
         assert!(
             PublicAuthority::parse("https:///").is_none(),
             "a URL with no authority names none"
