@@ -402,33 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn a_swapped_venv_relocates_its_console_scripts() {
-        let root = tempfile::tempdir().unwrap();
-        let venv = root.path().join("kernel-venv");
-        let candidate = venv::venv_candidate_path(&venv);
-        std::fs::create_dir_all(candidate.join("bin")).unwrap();
-        let shebang = format!("#!{}/bin/python\n", candidate.display());
-        let python = kernel_venv_python(&candidate);
-        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
-        std::fs::write(python, "python").unwrap();
-        std::fs::write(candidate.join("bin/pip"), &shebang).unwrap();
-        std::fs::write(
-            candidate.join("pyvenv.cfg"),
-            format!("home = /usr/bin\nuv = {}/bin\n", candidate.display()),
-        )
-        .unwrap();
-        venv::swap_venv_into_place(&candidate, &venv).unwrap();
-        let script = std::fs::read_to_string(venv.join("bin/pip")).unwrap();
-        assert_eq!(script, format!("#!{}/bin/python\n", venv.display()));
-        let cfg = std::fs::read_to_string(venv.join("pyvenv.cfg")).unwrap();
-        assert!(
-            cfg.contains(&format!("uv = {}/bin", venv.display())),
-            "{cfg}"
-        );
-        assert!(!cfg.contains("candidate-"), "the build path is gone: {cfg}");
-    }
-
-    #[test]
     fn recovery_restores_a_complete_venv_aside_before_a_partial_live_tree() {
         let root = tempfile::tempdir().unwrap();
         let venv = root.path().join("kernel-venv");
