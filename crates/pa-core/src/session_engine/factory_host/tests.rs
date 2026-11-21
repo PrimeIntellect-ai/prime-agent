@@ -834,7 +834,6 @@ impl EmitFixture {
 #[tokio::test]
 async fn a_valid_emit_merges_into_the_outputs_file_and_copies_file_ports() {
     let fixture = EmitFixture::new();
-    let copy = fixture.session_dir.join("factory-files/design/DESIGN.md");
     assert_eq!(
         fixture
             .request("factory.emit", json!({"outputs": {"design": "DESIGN.md"}}))
@@ -842,6 +841,9 @@ async fn a_valid_emit_merges_into_the_outputs_file_and_copies_file_ports() {
             .unwrap(),
         json!({"accepted": ["design"], "missing": ["verdict"]})
     );
+    let copy = std::path::PathBuf::from(fixture.written()["design"].as_str().unwrap());
+    assert!(copy.starts_with(fixture.session_dir.join("factory-files/design")));
+    assert_eq!(copy.file_name().unwrap(), "DESIGN.md");
     assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# Design\n");
     assert_eq!(
         fixture
@@ -957,4 +959,92 @@ fn concurrent_emits_both_merge() {
         .collect();
     ports.sort();
     assert_eq!(ports, ["design", "verdict"]);
+}
+
+/// The bytes the committed outputs file references for `port`.
+fn committed_bytes(session_dir: &Path, port: &str) -> String {
+    let outputs: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap(),
+    )
+    .unwrap();
+    std::fs::read_to_string(outputs[port].as_str().unwrap()).unwrap()
+}
+
+/// An emit that fails after copying one file port leaves the committed
+/// outputs file and the bytes it references exactly as they were, and
+/// removes the copy it staged.
+#[test]
+fn an_emit_that_fails_after_staging_keeps_the_committed_outputs_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session_dir, cwd) = (dir.path().join("session"), dir.path().join("work"));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let contract = json!({"outputs": [
+        {"name": "design", "type": "file"},
+        {"name": "notes", "type": "file"},
+    ]});
+    let emit = |outputs: serde_json::Value| {
+        super::emit_outputs(&contract, &session_dir, &cwd, &json!({"outputs": outputs}))
+    };
+    std::fs::write(cwd.join("DESIGN.md"), "first").unwrap();
+    std::fs::write(cwd.join("NOTES.md"), "notes").unwrap();
+    emit(json!({"design": "DESIGN.md"})).unwrap();
+    let before = std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap();
+    // `design` stages fine; `notes` cannot create its directory.
+    let files_dir = session_dir.join(super::FACTORY_FILES_DIR);
+    std::fs::write(files_dir.join("notes"), "in the way").unwrap();
+    std::fs::write(cwd.join("DESIGN.md"), "second").unwrap();
+    emit(json!({"design": "DESIGN.md", "notes": "NOTES.md"})).unwrap_err();
+    assert_eq!(
+        std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap(),
+        before
+    );
+    assert_eq!(committed_bytes(&session_dir, "design"), "first");
+    assert_eq!(
+        std::fs::read_dir(files_dir.join("design")).unwrap().count(),
+        1
+    );
+}
+
+/// Two emits of the same file port at the same time, from files with the
+/// same name: the committed outputs pair each call's value with that
+/// call's own bytes, and only the winner's copy is kept.
+#[test]
+fn concurrent_emits_of_one_file_port_commit_one_calls_bytes() {
+    for _ in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        let contract = json!({
+            "outputs": [
+                {"name": "design", "type": "file"},
+                {"name": "verdict", "type": "verdict"},
+            ],
+            "records": {"verdict": [["decision", "enum(approve, rework)"]]},
+        });
+        let emits: Vec<_> = ["approve", "rework"]
+            .into_iter()
+            .map(|decision| {
+                let cwd = dir.path().join(decision);
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::write(cwd.join("DESIGN.md"), decision).unwrap();
+                let (contract, session_dir) = (contract.clone(), session_dir.clone());
+                std::thread::spawn(move || {
+                    let outputs = json!({"design": "DESIGN.md", "verdict": {"decision": decision}});
+                    super::emit_outputs(&contract, &session_dir, &cwd, &json!({"outputs": outputs}))
+                })
+            })
+            .collect();
+        for emit in emits {
+            emit.join().unwrap().unwrap();
+        }
+        let outputs: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(session_dir.join(super::FACTORY_OUTPUTS_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            committed_bytes(&session_dir, "design"),
+            outputs["verdict"]["decision"].as_str().unwrap()
+        );
+        let copies = session_dir.join(super::FACTORY_FILES_DIR).join("design");
+        assert_eq!(std::fs::read_dir(copies).unwrap().count(), 1);
+    }
 }
