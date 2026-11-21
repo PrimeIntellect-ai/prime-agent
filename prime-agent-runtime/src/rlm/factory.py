@@ -2043,6 +2043,20 @@ def _runs_dir() -> Path | None:
     return Path(value).expanduser() / RUNS_DIR_NAME if value else None
 
 
+PRINT_RUNS_NOT_DURABLE = (
+    "--print runs are not durable; run machines under the daemon for restart safety"
+)
+"""The refusal ``resume`` gives on a daemonless host for a run this kernel did
+not start: a ``--print`` session's children live in its own process, so the
+runs they served cannot outlive it."""
+
+
+def _daemonless_host() -> bool:
+    """Whether the session runs without a daemon (the host sets
+    ``RLM_DAEMONLESS=1`` for ``--print`` sessions)."""
+    return os.environ.get("RLM_DAEMONLESS") == "1"
+
+
 def _transitions_index(machine: dict[str, Any]) -> dict[str, list[tuple[int, dict[str, Any]]]]:
     """Every transition visible from each source state, paired with its
     canonical index: a join (``from`` is a list) is visible from EVERY
@@ -2384,6 +2398,9 @@ class FactoryExecutor:
         # Run ids whose snapshots this executor loaded off disk: the
         # boot-once arming queue (each id is armed exactly once per boot).
         self._rehydrated: set[str] = set()
+        # The same ids, kept after arming: on a daemonless host their
+        # children died with the process that spawned them.
+        self._loaded: set[str] = set()
         # (run id, writer) pairs whose write already failed once: a dead
         # disk must not wedge the loop with a ledger row per event, and a
         # writer that recovers clears its own mark.
@@ -2828,6 +2845,7 @@ class FactoryExecutor:
                 continue
             self._runs[run.run_id] = run
             self._rehydrated.add(run.run_id)
+            self._loaded.add(run.run_id)
         # A marker whose snapshot is ABSENT names the run's FIRST write
         # (round-8 probe R8-03): the marker exists because the snapshot
         # does not, so no snapshot walk ever surfaces it — the run is
@@ -3322,8 +3340,13 @@ class FactoryExecutor:
         under ``failure_policy: "continue"``. A budget or max_transitions
         pause is reported once per run: resuming after it is an explicit
         operator decision and no further budget pauses fire. Raises
-        ``ValueError`` when the run is not paused.
+        ``ValueError`` when the run is not paused, and on a daemonless
+        (``--print``) host for any run this kernel did not start.
         """
+        if _daemonless_host() and (run_id not in self._runs or run_id in self._loaded):
+            raise ValueError(
+                f"factory run {run_id!r} did not start in this process: {PRINT_RUNS_NOT_DURABLE}"
+            )
         run = self._require_run(run_id)
         if run.state != "paused":
             raise ValueError(f"factory run {run_id!r} is {run.state!r}, not paused")
@@ -8977,6 +9000,10 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   owned, run straight through — a finished child's emitted outputs are
   read from its session dir, never from kernel memory). While the kernel
   is down the status lane answers the no-kernel refusal, never `running`.
+  That durability is the daemon's: a `--print` session hosts its children
+  in its own process, so its runs end with it, and `resume` of a run that
+  process did not start refuses with "--print runs are not durable; run
+  machines under the daemon for restart safety".
 - Residents outlive their run; stop the run (or tear down the session) to
   retire them. Prefer `rlm.factory.stop(run_id)` over deleting a factory
   child by hand — the executor claims and cancels children itself, and a
