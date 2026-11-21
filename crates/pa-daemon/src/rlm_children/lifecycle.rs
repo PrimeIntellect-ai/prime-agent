@@ -476,11 +476,16 @@ impl SupervisorChildSessionsInner {
                 )
                 .await;
             }
+            // The task-activity flag belongs to this same direct read: write
+            // it while the direct-observation lock still serializes the
+            // worker round trips, so a concurrent refresh cannot apply a
+            // stale capture after a fresher one.
+            if factory {
+                record.lock().await.factory_task_busy =
+                    state.as_ref().ok().and_then(factory_task_busy);
+            }
             state
         };
-        if factory {
-            record.lock().await.factory_task_busy = state.as_ref().ok().and_then(factory_task_busy);
-        }
         let busy = matches!(&state, Ok(state) if child_busy_flags(state));
         if busy || state.is_err() {
             return busy;
