@@ -3468,12 +3468,24 @@ class FactoryExecutor:
                 # for needs_verify if the entry fails permanently. A
                 # foreach entry retries each instance that omitted a
                 # required port, not only the last one to settle.
-                for failed_instance in failed:
+                for index, failed_instance in enumerate(failed):
                     failed_instance.provisional = True
                     failed_instance.capture_failed = True
                     await self._apply_instance_failure(
                         run, state, entry, failed_instance, capture_failure, retry=True
                     )
+                    if entry.status == "error":
+                        # This instance spent its retries and failed the
+                        # entry. Mark the other omitted instances error
+                        # too, so resume() re-admits all of them, not
+                        # only the first.
+                        for other in failed[index + 1:]:
+                            other.provisional = True
+                            other.capture_failed = True
+                            await self._apply_instance_failure(
+                                run, state, entry, other, capture_failure, retry=True
+                            )
+                        return
                     if entry.status != "running":
                         return
                 return
