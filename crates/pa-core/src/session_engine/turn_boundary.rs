@@ -393,6 +393,15 @@ impl TurnBoundaryRequests {
     }
 }
 
+/// One turn-boundary consumption: the outcome the host runtime persists
+/// and broadcasts; `Err` rows surface like the TS failed-compaction
+/// events. The pending refinement no longer consumes here — the
+/// daemon-backed boundary spawns the refinement child with it.
+#[derive(Debug)]
+pub struct TurnBoundaryConsumption {
+    pub compaction: Option<anyhow::Result<super::compact_session::CompactOutcome>>,
+}
+
 impl SessionEngine {
     /// Consume a pending model-requested compaction at a turn boundary; taken regardless
     /// of outcome, so a failed run is not silently re-run. `abort` cancels the run,
@@ -418,6 +427,20 @@ impl SessionEngine {
             },
             None => compact.await,
         })
+    }
+
+    /// Consume pending turn-boundary requests after a settled turn. Only the
+    /// compaction consumes here; the pending refinement belongs to the
+    /// daemon-backed boundary, which spawns the refinement child with it.
+    pub async fn consume_turn_boundary_requests(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        abort: Option<&pa_agent::abort::AbortSignal>,
+    ) -> TurnBoundaryConsumption {
+        let mut consumption = TurnBoundaryConsumption { compaction: None };
+        consumption.compaction = self.consume_pending_compaction(model, api_key, abort).await;
+        consumption
     }
 
     /// Start a pending model-requested refinement without waiting on planning or

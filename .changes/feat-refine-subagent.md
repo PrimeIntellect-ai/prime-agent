@@ -1,0 +1,3 @@
+- Refinement still runs from depth-2 sessions: the daemon's refinement-child spawn never spends the subagent recursion budget.
+- A refinement reply that lands while its parent turn is running parks and applies at the session's next idle boundary, so the refinement notice never wedges itself into the turn's history.
+- The spawned refine child keeps the synchronous refiner's model-pass error surface: an output-limit stop fails the child with "the model hit its output limit (N tokens, provider/model)" instead of passing truncated text down to the generic parse error, and the refine_failed event carries the pinned "Refinement failed: ..." lines.
