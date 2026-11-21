@@ -39,6 +39,12 @@ pub(crate) struct SessionCore {
     /// mints carries that instead of no identity at all, so an event
     /// consumer can tell it from the session's own work.
     pub(crate) running_wire_admissions: Vec<String>,
+    /// Whether the running batch is a delivery-scoped delivery (the A2A
+    /// prompt's `deliveryScoped` flag): the child registry stamps only
+    /// such a delivery's children, so a plain client's child notices
+    /// keep main's inbox routing while a task's notices stay the
+    /// delivery's own continuation.
+    pub(crate) running_delivery_scoped: bool,
     pub(crate) abort_requested: bool,
     /// Explicit cancellation of this picked delivery; graceful shutdown is excluded.
     pub(crate) turn_cancelled: bool,
@@ -171,6 +177,7 @@ impl SessionCore {
             attached_client_ids: Vec::new(),
             running_client_admissions: Vec::new(),
             running_wire_admissions: Vec::new(),
+            running_delivery_scoped: false,
             abort_requested: false,
             turn_cancelled: false,
             turn_completed: false,

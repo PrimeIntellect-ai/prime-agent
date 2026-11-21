@@ -343,6 +343,7 @@ impl Worker {
             kernel_bash_activity: Arc::new(tokio::sync::Notify::new()),
             running_client_admissions: Vec::new(),
             running_wire_admissions: Vec::new(),
+            running_delivery_scoped: false,
             tool_use_count: 0,
         };
         let active_session_id = config.active_session_id.clone();
@@ -597,8 +598,23 @@ impl Worker {
                             .cloned()
                             .or_else(|| core.running_wire_admissions.first().cloned())
                     });
-                concrete
-                    .set_child_delivery_identity(std::sync::Arc::clone(&running_delivery_probe));
+                // The child registry's stamp is delivery-scoped only:
+                // the A2A task's children belong to the waiting task,
+                // while a plain client's children keep the inbox
+                // routing the daemon gives their notices and replies.
+                let child_identity_core = Arc::clone(&core);
+                let child_delivery_probe: crate::rlm_children::DeliveryIdentityProbe =
+                    std::sync::Arc::new(move || {
+                        let core = child_identity_core.lock().unwrap();
+                        if !core.running_delivery_scoped {
+                            return None;
+                        }
+                        core.running_client_admissions
+                            .first()
+                            .cloned()
+                            .or_else(|| core.running_wire_admissions.first().cloned())
+                    });
+                concrete.set_child_delivery_identity(child_delivery_probe);
                 // The engine's ownership stamps read the same running
                 // delivery: the goal's Active transition and the
                 // autonomous deferral record it, so the identity-scoped

@@ -230,6 +230,16 @@ impl Worker {
             Ok(custom_message) => custom_message,
             Err(error) => return response_failure(None, lane.as_str(), &error, None),
         };
+        // The client's own admission id the delivery named (the
+        // supervisor's prompt route stamps it beside the wire rewrite):
+        // the queued row carries the delivery's identity, so the run's
+        // `agent_start` tags and the identity-scoped withdraw can match
+        // it without the daemon's rewrite table.
+        let client_admission_id = payload
+            .get("clientAdmissionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
         // The reserved child-status kinds are daemon provenance: a caller-supplied
         // row claiming one is answered loudly, never parked. The daemon's own
         // notice injection rides this command with the one-shot capability.
@@ -264,30 +274,26 @@ impl Worker {
         // the same routing the kernel notices and agent messages take. A
         // disabled inbox, an engine without a store, or a closed session
         // falls back to the direct lane row below.
-        if let Some(row) = custom_message.as_ref() {
-            if self.route_child_status_notice(row, lane) {
-                let command = if lane == Lane::Steering {
-                    "steer"
-                } else {
-                    "follow_up"
-                };
-                return response_success(None, command, Some(json!({ "queued": true })));
+        // A stamped notice is a delivery's own continuation (the A2A
+        // task's child summary), never an inbox notification: it keeps
+        // the full row and its identity. An unstamped notice keeps the
+        // daemon's inbox routing.
+        if client_admission_id.is_none() {
+            if let Some(row) = custom_message.as_ref() {
+                if self.route_child_status_notice(row, lane) {
+                    let command = if lane == Lane::Steering {
+                        "steer"
+                    } else {
+                        "follow_up"
+                    };
+                    return response_success(None, command, Some(json!({ "queued": true })));
+                }
             }
         }
         let mut core = self.core.lock().unwrap();
         if require_busy && (!core.busy || core.queued_input_parked(&self.input_pauses)) {
             return response_success(None, command, Some(json!({ "queued": false })));
         }
-        // The client's own admission id the delivery named (the
-        // supervisor's prompt route stamps it beside the wire rewrite):
-        // the queued row carries the delivery's identity, so the run's
-        // `agent_start` tags and the identity-scoped withdraw can match
-        // it without the daemon's rewrite table.
-        let client_admission_id = payload
-            .get("clientAdmissionId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string);
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -482,14 +488,18 @@ impl Worker {
         let inbox_on = self.agent_engine.as_ref().is_some_and(|engine| {
             crate::agent_inbox::inbox_enabled(&engine.cwd(), &self.config.agent_dir)
         });
-        let inbox_route = self.agent_engine.as_ref().and_then(|engine| {
-            if !inbox_on {
-                return None;
-            }
-            engine
-                .inbox()
-                .map(|inbox| (std::sync::Arc::clone(engine), inbox))
-        });
+        let inbox_route = if child_reply_delivery.is_some() {
+            None
+        } else {
+            self.agent_engine.as_ref().and_then(|engine| {
+                if !inbox_on {
+                    return None;
+                }
+                engine
+                    .inbox()
+                    .map(|inbox| (std::sync::Arc::clone(engine), inbox))
+            })
+        };
         // A closing session with the inbox on takes no delivery: no lane
         // row or wake would announce it, so the sender sees the refusal
         // instead of a receipt for a message nothing delivers. The check
