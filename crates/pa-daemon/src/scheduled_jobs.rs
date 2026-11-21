@@ -21,7 +21,7 @@ use pa_core::cron::{
 };
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
-use crate::worker::{admit_inbox_notice, Lane, QueuedItem, SessionCore, Worker};
+use crate::worker::{admit_inbox_notice_locked, Lane, QueuedItem, SessionCore, Worker};
 
 /// How long a fire waits for its turn to settle before answering the scheduler with a skip (a stuck
 /// turn must not pin the dispatch lane forever).
@@ -54,6 +54,8 @@ pub(crate) struct QueueHooks {
     store: Arc<AgentCronJobStore>,
     /// The worker recovery journal (the fire checkpoint's busy evidence).
     recovery: Arc<Mutex<Option<crate::journal::WorkerRecoveryJournal>>>,
+    /// The client event stream (an inbox-routed fire's queue strip refresh).
+    events: Arc<crate::worker::EventPump>,
     /// The late-bound inbox seam (heartbeat fires route into the session's
     /// durable inbox once it is set; `None` keeps the direct lane).
     inbox_seam: Mutex<Option<InboxSeam>>,
@@ -112,72 +114,98 @@ impl QueueHooks {
     /// fired prompt becomes one `heartbeat` entry and ONE coalesced wake
     /// row carries the arrival on the delivery-mode lane. The instruction
     /// is durable at admission, so the fire counts as ran (no turn-settle
-    /// handshake); a disabled inbox, an engine without a store, or a
-    /// closed/uncreated session answers `false` and the caller keeps the
-    /// direct lane row.
-    fn route_heartbeat_fire(&self, job: &AgentCronJob) -> bool {
-        let Some(seam) = self
+    /// handshake). Answers `None` when the direct lane row serves the
+    /// fire (a disabled inbox, an engine without a store, a refused
+    /// admission).
+    fn route_heartbeat_fire(&self, job: &AgentCronJob) -> Option<RoutedFire> {
+        let seam = self
             .inbox_seam
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        else {
-            return false;
-        };
-        let Some(engine) = seam.engine.upgrade() else {
-            return false;
-        };
+            .clone()?;
+        let engine = seam.engine.upgrade()?;
         if !crate::agent_inbox::inbox_enabled(&engine.cwd(), &seam.agent_dir) {
-            return false;
+            return None;
         }
-        let Some(inbox) = engine.inbox() else {
-            return false;
-        };
-        let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
-            job,
-            crate::util::now_ms(),
-        );
-        let Some(fields) = pa_core::session_engine::inbox::heartbeat_notice_fields(&job.id, &row)
-        else {
-            return false;
-        };
-        // TS cron fires resume the suspension before admission
-        // (`resumeIfIdle: true`): a fire on a post-abort/post-compact
-        // session is a resume site (the runner refuses suspended lanes).
-        {
+        let inbox = engine.inbox()?;
+        let closed_engine = Arc::clone(&engine);
+        let closed = move || closed_engine.session_is_closed();
+        let admitted = {
             let mut core = self
                 .core
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !core.created || core.shutdown_requested || job.status != JobStatus::Active {
-                return false;
+            if !core.created || core.shutdown_requested {
+                return Some(RoutedFire::Skipped);
             }
+            // The LIVE job, read inside the admission's critical section
+            // (`job` is the scheduler's pre-run snapshot): pause, stop,
+            // delete, and rewrite write the store before their withdrawal
+            // takes this lock, so a fire never lands after its withdrawal.
+            let Some(live) = self.store.get_claimed_job(&job.id) else {
+                return Some(RoutedFire::Skipped);
+            };
+            let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
+                &live,
+                crate::util::now_ms(),
+            );
+            let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&live.id, &row)?;
+            // One waiting fire per job: the newest replaces the older, and
+            // the arrival batch drops it so the notice never counts it. A
+            // store retired since the capture skips the fire: its waiting
+            // fire replays into the replacement, so a direct row would
+            // deliver twice.
+            let Some(withdrawn) = engine.withdraw_heartbeat_from_live_inbox(&inbox, &live.id)
+            else {
+                return Some(RoutedFire::Skipped);
+            };
+            if !withdrawn.is_empty() {
+                seam.arrivals
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retain(|message| withdrawn.iter().all(|gone| gone.id != message.id));
+            }
+            // TS cron fires resume the suspension before admission
+            // (`resumeIfIdle: true`): a fire on a post-abort/post-compact
+            // session is a resume site (the runner refuses suspended lanes).
             core.queued_input_suspended = false;
-        }
-        // A heartbeat rides its delivery-mode lane; the wake row keeps it.
-        let lane = if matches!(job.delivery_mode, Some(DeliveryMode::FollowUp)) {
-            Lane::FollowUp
-        } else {
-            Lane::Steering
+            // A heartbeat rides its delivery-mode lane; the wake row keeps it.
+            let lane = if matches!(live.delivery_mode, Some(DeliveryMode::FollowUp)) {
+                Lane::FollowUp
+            } else {
+                Lane::Steering
+            };
+            admit_inbox_notice_locked(
+                &mut core,
+                &inbox,
+                &seam.arrivals,
+                fields,
+                lane,
+                closed,
+                |_, _| None,
+                Some(engine.as_ref()),
+            )
         };
-        let closed_engine = Arc::clone(&engine);
-        let closed = move || closed_engine.session_is_closed();
-        match admit_inbox_notice(
+        admitted.ok()?;
+        crate::worker::checkpoint_queue_recovery(
             &self.recovery,
             &self.core,
-            &self.work_notify,
-            &inbox,
-            &seam.arrivals,
-            fields,
-            lane,
-            closed,
-            |_, _| None,
-            Some(engine.as_ref()),
-        ) {
-            Ok(_queued) => true,
-            Err(_) => false,
-        }
+            crate::worker::QueueCheckpoint::Admitted {
+                operation: "steer_queued",
+            },
+        );
+        self.work_notify.notify_one();
+        let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
+        Some(RoutedFire::Ran)
     }
+}
+
+/// The verdict of a heartbeat fire the inbox route took.
+enum RoutedFire {
+    /// The prompt waits in the inbox.
+    Ran,
+    /// The session or the live job no longer takes the fire.
+    Skipped,
 }
 
 impl AgentCronSchedulerHooks for QueueHooks {
@@ -198,8 +226,12 @@ impl AgentCronSchedulerHooks for QueueHooks {
         // instruction is durable at admission, so the fire counts as ran.
         // The direct queue below serves a disabled inbox, an engine
         // without a store, and plain (non-heartbeat) cron jobs.
-        if is_heartbeat_cron_job(job) && self.route_heartbeat_fire(job) {
-            return Ok(None);
+        if is_heartbeat_cron_job(job) {
+            match self.route_heartbeat_fire(job) {
+                Some(RoutedFire::Ran) => return Ok(None),
+                Some(RoutedFire::Skipped) => return Ok(Some("skipped")),
+                None => {}
+            }
         }
         let (done_tx, done_rx) = oneshot::channel();
         let heartbeat = is_heartbeat_cron_job(job);
@@ -330,8 +362,9 @@ impl ScheduledJobs {
         let mut store = AgentCronJobStore::for_session_artifacts();
         // `cronStore.onHeartbeatChange` broadcasts `{ type: "heartbeats_changed" }`
         // to the clients; the supervisor re-broadcasts daemon-wide.
+        let heartbeat_events = Arc::clone(&events);
         store.on_heartbeat_change(Box::new(move || {
-            events.send(crate::worker::OutboundFrame::heartbeats_changed());
+            heartbeat_events.send(crate::worker::OutboundFrame::heartbeats_changed());
         }));
         let store = Arc::new(store);
         ScheduledJobs {
@@ -341,6 +374,7 @@ impl ScheduledJobs {
                 user_bash,
                 store: Arc::clone(&store),
                 recovery,
+                events,
                 inbox_seam: Mutex::new(None),
             }),
             store,
@@ -458,8 +492,9 @@ impl ScheduledJobs {
                         // like the reminder's check: a replacement's
                         // successor rows never sweep for the retired
                         // store's job.
-                        if engine.is_live_inbox(&inbox)
-                            && !inbox.withdraw_heartbeat(&job.id).is_empty()
+                        if engine
+                            .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
+                            .is_some_and(|withdrawn| !withdrawn.is_empty())
                         {
                             // The wake rows that promised the withdrawn
                             // fire refresh over what is left (an emptied
