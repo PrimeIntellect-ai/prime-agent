@@ -872,7 +872,28 @@ impl SupervisorChildSessionsInner {
         };
         let wire = serde_json::to_value(pa_types::session::AgentMessage::Custom(message))
             .unwrap_or(Value::Null);
-        let nonce = crate::child_status_notices::mint();
+        let nonce = match crate::child_status_notices::mint(&self.agent_dir) {
+            Ok(nonce) => nonce,
+            Err(error) => {
+                eprintln!("pa-daemon: RLM child notice capability failed; retrying: {error}");
+                let retry = async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                        if let Ok(nonce) = crate::child_status_notices::mint(&self.agent_dir) {
+                            return nonce;
+                        }
+                    }
+                };
+                let Ok(nonce) =
+                    tokio::time::timeout(Duration::from_millis(NOTICE_DELIVERY_TIMEOUT_MS), retry)
+                        .await
+                else {
+                    eprintln!("pa-daemon: RLM child notice capability retry budget expired");
+                    return;
+                };
+                nonce
+            }
+        };
         let command = DaemonCommand::FollowUp {
             id: None,
             active_session_id: self.parent_active_session_id.clone(),
