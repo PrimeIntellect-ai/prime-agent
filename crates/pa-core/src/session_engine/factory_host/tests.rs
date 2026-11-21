@@ -679,6 +679,15 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             .as_deref(),
         Some("spec-1")
     );
+    assert_eq!(
+        parse("peek", None, None, None).unwrap(),
+        FactoryActivityRequest {
+            action: "peek",
+            run_id: None,
+            spec_id: None,
+            timeout_ms: None,
+        }
+    );
     // unknown action
     assert_eq!(
         parse("bogus", None, None, None).unwrap_err().to_string(),
@@ -704,6 +713,19 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
     assert_eq!(
         parse("run", None, None, None).unwrap_err().to_string(),
         "factory activity run requires specId"
+    );
+    // peek takes no target: a targeted peek has no live claim behind it.
+    assert_eq!(
+        parse("peek", Some("run-1"), None, None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity peek takes no runId or specId"
+    );
+    assert_eq!(
+        parse("peek", None, Some("spec-1"), None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity peek takes no runId or specId"
     );
     // the watch bound
     assert!(parse("watch", Some("r"), None, Some(60_000)).is_ok());

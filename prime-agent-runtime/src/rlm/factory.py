@@ -1123,9 +1123,10 @@ FACTORY_FRAME_CAP = 262_144
 full 1024-state machine cap fits; a snapshot that cannot shrink under the
 cap fails loudly instead of being silently truncated."""
 
-ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume")
+ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume", "peek")
 """The host bridge's actions over one factory run, the ``factory_activity``
-frame's action vocabulary (the kernel namespace is the same surface plus
+frame's action vocabulary; ``peek`` is the all-session overview's
+non-arming unscoped read (the kernel namespace is the same surface plus
 ``graph``/``watch`` for agents)."""
 
 ACTIVITY_TIMEOUT_MS_CAP = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
@@ -2473,9 +2474,11 @@ class FactoryExecutor:
     async def activity(self, request: dict[str, Any]) -> Any:
         """Handle one out-of-band ``factory_activity`` request frame (the
         host bridge's lane): route the action to ``graph``/``status``/
-        ``watch``/``run``/``stop``/``resume`` and return the reply's result
-        payload. Raises ``ValueError`` for malformed requests and unknown
-        runs/specs (the reply carries it as the error reason). ``graph``
+        ``watch``/``run``/``stop``/``resume``/``peek`` and return the reply's
+        result payload. Raises ``ValueError`` for malformed requests and
+        unknown runs/specs (the reply carries it as the error reason).
+        ``peek`` is the all-session overview's non-arming unscoped read; it
+        takes no target. ``graph``
         and ``watch`` answer with the compact snapshots (the host lane
         renders diagrams, not answers); ``run`` is the lane that starts a
         run from the daemon or TUI, so it rides the full ``run()``
@@ -2505,7 +2508,11 @@ class FactoryExecutor:
             raise ValueError(
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
-        if action == "graph":
+        if action in ("graph", "peek"):
+            # ``peek`` answers the same compact unscoped snapshot as
+            # ``graph``; the host refuses a target for it, and this lane
+            # never arms a run, so a display refresh in one session cannot
+            # complete another owner's interrupted flows.
             return _wire_payload(self.graph(run_id or spec_id, compact=True))
         if action == "status":
             if not run_id:

@@ -8082,6 +8082,12 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
             {"action": "graph"}
         )
         self.assertEqual([run["runId"] for run in listed["runs"]], [run_id])
+        # peek is the overview's non-arming unscoped read: the same rows,
+        # with no target.
+        peeked = await factory_module.default_factory_executor().activity(
+            {"action": "peek"}
+        )
+        self.assertEqual([run["runId"] for run in peeked["runs"]], [run_id])
         one = await factory_module.default_factory_executor().activity(
             {"action": "graph", "runId": run_id}
         )
