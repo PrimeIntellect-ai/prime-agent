@@ -161,6 +161,13 @@ impl ExitGuard {
         }
     }
 
+    /// Test-only: how many Ctrl+C presses the UI loop has reported
+    /// handled. One press must count once, whichever surface consumes it.
+    #[cfg(test)]
+    pub(crate) fn handled_ctrl_c(&self) -> u64 {
+        self.state.handled_ctrl_c.load(Ordering::SeqCst)
+    }
+
     /// The run decided to leave: the process must be gone within
     /// [`FORCE_QUIT_AFTER_MS`] even if the shutdown path wedges — the bounded
     /// requests and the exit flush are best-effort now.
