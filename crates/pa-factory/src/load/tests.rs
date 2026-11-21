@@ -213,6 +213,30 @@ fn a_state_without_outputs_still_carries_an_emit_contract() {
     assert_eq!(ship["emit"], json!({"outputs": [], "records": {}}));
 }
 
+/// A top-level `file` output still loads, and its emit contract keeps the
+/// `file` type that `factory.emit` checks and copies.
+#[test]
+fn a_top_level_file_output_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dir(
+        dir.path(),
+        &MACHINE.replacen(
+            "outputs = { url = \"text\" }",
+            "outputs = { url = \"file\" }",
+            1,
+        ),
+        FILES,
+    );
+    let machine = load_machine_dir(dir.path()).unwrap();
+    let mut params = Map::new();
+    params.insert("task".to_string(), json!("fix the retry loop"));
+    let spec = compile(&machine, &params).unwrap();
+    assert_eq!(
+        spec["states"][4]["emit"],
+        json!({"outputs": [{"name": "url", "type": "file"}], "records": {}})
+    );
+}
+
 #[test]
 #[expect(clippy::too_many_lines, reason = "one row per load error")]
 fn every_load_error_names_its_place() {
@@ -371,6 +395,19 @@ fn every_load_error_names_its_place() {
             )],
             &[],
             "optional outputs are not supported yet",
+        ),
+        (
+            &[(
+                "outputs = { url = \"text\" }",
+                "outputs = { url = \"list[file]\" }",
+            )],
+            &[],
+            "machine.toml: states.ship.outputs.url: file ports inside a list or a record are not supported yet (url[])",
+        ),
+        (
+            &[("at = \"text\"", "at = \"file\"")],
+            &[],
+            "machine.toml: states.review-a.outputs.verdict: file ports inside a list or a record are not supported yet (verdict.findings[].at)",
         ),
         (
             &[(
