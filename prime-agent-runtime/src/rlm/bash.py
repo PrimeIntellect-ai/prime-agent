@@ -132,15 +132,19 @@ def _is_home_scale_root(token: str) -> bool:
 
 
 def _is_rg_depth_bound(tokens: list[str]) -> bool:
-    """rg's --max-depth[=]N / -d N / -dN with a numeric argument; a bare
-    token (the filename maxdepth.txt) never counts."""
+    """rg's --max-depth[=]N / -d N / -dN with a numeric argument, also at the
+    end of a short cluster (`-id2`, `-id 2`); a bare token (the filename
+    maxdepth.txt) never counts."""
     for i, t in enumerate(tokens):
-        if t in ("--max-depth", "-d") and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if t == "--max-depth" and following.isdigit():
             return True
         if t.startswith("--max-depth=") and t[len("--max-depth=") :].isdigit():
             return True
-        if t.startswith("-d") and len(t) > 2 and t[2:].isdigit():
-            return True
+        cluster = _short_cluster(t, _RG_VALUE_LETTERS)
+        if cluster is not None and cluster[-1] == "d":
+            if (t[len(cluster) + 1 :] or following).isdigit():
+                return True
     return False
 
 
@@ -166,7 +170,8 @@ def _is_redirect_operator(token: str) -> bool:
 
 # Options whose operand is the next token, so that operand is neither the
 # pattern nor a root. Type and glob filters take operands only in rg (GNU
-# grep's -T takes none).
+# grep's -T takes none). The rg set is every value option in ripgrep 15's
+# --help; rg's -r is --replace (a value), not grep's recursive flag.
 _GREP_VALUE_OPTIONS = frozenset(
     {
         "-e", "--regexp", "-f", "--file", "-m", "--max-count",
@@ -174,7 +179,14 @@ _GREP_VALUE_OPTIONS = frozenset(
     }
 )
 _RG_VALUE_OPTIONS = _GREP_VALUE_OPTIONS | {
-    "-g", "--glob", "--iglob", "-t", "-T", "--type", "--type-not",
+    "-d", "--max-depth", "-E", "--encoding", "-g", "--glob", "-j", "--threads",
+    "-M", "--max-columns", "-r", "--replace", "-t", "-T", "--type",
+    "--type-not", "--color", "--colors", "--context-separator",
+    "--dfa-size-limit", "--engine", "--field-context-separator",
+    "--field-match-separator", "--generate", "--hostname-bin",
+    "--hyperlink-format", "--iglob", "--ignore-file", "--max-filesize",
+    "--path-separator", "--pre", "--pre-glob", "--regex-size-limit", "--sort",
+    "--sortr", "--type-add", "--type-clear",
 }
 
 # The short letters of those options: a cluster's first value-taking letter
@@ -207,11 +219,25 @@ _FIND_GLOBAL_OPTIONS = frozenset(
     {"-H", "-L", "-P", "-X", "-d", "-s", "-x", "--"}
 )
 
+# Reserved words that can come before a command: the command after them
+# still runs (`if find ...`, `then find ...`, `! find ...`).
+_COMMAND_PREFIX_WORDS = frozenset(
+    {"!", "do", "elif", "else", "if", "then", "time", "until", "while"}
+)
+
 
 # Masked quoted arguments leave this placeholder token behind: bash saw an
 # argument here, and the scanner's positional pattern-skip must skip the
 # placeholder, not a scan root that follows it.
 MASK_PLACEHOLDER = "\x01"
+
+
+def _mask_quoted_char(ch: str) -> str:
+    """Masked quoted data stays in one word with its neighbors (a placeholder,
+    never whitespace) and keeps `/`: bash joins `~/"work/repo"` into one deep
+    path, and the home-scale root test reads the depth from its `/`."""
+    return "/" if ch == "/" else MASK_PLACEHOLDER
+
 
 # Substitution nesting deeper than this is not scanned: a malformed
 # deeply-nested command must stay cheap on both stack and time.
@@ -265,11 +291,11 @@ def _mask_scan_literals(command: str) -> str:
                 continue
             j = i + 1
             while j < n and chars[j] != "'":
-                chars[j] = " "
+                chars[j] = _mask_quoted_char(chars[j])
                 j += 1
             chars[i] = MASK_PLACEHOLDER
             if j < n:
-                chars[j] = " "
+                chars[j] = ""  # the closing quote joins a glued suffix
             i = j + 1
             continue
         if ch == "\\" and i + 1 < n:
@@ -524,8 +550,8 @@ def _mask_scan_literals(command: str) -> str:
                 if chars[i] == "\\" and i + 1 < n:
                     # Escapes inside double quotes are literal data, including
                     # an escaped \$HOME.
-                    chars[i] = " "
-                    chars[i + 1] = " "
+                    chars[i] = MASK_PLACEHOLDER
+                    chars[i + 1] = _mask_quoted_char(chars[i + 1])
                     i += 2
                 elif chars[i] == "$" and i + 1 < n and chars[i + 1] == "(":
                     depth = 0
@@ -553,10 +579,10 @@ def _mask_scan_literals(command: str) -> str:
                         i += 1
                     i += 1
                 else:
-                    chars[i] = " "
+                    chars[i] = _mask_quoted_char(chars[i])
                     i += 1
             if i < n:
-                chars[i] = " "  # closing quote
+                chars[i] = ""  # the closing quote joins a glued suffix
             i += 1
             continue
         if ch == "#" and (
@@ -580,14 +606,15 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
     # inside the segment: their `&` is not a separator.
     for segment in re.split(r"&&|\|\||;|\||\n|(?<![<>])&(?!>)", masked):
         tokens = segment.split()
-        # Leading grouping operators: `(find ...)` and `{ ...; }` run the
-        # same command, so the shape must survive grouping. Walk by index
-        # and strip all prefixes at once: popping the head or copying one
-        # character per round is quadratic in the number of prefixes.
+        # Leading grouping operators and reserved words: `(find ...)`,
+        # `{ ...; }`, `then find ...`, and `! find ...` run the same command,
+        # so the shape must survive them. Walk by index and strip all
+        # prefixes at once: popping the head or copying one character per
+        # round is quadratic in the number of prefixes.
         command_start = 0
         while command_start < len(tokens):
             stripped = tokens[command_start].lstrip("({")
-            if stripped:
+            if stripped and stripped not in _COMMAND_PREFIX_WORDS:
                 tokens[command_start] = stripped
                 break
             command_start += 1
@@ -776,6 +803,11 @@ def _extract_substitutions(masked: str) -> tuple[str, list[str]]:
     bodies: list[str] = []
     i = 0
     while i < len(masked):
+        if chars[i] == "$" and chars[i + 1 : i + 3] == ["(", "("]:
+            # Arithmetic expansion `$((...))` is not command text: step past
+            # its opener, so only a $(...) nested in it is extracted.
+            i += 3
+            continue
         if (
             chars[i] == "$"
             and i + 1 < n
@@ -1368,9 +1400,10 @@ class BashHandle:
         timer.start()
 
     def _scan_timeout_kill(self) -> None:
-        # The flag precedes the kill so _finalize notes the timeout; a
-        # finished command's group is never signalled.
-        if self._done.is_set() or self._reaped:
+        # The flag precedes the kill so _finalize notes the timeout. Guard on
+        # group death like kill(): a backgrounded scan (`find ~ &`) outlives
+        # the foreground result and must still stop at the bound.
+        if self._reaped:
             return
         self._scan_fired = True
         self.kill()

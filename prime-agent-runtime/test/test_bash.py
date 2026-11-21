@@ -1675,7 +1675,7 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_scan('rg -fpatterns.txt "$HOME"'))
         self.assertTrue(is_scan('rg -ePATTERN "$HOME"'))
         self.assertTrue(is_scan('grep -rfpatterns.txt "$HOME"'))
-        self.assertTrue(is_scan('rg -rlefoo "$HOME"'))
+        self.assertTrue(is_scan('grep -rlefoo "$HOME"'))
         # A bare value-taking cluster takes the next token as its operand.
         self.assertTrue(is_scan("grep -rle -error ~/Documents"))
 
@@ -1781,6 +1781,57 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_scan('grep -rl "$HOME/a\\|$HOME/b" ~/Documents'))
         self.assertFalse(is_scan('echo "$HOME/\\$(x; find ~/Documents"'))
 
+    def test_rg_value_options_do_not_displace_the_pattern(self):
+        # rg's -r is --replace and takes a value, like -E/--encoding and the
+        # long value options: the operand is skipped, so the quoted
+        # "$HOME/needle" stays the pattern and src/ is the only root.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan('rg -r X "$HOME/needle" src/'))
+        self.assertFalse(is_scan('rg --replace X "$HOME/needle" src/'))
+        self.assertFalse(is_scan('rg -E utf-8 "$HOME/needle" src/'))
+        self.assertFalse(is_scan('rg --sort path "$HOME/needle" src/'))
+        self.assertFalse(is_scan('rg -rlefoo "$HOME"'))
+        self.assertTrue(is_scan('rg -r X needle "$HOME"'))
+
+    def test_clustered_rg_depth_bound_is_a_bound(self):
+        # `-d` at the end of a short cluster is still the depth bound; after a
+        # value letter (`-ed2`) it is that option's operand.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan("rg -id2 needle ~/Documents"))
+        self.assertFalse(is_scan("rg -id 2 needle ~/Documents"))
+        self.assertTrue(is_scan("rg -ed2 ~/Documents"))
+
+    def test_glued_quoted_fragments_keep_the_path_depth(self):
+        # Bash joins quoted fragments into one word, so `"$HOME"/"work/repo"`
+        # is the deep path $HOME/work/repo. Masked quoted data stays in the
+        # word and keeps its `/`, so only a real home-scale root warns.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan('find "$HOME"/"work/repo" -name x'))
+        self.assertFalse(is_scan('find ~/"work/repo" -name x'))
+        self.assertFalse(is_scan("find ~/'work/repo' -name x"))
+        self.assertFalse(is_scan('find ~/"work"/repo -name x'))
+        self.assertTrue(is_scan('find "$HOME"/"Documents"'))
+        self.assertTrue(is_scan("find ~/'Documents'"))
+
+    def test_reserved_words_do_not_hide_the_command(self):
+        # The command after a reserved word (`then`, `do`, `!`, `time`, ...)
+        # still runs, so a scan there warns like the bare command.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertTrue(is_scan('if true; then find "$HOME/Documents"; fi'))
+        self.assertTrue(is_scan("while true; do grep -rl needle ~/Documents; done"))
+        self.assertTrue(is_scan("if find ~/Documents -name x; then echo y; fi"))
+        self.assertTrue(is_scan("! find ~/Documents"))
+        self.assertTrue(is_scan("time rg needle ~/Documents"))
+        self.assertFalse(is_scan("if true; then timeout 60 find ~/Documents; fi"))
+        self.assertFalse(is_scan("if true; then echo find ~/Documents; fi"))
+
+    def test_arithmetic_expansion_is_not_command_text(self):
+        # `$((...))` is arithmetic, so its text never reads as a scan; a
+        # command substitution nested in it still runs and still warns.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan("echo $(( find + ~ 1 ))"))
+        self.assertTrue(is_scan("echo $(( $(find ~/Documents | wc -l) + 1 ))"))
+
     def test_standalone_background_ampersand_is_a_segment_separator(self):
         # A lone `&` backgrounds the left side and starts a new command, so
         # `sleep 1 & find "$HOME"` must warn like its `&&` form; the `&` in
@@ -1849,6 +1900,21 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
             "Command timed out after 0.5 seconds (PRIME_AGENT_SCAN_TIMEOUT)",
             result.output,
         )
+
+    async def test_scan_timeout_env_stops_a_backgrounded_scan(self):
+        # The foreground result comes back at once, but the group still runs
+        # the backgrounded scan: the timeout stops it at the bound too, the
+        # way kill() reaches a lingering background group.
+        with mock.patch.dict(os.environ, {bash_module._SCAN_TIMEOUT_ENV: "0.5"}):
+            handle = bash("(find ~/prime-agent-scan-pin-no-such-root; sleep 30) &")
+        self.addCleanup(handle.kill, signal.SIGKILL)
+        result = await asyncio.wait_for(handle, timeout=5)
+        self.assertEqual(result.exit_code, 0)
+        for _ in range(60):
+            if not handle.running:
+                break
+            await asyncio.sleep(0.05)
+        self.assertFalse(handle.running)
 
     async def test_scan_timeout_env_leaves_bounded_commands_alone(self):
         with mock.patch.dict(os.environ, {bash_module._SCAN_TIMEOUT_ENV: "0.5"}):
