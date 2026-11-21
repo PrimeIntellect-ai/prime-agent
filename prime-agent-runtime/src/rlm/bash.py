@@ -449,7 +449,8 @@ def _mask_scan_literals(command: str) -> str:
             # its own token (the positional pattern-skip in the segment
             # scanner keeps quoted patterns from counting as roots).
             if _starts_with_home_expansion(chars, i + 1):
-                # Mask separator characters outside substitutions: quoted
+                # One pass finds the closing quote and masks the span's own
+                # separators, so both steps use the same quoting rules: quoted
                 # separators are data, but a $(...)/backtick inside the span
                 # still executes and its body must stay intact for the
                 # substitution scan.
@@ -459,10 +460,20 @@ def _mask_scan_literals(command: str) -> str:
                 sub_backtick = False
                 while j < n:
                     c = chars[j]
-                    if c == "\\" and j + 1 < n:
+                    in_sub = sub_depth > 0 or sub_backtick
+                    # A backslash quotes the next character, except in
+                    # single quotes, where it is literal. In the span itself
+                    # it quotes only $ ` " \ as in bash: another escaped
+                    # character, such as a separator, stays span data.
+                    if (
+                        c == "\\"
+                        and j + 1 < n
+                        and sub_quote != "'"
+                        and (in_sub or chars[j + 1] in '$`"\\')
+                    ):
                         j += 2
                         continue
-                    if sub_depth > 0 or sub_backtick:
+                    if in_sub:
                         # A substitution carries its own quoting: a `"` inside
                         # it never closes the outer span.
                         if sub_quote is not None:
@@ -491,38 +502,15 @@ def _mask_scan_literals(command: str) -> str:
                         sub_backtick = True
                         j += 1
                         continue
+                    # Quoted separators and spaces are data: replace them
+                    # with the non-whitespace placeholder so the span
+                    # stays ONE token. `|;&` are the segment-splitting
+                    # separators: left live, they split the parent command
+                    # and hide the scan root.
+                    if c.isspace() or c in "|;&":
+                        chars[j] = MASK_PLACEHOLDER
                     j += 1
                 close = j
-                k = i + 1
-                sub_depth = 0
-                backtick = False
-                while k < close:
-                    c = chars[k]
-                    if sub_depth > 0:
-                        if c == "(":
-                            sub_depth += 1
-                        elif c == ")":
-                            sub_depth -= 1
-                        k += 1
-                    elif backtick:
-                        if c == "`":
-                            backtick = False
-                        k += 1
-                    elif c == "$" and k + 1 < close and chars[k + 1] == "(":
-                        sub_depth = 1
-                        k += 2
-                    elif c == "`":
-                        backtick = True
-                        k += 1
-                    else:
-                        # Quoted separators and spaces are data: replace them
-                        # with the non-whitespace placeholder so the span
-                        # stays ONE token. `|;&` are the segment-splitting
-                        # separators: left live, they split the parent command
-                        # and hide the scan root.
-                        if c.isspace() or c in "|;&":
-                            chars[k] = MASK_PLACEHOLDER
-                        k += 1
                 # Remove the quotes as the shell does, so a glued suffix
                 # (`"$HOME"/work/repo`) stays part of the same token.
                 chars[i] = ""

@@ -1761,6 +1761,26 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_scan('rg foo "$HOME"'))
         self.assertTrue(is_scan('rg foo "$HOME"/Documents'))
 
+    def test_home_span_backslash_in_single_quotes_is_literal(self):
+        # In single quotes a backslash is literal, so `'%s\'` closes at its
+        # second quote: the span ends at its real closing quote and the rest
+        # of the command is read as commands, with its comment masked.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertTrue(is_scan("echo \"$HOME/$(printf '%s\\' x)\"; find ~/Documents"))
+        self.assertFalse(
+            is_scan("echo \"$HOME/$(printf '%s\\' x)\"; grep -rl needle src # ~/Documents")
+        )
+
+    def test_home_span_mask_follows_substitution_quotes_and_escapes(self):
+        # The span's separator mask reads the same quoting as its closer: a
+        # quoted `)` does not end the substitution, so the scan after it
+        # still warns. In the span itself an escaped separator is data (a
+        # BRE `\|` alternation), and an escaped `\$(` opens nothing.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertTrue(is_scan("echo \"$HOME/$(printf ')'; find ~/Documents)\""))
+        self.assertTrue(is_scan('grep -rl "$HOME/a\\|$HOME/b" ~/Documents'))
+        self.assertFalse(is_scan('echo "$HOME/\\$(x; find ~/Documents"'))
+
     def test_standalone_background_ampersand_is_a_segment_separator(self):
         # A lone `&` backgrounds the left side and starts a new command, so
         # `sleep 1 & find "$HOME"` must warn like its `&&` form; the `&` in
