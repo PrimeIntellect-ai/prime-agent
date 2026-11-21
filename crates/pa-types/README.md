@@ -4,61 +4,19 @@ The single shared vocabulary crate. Nothing else is shared between crates.
 
 ## Scope
 
-`compaction::is_valid_threshold_percent` is the shared percentage-domain validator
-used by settings deserialization, persistence, runtime policy, and the TUI.
-Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/stream events, session JSONL entry schema, daemon wire protocol messages, worker frames.
+`compaction::is_valid_threshold_percent` is the shared percentage-domain validator used by settings deserialization, persistence, runtime policy, and the TUI. Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/stream events, session JSONL entry schema, daemon wire protocol messages, worker frames.
 
 Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui/pa-cli) live here because pa-tui depends on pa-types alone:
 - `daemon::framing`: the private-frame codec of the worker socket (direct-attach clients speak it too).
 - `daemon::plane`: the session/control command-plane table (worker-side peer gating and client-side socket routing both read it).
 - `daemon::{DaemonPeerTransportTicket, DaemonWorkerPeerGrant, DaemonPeerCommand}`: the direct-transport ticket and grant wire shapes.
-- `goal`: the thread-goal wire state (`GoalState`/`GoalStatus`) shared by the
-  goal engine (pa-core), the daemon wire (`goal_update` session events and
-  the attach snapshot's `state.goal`), and the TUI (announcement rows, tray
-  label). The goal *engine* (validation, accounting, continuation prompts)
-  is pa-core's.
-- `inbox_notice`: the agent-inbox notice rows' wire vocabulary (the
-  `inbox_notice` customType, the arrival/reminder class words, the
-  `Agent inbox` sender identity) — one definition the session engine's
-  row builder (pa-core), the daemon's queue lanes and strip provenance,
-  and the TUI's decode all import (pa-tui cannot import the session
-  engine, so a twin constant would drift silently).
-- `slash_commands`: the builtin slash-command table every surface shares
-  (the TUI dispatch + autocomplete, the session engine's command admission,
-  CLI suggestion help) plus its pure parse/suggestion helpers — the TS
-  product keeps the same single table in core and imports it from its TUI.
-- `incident`: the daemon incident classifier shared by the incident CLI
-  (pa-cli's `prime-agent incident`, TS `src/cli/incident.ts`) and the
-  agents-view incident notice (pa-tui's `incident_notices`, TS
-  `src/modes/agents-view/incident-notices.ts`) — pa-tui depends on
-  pa-types alone, and the TS product keeps the same single classifier in
-  `cli/incident.ts` with both halves importing it. Pure log-line parsing
-  (`agent.jsonl` records, per-daemon plain-text lines), worker pid
-  attribution, event classification, and the stall/burst/gap anomaly
-  computation — the message shapes are the TS regexes kept 1:1. The CLI's
-  log-file discovery, `--since`/`--until` window parsing, and report
-  rendering belong to pa-cli; the notice polling, rotation-safe
-  incremental reads, and dismissal horizons belong to pa-tui.
-- `themes`: the bundled theme definition files (`prime`/`dark`/`light`) as
-  pure data, shared by the TUI's theme loader (pa-tui renders terminal
-  colors from them) and the session HTML exporter (pa-core resolves them
-  into CSS variables). Everything built on top of the files — terminal
-  color rendering, export CSS generation, custom-theme discovery — belongs
-  to the consuming crates.
+- `goal`: the thread-goal wire state (`GoalState`/`GoalStatus`) shared by the goal engine (pa-core), the daemon wire (`goal_update` session events and the attach snapshot's `state.goal`), and the TUI (announcement rows, tray label). The goal *engine* (validation, accounting, continuation prompts) is pa-core's.
+- `inbox_notice`: the agent-inbox notice rows' wire vocabulary (the `inbox_notice` customType, the arrival/reminder class words, the `Agent inbox` sender identity) — one definition the session engine's row builder (pa-core), the daemon's queue lanes and strip provenance, and the TUI's decode all import (pa-tui cannot import the session engine, so a twin constant would drift silently).
+- `slash_commands`: the builtin slash-command table every surface shares (the TUI dispatch + autocomplete, the session engine's command admission, CLI suggestion help) plus its pure parse/suggestion helpers — the TS product keeps the same single table in core and imports it from its TUI.
+- `incident`: the daemon incident classifier shared by the incident CLI (pa-cli's `prime-agent incident`, TS `src/cli/incident.ts`) and the agents-view incident notice (pa-tui's `incident_notices`, TS `src/modes/agents-view/incident-notices.ts`) — pa-tui depends on pa-types alone, and the TS product keeps the same single classifier in `cli/incident.ts` with both halves importing it. Pure log-line parsing (`agent.jsonl` records, per-daemon plain-text lines), worker pid attribution, event classification, and the stall/burst/gap anomaly computation — the message shapes are the TS regexes kept 1:1. The CLI's log-file discovery, `--since`/`--until` window parsing, and report rendering belong to pa-cli; the notice polling, rotation-safe incremental reads, and dismissal horizons belong to pa-tui.
+- `themes`: the bundled theme definition files (`prime`/`dark`/`light`) as pure data, shared by the TUI's theme loader (pa-tui renders terminal colors from them) and the session HTML exporter (pa-core resolves them into CSS variables). Everything built on top of the files — terminal color rendering, export CSS generation, custom-theme discovery — belongs to the consuming crates.
 
-- `daemon::update_flow`: the update-flow state machine's shared vocabulary:
-  the coordinator FSM states + legal
-  transition table, `UpdateId`, the on-disk artifact schemas (`intent.json`,
-  `status.json` — TS status-file shape, `prepared/<id>/{roster,marker}.json`),
-  the roster-snapshot projection (sessions/workers/subagents/heartbeats,
-  durable session ids, heartbeat re-arm fields only), the timeout-budget
-  table with `PRIME_AGENT_UPDATE_*_MS` overrides, and the artifact path
-  layout under `<agent-dir>/update-restarts/`. Pure serde + pure data
-  helpers; the FSM drivers and watchdogs are owned by pa-daemon/pa-cli. The
-  prepare/commit wire commands (`prepare_update_restart`/`
-  commit_update_restart`) and the TS mutation classification
-  (`is_daemon_mutating_command`, `is_update_drain_command` — the
-  update-flow admission gate's read tables) live in `daemon::{command,plane}`.
+- `daemon::update_flow`: the update-flow state machine's shared vocabulary: the coordinator FSM states + legal transition table, `UpdateId`, the on-disk artifact schemas (`intent.json`, `status.json` — TS status-file shape, `prepared/<id>/{roster,marker}.json`), the roster-snapshot projection (sessions/workers/subagents/heartbeats, durable session ids, heartbeat re-arm fields only), the timeout-budget table with `PRIME_AGENT_UPDATE_*_MS` overrides, and the artifact path layout under `<agent-dir>/update-restarts/`. Pure serde + pure data helpers; the FSM drivers and watchdogs are owned by pa-daemon/pa-cli. The prepare/commit wire commands (`prepare_update_restart`/` commit_update_restart`) and the TS mutation classification (`is_daemon_mutating_command`, `is_update_drain_command` — the update-flow admission gate's read tables) live in `daemon::{command,plane}`.
 Platform contracts (`platform`): the cross-crate transport, process-identity, socket-identity, and home-dir helpers, plus the suspend-to-background signal control (`process::{stop_own_process_group, ignore_sigint_for_suspend, restore_default_sigint}`: the TUI's TS-`handleCtrlZ` cycle — SIGTSTP to the own process group, SIGINT ignored for the stopped window and restored on the SIGCONT resume; unsafe lives behind this wall because pa-tui opts into the workspace `unsafe_code` forbid) (`platform::dirs::home_dir`: `HOME`, then on Windows `USERPROFILE` / `HOMEDRIVE`+`HOMEPATH` - Node `os.homedir()` parity, returning `None` so each caller owns its fallback). pa-types is the only crate every transport consumer can depend on (pa-tui depends on pa-types alone), so the shared trait vocabulary and its cfg-gated platform implementations live here: AF_UNIX on Unix, named pipes (`\.\pipe\`, `platform/windows_pipe.rs`) on Windows. Remaining platform areas (process control, perms, ...) are implemented per platform behind the same traits, not re-plumbed in callers.
 
 ## Non-goals
