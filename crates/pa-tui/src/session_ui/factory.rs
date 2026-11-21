@@ -110,10 +110,11 @@ impl super::SessionUi {
                 .client
                 .supports_server_capability("factory_node_activity")
         {
-            self.note(
-                "The node view needs a daemon that supports node inspection",
-                view,
-            );
+            let text = "The node view needs a daemon that supports node inspection";
+            self.note(text, view);
+            // The factory page covers the transcript, so the status row alone
+            // would be invisible: the toast overlay sits above the page.
+            self.toast(text, view);
             return;
         }
         self.factory_node_epoch += 1;

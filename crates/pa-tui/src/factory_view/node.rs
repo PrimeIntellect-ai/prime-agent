@@ -410,7 +410,7 @@ impl NodeView {
     /// Record the node fetch's failure on the error row (the last good
     /// document stays).
     pub fn set_error(&mut self, message: String) {
-        self.error = Some(message);
+        self.error = Some(crate::menu_panel::scrub_controls(&message));
     }
 
     /// One Esc: the template document closes first (back to the instance
