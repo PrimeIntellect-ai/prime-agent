@@ -805,14 +805,15 @@ def _is_unbounded_home_scan(command: str) -> bool:
 def _is_plain_unbounded_home_scan(command: str) -> bool:
     """True only for the plain shape that may arm the opt-in kill: a literal
     home root (`~`, `$HOME`, `${HOME}`, or one component below) and no
-    substitution, function definition, or heredoc anywhere in the command.
-    The warning stays broad; the kill stays narrow because a shape this
-    parser cannot prove plain must never terminate a process group."""
+    substitution, function definition, heredoc, or arithmetic command
+    anywhere in the command. The warning stays broad; the kill stays narrow
+    because a shape this parser cannot prove plain must never terminate a
+    process group."""
     if not _is_unbounded_home_scan(command):
         return False
     if any(marker in command for marker in ("$(", "`", "<(", ">(")):
         return False
-    if "<<" in command:
+    if "<<" in command or "((" in command:
         return False
     return _FUNCTION_DEFINITION.search(command) is None
 

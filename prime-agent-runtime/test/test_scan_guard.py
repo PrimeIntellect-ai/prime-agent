@@ -556,6 +556,12 @@ class ScanGuardTest(unittest.TestCase):
         self.assertTrue(_scan_guard._is_unbounded_home_scan(command))
         self.assertIsNone(self._scan_timeout(command))
 
+    def test_scan_timeout_does_not_arm_an_arithmetic_shape(self):
+        # Mutation pin: drop the arithmetic check and a command whose text is
+        # an arithmetic expression arms a kill for a group that runs no scan.
+        command = "(( find + ~ 1 )); sleep 120"
+        self.assertIsNone(self._scan_timeout(command))
+
     def test_scan_timeout_does_not_arm_a_heredoc_shape(self):
         # Mutation pin: drop the heredoc check and a scan command carrying a
         # heredoc arms a kill.
