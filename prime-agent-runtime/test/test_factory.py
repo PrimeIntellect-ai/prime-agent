@@ -7447,6 +7447,47 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(self.host.spawn_calls("build"), [])
 
     @async_test
+    async def test_a_foreach_retries_the_instance_that_omitted_its_port(self) -> None:
+        # Macroscope finding: the last-settling instance took the retry
+        # even when an earlier instance omitted a required emit, so the
+        # retry never restored the missing port. The retry must re-run the
+        # instance that omitted it.
+        self.emitted("child-1", {"items": ["a", "b"]})
+        self.emitted("child-3", {"report": "b"})  # fan i1 emitted its port
+        self.emitted("child-4", {"report": "a"})  # fan i0 retry emits it
+        self.store_machine(
+            {
+                "params": {"task": "ship it"},
+                "states": [
+                    state(
+                        "plan",
+                        entry=True,
+                        subagent={"prompt": "Plan {task}."},
+                        outputs=[{"name": "items", "type": "json"}],
+                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
+                    ),
+                    state(
+                        "fan",
+                        subagent={"prompt": "Do {items}."},
+                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
+                        outputs=[{"name": "report", "type": "text"}],
+                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                        foreach={"over": "items", "max": 2},
+                        retries=1,
+                    ),
+                ],
+                "transitions": [{"from": "plan", "to": "fan"}],
+            }
+        )
+        status = await self.run_to_end()
+
+        self.assertEqual(status["state"], "done")
+        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
+        self.assertEqual(len(names), 3)
+        self.assertIn("-i0-a2", names[-1])
+        self.assertNotIn("-i1-a2", " ".join(names))
+
+    @async_test
     async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
         nodes = Path(self.host.session_root) / "nodes"
         nodes.mkdir()
