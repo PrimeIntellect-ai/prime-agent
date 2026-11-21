@@ -3,7 +3,7 @@
 use super::{
     json, queue_lanes, queued_bash_completion_notices, response_failure, response_success,
     session_snapshot, AgentSessionEngine, DaemonResponse, QueueCheckpoint, QueuePriority,
-    QueuedItem, SessionFile, TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
+    QueuedItem, SessionCore, SessionFile, TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 /// How long the shutdown waits for the connections' fan-outs to flush.
@@ -745,11 +745,21 @@ impl Worker {
     ///
     /// Panics when the session-core mutex is poisoned.
     pub(crate) fn outstanding_background_jobs(&self) -> u64 {
+        let core = self.core.lock().unwrap();
+        self.outstanding_background_jobs_locked(&core)
+    }
+
+    /// The same count over a held session-core guard: a caller that also reads
+    /// the session summary takes both from one snapshot, so a completion
+    /// notice cannot be dequeued into a new turn between the two reads. A
+    /// finished handle's notice is admitted before the handle leaves the live
+    /// set, so reading the live count first cannot miss a delivery.
+    pub(crate) fn outstanding_background_jobs_locked(&self, core: &SessionCore) -> u64 {
         let live = self
             .agent_engine
             .as_ref()
             .map_or(0, |engine| engine.background_bash_handle_count());
-        let queued = queued_bash_completion_notices(&self.core.lock().unwrap());
+        let queued = queued_bash_completion_notices(core);
         (live + queued) as u64
     }
 
