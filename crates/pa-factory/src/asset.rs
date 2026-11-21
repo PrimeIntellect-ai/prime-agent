@@ -45,7 +45,7 @@ impl fmt::Display for AssetPath {
 /// A path that does not give a readable file inside the machine directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetError {
-    /// The path is absolute or has a `.` or `..` part.
+    /// The path is absolute or has an empty, `.`, or `..` part.
     Outside {
         path: String,
         dir: PathBuf,
@@ -95,18 +95,21 @@ impl std::error::Error for AssetError {}
 
 /// The real path of `relative` inside `dir`.
 ///
-/// The path must be relative with only normal parts, and its real path
-/// (after each symlink) must stay under the real path of `dir`.
+/// The path must be relative with no empty, `.`, or `..` part (the
+/// kernel's validator uses the same rule), and its real path (after each
+/// symlink) must stay under the real path of `dir`.
 ///
 /// # Errors
 ///
-/// [`AssetError::Outside`] for an absolute path or a `.` or `..` part,
+/// [`AssetError::Outside`] for an absolute path or an empty, `.`, or `..` part,
 /// [`AssetError::Missing`] when nothing is at the path, and
 /// [`AssetError::Escapes`] when a symlink leaves the directory.
 pub(crate) fn resolve(dir: &Path, relative: &str) -> Result<PathBuf, AssetError> {
     let path = Path::new(relative);
-    if relative.is_empty()
-        || path.is_absolute()
+    if path.is_absolute()
+        || relative
+            .split('/')
+            .any(|part| matches!(part, "" | "." | ".."))
         || path
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))

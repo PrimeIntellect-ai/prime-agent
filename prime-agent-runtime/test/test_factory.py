@@ -1016,6 +1016,74 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(machine["transitions"][0]["when"]["output"], "o")
 
 
+class CanonicalizeMachineAssetsTest(unittest.TestCase):
+    """Asset inputs (``assets/<path>``) of a machine-directory run resolve
+    inside the machine directory, by the same rule as the Rust loader."""
+
+    def setUp(self) -> None:
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.machine_dir = self.root / "outline-draft"
+        (self.machine_dir / "assets").mkdir(parents=True)
+        (self.machine_dir / "assets" / "style.md").write_text("Be brief.\n", encoding="utf-8")
+
+    def machine(self, asset: str) -> dict[str, Any]:
+        return {
+            "states": [
+                state("plan", entry=True, outputs=[{"name": "outline", "type": "json"}]),
+                state(
+                    "draft",
+                    inputs=[
+                        {"name": "outline", "type": "json", "from": "plan.outline"},
+                        {"name": "style", "type": "text", "from": asset},
+                    ],
+                ),
+            ],
+            "transitions": [{"from": "plan", "to": "draft"}],
+        }
+
+    def test_a_machine_with_an_asset_input_canonicalizes(self) -> None:
+        canonical = canonicalize_factory_spec(self.machine("assets/style.md"), machine_dir=self.machine_dir)
+        self.assertEqual(
+            canonical["states"][1]["inputs"],
+            [
+                {"name": "outline", "type": "json", "from": "plan.outline"},
+                {"name": "style", "type": "text", "from": "assets/style.md"},
+            ],
+        )
+
+    def test_a_dot_dot_asset_path_is_rejected(self) -> None:
+        (self.root / "secret.md").write_text("secret", encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            canonicalize_factory_spec(self.machine("assets/../../secret.md"), machine_dir=self.machine_dir)
+        self.assertEqual(
+            str(caught.exception),
+            f"state draft input 'style': 'assets/../../secret.md' must be a relative path inside "
+            f"the machine directory {self.machine_dir}",
+        )
+
+    def test_a_symlink_that_leaves_the_directory_is_rejected(self) -> None:
+        secret = self.root / "secret.md"
+        secret.write_text("secret", encoding="utf-8")
+        (self.machine_dir / "assets" / "link.md").symlink_to(secret)
+        with self.assertRaises(ValueError) as caught:
+            canonicalize_factory_spec(self.machine("assets/link.md"), machine_dir=self.machine_dir)
+        self.assertEqual(
+            str(caught.exception),
+            f"state draft input 'style': 'assets/link.md' escapes the machine directory "
+            f"{self.machine_dir}: it resolves to {secret.resolve()}",
+        )
+
+    def test_a_missing_asset_names_its_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "'assets/missing.md' does not exist in the machine directory"):
+            canonicalize_factory_spec(self.machine("assets/missing.md"), machine_dir=self.machine_dir)
+
+    def test_an_asset_input_needs_a_machine_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only a run of a machine directory has assets"):
+            canonicalize_factory_spec(self.machine("assets/style.md"))
+
+
 # ---------------------------------------------------------------------------
 # Machine-form validation
 # ---------------------------------------------------------------------------
@@ -7356,6 +7424,53 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
         self.assertEqual(resolve("review"), user / "review")
         self.assertEqual(resolve("both"), repo / "both")
         self.assertIsNone(resolve("absent"))
+
+
+class FactoryMachineDirectoryAssetsTest(_ExecutorTestCase):
+    """A machine-directory run binds an asset input from the directory's
+    assets/ tree and reads each asset one time in the run."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.machine_dir = user_machines_dir() / "outline-draft"
+        (self.machine_dir / "assets").mkdir(parents=True)
+        (self.machine_dir / "machine.toml").write_text("format = 1\n", encoding="utf-8")
+        (self.machine_dir / "assets" / "style.md").write_text("Be brief.", encoding="utf-8")
+
+    def compiled(self, asset: str) -> None:
+        self.host.compiled[str(self.machine_dir)] = {
+            "name": "outline-draft",
+            "version": 1,
+            "description": "Outline, then draft",
+            "author": None,
+            "spec": {
+                "run": {},
+                "states": [
+                    {"id": "draft", "entry": True, "subagent": {"prompt": "Draft. Style: {style}"},
+                     "inputs": [{"name": "style", "type": "text", "from": asset}]},
+                ],
+                "transitions": [],
+            },
+        }
+
+    @async_test
+    async def test_the_run_binds_the_asset_text_into_the_prompt(self) -> None:
+        self.compiled("assets/style.md")
+        self.host.outcomes["draft"] = {"status": "done", "answer": "done"}
+        result = await rlm_module.rlm.factory.run("outline-draft")
+        run = self.executor._runs[result["run_id"]]
+        await run.task
+
+        self.assertEqual((await rlm_module.rlm.factory.status(result["run_id"]))["state"], "done")
+        self.assertEqual([call["prompt"] for call in self.host.spawn_calls("draft")], ["Draft. Style: Be brief."])
+        self.assertEqual(run.assets, {"assets/style.md": "Be brief."})
+
+    @async_test
+    async def test_a_dot_dot_asset_fails_the_run_before_it_starts(self) -> None:
+        self.compiled("assets/../machine.toml")
+        with self.assertRaisesRegex(ValueError, "'assets/../machine.toml' must be a relative path inside"):
+            await rlm_module.rlm.factory.run("outline-draft")
+        self.assertEqual(self.executor._runs, {})
 
 
 class FactoryEmitTest(_ExecutorTestCase):
