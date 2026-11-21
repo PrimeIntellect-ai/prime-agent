@@ -63,6 +63,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         kernel_bash_activity: std::sync::Arc::new(tokio::sync::Notify::new()),
         running_client_admissions: Vec::new(),
         running_wire_admissions: Vec::new(),
+        running_delivery_scoped: false,
         tool_use_count: 0,
     }));
     TurnRunner {

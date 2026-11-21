@@ -181,6 +181,7 @@ impl TurnRunner {
         core.running_admission_ids = running_admission_ids(&items);
         core.running_client_admissions = running_client_admissions(&items);
         core.running_wire_admissions = running_wire_admissions(&items);
+        core.running_delivery_scoped = items.iter().any(|item| item.delivery_scoped);
         core.busy = true;
         core.abort_requested = false;
         core.retry_abort_requested = false;
@@ -1284,6 +1285,7 @@ impl TurnRunner {
             core.running_admission_ids.clear();
             core.running_client_admissions.clear();
             core.running_wire_admissions.clear();
+            core.running_delivery_scoped = false;
             more_queued
         };
         self.push_roster_delta();
