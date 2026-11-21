@@ -105,12 +105,8 @@ impl super::SessionUi {
         state_id: &str,
         selector: Option<(u64, u64)>,
     ) {
-        if !self.factory_activity_supported()
-            || !self
-                .client
-                .supports_server_capability("factory_node_activity")
-        {
-            let text = "The node view needs a daemon that supports node inspection";
+        if !self.factory_activity_supported() {
+            let text = "The node view needs a daemon that advertises the factory lane";
             self.note(text, view);
             // The factory page covers the transcript, so the status row alone
             // would be invisible: the toast overlay sits above the page.
