@@ -9814,10 +9814,6 @@ class FactoryFrameCapTest(unittest.TestCase):
 
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ---------------------------------------------------------------------------
 # Machine library: MACHINE.md parse, render, gate, resolution, run.
 #
@@ -14551,3 +14547,6 @@ class FactoryRunTombstoneTest(_ExecutorTestCase):
 
         self.assertFalse(_frame_has_lone_surrogate(record), "a lone surrogate rode the status answer")
 
+
+if __name__ == "__main__":
+    unittest.main()
