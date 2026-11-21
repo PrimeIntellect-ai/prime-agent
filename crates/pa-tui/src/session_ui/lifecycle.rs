@@ -1674,6 +1674,73 @@ mod backfill_tests {
     }
 
     #[tokio::test]
+    async fn library_back_fences_the_pending_drill_in() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, _requests) = mock_session(
+                &dir.path().join("library-back.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_library_page(&mut view);
+            view.library_view.as_mut().unwrap().apply_machines(
+                crate::factory_view::parse_library_machines(&json!({"machines": [
+                    {"name": "first", "description": "", "source": "repo"},
+                ]})),
+            );
+            view.library_view
+                .as_mut()
+                .unwrap()
+                .apply_detail("first", &json!({"specId": "first", "machine": {}}));
+            let epoch_before_back = session.library_detail_epoch;
+            let issued_at = session.library_detail_epoch;
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Esc,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            assert!(
+                session.library_detail_epoch > epoch_before_back,
+                "back from the drill-in bumps the detail epoch"
+            );
+            // A reply issued before the back is stale and must not restore
+            // the detail or its error.
+            session.dirty = false;
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Graph {
+                    session: session.session_id.clone(),
+                    epoch: issued_at,
+                    name: "first".to_string(),
+                    result: Ok(json!({"specId": "first", "machine": {}})),
+                },
+                &mut view,
+            );
+            assert!(!session.dirty, "a reply from before the back is dropped");
+            let frame = view.render_frame(100, 30);
+            let text = frame
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(!text.contains("machine: first"), "{text}");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("the back fence completes within ten seconds");
+    }
+
+    #[tokio::test]
     async fn library_graph_never_blocks_keys_or_reopens_a_replaced_page() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let dir = tempfile::tempdir().unwrap();
