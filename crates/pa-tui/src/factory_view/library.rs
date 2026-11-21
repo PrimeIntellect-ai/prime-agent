@@ -176,6 +176,12 @@ impl LibraryView {
 
     /// The selected machine row, when the list has one.
     #[must_use]
+    /// The machine an open drill-in shows, when the page is drilled in.
+    /// A rebind re-issues this machine's fetch with the new wire id.
+    pub fn open_machine_name(&self) -> Option<String> {
+        self.detail.as_ref().map(|detail| detail.name.clone())
+    }
+
     pub fn selected_machine(&self) -> Option<&LibraryMachine> {
         self.machines.get(self.selected)
     }
@@ -446,7 +452,9 @@ impl LibraryView {
                 machine.name.clone(),
             ));
             row.push(theme.fg_span(ThemeColor::Dim, format!(" [{}]", machine.source)));
-            row.push(theme.fg_span(ThemeColor::Muted, format!(" — {}", machine.description)));
+            if !machine.description.is_empty() {
+                row.push(theme.fg_span(ThemeColor::Muted, format!(" — {}", machine.description)));
+            }
             body.push(truncate_line(&row, width, ""));
         }
         let mut tail: Vec<Line> = Vec::new();

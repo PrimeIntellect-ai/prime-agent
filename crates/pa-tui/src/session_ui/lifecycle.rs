@@ -646,6 +646,17 @@ impl SessionUi {
             // Retry after recovery and fence replies from the previous attachment.
             self.library_list_epoch = self.library_list_epoch.wrapping_add(1);
             self.spawn_library_list_refresh();
+            // An open drill-in rides the same retry: its request carried the
+            // previous wire id, so re-issue it rather than leaving the page on
+            // the loader until the user backs out and drills in again.
+            let open_machine = view
+                .library_view
+                .as_ref()
+                .and_then(|library| library.open_machine_name());
+            if let Some(name) = open_machine {
+                self.library_detail_epoch = self.library_detail_epoch.wrapping_add(1);
+                self.spawn_library_graph_fetch(name);
+            }
         }
         // Retry countdowns belong to the previous event stream. The fresh
         // snapshot's activity flags own this attachment; only a new retry

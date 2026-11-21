@@ -125,7 +125,7 @@ impl super::SessionUi {
     }
 
     /// Fetch a graph off the input path. Selection changes and page mounts fence its reply.
-    fn spawn_library_graph_fetch(&self, name: String) {
+    pub(crate) fn spawn_library_graph_fetch(&self, name: String) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let session = self.session_id.clone();
