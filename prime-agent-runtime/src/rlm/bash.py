@@ -227,8 +227,9 @@ _COMMAND_PREFIX_WORDS = frozenset(
 )
 
 # An assignment word before a command (`LC_ALL=C find ...`) only sets the
-# command's environment.
-_ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# command's environment. An array assignment (`files=(find ~)`) is not a
+# prefix: its words are array elements, and nothing after it runs.
+_ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(?!\()")
 
 
 # Masked quoted arguments leave this placeholder token behind: bash saw an

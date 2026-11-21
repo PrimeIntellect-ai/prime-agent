@@ -1858,6 +1858,14 @@ class ScanCostGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_scan("LC_ALL=C timeout 60 find ~/Documents"))
         self.assertFalse(is_scan("x=1"))
 
+    def test_array_assignment_is_not_a_command_prefix(self):
+        # The words of an array assignment are elements, not a command, so a
+        # scan-like element never warns; a real scan after it still does.
+        is_scan = bash_module._is_unbounded_home_scan
+        self.assertFalse(is_scan("files=( find ~/Documents ); sleep 100"))
+        self.assertFalse(is_scan("files=(rg needle ~)"))
+        self.assertTrue(is_scan("files=(a b); find ~/Documents"))
+
     def test_process_substitution_bodies_are_scanned(self):
         # `<(...)` and `>(...)` bodies run like `$(...)` bodies, so a scan
         # inside one warns.
