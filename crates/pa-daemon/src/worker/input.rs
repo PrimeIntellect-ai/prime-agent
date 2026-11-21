@@ -175,9 +175,19 @@ impl Worker {
         if let Err(response) = self.require_created(lane.as_str()) {
             return response;
         }
+        // `requireBusy` admits only into a running turn the runner keeps
+        // feeding, so it never starts a turn and never resumes a suspension.
+        let require_busy = payload.get("requireBusy").and_then(Value::as_bool) == Some(true);
+        let command = if lane == Lane::Steering {
+            "steer"
+        } else {
+            "follow_up"
+        };
         // These commands are resume sites: an admitted turn with
         // `wake: "immediate"` resumes the suspension.
-        self.resume_queued_input();
+        if !require_busy {
+            self.resume_queued_input();
+        }
         let message = payload
             .get("message")
             .and_then(Value::as_str)
@@ -231,6 +241,9 @@ impl Worker {
             }
         }
         let mut core = self.core.lock().unwrap();
+        if require_busy && (!core.busy || core.queued_input_parked(&self.input_pauses)) {
+            return response_success(None, command, Some(json!({ "queued": false })));
+        }
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -268,11 +281,6 @@ impl Worker {
         });
         let _ = self.emit_action_update(&snapshot);
         self.work_notify.notify_one();
-        let command = if lane == Lane::Steering {
-            "steer"
-        } else {
-            "follow_up"
-        };
         response_success(None, command, Some(json!({ "queued": true })))
     }
 
