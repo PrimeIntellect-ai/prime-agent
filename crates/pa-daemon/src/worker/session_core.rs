@@ -67,14 +67,18 @@ pub(crate) struct SessionCore {
     pub(crate) tool_use_count: u64,
     /// The kernel `bash()` launches the session observed, pid -> the
     /// delivery identity whose turn ran at the launch (the worker's
-    /// launch observer records it): a completion notice names only its
-    /// pid and arrives long after the creating turn, so the notice's
-    /// admission resolves the creator here. Bounded FIFO — the OLDEST
-    /// launch's binding leaves at the bound, and the activity-end
-    /// observation drops an in-cell-consumed handle's binding; a worker
-    /// restart loses the table (a notice that lands after it arrives
-    /// unstamped, the session-owned class).
-    pub(crate) kernel_bash_creators: std::collections::VecDeque<(u32, String)>,
+    /// launch observer records it), plus whether that batch was
+    /// delivery-scoped (the A2A task's `deliveryScoped` prompt): a
+    /// completion notice names only its pid and arrives long after the
+    /// creating turn, so the notice's admission resolves the creator
+    /// here. A scoped row's notice keeps the delivery's own route (its
+    /// continuation turn credits the task); every other notice keeps
+    /// main's inbox routing. Bounded FIFO — the OLDEST launch's binding
+    /// leaves at the bound, and the activity-end observation drops an
+    /// in-cell-consumed handle's binding; a worker restart loses the
+    /// table (a notice that lands after it arrives unstamped, the
+    /// session-owned class).
+    pub(crate) kernel_bash_creators: std::collections::VecDeque<(u32, String, bool)>,
     /// The binding table's change wake (the worker's shared `Notify`):
     /// fires when a launch's binding leaves — the in-cell consumption's
     /// activity end, or the completion notice's admission consuming its

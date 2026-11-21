@@ -325,9 +325,9 @@ async fn the_launch_table_evicts_its_oldest_binding_not_the_smallest_pid() {
     core.kernel_bash_creators.clear();
     // The oldest launch carries the LARGEST pid (a long-running job):
     // 256 bindings reach the table's bound exactly.
-    record_kernel_bash_creator(&mut core, 9000, "oldest-long-job".into());
+    record_kernel_bash_creator(&mut core, 9000, "oldest-long-job".into(), false);
     for pid in 1..MAX_KERNEL_BASH_CREATORS as u32 {
-        record_kernel_bash_creator(&mut core, pid, format!("launch-{pid}"));
+        record_kernel_bash_creator(&mut core, pid, format!("launch-{pid}"), false);
     }
     assert_eq!(
         core.kernel_bash_creators.len(),
@@ -335,7 +335,7 @@ async fn the_launch_table_evicts_its_oldest_binding_not_the_smallest_pid() {
         "the table holds its bound"
     );
     // One more launch: the OLDEST binding (the largest pid) leaves.
-    record_kernel_bash_creator(&mut core, 5000, "newest".into());
+    record_kernel_bash_creator(&mut core, 5000, "newest".into(), false);
     let pids: Vec<u32> = core
         .kernel_bash_creators
         .iter()
@@ -350,7 +350,7 @@ async fn the_launch_table_evicts_its_oldest_binding_not_the_smallest_pid() {
     assert_eq!(pids.last(), Some(&5000), "the newest launch stays bound");
     // A re-launch of a bound pid re-binds it at the back under its new
     // creator, evicting nothing past the bound.
-    record_kernel_bash_creator(&mut core, 3, "relaunch-3".into());
+    record_kernel_bash_creator(&mut core, 3, "relaunch-3".into(), false);
     let bindings: Vec<(u32, String)> = core
         .kernel_bash_creators
         .iter()
@@ -400,9 +400,9 @@ async fn the_wired_activity_end_observer_drops_the_launch_binding() {
     {
         let mut core = worker.core.lock().unwrap();
         core.kernel_bash_creators
-            .push_back((4321, "delivery-a".to_string()));
+            .push_back((4321, "delivery-a".to_string(), false));
         core.kernel_bash_creators
-            .push_back((4322, "delivery-b".to_string()));
+            .push_back((4322, "delivery-b".to_string(), false));
     }
     let engine = worker
         .agent_engine

@@ -1468,7 +1468,7 @@ async fn a_kernel_bash_notice_carries_its_creating_delivery() {
     let core = Arc::clone(&runner.core);
     {
         let mut guard = core.lock().unwrap();
-        crate::worker::record_kernel_bash_creator(&mut guard, 4321, "task-own".into());
+        crate::worker::record_kernel_bash_creator(&mut guard, 4321, "task-own".into(), true);
     }
     admit_kernel_notice(
         &std::sync::Mutex::new(None),
