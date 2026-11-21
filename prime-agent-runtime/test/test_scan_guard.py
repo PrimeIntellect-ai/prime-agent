@@ -336,6 +336,8 @@ class ScanGuardTest(unittest.TestCase):
         self.assertTrue(is_scan("find ~/Documents -ok find {} -maxdepth 1 ';'"))
         self.assertFalse(is_scan("find ~ -exec echo {} \\; -maxdepth 1"))
         self.assertFalse(is_scan("find ~ -exec echo {} + -maxdepth 2"))
+        self.assertFalse(is_scan('find ~ -exec echo {} ";" -maxdepth 1'))
+        self.assertTrue(is_scan("find ~ -exec printf '%s\\n' -maxdepth 1 \\;"))
         self.assertFalse(is_scan("(find ~ -maxdepth 2)"))
         self.assertFalse(is_scan("(rg needle ~ --max-depth 2)"))
         self.assertFalse(is_scan("(rg needle ~ -d 2)"))
@@ -347,6 +349,25 @@ class ScanGuardTest(unittest.TestCase):
         self.assertTrue(is_scan('> /tmp/results rg needle "$HOME"'))
         self.assertTrue(is_scan("LC_ALL=C 2>&1 grep -rl needle ~/Documents"))
         self.assertFalse(is_scan("2>/dev/null find ~ -maxdepth 1"))
+
+    def test_grep_value_options_do_not_displace_the_pattern(self):
+        # GNU grep's --include/--exclude/-d/... take an operand, and
+        # -d/--directories recurse is recursive.
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertFalse(is_scan("grep -r --include '*.md' \"$HOME\" docs/"))
+        self.assertFalse(is_scan('grep -r --exclude-dir node_modules "$HOME" src/'))
+        self.assertTrue(is_scan("grep -d recurse needle ~/Documents"))
+        self.assertTrue(is_scan("grep --directories=recurse needle ~/Documents"))
+        self.assertFalse(is_scan("grep -d skip needle ~/Documents"))
+
+    def test_unquoted_heredoc_terminator_joins_backslash_newline(self):
+        # With an unquoted delimiter, bash joins a line that ends in an
+        # unescaped backslash with the next line before it looks for the
+        # terminator; a quoted delimiter keeps the lines apart.
+        is_scan = _scan_guard._is_unbounded_home_scan
+        self.assertTrue(is_scan("cat <<EOF\nE\\\nOF\nfind ~"))
+        self.assertFalse(is_scan("cat <<EOF\nx \\\nEOF\nfind ~\nEOF"))
+        self.assertFalse(is_scan("cat <<'EOF'\nE\\\nOF\nfind ~\nEOF"))
 
     def test_grep_dereference_recursive_is_recursive(self):
         is_scan = _scan_guard._is_unbounded_home_scan
@@ -422,6 +443,7 @@ class ScanGuardTest(unittest.TestCase):
         self.assertFalse(is_scan("find ~/Documents '-maxdepth' 2"))
         self.assertFalse(is_scan("find . '-newer' ~/stamp"))
         self.assertTrue(is_scan("find ~/Documents '-name' x"))
+        self.assertFalse(is_scan("grep -rl '--' \"$HOME\" src/"))
 
     def test_assignment_words_do_not_hide_the_command(self):
         # An assignment word before a command only sets its environment, so

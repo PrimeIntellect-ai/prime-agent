@@ -40,13 +40,13 @@ def _is_find_depth_bound(tokens: list[str]) -> bool:
     """find's `-maxdepth N` with a numeric argument. The words of an -exec,
     -execdir, -ok, or -okdir action are a command, not find options:
     `find ~ -exec find {} -maxdepth 1 \\;` has no bound. The action ends at
-    `;`, which reaches here masked (`\\;` or `';'` leaves placeholders only),
-    or at `{} +`. A grouping paren glued to N (`(find ~ -maxdepth 2)`) is
-    not part of N."""
+    `{} +` or at `;`, which reaches here masked as exactly two placeholders
+    (`\\;`, `';'`, or `";"`; longer quoted words like `'%s\\n'` mask longer).
+    A grouping paren glued to N (`(find ~ -maxdepth 2)`) is not part of N."""
     in_action = False
     for i, t in enumerate(tokens):
         if in_action:
-            in_action = bool(t.strip(_MASK_PLACEHOLDER)) and not (
+            in_action = t != _MASK_PLACEHOLDER * 2 and not (
                 t == "+" and tokens[i - 1] == "{}"
             )
         elif t in ("-exec", "-execdir", "-ok", "-okdir"):
@@ -77,16 +77,22 @@ _ATTACHED_REDIRECT = re.compile(r"[0-9]*(?:&>>|&>|>>|>\||>&|<&|<>|>|<)\S")
 
 
 # Options whose operand is the next token, so that operand is neither the
-# pattern nor a root. Type and glob filters take operands only in rg (GNU
-# grep's -T takes none). The rg set is every value option in ripgrep 15's
-# --help; rg's -r is --replace (a value), not grep's recursive flag.
-_GREP_VALUE_OPTIONS = frozenset(
+# pattern nor a root. Both tools share the pattern, count, and context
+# options. The grep set adds GNU grep's other value options (its -T takes
+# none); the rg set is every value option in ripgrep 15's --help, where -r is
+# --replace (a value), not grep's recursive flag.
+_SHARED_VALUE_OPTIONS = frozenset(
     {
         "-e", "--regexp", "-f", "--file", "-m", "--max-count",
         "-A", "-B", "-C", "--after-context", "--before-context", "--context",
     }
 )
-_RG_VALUE_OPTIONS = _GREP_VALUE_OPTIONS | {
+_GREP_VALUE_OPTIONS = _SHARED_VALUE_OPTIONS | {
+    "-d", "--directories", "-D", "--devices", "--binary-files", "--exclude",
+    "--exclude-dir", "--exclude-from", "--group-separator", "--include",
+    "--label",
+}
+_RG_VALUE_OPTIONS = _SHARED_VALUE_OPTIONS | {
     "-d", "--max-depth", "--maxdepth", "-E", "--encoding", "-g", "--glob", "-j",
     "--threads",
     "-M", "--max-columns", "-r", "--replace", "-t", "-T", "--type",
@@ -153,10 +159,10 @@ def _mask_quoted_char(ch: str) -> str:
     return "/" if ch == "/" else _MASK_PLACEHOLDER
 
 
-# A quoted span that is all digits or one option word (`'2'`, `"--max-depth"`)
-# is an argument, not data: the tool sees it after quote removal, so it stays
-# visible for option and bound detection.
-_ARGUMENT_WORD = re.compile(r"[0-9]+|--?[A-Za-z0-9][A-Za-z0-9_.=-]*")
+# A quoted span that is all digits, one option word, or `--` (`'2'`,
+# `"--max-depth"`, `'--'`) is an argument, not data: the tool sees it after
+# quote removal, so it stays visible for option and bound detection.
+_ARGUMENT_WORD = re.compile(r"[0-9]+|--|--?[A-Za-z0-9][A-Za-z0-9_.=-]*")
 
 
 def _quoted_argument_end(chars: list[str], start: int, quote: str) -> int | None:
@@ -314,22 +320,33 @@ def _mask_scan_literals(command: str) -> str:
                 if body < n:
                     body += 1  # first char of the body
                     # The terminator line ends the heredoc even mid-
-                    # substitution; find it on the raw text.
+                    # substitution; find it on the raw text. With an
+                    # unquoted delimiter, bash first joins a line that ends
+                    # in an unescaped backslash with the next line.
                     probe = body
-                    region_end = n
+                    region_end = term_eol = n
                     while True:
                         eol = probe
                         while eol < n and chars[eol] != "\n":
                             eol += 1
-                        start = probe
-                        if tabbed:
-                            while start < eol and chars[start] == "\t":
-                                start += 1
-                        if "".join(chars[start:eol]) == delim:
+                        parts = ["".join(chars[probe:eol])]
+                        while (
+                            not quoted
+                            and eol < n
+                            and (len(parts[-1]) - len(parts[-1].rstrip("\\"))) % 2 == 1
+                        ):
+                            parts[-1] = parts[-1][:-1]
+                            joined_eol = eol + 1
+                            while joined_eol < n and chars[joined_eol] != "\n":
+                                joined_eol += 1
+                            parts.append("".join(chars[eol + 1 : joined_eol]))
+                            eol = joined_eol
+                        line = "".join(parts)
+                        if (line.lstrip("\t") if tabbed else line) == delim:
                             region_end = probe
+                            term_eol = eol
                             break  # terminator line: body ends here
                         if eol >= n:
-                            region_end = n
                             break  # no terminator: bash reads to EOF
                         probe = eol + 1
                     # Mask the whole body region in one pass: with an
@@ -337,9 +354,6 @@ def _mask_scan_literals(command: str) -> str:
                     # (bash runs them in the body, and a substitution may
                     # span lines); an escaped \$, \`, or \\ is literal;
                     # everything else is data. The terminator line is data.
-                    term_eol = region_end
-                    while term_eol < n and chars[term_eol] != "\n":
-                        term_eol += 1
                     if quoted:
                         for k in range(body, term_eol):
                             chars[k] = " "
@@ -611,10 +625,10 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
         # One walk makes every option decision. Options end at `--`, and an
         # option's operand is not an option: `grep -e -r ~/x` is not
         # recursive, and `rg -g --files` globs for `--files`. rg always
-        # recurses; the grep family needs -r, -R, --recursive, or
-        # --dereference-recursive. Only rg has a depth bound (--max-depth,
-        # --maxdepth, or -d with a number; a glued grouping paren is not part
-        # of the number).
+        # recurses; the grep family needs -r, -R, --recursive,
+        # --dereference-recursive, or -d/--directories recurse. Only rg has
+        # a depth bound (--max-depth, --maxdepth, or -d with a number; a
+        # glued grouping paren is not part of the number).
         recursive = is_rg
         depth_bound = pattern_from_option = files_mode = False
         positionals: list[str] = []
@@ -637,6 +651,8 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
             if t.startswith("--"):
                 name, eq, value = t.partition("=")
                 recursive = recursive or name in ("--recursive", "--dereference-recursive")
+                if not is_rg and name == "--directories":
+                    recursive = recursive or (value if eq else following) == "recurse"
                 pattern_from_option = pattern_from_option or name in ("--regexp", "--file")
                 files_mode = files_mode or (is_rg and t == "--files")
                 if is_rg and name in ("--max-depth", "--maxdepth"):
@@ -653,10 +669,12 @@ def _segments_contain_unbounded_scan(masked: str) -> bool:
             recursive = recursive or "r" in flags.lower()
             if value_letter:
                 attached = t[len(cluster) + 1 :]
+                operand = attached or following
                 pattern_from_option = pattern_from_option or value_letter in ("e", "f")
                 if is_rg and value_letter == "d":
-                    operand = attached or following
                     depth_bound = depth_bound or operand.rstrip(")").isdigit()
+                elif value_letter == "d":
+                    recursive = recursive or operand == "recurse"
                 skip_next = not attached
         if not recursive or depth_bound:
             continue
