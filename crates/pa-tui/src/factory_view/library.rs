@@ -208,6 +208,7 @@ impl LibraryView {
             .map(|machine| machine.name.clone());
         self.machines = machines;
         self.selected = selected_name
+            .as_deref()
             .and_then(|name| {
                 self.machines
                     .iter()
@@ -215,6 +216,18 @@ impl LibraryView {
             })
             .unwrap_or(0)
             .min(self.machines.len().saturating_sub(1));
+        let selected_after = self
+            .machines
+            .get(self.selected)
+            .map(|machine| machine.name.clone());
+        if selected_after != selected_name {
+            // The selected machine left the library: its open drill-in
+            // belongs to a machine the fresh list no longer has. Closing
+            // it here keeps the page from painting a detail that is not
+            // reachable from the visible list.
+            self.detail = None;
+            self.detail_scroll = 0;
+        }
     }
 
     /// Fold one drill-in reply: the machine's detail mounts and the
@@ -693,6 +706,41 @@ mod tests {
             view.selected_machine().map(|m| m.name.as_str()),
             Some("builder"),
             "the selection follows the machine, never the index"
+        );
+    }
+
+    /// A refresh that loses the selected machine closes its open drill-in:
+    /// the page never paints a detail for a machine the visible list no
+    /// longer selects.
+    #[test]
+    fn a_refresh_that_loses_the_selected_machine_closes_its_detail() {
+        let mut view = LibraryView::new(
+            vec![LibraryMachine {
+                name: "builder".to_string(),
+                description: "Builds.".to_string(),
+                source: "repo".to_string(),
+            }],
+            20,
+        );
+        assert_eq!(
+            view.handle_key("enter", &kb()),
+            LibraryViewAction::DrillIn {
+                name: "builder".to_string(),
+            }
+        );
+        view.apply_detail("builder", &graph("entry --> checking"));
+        view.apply_machines(vec![LibraryMachine {
+            name: "pr-manager".to_string(),
+            description: "Drives a PR.".to_string(),
+            source: "repo".to_string(),
+        }]);
+        assert_eq!(
+            view.selected_machine().map(|machine| machine.name.as_str()),
+            Some("pr-manager")
+        );
+        assert!(
+            view.detail.is_none(),
+            "the gone machine's detail closes with the selection"
         );
     }
 
