@@ -144,6 +144,12 @@ _COMMAND_PREFIX_WORDS = frozenset(
 # command's environment. An array assignment (`files=(find ~)`) is not a
 # prefix: its words are array elements, and nothing after it runs.
 _ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(?!\()")
+# `name() {` / `function name {`: a scan inside a function body runs only when
+# a call does, so the opt-in kill must not treat it as an active scan.
+_FUNCTION_DEFINITION = re.compile(
+    r"(?:^|[;&|(){}`\n])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)"
+    r"|(?:^|[;&|(){}`\n])\s*function\s+[A-Za-z_][A-Za-z0-9_]*"
+)
 
 
 # Masked quoted arguments leave this placeholder token behind: bash saw an
@@ -796,6 +802,21 @@ def _is_unbounded_home_scan(command: str) -> bool:
     return False
 
 
+def _is_plain_unbounded_home_scan(command: str) -> bool:
+    """True only for the plain shape that may arm the opt-in kill: a literal
+    home root (`~`, `$HOME`, `${HOME}`, or one component below) and no
+    substitution, function definition, or heredoc anywhere in the command.
+    The warning stays broad; the kill stays narrow because a shape this
+    parser cannot prove plain must never terminate a process group."""
+    if not _is_unbounded_home_scan(command):
+        return False
+    if any(marker in command for marker in ("$(", "`", "<(", ">(")):
+        return False
+    if "<<" in command:
+        return False
+    return _FUNCTION_DEFINITION.search(command) is None
+
+
 def note_scan_cost(command: str, scan_timeout: float | None = None) -> None:
     """Write the scan-cost hint to the dispatching cell's stderr, within budget."""
     global _scan_hints_written
@@ -819,8 +840,9 @@ def note_scan_cost(command: str, scan_timeout: float | None = None) -> None:
 
 
 def scan_timeout_from_env(command: str) -> float | None:
-    """The opted-in auto-timeout for `command` when set and it is an unbounded
-    home scan; the value must be finite and positive."""
+    """The opted-in auto-timeout for `command` when set and it is a plain
+    unbounded home scan (no substitution, function, or heredoc shape); the
+    value must be finite and positive."""
     raw = os.environ.get(SCAN_TIMEOUT_ENV)
     if raw is None:
         return None
@@ -830,6 +852,6 @@ def scan_timeout_from_env(command: str) -> float | None:
         return None
     return (
         secs
-        if math.isfinite(secs) and secs > 0.0 and _is_unbounded_home_scan(command)
+        if math.isfinite(secs) and secs > 0.0 and _is_plain_unbounded_home_scan(command)
         else None
     )

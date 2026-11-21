@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import unittest
 from unittest import mock
 
@@ -520,6 +521,47 @@ class ScanGuardTest(unittest.TestCase):
             _scan_guard.note_scan_cost("grep -rl needle ~/Documents", 12.5)
         self.assertIn("PRIME_AGENT_SCAN_TIMEOUT", err.getvalue())
         self.assertIn("12.5s", err.getvalue())
+
+    def _scan_timeout(self, command: str) -> float | None:
+        with mock.patch.dict(os.environ, {_scan_guard.SCAN_TIMEOUT_ENV: "1"}):
+            return _scan_guard.scan_timeout_from_env(command)
+
+    def test_scan_timeout_arms_the_plain_shape(self):
+        # Mutation pin: replace _is_plain_unbounded_home_scan with the broad
+        # _is_unbounded_home_scan and the three non-arming tests below arm.
+        for command in (
+            self.INCIDENT,
+            "grep -rl needle ~/Documents",
+            'grep -rl needle "$HOME/Downloads"',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self._scan_timeout(command), 1.0)
+
+    def test_scan_timeout_does_not_arm_a_substitution_shape(self):
+        # Mutation pin: drop the substitution marker check and these warn-
+        # and-arm instead of warn-only.
+        for command in (
+            "find $HOME/$(printf work/repo) -name x",
+            "find ~/`printf Documents` -name x",
+            'echo "$(grep -rl needle ~/Documents)"',
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(_scan_guard._is_unbounded_home_scan(command))
+                self.assertIsNone(self._scan_timeout(command))
+
+    def test_scan_timeout_does_not_arm_a_function_shape(self):
+        # Mutation pin: drop the function-definition check and an uninvoked
+        # body's `find ~` arms a kill for a command that may never run it.
+        command = "f() {\n  find ~ -name x\n}\nsleep 30"
+        self.assertTrue(_scan_guard._is_unbounded_home_scan(command))
+        self.assertIsNone(self._scan_timeout(command))
+
+    def test_scan_timeout_does_not_arm_a_heredoc_shape(self):
+        # Mutation pin: drop the heredoc check and a scan command carrying a
+        # heredoc arms a kill.
+        command = "find ~ -name x <<EOF\nfoo\nEOF"
+        self.assertTrue(_scan_guard._is_unbounded_home_scan(command))
+        self.assertIsNone(self._scan_timeout(command))
 
 
 if __name__ == "__main__":
