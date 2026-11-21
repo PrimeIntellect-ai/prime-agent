@@ -2835,7 +2835,7 @@ class FakeHost:
     scripted per child id first (``child_outcomes``), then per node id
     (``outcomes``); a "running" outcome never settles. ``rate_limit_first``
     / ``rate_limit_forever`` make spawn admissions for a node fail with a
-    429-style RuntimeError. ``gate("rlm.collect"|"rlm.delete_subagent"|"rlm.run"|"factory.progress", n)``
+    429-style RuntimeError. ``gate("rlm.collect"|"rlm.delete_subagent"|"rlm.run"|"factory.progress"|"factory.check", n)``
     suspends the n-th call of that type on an asyncio.Event so tests can
     reproduce races between the control loop and stop()/resume().
     ``advance_per_run`` advances the injected clock on every admission (a
@@ -2927,7 +2927,7 @@ class FakeHost:
     async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         gate = None
-        if request_type in ("rlm.collect", "rlm.delete_subagent", "rlm.run", "factory.progress"):
+        if request_type in ("rlm.collect", "rlm.delete_subagent", "rlm.run", "factory.progress", "factory.check"):
             index = self._call_indices.get(request_type, 0) + 1
             self._call_indices[request_type] = index
             gate = self.gates.pop((request_type, index), None)
@@ -7463,6 +7463,31 @@ class FactoryEmitTest(_ExecutorTestCase):
 
         plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
         self.assertEqual(plan["error"], 'python state output: plan.steps: expected int, got text "two"')
+
+    @async_test
+    async def test_a_stop_during_the_python_output_check_keeps_the_entry_cancelled(self) -> None:
+        nodes = Path(self.host.session_root) / "nodes"
+        nodes.mkdir()
+        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 2}}\n", encoding="utf-8")
+        machine = self.machine()
+        machine["states"][0] = {
+            **machine["states"][0],
+            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
+        }
+        del machine["states"][0]["subagent"]
+        check_gate = self.host.gate("factory.check", 1)
+        self.store_machine(machine)
+        result = await self.start()
+        await self.host.gate_entered("factory.check", 1).wait()  # the python call exited; its check is in flight
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        check_gate.set()
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(plan["status"], "cancelled")
+        self.assertEqual(self.host.spawn_calls("build"), [])
 
     @async_test
     async def test_emit_raises_factory_emit_error_outside_a_factory_child(self) -> None:

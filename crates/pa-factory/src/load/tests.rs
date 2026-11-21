@@ -194,6 +194,25 @@ fn compiles_the_base_machine_to_the_executor_spec() {
     assert_eq!(spec, expected);
 }
 
+/// A state with inputs and no outputs still carries an (empty) emit
+/// contract: the contract is what gives its child `factory.inputs`.
+#[test]
+fn a_state_without_outputs_still_carries_an_emit_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dir(
+        dir.path(),
+        &MACHINE.replacen("outputs = { url = \"text\" }\n", "", 1),
+        FILES,
+    );
+    let machine = load_machine_dir(dir.path()).unwrap();
+    let mut params = Map::new();
+    params.insert("task".to_string(), json!("fix the retry loop"));
+    let spec = compile(&machine, &params).unwrap();
+    let ship = &spec["states"][4];
+    assert_eq!(ship["id"], "ship");
+    assert_eq!(ship["emit"], json!({"outputs": [], "records": {}}));
+}
+
 #[test]
 #[expect(clippy::too_many_lines, reason = "one row per load error")]
 fn every_load_error_names_its_place() {
