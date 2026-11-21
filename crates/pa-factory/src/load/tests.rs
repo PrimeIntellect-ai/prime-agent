@@ -211,6 +211,13 @@ fn a_state_without_outputs_still_carries_an_emit_contract() {
     let ship = &spec["states"][4];
     assert_eq!(ship["id"], "ship");
     assert_eq!(ship["emit"], json!({"outputs": [], "records": {}}));
+    assert!(
+        ship["subagent"]["prompt"].as_str().unwrap().ends_with(
+            "## Inputs\n\nYour inputs, as typed values, are `await rlm.factory.inputs()`."
+        ),
+        "the no-output state's prompt must name factory.inputs: {}",
+        ship["subagent"]["prompt"]
+    );
 }
 
 /// A top-level `file` output still loads, and its emit contract keeps the
@@ -234,6 +241,34 @@ fn a_top_level_file_output_still_loads() {
     assert_eq!(
         spec["states"][4]["emit"],
         json!({"outputs": [{"name": "url", "type": "file"}], "records": {}})
+    );
+}
+
+/// A python state has no `factory.emit`, so a top-level `file` output
+/// would reach a later state as the child's own path. The loader refuses
+/// it; an agent state's emit is the only path that copies a file.
+#[test]
+fn a_python_state_cannot_declare_a_file_output() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dir(
+        dir.path(),
+        &MACHINE.replacen(
+            "outputs = { action = \"enum(ship, rework)\", rework = \"list[finding]\" }",
+            "outputs = { action = \"enum(ship, rework)\", rework = \"list[finding]\", report = \"file\" }",
+            1,
+        ),
+        FILES,
+    );
+    let errors: Vec<String> = load_machine_dir(dir.path())
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        errors,
+        vec![
+            "machine.toml: states.triage.outputs.report: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session".to_string()
+        ]
     );
 }
 

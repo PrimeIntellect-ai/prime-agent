@@ -756,6 +756,8 @@ fn build_state(
                     nested_file(&slot.ty, records, name.clone(), false, &mut BTreeSet::new())
                 {
                     problems.push(Diagnostic::new(MACHINE_FILE, &key, format!("file ports inside a list or a record are not supported yet ({path}); declare each file as a top-level output, which the emit copies")));
+                } else if matches!(&work, Some(Work::Python(_))) && slot.ty == Type::File {
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"));
                 } else {
                     outputs.push(Output { name, slot });
                 }

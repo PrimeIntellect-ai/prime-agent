@@ -4,8 +4,9 @@
 //! (`"emit"`). An agent state's child receives it at spawn, and its
 //! `factory.emit` host request checks every value before accepting it, so
 //! a wrong value fails inside the child that produced it. A python state's
-//! returned dict goes through the same check. The JSON form keeps types in
-//! the machine.toml grammar, so one parser reads both.
+//! returned dict goes through the same check; it has no emit, so a `file`
+//! output is refused. The JSON form keeps types in the machine.toml grammar,
+//! so one parser reads both.
 
 use serde_json::{json, Map, Value};
 

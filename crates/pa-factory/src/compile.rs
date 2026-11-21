@@ -270,6 +270,12 @@ fn assemble_prompt(machine: &Machine, state: &State, agent: &Agent) -> String {
     if !state.outputs.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(&outputs_section(machine, state));
+    } else if !state.inputs.is_empty() {
+        // No outputs: the empty contract exists so the child can still
+        // read its bound inputs, so the prompt must say how.
+        prompt.push_str(
+            "\n\n## Inputs\n\nYour inputs, as typed values, are `await rlm.factory.inputs()`.",
+        );
     }
     to_executor_placeholders(&prompt)
 }
