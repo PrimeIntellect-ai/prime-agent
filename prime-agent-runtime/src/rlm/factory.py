@@ -3453,23 +3453,29 @@ class FactoryExecutor:
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
             entry.answer = self._entry_answer(entry)
             if "emit" in state.spec:
-                capture_failure = self._emitted_outputs(run, state, entry)
+                capture_failure, failed = self._emitted_outputs(run, state, entry)
             else:
                 capture_failure = await self._capture_outputs(run, state, entry)
+                failed = [instance]
             if entry.status != "running":
                 return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
-                # A declared output that never bound after the capture
-                # retry is the producing entry's task failure, not a silent
+                # A declared output that never bound or was never emitted
+                # is the producing entry's task failure, not a silent
                 # valueless settle: no settle is queued (a dependent never
                 # enters on an unbound required input), retries then
                 # failure_policy apply, and the answer stays provisional
-                # for needs_verify if the entry fails permanently.
-                instance.provisional = True
-                instance.capture_failed = True
-                await self._apply_instance_failure(
-                    run, state, entry, instance, capture_failure, retry=True
-                )
+                # for needs_verify if the entry fails permanently. A
+                # foreach entry retries each instance that omitted a
+                # required port, not only the last one to settle.
+                for failed_instance in failed:
+                    failed_instance.provisional = True
+                    failed_instance.capture_failed = True
+                    await self._apply_instance_failure(
+                        run, state, entry, failed_instance, capture_failure, retry=True
+                    )
+                    if entry.status != "running":
+                        return
                 return
             entry.status = "done"
             self._queue_settle(run, state, entry)
@@ -3607,15 +3613,17 @@ class FactoryExecutor:
         entry.outputs = outputs
         entry.output_errors = errors
 
-    def _emitted_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
+    def _emitted_outputs(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry
+    ) -> tuple[str | None, list[_NodeInstance]]:
         """Read what each child emitted into ``entry.outputs``.
 
         The child's ``factory.emit`` already checked every value and wrote
         the accepted ones to its outputs file in one step, so this reads
         and gathers them: a foreach entry joins text ports with blank lines
         and turns every other port into a list in item order. Returns the
-        joined failure reason when a child did not emit a required port,
-        ``None`` when every port has a value.
+        joined failure reason and the instances that omitted a required
+        port; ``(None, [])`` when every port has a value.
         """
         declared = state.spec["emit"].get("outputs") or []
         kinds = _declared_port_types(state.spec, "outputs")
@@ -3640,6 +3648,13 @@ class FactoryExecutor:
                         "\n\n".join(str(value) for value in values) if kinds.get(out["name"]) == "text" else values
                     )
         entry.output_errors = {}
+        missing: list[_NodeInstance] = []
+        for instance, emitted in zip(entry.instances, per_instance):
+            if any(
+                not out.get("type", "").endswith("?") and out["name"] not in emitted
+                for out in declared
+            ):
+                missing.append(instance)
         failures = []
         for out in declared:
             name = out["name"]
@@ -3648,7 +3663,7 @@ class FactoryExecutor:
             error = f"output {name!r} was never emitted (rlm.factory.emit)"
             self._event(run, "output_capture_failed", node=state.state_id, entry=entry.index, port=name, error=error)
             failures.append(error)
-        return "; ".join(failures) or None
+        return ("; ".join(failures) or None), missing
 
     async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
         """Capture the settle's outputs, retrying the capture once.
