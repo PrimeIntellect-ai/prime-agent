@@ -177,7 +177,7 @@ impl Worker {
                     .unwrap()
                     .iter()
                     .filter(|message| {
-                        message.class == pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE
+                        message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
                     })
                     .map(|message| message.id.clone())
                     .collect();

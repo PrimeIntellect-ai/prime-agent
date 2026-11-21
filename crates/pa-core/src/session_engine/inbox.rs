@@ -35,20 +35,10 @@ pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
 pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
     "(inbox persistence failed; messages are memory-only)";
 
-/// The `bash.completed` notice class label.
-pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
-/// The `factory.progress` notice class label.
-pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
-/// The agent-message class label: one delivered `agent_message.send`
-/// row (parent/sibling/child traffic) routed into the inbox.
-pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
-/// The child-exit class label: one `rlm_child_terminal_notice` row (a
-/// child that ended without a reply or was cancelled).
-pub const INBOX_CLASS_CHILD_EXITED: &str = "child-exited";
-/// The child-failure class label: one `rlm_child_failure` row.
-pub const INBOX_CLASS_CHILD_FAILED: &str = "child-failed";
-/// The heartbeat class label: one fired scheduled heartbeat's prompt.
-pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
+use pa_types::inbox_notice::{
+    INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED, INBOX_CLASS_CHILD_FAILED,
+    INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
+};
 
 /// The coalescing batch state the daemon's notice sink owns: the
 /// arrivals the currently queued short-notice row covers (reset when the
@@ -873,9 +863,11 @@ use pa_types::inbox_notice::{INBOX_NOTICE_CUSTOM_TYPE, INBOX_NOTICE_SENDER};
 /// mirroring `create_agent_session_message_row`: `content` IS the notice
 /// text, so the turn's model context stays byte-identical to the
 /// plain-prompt delivery, while the details carry the inbox-system sender
-/// and the notice class for the transcript's own row class.
+/// and the notice class for the transcript's own row class. `count` is
+/// the number the text announces (the arrival batch size, or the
+/// reminder's waiting count) for the transcript header.
 #[must_use]
-pub fn create_inbox_notice_row(text: &str, class: &str, timestamp: u64) -> Value {
+pub fn create_inbox_notice_row(text: &str, class: &str, count: usize, timestamp: u64) -> Value {
     json!({
         "role": "custom",
         "customType": INBOX_NOTICE_CUSTOM_TYPE,
@@ -884,6 +876,7 @@ pub fn create_inbox_notice_row(text: &str, class: &str, timestamp: u64) -> Value
         "details": {
             "sender": INBOX_NOTICE_SENDER,
             "class": class,
+            "count": count,
         },
         "timestamp": timestamp,
     })
@@ -947,7 +940,9 @@ pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut Ho
 mod tests {
     use super::*;
     use crate::kernel::shared::HostRequestPayload;
-    use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER};
+    use pa_types::inbox_notice::{
+        INBOX_CLASS_AGENT_MESSAGE, INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER,
+    };
     use std::io::Write as _;
 
     fn message(id: &str, class: &str, arrived_at_ms: u64, text: &str) -> InboxMessage {
@@ -1830,11 +1825,11 @@ mod tests {
             "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
         );
         let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
-        for (class, text) in [
-            (INBOX_NOTICE_CLASS_ARRIVAL, arrival),
-            (INBOX_NOTICE_CLASS_REMINDER, reminder),
+        for (class, count, text) in [
+            (INBOX_NOTICE_CLASS_ARRIVAL, 1, arrival),
+            (INBOX_NOTICE_CLASS_REMINDER, 3, reminder),
         ] {
-            let row = create_inbox_notice_row(&text, class, 1_730_000_000_000);
+            let row = create_inbox_notice_row(&text, class, count, 1_730_000_000_000);
             // Whole-object equality: the exact wire shape, no extra keys,
             // every field present at once.
             let expected = json!({
@@ -1842,7 +1837,7 @@ mod tests {
                 "customType": INBOX_NOTICE_CUSTOM_TYPE,
                 "content": text.clone(),
                 "display": true,
-                "details": { "sender": INBOX_NOTICE_SENDER, "class": class },
+                "details": { "sender": INBOX_NOTICE_SENDER, "class": class, "count": count },
                 "timestamp": 1_730_000_000_000u64,
             });
             assert_eq!(row, expected, "the {class} notice row");

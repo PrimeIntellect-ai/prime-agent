@@ -44,6 +44,17 @@ impl RowOutput {
             Self::Count(count) => *count += 1,
         }
     }
+    /// Rows a renderer paints whole, with its own count-only geometry.
+    pub(super) fn rows(
+        &mut self,
+        count: impl FnOnce() -> usize,
+        paint: impl FnOnce() -> Vec<Line>,
+    ) {
+        match self {
+            Self::Paint(rows) => rows.extend(paint()),
+            Self::Count(rows) => *rows += count(),
+        }
+    }
     pub(super) fn blank(&mut self) {
         self.push(Vec::new);
     }

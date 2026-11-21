@@ -562,6 +562,10 @@ async def progress_note(message: str) -> RLMProgressNoteResult:
     return RLMProgressNoteResult(accepted=accepted, retry_after_ms=retry_after_ms)
 
 
+# Display MIME the host collects into the cell card: one per message a read returned.
+_INBOX_MESSAGE_MIME = "application/vnd.prime-agent.inbox-message+json"
+
+
 def _inbox_message_from_payload(payload: Any) -> RLMInboxMessage:
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.inbox.read returned an invalid message entry")
@@ -639,7 +643,10 @@ async def inbox_read(
     messages = payload.get("messages")
     if not isinstance(messages, list):
         raise RuntimeError("rlm.inbox.read returned an invalid messages list")
-    return [_inbox_message_from_payload(entry) for entry in messages]
+    read = [_inbox_message_from_payload(entry) for entry in messages]
+    for entry in messages:
+        emit({_INBOX_MESSAGE_MIME: entry})
+    return read
 
 
 async def inbox_count() -> RLMInboxCount:
