@@ -1002,6 +1002,48 @@ mod backfill_tests {
         .expect("library session path completes within ten seconds");
     }
 
+    /// One Ctrl+C press dispatched at the library page counts once for the
+    /// force-quit guard: the session loop already reports every dispatched
+    /// key, so the page must not report the same press again. A second
+    /// count would disarm the watchdog while a queued press is unhandled.
+    #[tokio::test]
+    async fn one_library_ctrl_c_press_reports_one_handled_key() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut session, server, _requests) = mock_session(
+                &dir.path().join("library-ctrl-c.sock"),
+                mpsc::unbounded_channel().0,
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            view.library_view = Some(crate::factory_view::LibraryView::new(Vec::new(), 20));
+            session
+                .handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char('c'),
+                        crossterm::event::KeyModifiers::CONTROL,
+                    ),
+                    &mut view,
+                    &mut true,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                session.exit_guard.handled_ctrl_c(),
+                1,
+                "one dispatched Ctrl+C is one handled press, whichever surface consumes it"
+            );
+            assert!(view.library_view.is_none(), "the library page closes");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("library Ctrl+C dispatch completes within ten seconds");
+    }
+
     #[tokio::test]
     async fn library_graph_reply_survives_same_session_rebind() {
         tokio::time::timeout(Duration::from_secs(10), async {

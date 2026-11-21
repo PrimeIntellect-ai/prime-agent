@@ -81,9 +81,6 @@ impl super::SessionUi {
         let Some(id) = super::key_event_to_id(&key) else {
             return Ok(());
         };
-        if id == "ctrl+c" {
-            self.exit_guard.note_key_handled("ctrl+c");
-        }
         let selected_before = view
             .library_view
             .as_ref()
