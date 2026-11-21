@@ -115,6 +115,175 @@ async fn run_async(command: &str, args: &[String], project: Option<&Path>) -> an
     .map_err(|e| anyhow!("bootstrap task join failed: {e}"))?
 }
 
+/// A sibling staging path for a rebuild: the new venv is built here and only
+/// then renamed into place, so the live path keeps serving the previous venv
+/// for the whole build.
+pub(crate) fn venv_candidate_path(venv: &Path) -> PathBuf {
+    let name = venv.file_name().unwrap_or_default().to_string_lossy();
+    venv.with_file_name(format!(
+        "{name}.candidate-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
+/// Rewrite the build path out of a finished candidate.
+///
+/// A venv is path-dependent: `uv` writes the build path into console-script
+/// shebangs (`bin/pip`), the activation scripts, and `pyvenv.cfg`. After the
+/// swap those entries must name the live path, or every console script fails
+/// with "bad interpreter". Only small top-level text entries are touched: the
+/// interpreter symlink and installed package payloads are left alone.
+fn relocate_venv_paths(candidate: &Path, venv: &Path) -> anyhow::Result<()> {
+    let from = candidate.to_string_lossy().to_string();
+    let to = venv.to_string_lossy().to_string();
+    if from == to {
+        return Ok(());
+    }
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(candidate) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if path.is_file() && (name.starts_with("activate") || name == "pyvenv.cfg") {
+                targets.push(path);
+            }
+        }
+    }
+    // POSIX keeps console scripts in `bin`, Windows in `Scripts`.
+    for scripts in ["bin", "Scripts"] {
+        if let Ok(entries) = std::fs::read_dir(candidate.join(scripts)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                // Console scripts are regular files; the interpreter is a symlink.
+                if path.is_file() && !path.is_symlink() {
+                    targets.push(path);
+                }
+            }
+        }
+    }
+    for path in targets {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        // Skip binaries and oversized payloads: shebangs and activation
+        // scripts are small UTF-8 text.
+        if bytes.len() > 1024 * 1024 || bytes.contains(&0) {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if !text.contains(&from) {
+            continue;
+        }
+        std::fs::write(&path, text.replace(&from, &to))
+            .with_context(|| format!("relocating {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Whether a venv has the interpreter and configuration written by `uv venv`.
+fn venv_structure_complete(venv: &Path) -> bool {
+    kernel_venv_python(venv).exists() && venv.join("pyvenv.cfg").is_file()
+}
+
+/// Restore a complete aside left by a process killed during the two-rename swap.
+/// The caller holds the bootstrap lock, so no live rebuild owns the aside.
+pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
+    let parent = venv.parent().unwrap_or(Path::new("/"));
+    let name = venv.file_name().unwrap_or_default().to_string_lossy();
+    let prefix = format!("{name}.old-");
+    let mut asides: Vec<_> = std::fs::read_dir(parent)?
+        .flatten()
+        .filter(|entry| {
+            entry.file_name().to_string_lossy().starts_with(&prefix)
+                && venv_structure_complete(&entry.path())
+        })
+        .collect();
+    asides.sort_by_key(|entry| {
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    let Some(aside) = asides.pop() else {
+        return Ok(());
+    };
+    let aside = aside.path();
+    if venv.exists() {
+        if venv_structure_complete(venv) {
+            return Ok(());
+        }
+        let partial = venv.with_file_name(format!(
+            "{name}.partial-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::rename(venv, &partial)
+            .with_context(|| format!("moving incomplete {} aside", venv.display()))?;
+    }
+    std::fs::rename(&aside, venv)
+        .with_context(|| format!("restoring {} from {}", venv.display(), aside.display()))?;
+    Ok(())
+}
+
+/// Move a fully built `candidate` onto the live `venv` path.
+///
+/// The live path is absent only between the two renames. A killed process can
+/// leave the old venv aside in that window; the next lock holder restores it
+/// before sweeping staging paths. A failed candidate move restores the old venv
+/// immediately, and cleanup never removes the aside until the replacement is
+/// structurally complete.
+pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Result<()> {
+    if candidate.exists() && !venv_structure_complete(candidate) {
+        anyhow::bail!("candidate venv {} is incomplete", candidate.display());
+    }
+    relocate_venv_paths(candidate, venv)?;
+    if !venv.exists() {
+        return std::fs::rename(candidate, venv)
+            .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
+    }
+    let name = venv.file_name().unwrap_or_default().to_string_lossy();
+    let aside = venv.with_file_name(format!(
+        "{name}.old-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::rename(venv, &aside).with_context(|| format!("moving {} aside", venv.display()))?;
+    if let Err(error) = std::fs::rename(candidate, venv) {
+        // Put the working venv back before reporting the failure. A failed
+        // restore must not hide behind the first error: the caller has to know
+        // that the live path is now the aside directory, not the old venv.
+        if let Err(restore) = std::fs::rename(&aside, venv) {
+            return Err(anyhow::anyhow!(
+                "moving {} into {} failed ({error:#}), and restoring {} from {} failed too \
+                 ({restore:#})",
+                candidate.display(),
+                venv.display(),
+                venv.display(),
+                aside.display()
+            ));
+        }
+        return Err(error)
+            .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
+    }
+    if !venv_structure_complete(venv) {
+        std::fs::remove_dir_all(venv)
+            .with_context(|| format!("removing incomplete replacement venv {}", venv.display()))?;
+        std::fs::rename(&aside, venv).with_context(|| {
+            format!(
+                "restoring {} from {} after incomplete replacement",
+                venv.display(),
+                aside.display()
+            )
+        })?;
+        anyhow::bail!("replacement venv {} is incomplete", venv.display());
+    }
+    let _ = std::fs::remove_dir_all(&aside);
+    Ok(())
+}
+
 pub(crate) async fn bootstrap_venv(
     venv: &Path,
     source_dir: &Path,

@@ -1,0 +1,1 @@
+- Fixed the kernel Python environment disappearing when Prime Agent stopped during a rebuild; the next setup now restores the previous environment. Pillow is now a default kernel package, so viewing images works after a rebuild.
