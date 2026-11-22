@@ -11,6 +11,7 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use pa_agent::scripted::{tool_call_turn_steps, ScriptedProvider, ScriptedTurn};
 use pa_core::session::manager::SessionManager;
@@ -45,8 +46,22 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
+/// The process env is global and both live-kernel tests in this binary run
+/// concurrently on separate test threads: each overrides
+/// `PRIME_AGENT_KERNEL_PYTHON` and friends, and one test's restore would pull
+/// the variable out from under the other's kernel bootstrap. Each test holds
+/// this lock for its whole body (taken before its `EnvOverride`, so the
+/// override is restored before the lock is released).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Scoped process-env overrides: applied on construction, restored on drop.
-/// This binary carries exactly one live-kernel test, so nothing races.
+/// Callers hold `env_lock()` for as long as the override lives.
 struct EnvOverride {
     saved: Vec<(String, Option<String>)>,
 }
@@ -99,8 +114,10 @@ fn registry_model() -> pa_types::ai::Model {
     .expect("faux registry model")
 }
 
+#[allow(clippy::await_holding_lock)] // the env lock must span the async kernel flow
 #[tokio::test]
 async fn a_child_fixes_a_rejected_emit_in_the_same_turn() {
+    let _env_lock = env_lock();
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -240,8 +257,10 @@ async fn a_child_fixes_a_rejected_emit_in_the_same_turn() {
 /// fallback a daemon-worker machine child's `factory.emit` is refused as
 /// unbound from its very first turn, and
 /// its outputs never land beside its session file.
+#[allow(clippy::await_holding_lock)] // the env lock must span the async kernel flow
 #[tokio::test]
 async fn a_daemon_worker_child_emits_from_its_conversation_log_path() {
+    let _env_lock = env_lock();
     let Some(kernel_python) = kernel_python() else {
         return;
     };
