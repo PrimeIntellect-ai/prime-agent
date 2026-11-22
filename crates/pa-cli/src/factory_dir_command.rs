@@ -6,7 +6,7 @@
 //! host request uses, so the CLI and a running session accept exactly the
 //! same machines. MACHINE.md files stay with the kernel's parser.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
@@ -190,4 +190,212 @@ fn print_problems(dir: &Path, problems: &[pa_factory::Diagnostic], json: bool) -
         }
     }
     1
+}
+
+/// Merge the machine directories of every library level into the
+/// kernel's `list` result. Within a level a machine directory wins over a
+/// MACHINE.md of the same name; an earlier level wins over a later one,
+/// the order `rlm.factory.run` resolves names in.
+pub(crate) fn add_machine_dirs(result: &mut Value) {
+    let levels: Vec<(String, PathBuf)> = result
+        .get("levels")
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| {
+                    let source = level.get("source")?.as_str()?.to_string();
+                    let path = PathBuf::from(level.get("path")?.as_str()?);
+                    Some((source, path))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rank_of = |source: &str| {
+        levels
+            .iter()
+            .position(|(level, _)| level == source)
+            .unwrap_or(levels.len())
+    };
+    // (level rank, 0 for a directory or 1 for MACHINE.md) per name.
+    let mut chosen: std::collections::BTreeMap<String, ((usize, u8), Value)> =
+        std::collections::BTreeMap::new();
+    let mut offer = |name: String, rank: (usize, u8), row: Value| {
+        if chosen.get(&name).is_none_or(|(held, _)| rank < *held) {
+            chosen.insert(name, (rank, row));
+        }
+    };
+    for row in result
+        .get("machines")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let name = row
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let source = row
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        offer(name, (rank_of(source), 1), row);
+    }
+    let mut warnings: Vec<Value> = result
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (rank, (source, root)) in levels.iter().enumerate() {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.join(pa_factory::MACHINE_FILE).is_file())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            match pa_factory::load_machine_dir(&dir) {
+                Ok(machine) => offer(
+                    machine.name.clone(),
+                    (rank, 0),
+                    json!({
+                        "name": machine.name,
+                        "description": machine.description,
+                        "version": machine.version.to_string(),
+                        "author": machine.author.unwrap_or_default(),
+                        "source": source,
+                        "path": dir.display().to_string(),
+                    }),
+                ),
+                Err(problems) => {
+                    let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
+                    warnings.push(json!(format!("{}: {}", dir.display(), lines.join("; "))));
+                }
+            }
+        }
+    }
+    let machines: Vec<Value> = chosen.into_values().map(|(_, row)| row).collect();
+    if let Some(object) = result.as_object_mut() {
+        object.insert("machines".to_string(), Value::Array(machines));
+        object.insert("warnings".to_string(), Value::Array(warnings));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_machine(root: &Path, name: &str, description: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::write(
+            dir.join("machine.toml"),
+            format!("format = 1\nname = \"{name}\"\nversion = 2\ndescription = \"{description}\"\n\n[states.go]\nentry = true\nagent = {{ prompt = \"prompts/go.md\" }}\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("prompts/go.md"), "Go.\n").unwrap();
+    }
+
+    #[test]
+    fn machine_dirs_join_the_listing_in_resolution_order() {
+        let repo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_machine(repo.path(), "sweep", "The directory sweep.");
+        write_machine(user.path(), "builder", "A personal builder.");
+        write_machine(user.path(), "mine", "Mine.");
+        std::fs::create_dir_all(user.path().join("broken")).unwrap();
+        std::fs::write(user.path().join("broken/machine.toml"), "format = 1\n").unwrap();
+        let mut result = json!({
+            "ok": true,
+            "levels": [
+                {"source": "repo", "path": repo.path().display().to_string()},
+                {"source": "user", "path": user.path().display().to_string()},
+            ],
+            "machines": [
+                {"name": "builder", "description": "The bundled builder.", "version": "1", "author": "Prime Agent", "source": "repo", "path": "/rlm/machines/builder/MACHINE.md"},
+                {"name": "sweep", "description": "The bundled sweep.", "version": "1", "author": "Prime Agent", "source": "repo", "path": "/rlm/machines/sweep/MACHINE.md"},
+            ],
+            "warnings": [],
+        });
+        add_machine_dirs(&mut result);
+        let row = |name: &str,
+                   description: &str,
+                   version: &str,
+                   author: &str,
+                   source: &str,
+                   path: String| {
+            json!({"name": name, "description": description, "version": version, "author": author, "source": source, "path": path})
+        };
+        assert_eq!(
+            result["machines"],
+            json!([
+                row(
+                    "builder",
+                    "The bundled builder.",
+                    "1",
+                    "Prime Agent",
+                    "repo",
+                    "/rlm/machines/builder/MACHINE.md".to_string()
+                ),
+                row(
+                    "mine",
+                    "Mine.",
+                    "2",
+                    "",
+                    "user",
+                    user.path().join("mine").display().to_string()
+                ),
+                row(
+                    "sweep",
+                    "The directory sweep.",
+                    "2",
+                    "",
+                    "repo",
+                    repo.path().join("sweep").display().to_string()
+                ),
+            ])
+        );
+        let warnings = result["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("broken: machine.toml: missing field `name`"));
+    }
+
+    #[test]
+    fn params_follow_their_declared_types() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("typed");
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::write(
+            dir.join("machine.toml"),
+            "format = 1\nname = \"typed\"\nversion = 1\ndescription = \"d\"\n\n[params]\ntask = { type = \"text\" }\nmax_loc = { type = \"int\" }\nmode = { type = \"enum(fast, slow)\" }\n\n[states.go]\nentry = true\nagent = { prompt = \"prompts/go.md\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("prompts/go.md"), "Go.\n").unwrap();
+        std::fs::write(root.path().join("task.md"), "Fix 42.\n").unwrap();
+        let machine = pa_factory::load_machine_dir(&dir).unwrap();
+        let given = parse_params(
+            &machine,
+            &[
+                format!("task=@{}", root.path().join("task.md").display()),
+                "max_loc=400".to_string(),
+                "mode=fast".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            Value::Object(given),
+            json!({"task": "Fix 42.\n", "max_loc": 400, "mode": "fast"})
+        );
+        assert_eq!(
+            parse_params(&machine, &["mode".to_string()]),
+            Err("--param \"mode\" must be name=value".to_string())
+        );
+    }
 }

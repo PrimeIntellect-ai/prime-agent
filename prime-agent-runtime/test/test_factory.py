@@ -8981,7 +8981,15 @@ class MachineCliDispatchTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def test_read_answers_one_machine(self) -> None:
+    def test_list_answers_the_levels_and_read_answers_one_machine(self) -> None:
+        listed = cli_dispatch({"op": "list"})
+        self.assertEqual(
+            listed["levels"],
+            [
+                {"source": "repo", "path": str(self.repo)},
+                {"source": "user", "path": str(self.agent_home / "machines")},
+            ],
+        )
         read = cli_dispatch({"op": "read", "path": str(self.source_path)})
         self.assertEqual(
             read,

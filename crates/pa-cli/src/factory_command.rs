@@ -262,7 +262,12 @@ fn export_payload(name: &str, out: &std::path::Path) -> Value {
 fn run_list(json: bool) -> i32 {
     let payload = list_payload();
     match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
-        Ok(result) => render_list(&result, json),
+        Ok(mut result) => {
+            if result.get("ok").and_then(Value::as_bool) == Some(true) {
+                crate::factory_dir_command::add_machine_dirs(&mut result);
+            }
+            render_list(&result, json)
+        }
         Err(error) => {
             eprintln!("Error: {error}");
             1

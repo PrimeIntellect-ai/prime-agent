@@ -5378,9 +5378,10 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
     the exact validator sentences reach the command's output verbatim.
     The payload carries only what the user typed (an op, a path, a name,
     an out target); ``read`` answers one MACHINE.md machine's fields and
-    spec for ``prime-agent factory convert``; this process resolves every
-    library directory itself, so the kernel is the single resolution
-    contract for list, import, and
+    spec for ``prime-agent factory convert``, and ``list`` answers the
+    library levels so the CLI can add machine directories (which the Rust
+    loader checks); this process resolves every library directory itself,
+    so the kernel is the single resolution contract for list, import, and
     export alike — a fresh CLI process has no session state (stored
     entries, live runs), so export resolves the library only.
     """
@@ -5389,7 +5390,13 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
     op = payload.get("op")
     if op == "list":
         machines, warnings = _scan_machine_library()
-        return {"ok": True, "machines": machines, "warnings": warnings}
+        # The levels let the CLI list machine directories with the Rust
+        # loader in the same resolution order.
+        levels = [
+            {"source": source, "path": str(directory)}
+            for source, directory in machine_library_dirs()
+        ]
+        return {"ok": True, "machines": machines, "warnings": warnings, "levels": levels}
     if op == "read":
         path, name = payload.get("path"), payload.get("name")
         try:

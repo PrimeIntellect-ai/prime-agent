@@ -507,3 +507,60 @@ fn guards_are_refused_with_the_guard_spelled_out() {
         ]
     );
 }
+
+/// A relative in-dir path that leaves the machine dir through a symlink is
+/// refused before any text is read (the opus F-10 probe: a
+/// `prompts/a.md -> /tmp/secret` handed the machine outside content, into
+/// a child prompt and the factory page's files).
+#[test]
+fn a_symlink_pointing_outside_the_dir_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().with_extension("secret");
+    std::fs::write(&outside, "SECRET-OUTSIDE-THE-MACHINE-DIR {task}").unwrap();
+    write_dir(dir.path(), MACHINE, FILES);
+    let symlink = dir.path().join("prompts/design.md");
+    std::fs::remove_file(&symlink).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &symlink).unwrap();
+    #[cfg(not(unix))]
+    {
+        // The guard reads through the fs layer only; platforms without
+        // symlinks cannot reproduce the probe.
+        return;
+    }
+    match load_machine_dir(dir.path()) {
+        Ok(_) => panic!("a symlink pointing outside the machine dir loaded"),
+        Err(found) => {
+            let lines: Vec<String> = found.iter().map(ToString::to_string).collect();
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("escapes the machine directory")),
+                "the symlink must name its escape: {lines:?}"
+            );
+            for line in &lines {
+                assert!(
+                    !line.contains("SECRET-OUTSIDE"),
+                    "the outside content must never be read: {line:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The guard does not regress the missing-file report: a machine naming a
+/// nonexistent file still reports the file, not a silent drop.
+#[test]
+fn a_missing_file_still_reports_its_own_diagnostic() {
+    let lines = problems(
+        &[(
+            "prompt = \"prompts/design.md\"",
+            "prompt = \"prompts/missing.md\"",
+        )],
+        &[],
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("prompts/missing.md")),
+        "the missing file must be named: {lines:?}"
+    );
+}
