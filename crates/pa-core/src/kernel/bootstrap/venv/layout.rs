@@ -38,11 +38,14 @@ pub(crate) fn home_kernel_venv_dir(home: &Path) -> PathBuf {
 ///
 /// A bootstrap never deletes the venv it replaces: the caller may be a worktree
 /// binary or an older install whose runtime differs from the one the user's
-/// sessions run, and the retired copy can be renamed back. The newest
-/// `STALE_VENV_KEEP` retired copies are always kept, because after an
-/// interrupted rebuild the newest copy is the partial tree and the previous
-/// complete venv is the recovery. Older copies are pruned only past
-/// `STALE_VENV_RETENTION`, best-effort and never fatal.
+/// sessions run, and the retired copy can be renamed back.
+///
+/// What stays on disk: the copy this call just retired, PLUS the newest
+/// `STALE_VENV_KEEP` (two) earlier retired copies - up to three. That gap is
+/// the recovery guarantee: after an interrupted rebuild the newest copy is the
+/// partial tree, and the previous complete venv is the one before it. Anything
+/// older is pruned only past `STALE_VENV_RETENTION`, best-effort and never
+/// fatal.
 pub(crate) fn retire_stale_venv(venv: &Path) -> anyhow::Result<PathBuf> {
     let name = venv.file_name().unwrap_or_default().to_string_lossy();
     let prefix = format!("{name}.stale-");
