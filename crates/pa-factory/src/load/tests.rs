@@ -481,6 +481,19 @@ fn every_load_error_names_its_place() {
 }
 
 #[test]
+fn a_template_binds_no_params() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dir(dir.path(), MACHINE, FILES);
+    let machine = load_machine_dir(dir.path()).unwrap();
+    let template = crate::compile_template(&machine).unwrap();
+    let mut params = Map::new();
+    params.insert("task".to_string(), json!("t"));
+    let mut bound = compile(&machine, &params).unwrap();
+    bound.as_object_mut().unwrap().remove("params");
+    assert_eq!(template, bound);
+}
+
+#[test]
 fn compile_checks_params() {
     let dir = tempfile::tempdir().unwrap();
     write_dir(dir.path(), MACHINE, FILES);

@@ -778,6 +778,35 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
             },
         })
     );
+    let describe = handlers
+        .get(super::FACTORY_DESCRIBE_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let described = describe(crate::kernel::shared::HostRequestPayload {
+        data: json!({"path": machine_dir.display().to_string()}),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        described["params"],
+        json!([{"name": "who", "type": "text"}])
+    );
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "prompts/greet.md", "text": "Greet {{who}}.\n"}]),
+            &json!([{"state": "greet", "paths": ["prompts/greet.md"]}])
+        )
+    );
+    assert_eq!(
+        described["spec"]["states"][0]["subagent"]["prompt"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .next(),
+        Some("Greet {who}.")
+    );
+    assert!(described["spec"].get("params").is_none());
     let error = call(json!({"path": machine_dir.display().to_string()}))
         .await
         .unwrap_err();
