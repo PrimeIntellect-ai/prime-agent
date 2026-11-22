@@ -44,8 +44,10 @@ pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
 /// `library` is public's machine-library lane (the TUI library page asks the
 /// host for the listing and one machine's graph); dev's host set does not
 /// carry it because dev's page reads through a different route.
-pub const FACTORY_ACTIVITY_ACTIONS: [&str; 8] = [
-    "graph", "status", "watch", "run", "stop", "resume", "peek", "library",
+/// `node` reads one state's inspection payload (entry/instance selectors);
+/// public carries it because the node view asks through this lane.
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 9] = [
+    "graph", "status", "watch", "run", "stop", "resume", "peek", "library", "node",
 ];
 
 /// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel

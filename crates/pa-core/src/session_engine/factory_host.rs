@@ -453,7 +453,9 @@ impl FactoryActivityRequest {
         {
             return Err(anyhow!("factory activity peek takes no runId or specId"));
         }
-        if !matches!(action, "graph" | "run" | "peek")
+        // `library` reads the machine library (the listing, or one machine by
+        // name) and takes neither a runId nor a specId: it is public's lane.
+        if !matches!(action, "graph" | "run" | "peek" | "library" | "node")
             && run_id.is_none_or(|id| id.trim().is_empty())
         {
             return Err(anyhow!("factory activity {action} requires runId"));
