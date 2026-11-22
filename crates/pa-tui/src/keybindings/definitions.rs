@@ -388,6 +388,10 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         def!(&["ctrl+o"], "Show the program that spawned subagents"),
     ),
     (
+        "app.agents.factory",
+        def!(&[], "Open the machines page through the selected session"),
+    ),
+    (
         "app.agents.rename",
         def!(&["ctrl+r"], "Rename selected agent session"),
     ),

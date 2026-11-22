@@ -1,0 +1,1 @@
+- The factory page now lists every session's active runs — machine, live state, and progress — beside the machine library, not only the attached session's; rows owned by other sessions stay read-only and name the session to open for controls. Your session's recently finished runs (the newest 20) stay listed on the factory page, and Enter opens their run page.

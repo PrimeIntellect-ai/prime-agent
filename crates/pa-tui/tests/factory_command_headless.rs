@@ -115,8 +115,11 @@ impl MockSupervisor {
                         // The lane's mock: a graph action answers the
                         // configured refusal (the worker arm's exact
                         // kernel-not-running wire shape) or the configured
-                        // runs reply; every other action answers empty data
-                        // (the guard reads the graph list only).
+                        // runs reply; the overview action answers the same
+                        // configured runs owned by the attached session (the
+                        // page's all-session lane in this battery); every other
+                        // action answers empty data (the guard reads the graph
+                        // list only).
                         if command.get("action").and_then(Value::as_str) == Some("stop") {
                             write_json(
                                 writer,
@@ -164,6 +167,42 @@ impl MockSupervisor {
                             command.get("action").and_then(Value::as_str),
                         ) {
                             (Some(runs), Some("graph")) => runs.clone(),
+                            // The page's overview lane: the same configured
+                            // runs, owned by the attached session (`sess-1`), so
+                            // the page's rows and its owned drill-in behave
+                            // exactly as they did on the scoped graph.
+                            (Some(runs), Some("overview")) => {
+                                let owned: Vec<Value> = runs
+                                    .get("runs")
+                                    .and_then(Value::as_array)
+                                    .map(|rows| {
+                                        rows.iter()
+                                            .cloned()
+                                            .map(|mut row| {
+                                                if let Some(object) = row.as_object_mut() {
+                                                    object.insert(
+                                                        "ownerId".to_string(),
+                                                        json!("sess-1"),
+                                                    );
+                                                    object
+                                                        .insert("ownerName".to_string(), json!(""));
+                                                    object
+                                                        .insert("saved".to_string(), json!(false));
+                                                    // The daemon's live-cache rows carry the
+                                                    // peek lane's `armed` marker (null for an
+                                                    // executing run): the page routes an
+                                                    // owned row's Enter by it.
+                                                    object.insert("armed".to_string(), json!(null));
+                                                }
+                                                row
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                json!({ "runs": owned, "warnings": [] })
+                            }
+                            // The factory page's machine list: an empty library.
+                            (_, Some("library")) => json!({"machines": [], "warnings": []}),
                             _ => json!({}),
                         };
                         write_json(
@@ -444,7 +483,7 @@ fn factory_on_and_off_round_trip_the_gate_through_the_seam() {
     let all = flat_text(&frames);
     assert!(
         all.contains(
-            "The factory is enabled. Restart the client to surface the factory group (the factory page and the agent-side factory API follow the same gate)."
+            "The factory is enabled. Restart the client to surface the machines group (the machines page and the agent-side factory API follow the same gate)."
         ),
         "the enabled note rendered:\n{all}"
     );
@@ -454,7 +493,7 @@ fn factory_on_and_off_round_trip_the_gate_through_the_seam() {
     );
     assert!(
         all.contains(
-            "The factory is disabled. The factory group and page disappear on the next client start."
+            "The factory is disabled. The machines group and page disappear on the next client start."
         ),
         "the off note rendered:\n{all}"
     );
@@ -515,7 +554,7 @@ fn factory_off_refuses_while_runs_are_live() {
     let all = flat_text(&frames);
     assert!(
         all.contains(
-            "Cannot disable the factory while 2 runs are still live — stop them first (the factory page's stop action or rlm.factory.stop), then /factory off."
+            "Cannot disable the factory while 2 runs are still live — stop them first (the run page's stop action or rlm.factory.stop), then /factory off."
         ),
         "the refusal names the live count:\n{all}"
     );
@@ -524,7 +563,7 @@ fn factory_off_refuses_while_runs_are_live() {
         "the gate stayed enabled after the refused off:\n{all}"
     );
     assert!(
-        !all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        !all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the off note never rendered:\n{all}"
     );
 }
@@ -548,7 +587,7 @@ fn factory_off_proceeds_once_no_runs_are_live() {
     let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the off proceeded with only terminal runs:\n{all}"
     );
     assert!(
@@ -579,7 +618,7 @@ fn factory_off_refuses_on_a_client_whose_hello_predates_the_gate() {
     let all = flat_text(&frames);
     assert!(
         all.contains(
-            "Cannot disable the factory while 1 run is still live — stop it first (the factory page's stop action or rlm.factory.stop), then /factory off."
+            "Cannot disable the factory while 1 run is still live — stop it first (the run page's stop action or rlm.factory.stop), then /factory off."
         ),
         "the unadvertised-lane guard still refused:\n{all}"
     );
@@ -603,7 +642,7 @@ fn factory_off_proceeds_when_the_lane_cannot_report() {
     let frames = run_plan_config(Vec::new(), None, steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the unreadable count never blocked off:\n{all}"
     );
     assert!(
@@ -669,7 +708,7 @@ fn factory_off_proceeds_when_the_kernel_is_not_running() {
     );
     let all = flat_text(&frames);
     assert!(
-        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        all.contains("The factory is disabled. The machines group and page disappear on the next client start."),
         "the no-kernel count never blocked off:\n{all}"
     );
     assert!(
@@ -683,7 +722,10 @@ fn factory_off_proceeds_when_the_kernel_is_not_running() {
 }
 
 /// One live named run row for the page battery (the wire shape the
-/// kernel's graph lane sends): the name the panel header paints.
+/// kernel's graph lane sends): the name the panel header paints. The
+/// machine is a minimal valid one-state machine — the run page renders
+/// its diagram, and a zero-state machine is loader-invalid (the
+/// factory directory rejects it).
 fn factory_page_run(id: &str, name: &str) -> Value {
     json!({
         "runId": id,
@@ -691,7 +733,7 @@ fn factory_page_run(id: &str, name: &str) -> Value {
         "name": name,
         "state": "running",
         "elapsedMs": 100,
-        "machine": { "states": [], "transitions": [] },
+        "machine": { "states": [ { "id": "entry", "entry": true } ], "transitions": [] },
         "nodes": [],
         "usage": { "running": 0 },
     })
@@ -705,6 +747,11 @@ fn alt_a() -> KeyEvent {
 /// One down-arrow key event (`tui.select.down`: the dock's next row, the page's next row).
 fn down() -> KeyEvent {
     KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+}
+
+/// One up-arrow key event (`tui.select.up`: the page's previous row).
+fn up() -> KeyEvent {
+    KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)
 }
 
 /// One plain Enter key event (the dock's focused-section open).
@@ -727,16 +774,18 @@ fn escape() -> KeyEvent {
 /// dispatched input paints — the same TS `handleInput` parity that
 /// carries the dock's keys and every other picker key). The pin closes
 /// the page on the input right after the arrow, so no poll window can
-/// sit between the move and the paint: the moved selection marker must
-/// land in a captured frame on the arrow's own repaint — and the poll
-/// alone could never produce it, because a fold preserves the selected
-/// run id, so a picker key that skipped its repaint would leave the
-/// marker on the old run forever (the fold repaints the same unmoved
-/// selection).
+/// sit between the move and the paint: the moved selection's box frame
+/// must land in a captured frame on the arrow's own repaint — and the
+/// poll alone could never produce it, because a fold preserves the
+/// selected row, so a picker key that skipped its repaint would leave
+/// the frame on the old row forever (the fold repaints the same
+/// unmoved selection).
 #[test]
 fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
-    // Oldest first on the wire; the page reads newest-first, so
-    // second-run is the opening selection and first-run is one Down away.
+    // Oldest first on the wire (the reply's start order): the machines
+    // page lists the runs in the reply's order and anchors on the first
+    // row, so first-run is the opening selection and Enter opens its run
+    // page.
     let graph = json!({
         "runs": [
             factory_page_run("run-old", "first-run"),
@@ -751,32 +800,40 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
-        // The page opens on the feed's live head: the newest run.
+        // The machines page lists the runs in the reply's order; the
+        // anchored marker sits on the first row, and Enter opens that
+        // row's run page.
         HeadlessStep::WaitRender {
-            needle: "factory: second-run".to_string(),
+            needle: "\u{25b8} \u{21b3} first-run".to_string(),
             timeout_ms: 5_000,
         },
-        // Down moves the selection to the older run, and Esc closes the
-        // page on the very next input — no poll cycle can land between
-        // the two, so the moved marker below can only be the arrow's own
-        // repaint.
-        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: first-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        // Up moves the selection onto the other run's header (the run
+        // page stacks the runs newest-first, so second-run sits above),
+        // and Esc closes the page on the very next input — no poll cycle
+        // can land between the two, so the moved marker below can only be
+        // the arrow's own repaint.
+        HeadlessStep::Key(up()),
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(200),
     ];
     let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("factory: second-run"),
-        "the page mounted on the newest run:\n{all}"
+        all.contains("run: first-run"),
+        "the page mounted on the anchored run:\n{all}"
     );
     assert!(
-        all.contains("\u{25b8} factory: first-run"),
+        all.contains("\u{25b8} run: second-run"),
         "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
     );
 }
 
-/// A paste while the factory page owns the frame never lands in the editor hidden behind it: the
+/// A paste while the machines page owns the frame never lands in the editor hidden behind it: the
 /// page has no text input, so it consumes the paste like the other input-less frame owners.
 #[test]
 fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
@@ -788,20 +845,20 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
-            needle: "factory: only-run".to_string(),
+            needle: "\u{21b3} only-run".to_string(),
             timeout_ms: 5_000,
         },
         HeadlessStep::Paste("zq-stray-paste".to_string()),
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitGone {
-            needle: "factory: only-run".to_string(),
+            needle: "\u{21b3} only-run".to_string(),
             timeout_ms: 5_000,
         },
     ];
     let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
     let all = flat_text(&frames);
     assert!(
-        all.contains("factory: only-run"),
+        all.contains("\u{21b3} only-run"),
         "the page mounted before the paste:\n{all}"
     );
     assert!(
@@ -811,9 +868,10 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
 }
 
 /// A session the daemon stops while its factory page is open leaves no stale run cards: the
-/// close clears the dock's run cache and the mounted page with it.
+/// close clears the dock's run cache and the mounted run page with it (the machine page's
+/// all-session rows are not the closed session's cache; they stay).
 #[test]
-fn a_closed_session_clears_the_open_factory_page() {
+fn a_closed_session_clears_the_run_cards_and_the_run_page() {
     let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
     let steps = vec![
         HeadlessStep::Key(alt_a()),
@@ -822,7 +880,12 @@ fn a_closed_session_clears_the_open_factory_page() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
-            needle: "factory: only-run".to_string(),
+            needle: "\u{21b3} only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: only-run".to_string(),
             timeout_ms: 5_000,
         },
         // The first stop press arms the selected run, the second stops it; the mock's daemon

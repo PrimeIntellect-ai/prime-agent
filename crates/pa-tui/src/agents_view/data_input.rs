@@ -623,6 +623,12 @@ impl AgentsViewMode {
             self.cycle_program_for_selected();
             return;
         }
+        // `app.agents.factory` (unbound by default, empty editor only): open the factory page through
+        // the selected row's session.
+        if !has_query && self.keybindings.matches(key, "app.agents.factory") {
+            self.open_factory_for_selected();
+            return;
+        }
         // `app.agents.expand` (default alt+right, search empty): toggle the selected parent's
         // list when it has children.
         if !has_query && self.keybindings.matches(key, "app.agents.expand") {

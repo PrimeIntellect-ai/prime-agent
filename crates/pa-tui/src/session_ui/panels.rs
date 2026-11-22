@@ -12,6 +12,7 @@ pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
     pub factory: mpsc::UnboundedSender<FactoryUpdate>,
+    pub library: mpsc::UnboundedSender<crate::session_ui::LibraryUpdate>,
     pub commands: mpsc::UnboundedSender<CommandCatalogUpdate>,
 }
 
@@ -119,10 +120,10 @@ impl SessionUi {
         // finished runs stay in the bash view.
         let shell_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
         let shells = crate::bash_view::dock_shell_items(&shell_rows);
-        // The dock's factory group lists live runs only — the view's one liveness rule
+        // The dock's machines group lists live runs only — the view's one liveness rule
         // (`FactoryRunSnapshot::is_live`: a live state, or children still in flight — a `done`
         // run whose resident children still run keeps its entry like its panel and its stop
-        // control). Fully terminal runs stay as panels inside the factory page, never in the
+        // control). Fully terminal runs stay as panels inside the run page, never in the
         // dock — the shells group's running-only scoping, one lane over.
         let runs = crate::factory_view::parse_factory_runs(&self.factory_graph);
         let factory_runs = crate::factory_view::dock_factory_items(&runs);
@@ -143,9 +144,8 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             shells,
             shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
-            factory_specs: crate::factory_view::stored_spec_count(&self.factory_graph),
             factory_runs,
-            factory_counts: crate::factory_view::FactoryRunCounts::of(&runs),
+            factory_running: crate::factory_view::FactoryRunCounts::of(&runs).running,
             // The group renders exactly while the daemon advertises the
             // lane: the factory's opt-in gate (a daemon without the
             // factory lane never mounts the group).
@@ -259,16 +259,21 @@ impl SessionUi {
                     bash_view.select(&id);
                 }
             }
+            // The machines page; a return from a state's child session
+            // reopens the run page on its row, over the machines page —
+            // the agents-view line opens the page alone, and only that
+            // open counts as a new adoption.
             crate::interactive::SessionPanel::FactoryRuns { row } => {
-                self.open_factory_page(view);
-                if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
-                    factory_view.select(row);
-                    self.sync_factory_selection(view);
+                self.open_factory_page(view, /*user_initiated*/ row.is_none());
+                if row.is_some() {
+                    self.open_factory_runs(view, row);
                 }
             }
         }
-        self.panel_returns_to_agents_view =
-            closes_to_agents_view && (view.bash_view.is_some() || view.factory_view.is_some());
+        self.panel_returns_to_agents_view = closes_to_agents_view
+            && (view.bash_view.is_some()
+                || view.factory_view.is_some()
+                || view.library_view.is_some());
     }
 
     /// The close of a panel the agents view requested hands the pane back to it; returns whether
@@ -311,7 +316,7 @@ impl SessionUi {
             }
             crate::chrome::ActivityGroup::Factory => {
                 self.emit_activity_opened("factory");
-                self.open_factory_page(view);
+                self.open_factory_page(view, /*user_initiated*/ true);
             }
             crate::chrome::ActivityGroup::Goal => {
                 self.emit_activity_opened("goal");

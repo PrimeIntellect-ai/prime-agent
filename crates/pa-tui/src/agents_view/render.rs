@@ -873,6 +873,11 @@ impl AgentsViewMode {
                     segments.push(format!("{keys} program"));
                 }
             }
+            if self.factory_supported {
+                if let Some(keys) = all("app.agents.factory") {
+                    segments.push(format!("{keys} machines"));
+                }
+            }
             if self.scope_active {
                 if let Some(back) = first("app.agents.back") {
                     segments.push(format!("{back} parent"));

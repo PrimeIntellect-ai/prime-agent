@@ -33,9 +33,19 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::{Line, Span};
 
+mod blocks;
 mod diagram;
+mod library;
+mod mermaid;
 #[cfg(test)]
 mod tests;
+
+pub use library::{
+    library_reply_lists_machines, overview_reply_lists_runs, parse_library_machines,
+    parse_library_warnings, parse_overview_runs, parse_overview_warnings, LibraryMachine,
+    LibraryRun, LibraryView, LibraryViewAction, MALFORMED_LIBRARY_REPLY_ERROR,
+    MALFORMED_OVERVIEW_REPLY_ERROR,
+};
 
 use diagram::{
     edge_marker, node_glyph, run_state_color, FactoryEdge, FactoryNodeState, FactoryState,
@@ -145,8 +155,9 @@ impl FactoryRunSnapshot {
     }
 }
 
-/// The live runs split on [`FactoryRunSnapshot::is_paused`]: the dock and
-/// the agents view show the running runs apart from the paused ones.
+/// The live runs split on [`FactoryRunSnapshot::is_paused`]: the agents
+/// view's factory line shows the running runs apart from the paused
+/// ones (the bar's machines item shows the running count alone).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FactoryRunCounts {
     pub running: usize,
@@ -169,8 +180,9 @@ impl FactoryRunCounts {
     }
 }
 
-/// The activity dock's factory row: the live runs (the dock count's own
-/// set), paused first, each `<name> <state>`.
+/// The activity dock's expanded items: the live runs, paused first,
+/// each `<name> <state>` — the count item beside them numbers the
+/// running runs only.
 #[must_use]
 pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
     let mut live: Vec<&FactoryRunSnapshot> = runs.iter().filter(|run| run.is_live()).collect();
@@ -263,17 +275,18 @@ impl FactoryCounts {
         }
     }
 
-    /// `N factories · M running[ · K paused]`, or `None` while the session has neither specs nor
-    /// live runs: the agents view's factory line and the expanded dock's factory row show exactly
-    /// then.
+    /// `N machines · M running[ · K paused]`, or `None` while the session has neither specs nor
+    /// live runs: the agents view's per-session factory line shows exactly then. The bar's
+    /// machines item composes its own running count directly — never route the bar back
+    /// through this label; its specs and paused segments belong to the agents view alone.
     #[must_use]
     pub fn label(self) -> Option<String> {
         let FactoryRunCounts { running, paused } = self.runs;
         (self.specs > 0 || running + paused > 0).then(|| {
             let noun = if self.specs == 1 {
-                "factory"
+                "machine"
             } else {
-                "factories"
+                "machines"
             };
             let paused = if paused > 0 {
                 format!(" \u{b7} {paused} paused")
@@ -329,7 +342,7 @@ fn get_either<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a Valu
 /// scrubs its control bytes ([`scrubbed_string`]) — daemon-provided
 /// text never drives the terminal — and the run id stays raw (the
 /// stop/resume/watch identity must round-trip the kernel's registry).
-fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
+pub(crate) fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
     let run_id = opt_string(get_either(run, "run_id", "runId")).unwrap_or_default();
     let spec_id = scrubbed_string(get_either(run, "spec_id", "specId")).unwrap_or_default();
     if run_id.is_empty() && spec_id.is_empty() {
@@ -428,7 +441,10 @@ pub struct FactoryRow {
 }
 
 impl FactoryRow {
-    fn header(run_id: &str) -> Self {
+    /// A run's header row (the machines page's run rows open the run page
+    /// on it).
+    #[must_use]
+    pub fn header(run_id: &str) -> Self {
         Self {
             run_id: run_id.to_string(),
             state_id: None,
@@ -472,6 +488,10 @@ impl FactoryView {
         };
         view.selected = view.rows().into_iter().next();
         view
+    }
+
+    pub fn set_viewport_rows(&mut self, rows: usize) {
+        self.viewport_rows = rows;
     }
 
     /// The run-level actions the page offers on one run: resume on a
@@ -800,6 +820,9 @@ impl FactoryView {
             panels.truncate(panel_budget);
         }
         let mut rows = panels;
+        while rows.len() < panel_budget {
+            rows.push(vec![]);
+        }
         if let Some(error) = &self.error {
             rows.push(vec![Span::raw("")]);
             rows.push(vec![
@@ -884,7 +907,7 @@ impl FactoryView {
         let changed = self.recent_change.get(index).copied().unwrap_or(false);
         // The header: the selection marker, the run's name, its state.
         let mut header: Line = vec![Span::raw(if header_selected { "▸ " } else { "  " })];
-        header.push(theme.fg_span(ThemeColor::ToolTitle, "factory: "));
+        header.push(theme.fg_span(ThemeColor::ToolTitle, "run: "));
         header.push(theme.fg_span(ThemeColor::Text, run.display_name()));
         let state_text = match run.state.as_deref() {
             Some(state) => format!(" — {state}"),
@@ -1074,7 +1097,7 @@ impl FactoryView {
 }
 
 /// A compact duration: seconds under a minute, minutes under an hour.
-fn format_duration(ms: u64) -> String {
+pub(crate) fn format_duration(ms: u64) -> String {
     let seconds = ms / 1_000;
     if seconds < 60 {
         format!("{seconds}s")

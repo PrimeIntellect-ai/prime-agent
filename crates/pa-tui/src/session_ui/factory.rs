@@ -1,7 +1,6 @@
-//! The factory page's session surface: the page open (the activity
-//! dock's factory group's destination), the view's key loop, the
-//! refresh cadence, and the daemon `factory_activity` lane the page's
-//! actions ride.
+//! The run page's session surface: the page open (the machines page's
+//! run rows), the view's key loop, the refresh cadence, and the daemon
+//! `factory_activity` lane the page's actions ride.
 
 use std::time::Duration;
 
@@ -13,8 +12,8 @@ use pa_types::daemon::DaemonCommand;
 use super::AgentView;
 
 use crate::factory_view::{
-    factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryView, FactoryViewAction,
-    FACTORY_WATCH_TICK_MS,
+    factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryRow, FactoryView,
+    FactoryViewAction, FACTORY_WATCH_TICK_MS,
 };
 use crate::interactive::{SelectionOrigin, SessionPanel, SessionSelection};
 use crate::session_ui::{picker_viewport_rows, UI_REQUEST_TIMEOUT_MS};
@@ -58,17 +57,16 @@ impl super::SessionUi {
             })
     }
 
-    /// Open the factory page: the activity dock's factory group's
-    /// destination (the subagents/heartbeats/shells pages' navigation
-    /// family — the dock's Enter and the click both dispatch here). The
-    /// keypress never waits on the daemon (the heartbeats/bash page
-    /// pattern): the poll cycle's cached graph mounts at once and the
-    /// refresh cadence keeps it current; a daemon without the lane
-    /// reports exactly that instead of mounting nothing silently.
-    pub(crate) fn open_factory_page(&mut self, view: &mut AgentView) {
+    /// Open the run page (the machines page's run rows, and a return from
+    /// a state's child session), on `row` when given. The keypress never
+    /// waits on the daemon (the heartbeats/bash page pattern): the poll
+    /// cycle's cached graph mounts at once and the refresh cadence keeps
+    /// it current; a daemon without the lane reports exactly that instead
+    /// of mounting nothing silently.
+    pub(crate) fn open_factory_runs(&mut self, view: &mut AgentView, row: Option<FactoryRow>) {
         if !self.factory_activity_supported() {
             self.note(
-                "The factory page needs a daemon that advertises the factory lane",
+                "The run page needs a daemon that advertises the factory lane",
                 view,
             );
             return;
@@ -83,6 +81,9 @@ impl super::SessionUi {
             &self.factory_graph,
             picker_viewport_rows(view.terminal_rows()),
         ));
+        if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
+            factory_view.select(row);
+        }
         self.sync_factory_selection(view);
         self.dirty = true;
         self.spawn_factory_refresh();
@@ -111,7 +112,11 @@ impl super::SessionUi {
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 view.factory_view = None;
-                self.close_panel_to_agents_view();
+                // The run page opened from the machines page closes back
+                // to it; the machines page's own close leaves.
+                if view.library_view.is_none() {
+                    self.close_panel_to_agents_view();
+                }
                 self.dirty = true;
             }
             Some(FactoryViewAction::Open { child_id }) => self.open_factory_child(view, &child_id),
@@ -457,6 +462,14 @@ impl super::SessionUi {
         match payload {
             Ok(data) => match Self::fold_factory_reply(&mut self.factory_graph, data) {
                 Some(runs) => {
+                    // The scoped graph feeds the local run detail and
+                    // the dock; the machines page reads the same cache
+                    // only through its own seams (the mount seed's
+                    // merge, the overview fold's uncarried-row fill, and
+                    // the version-skew fallback's rows), never through this
+                    // fold — this seam never repaints the page (a late
+                    // scoped graph must not erase the all-session rows
+                    // with the attached session's own list).
                     if let Some(factory_view) = view.factory_view.as_mut() {
                         factory_view.set_error(None);
                         factory_view.apply_runs(runs);

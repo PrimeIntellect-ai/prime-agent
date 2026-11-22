@@ -66,7 +66,7 @@ fn enter_on_a_nested_factory_line_opens_the_child_with_the_factory_panel() {
     let mut mode = mode_with_parent_and_child();
     mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
     with_activity(&mut mode, "c-live", 0, 1);
-    select_title(&mut mode, "\u{2699} 0 factories \u{b7} 1 running");
+    select_title(&mut mode, "\u{2699} 0 machines \u{b7} 1 running");
     mode.handle_key("enter");
     let opened = mode.opened.as_ref().expect("open recorded");
     assert_eq!(
@@ -102,5 +102,36 @@ fn child_lines_sit_one_indent_step_past_their_row() {
             column("$ 2 shells"),
         ],
         [0, 4, 6, 8, 4]
+    );
+}
+
+/// The `app.agents.factory` key (unbound by default; bound to alt+f here): the factory page opens through the selected
+/// row's top-level session (a nested child resolves to its root agent), closing back here; while
+/// the daemon advertises no factory lane it reports that instead.
+#[test]
+fn the_factory_key_opens_the_factory_page_through_the_root_session() {
+    let mut mode = mode_with_parent_and_child();
+    let mut bindings = crate::keybindings::KeybindingsConfig::new();
+    bindings.insert("app.agents.factory".to_string(), vec!["alt+f".to_string()]);
+    mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(bindings);
+    mode.handle_key("alt+f");
+    assert!(mode.opened.is_none());
+    assert_eq!(
+        mode.status_text(),
+        Some(
+            "The machines page needs the factory lane: run /factory on in a session, then restart"
+        )
+    );
+    mode.factory_supported = true;
+    mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
+    mode.rebuild_rows();
+    select_title(&mut mode, "worker one");
+    mode.handle_key("alt+f");
+    let opened = mode.opened.as_ref().expect("open recorded");
+    assert_eq!(opened.panel, Some(SessionPanel::FactoryRuns { row: None }));
+    assert_ne!(
+        opened.selection,
+        SessionSelection::Attach("c-live".to_string()),
+        "the page opens through the root session, not the child"
     );
 }

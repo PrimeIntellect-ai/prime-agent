@@ -34,6 +34,12 @@ pub struct FactoryState {
     pub subagent: Option<String>,
     /// A python state's `<import>.<callable>`; such a state has no subagent.
     pub python: Option<String>,
+    /// The agent's model selector, when the graph names one.
+    pub model: Option<String>,
+    /// A mermaid node's shape label: the box's second line, empty when
+    /// the node carries none. Machine states never carry one, and their
+    /// box keeps its own model/python detail.
+    pub label: Option<String>,
 }
 
 impl FactoryState {
@@ -58,6 +64,12 @@ impl FactoryState {
                 .and_then(Value::as_str)
                 .map(scrubbed)
                 .filter(|text| !text.is_empty()),
+            model: value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(scrubbed)
+                .filter(|text| !text.is_empty()),
+            label: None,
         })
     }
 }

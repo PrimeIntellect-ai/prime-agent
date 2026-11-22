@@ -281,11 +281,15 @@ impl SessionUi {
                     self.settled = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
+                    self.library_overview_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
                     self.factory_graph = serde_json::json!({"runs": []});
                     if let Some(factory_view) = view.factory_view.as_mut() {
                         factory_view.apply_runs(Vec::new());
                     }
+                    // The factory page keeps its all-session rows: its
+                    // cache is not the closed session's scoped graph, so
+                    // only the epoch retires an in-flight reply.
                     self.update_subagent_summary(view);
                     match reason.as_str() {
                         "shutdown" => self.error_row(

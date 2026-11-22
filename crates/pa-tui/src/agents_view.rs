@@ -370,6 +370,9 @@ enum SelectionEdge {
 struct AgentsViewMode {
     options: AgentsViewOptions,
     theme: Theme,
+    /// The daemon advertises the factory lane: `app.agents.factory` opens
+    /// the factory page through the selected session.
+    factory_supported: bool,
     roster: Vec<Value>,
     saved: Vec<Value>,
     rows: Vec<AgentsViewRow>,
@@ -599,6 +602,7 @@ impl AgentsViewMode {
             pending_shell_open: None,
             session_activity: ActivityCounts::default(),
             content_search: content_search::ContentSearch::default(),
+            factory_supported: false,
         }
     }
 }
@@ -809,6 +813,7 @@ async fn run_agents_view_surface(
     mode.content_search.enabled = mode.content_search.supported && content_search_carried;
     mode.content_search
         .arm(mode.query.trim(), tokio::time::Instant::now());
+    mode.factory_supported = client.supports_server_capability("factory_activity");
     mode.rebuild_rows();
     // The notice from the log's bounded tail paints on the FIRST frame, before the interval's
     // first tick.

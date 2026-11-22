@@ -134,6 +134,35 @@ impl AgentsViewMode {
         }
     }
 
+    /// `app.agents.factory`: open the machines page through the selected
+    /// row's top-level session (a nested row's root agent); the page closes
+    /// back to the agents view like an activity line's panel.
+    pub(super) fn open_factory_for_selected(&mut self) {
+        if !self.factory_supported {
+            self.set_status("The machines page needs the factory lane: run /factory on in a session, then restart");
+            return;
+        }
+        let Some(row) = self.rows.get(self.selected).cloned() else {
+            return;
+        };
+        let agent = match row.kind {
+            RowKind::Agent => Some(row),
+            RowKind::SubagentSummary
+            | RowKind::Subagent
+            | RowKind::Shells
+            | RowKind::FactoryRuns => self.find_subagent_root_row(&row).cloned(),
+            RowKind::Code | RowKind::PersistentShell => None,
+        };
+        let Some(agent) = agent else {
+            self.set_status("Select a session to open the machines page through");
+            return;
+        };
+        self.open_row(&agent, Vec::new());
+        if let Some(opened) = self.opened.as_mut() {
+            opened.panel = Some(SessionPanel::FactoryRuns { row: None });
+        }
+    }
+
     /// The top-level ancestor row of a nested row.
     pub(super) fn find_subagent_root_row(&self, row: &AgentsViewRow) -> Option<&AgentsViewRow> {
         let mut identity = row.parent_identity.as_deref();

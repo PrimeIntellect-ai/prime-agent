@@ -149,11 +149,16 @@ impl SessionUi {
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
             factory_graph: serde_json::json!({"runs": []}),
+            factory_overview: serde_json::json!({"runs": []}),
             factory_view_session: None,
             factory_refresh_in_flight: false,
             factory_refresh_queued: false,
             factory_list_epoch: 0,
             factory_updates: activity_updates.factory,
+            library_updates: activity_updates.library,
+            library_list_epoch: 0,
+            library_overview_in_flight: false,
+            library_overview_epoch: 0,
             factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
@@ -624,6 +629,11 @@ impl SessionUi {
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
             view.info_panel = None;
+            // The machine library page dies the same death: its open
+            // fetch is session-addressed (the lane rides the attached
+            // session's kernel), so the page reopens on the new session
+            // instead of keeping the old one's list.
+            view.library_view = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -885,6 +895,7 @@ mod backfill_tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             backfill_tx,
@@ -1078,6 +1089,7 @@ mod backfill_tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             mpsc::unbounded_channel().0,

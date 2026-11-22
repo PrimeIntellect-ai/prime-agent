@@ -17,7 +17,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 machines"
     );
     let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
     assert_eq!(
@@ -144,7 +144,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 machines  ·  Pursuing goal (0s)"
     );
     // The operator's 2026-09-24 color-coding directive.
     let success = theme.fg_style(ThemeColor::Success).fg;
@@ -194,7 +194,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 machines"
     );
     // The all-zero dock renders its own empty state — the zero
     // readout — and the zero segments stay neutral, never green. The
@@ -211,7 +211,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 machines"
     );
     assert!(frame[1]
         .iter()
@@ -258,10 +258,11 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     assert!(text.contains("Pursuing goal (12m 05s)"));
 }
 
-/// A paused factory run never reads as running: the collapsed count holds only the running
-/// run (green), and the paused one sits in its own amber cluster, like a paused heartbeat.
+/// The machines item shows ONE number — the running count, pluralized —
+/// and never a paused count (the operator's dock-count directive): a paused run stays a state-colored
+/// row inside the machines page, never a cluster on the bar.
 #[test]
-fn the_collapsed_dock_counts_paused_factory_runs_apart_from_running_ones() {
+fn the_dock_counts_running_machines_only_never_the_paused_ones() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let colored = |dock: &ActivityDock| {
         render_activity_dock(dock, &theme, 120)[1]
@@ -272,40 +273,86 @@ fn the_collapsed_dock_counts_paused_factory_runs_apart_from_running_ones() {
     };
     let paused_only = ActivityDock {
         factory_runs: vec!["nightly paused".to_string()],
-        factory_counts: crate::factory_view::FactoryRunCounts {
-            running: 0,
-            paused: 1,
-        },
+        factory_running: 0,
         factory_group: true,
         ..ActivityDock::default()
     };
     let muted = theme.fg_style(ThemeColor::Muted).fg;
     let success = theme.fg_style(ThemeColor::Success).fg;
-    let warning = theme.fg_style(ThemeColor::Warning).fg;
-    let dim = theme.fg_style(ThemeColor::Dim).fg;
     assert_eq!(
         colored(&paused_only),
-        vec![
-            ("⚙ 0 factory".to_string(), muted),
-            (" · ".to_string(), dim),
-            ("◐ 1 paused".to_string(), warning),
-        ]
+        vec![("⚙ 0 machines".to_string(), muted)],
+        "a paused-only group numbers zero machines, never a paused count"
     );
     let mixed = ActivityDock {
         factory_runs: vec!["nightly paused".to_string(), "lint running".to_string()],
-        factory_counts: crate::factory_view::FactoryRunCounts {
-            running: 1,
-            paused: 1,
-        },
-        ..paused_only
+        factory_running: 1,
+        ..paused_only.clone()
     };
     assert_eq!(
         colored(&mixed),
-        vec![
-            ("⚙ 1 factory".to_string(), success),
-            (" · ".to_string(), dim),
-            ("◐ 1 paused".to_string(), warning),
-        ]
+        vec![("⚙ 1 machine".to_string(), success)],
+        "one running run reads the singular, and the paused run never clusters"
+    );
+    let two_running = ActivityDock {
+        factory_runs: vec![
+            "nightly paused".to_string(),
+            "lint running".to_string(),
+            "docs running".to_string(),
+        ],
+        factory_running: 2,
+        ..paused_only
+    };
+    assert_eq!(
+        colored(&two_running),
+        vec![("⚙ 2 machines".to_string(), success)],
+        "two running runs read the plural"
+    );
+    // The expanded breakdown follows the same rule: the count item
+    // alone, then the state-labeled run items — no paused
+    // segment, no spec number.
+    let expanded = render_activity_dock(
+        &ActivityDock {
+            focused: true,
+            ..mixed
+        },
+        &theme,
+        120,
+    );
+    let machines_row = expanded
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.clone())
+                .collect::<String>()
+        })
+        .find(|row| row.starts_with(" ⚙ machines"))
+        .expect("the machines row");
+    assert_eq!(
+        machines_row.trim_end(),
+        " ⚙ machines    1 machine  ·  nightly paused  ·  lint running",
+        "the breakdown item is the running count alone, pluralized"
+    );
+    // The same breakdown at TWO running runs: the plural branch of
+    // the count item, on the expanded row (the collapsed plural is
+    // pinned above; a singular-only expanded item would pass every
+    // other assert in this battery).
+    let expanded_two = render_activity_dock(
+        &ActivityDock {
+            focused: true,
+            ..two_running
+        },
+        &theme,
+        120,
+    );
+    let machines_row = line_texts(&expanded_two)
+        .into_iter()
+        .find(|row| row.starts_with(" ⚙ machines"))
+        .expect("the machines row");
+    assert_eq!(
+        machines_row.trim_end(),
+        " ⚙ machines    2 machines  ·  nightly paused  ·  lint running  ·  docs running",
+        "the expanded breakdown reads the plural at two, like the collapsed bar"
     );
 }
 
@@ -327,7 +374,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 machines"
     );
     // Two running children plus seven running descendants: ONE
     // number — the summed total, never the pair, never the
@@ -345,7 +392,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 machines"
     );
     assert!(!text.contains("2,"), "no direct/nested pair: {text}");
     assert!(!text.contains("idle"), "no category breakdown: {text}");
@@ -366,7 +413,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 machines"
     );
 }
 
@@ -393,12 +440,8 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
         shells_persistent: 0,
-        factory_specs: 2,
         factory_runs: vec!["nightly paused".to_string()],
-        factory_counts: crate::factory_view::FactoryRunCounts {
-            running: 0,
-            paused: 1,
-        },
+        factory_running: 0,
         factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         selected: ActivityGroup::Subagents,
@@ -414,7 +457,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
             " ◆ subagents   3 running · 1 idle · 2 inactive",
             " ◷ heartbeats  5m lane canary",
             " ▸ shells      1 running · 0 persistent  ·  cargo test · 12.0s",
-            " ⚙ factory     2 factories · 0 running · 1 paused  ·  nightly paused",
+            " ⚙ machines    nightly paused",
             " Pursuing goal (0s)",
         ]
     );
@@ -431,9 +474,12 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         ..dock
     };
     let texts = line_texts(&render_activity_dock(&collapsed, &theme, 120));
+    // The machines item carries one number (the operator's dock-count
+    // directive): the paused run never clusters on the bar, so the
+    // goal label keeps its full width here — no truncation ellipsis.
     assert_eq!(
         texts[1..],
-        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)"]
+        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 machines  ·  Pursuing goal (0s)"]
     );
 }
 
@@ -494,31 +540,6 @@ fn an_overflowing_expanded_row_counts_the_rest() {
         texts[3],
         " ▸ shells      9 running · 2 persistent  ·  item 1  +8"
     );
-}
-
-/// Stored factory specs without a live run still fill the expanded factory row with its counts,
-/// while the collapsed segment keeps counting live runs only.
-#[test]
-fn the_expanded_factory_row_counts_stored_specs_without_runs() {
-    let theme = Theme::builtin("prime", ColorMode::TrueColor);
-    let dock = ActivityDock {
-        factory_specs: 2,
-        factory_group: true,
-        selected: ActivityGroup::Subagents,
-        focused: true,
-        ..ActivityDock::default()
-    };
-    let texts = line_texts(&render_activity_dock(&dock, &theme, 80));
-    assert_eq!(
-        texts[4].trim_end(),
-        " ⚙ factory     2 factories · 0 running"
-    );
-    let collapsed = ActivityDock {
-        focused: false,
-        ..dock
-    };
-    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 80));
-    assert!(texts[1].ends_with("⚙ 0 factory"), "{texts:?}");
 }
 
 /// A large activity list fits by terminal cells, including a multi-digit omitted count.
@@ -766,7 +787,7 @@ fn an_empty_group_renders_a_dimmed_row_and_stays_selectable() {
     for (row, title) in
         frame[1..]
             .iter()
-            .zip(["◆ subagents", "◷ heartbeats", "▸ shells", "⚙ factory"])
+            .zip(["◆ subagents", "◷ heartbeats", "▸ shells", "⚙ machines"])
     {
         let text: String = row.iter().map(|span| span.content.as_str()).collect();
         assert_eq!(text.trim_end(), format!(" {title}"), "no details: {text:?}");

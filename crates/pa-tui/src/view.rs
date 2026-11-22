@@ -94,6 +94,10 @@ pub struct AgentView {
     /// inline pickers (one panel per live factory run) — the activity
     /// dock's factory group's destination.
     pub factory_view: Option<crate::factory_view::FactoryView>,
+    /// The machine library page: while set, it owns the editor dock the
+    /// same way (every library machine listed, one drill-in per machine)
+    /// — the activity dock's machine-library group's destination.
+    pub library_view: Option<crate::factory_view::LibraryView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
@@ -257,12 +261,13 @@ impl AgentView {
             return true;
         }
         // The input-less frame owners (the key dispatch's same set): the
-        // factory page, the heartbeats picker, the bash view, the
-        // read-only goal and info panels, the fork selector, the pending
-        // confirm, the share loader, the reload box, and the auth panel
-        // (its own channel drives it). None of them leaves a paste to the
-        // editor behind.
-        if self.factory_view.is_some()
+        // machines page and its run page, the heartbeats picker, the bash
+        // view, the read-only goal and info panels, the fork selector, the
+        // pending confirm, the share loader, the reload box, and the auth
+        // panel (its own channel drives it). None of them leaves a paste to
+        // the editor behind.
+        if self.library_view.is_some()
+            || self.factory_view.is_some()
             || self.heartbeats_picker.is_some()
             || self.bash_view.is_some()
             || self.goal_panel.is_some()
@@ -308,6 +313,7 @@ impl AgentView {
             choice_picker: None,
             mcp_view: None,
             factory_view: None,
+            library_view: None,
             heartbeats_picker: None,
             goal_panel: None,
             bash_view: None,

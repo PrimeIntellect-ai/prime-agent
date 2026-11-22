@@ -117,6 +117,40 @@ fn injected_terminal_links_are_not_clickable() {
 /// family — Macroscope review finding: the factory page left the caret
 /// parked at the previous editor position over the panel).
 #[test]
+fn the_factory_page_fills_the_parent_area() {
+    let mut v = view();
+    v.push_entry(ChatEntry::User {
+        text: "hello transcript".to_string(),
+    });
+    v.library_view = Some(crate::factory_view::LibraryView::new(
+        Vec::new(),
+        Vec::new(),
+        20,
+    ));
+    let frame = v.render_frame(80, 24);
+    assert_eq!(frame.len(), 24);
+    let rows: Vec<String> = frame.iter().map(text_of).collect();
+    // The factory page claims the main area right below the top bar: row 1 is the page header,
+    // not transcript content or an empty transcript band.
+    assert!(
+        rows[1].contains("machines"),
+        "row 1 starts the machines page, was: {:?}",
+        rows[1]
+    );
+    // The key hint is pinned at the bottom of the frame (row 23).
+    assert!(
+        rows[23].contains("Esc close"),
+        "row 23 pins the key hint, was: {:?}",
+        rows[23]
+    );
+    // The transcript content is not rendered while the factory page owns the frame.
+    assert!(
+        !rows.iter().any(|r| r.contains("hello transcript")),
+        "transcript is hidden while factory page is open"
+    );
+}
+
+#[test]
 fn the_factory_page_suppresses_the_stale_editor_cursor() {
     let mut v = view();
     v.dock_cursor = Some((10, 3));
