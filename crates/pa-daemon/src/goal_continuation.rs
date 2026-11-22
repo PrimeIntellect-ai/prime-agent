@@ -204,8 +204,9 @@ impl AgentSessionEngine {
             // delivery never pauses another client's goal on the shared
             // session. A goal with no stamp (started outside any
             // delivery's turn, or after a worker rebuild lost the
-            // in-memory slot) is no waiting task's own work either —
-            // the cancel leaves it to its own surface.
+            // in-memory slot) is not paused here — it belongs to no
+            // waiting task — but its mints still retire with the
+            // withdrawn record (see `withdrawn_delivery_owns_goal`).
             if engine
                 .goal_owner_delivery
                 .lock()
@@ -255,18 +256,21 @@ impl AgentSessionEngine {
     /// goal loop such a delivery started was canceled with its task, so
     /// its mints retire (the pause owns the durable stop; this record
     /// closes the mint window the pause's scheduling cannot).
+    ///
+    /// A goal with no stamped owner counts as withdrawn while the session
+    /// carries any withdrawal record: a cancel stops every continuation,
+    /// and an unknown identity must never keep minting turns after one.
     fn withdrawn_delivery_owns_goal(&self) -> bool {
         let owner = self
             .goal_owner_delivery
             .lock()
             .expect("goal owner delivery lock")
             .clone();
-        owner.is_some_and(|owner| {
-            self.goal_withdrawn_deliveries
-                .lock()
-                .expect("goal withdrawn deliveries lock")
-                .contains(&owner)
-        })
+        let withdrawn = self
+            .goal_withdrawn_deliveries
+            .lock()
+            .expect("goal withdrawn deliveries lock");
+        owner.map_or(!withdrawn.is_empty(), |owner| withdrawn.contains(&owner))
     }
 
     /// The natural-turn-end goal consult: the goal arm runs before the

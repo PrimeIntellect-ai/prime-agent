@@ -94,14 +94,22 @@ impl AgentSessionEngine {
         // recorded owner, the later run-on rows — the terminal notice —
         // with the withdrawn delivery's own stamp), so no later
         // boundary of the same chain spends a turn no client answers.
-        if let Some(running) = self.running_delivery_identity() {
+        // A boundary with no stamped identity (a turn on an engine
+        // continuation row) counts as withdrawn too once the session
+        // carries a withdrawal record: a cancel stops every
+        // continuation, and an unknown identity must never mint.
+        let running = self.running_delivery_identity();
+        let stopped = {
             let withdrawn = self
                 .autonomous_withdrawn_deliveries
                 .lock()
                 .expect("autonomous withdrawn deliveries lock");
-            if withdrawn.contains(&running) {
-                return Vec::new();
-            }
+            running.map_or(!withdrawn.is_empty(), |running| {
+                withdrawn.contains(&running)
+            })
+        };
+        if stopped {
+            return Vec::new();
         }
         // The goal arm takes exclusive priority (an active goal owns the boundary).
         if self.goal_owns_continuation_wakeup().await {
@@ -595,6 +603,45 @@ mod tests {
                 .autonomous_awaits_rlm_work
                 .load(std::sync::atomic::Ordering::SeqCst),
             "the unstamped deferral retires with the legacy unconditional stop"
+        );
+    }
+
+    /// The owner's rule on the unstamped arm: a cancel stops EVERY
+    /// continuation. A boundary whose running delivery is unset (a turn on
+    /// an engine continuation row, whose mint carried no client id) counts
+    /// as withdrawn once the session carries a withdrawal record — the
+    /// in-run consult must not skip its withdrawn check on `None`.
+    #[test]
+    fn a_withdrawn_chain_mints_no_unstamped_autonomous_turn() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
+            u64::MAX,
+        );
+        let engine = Arc::new(engine);
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, "warm".to_string(), &mut events);
+        admit(
+            &engine,
+            "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
+            &mut events,
+        );
+        // No worker probe: this boundary carries no stamped delivery
+        // identity (the state of a continuation turn minted outside one).
+        assert!(engine.running_delivery_identity().is_none());
+        engine.retire_withdrawn_autonomous_deferral("a2a-delivery");
+        let message = engine
+            .runtime
+            .block_on(async { engine.latest_settled_assistant().await })
+            .expect("the warm turn settled an assistant message");
+        let rows = engine
+            .runtime
+            .block_on(async { engine.autonomous_continuation_rows(&message).await });
+        assert!(
+            rows.is_empty(),
+            "a cancel with no stamped identity minted a continuation turn: {rows:?}"
         );
     }
 }
