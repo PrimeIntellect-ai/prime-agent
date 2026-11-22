@@ -556,8 +556,9 @@ pub fn register_factory_check_host_handler(handlers: &mut HostRequestHandlers) {
 ///
 /// `contract` is the state's contract from the child's create; its
 /// `inputs` are the bound input values. `session_dir` holds the
-/// accepted-outputs file and the copied file ports; `cwd` resolves
-/// relative file paths. Each emit is all-or-nothing: every value is
+/// accepted-outputs file and the copied file ports. Relative file paths
+/// resolve against the emit's own `cwd` (the kernel's current directory
+/// at the call), else against `cwd`, the session's. Each emit is all-or-nothing: every value is
 /// checked (and every file port found) before anything is written, so a
 /// wrong value fails the call with the exact field and the child fixes it
 /// in the same turn.
@@ -664,6 +665,10 @@ fn emit_outputs(
     let mut problems = contract.check(&outputs).err().unwrap_or_default();
     // A file port names a file the child wrote. It must exist now, and
     // downstream states read the copy, not the path of the child.
+    let cwd = data
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map_or(cwd, Path::new);
     let emit_id = uuid::Uuid::new_v4().to_string();
     let files_dir = session_dir.join(FACTORY_FILES_DIR);
     let mut copies: Vec<(String, PathBuf, PathBuf)> = Vec::new();

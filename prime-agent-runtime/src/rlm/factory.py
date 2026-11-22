@@ -1175,14 +1175,15 @@ async def emit_factory_outputs(outputs: dict[str, Any]) -> dict[str, Any]:
     Every value is checked against the state's declared types before
     anything is kept; a wrong value raises ``FactoryEmitError`` with the
     exact field, so fix it and call again. A ``file`` output takes a path
-    (``str`` or ``Path``) and the file is copied. Returns ``{"accepted":
-    [...], "missing": [...]}``, the required outputs still owed.
+    (``str`` or ``Path``), relative to the kernel's current directory, and
+    the file is copied. Returns ``{"accepted": [...], "missing": [...]}``,
+    the required outputs still owed.
     """
     from . import host_request
 
     values = {name: os.fspath(value) if isinstance(value, os.PathLike) else value for name, value in outputs.items()}
     try:
-        return await host_request("factory.emit", {"outputs": values})
+        return await host_request("factory.emit", {"outputs": values, "cwd": os.getcwd()})
     except RuntimeError as error:
         raise FactoryEmitError(_emit_error_text(str(error))) from None
 

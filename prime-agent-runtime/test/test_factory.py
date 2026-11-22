@@ -7597,6 +7597,23 @@ class FactoryEmitTest(_ExecutorTestCase):
             with self.assertRaisesRegex(rlm_module.FactoryEmitError, "work only in a child spawned by"):
                 await rlm_module.rlm.factory.emit(plan={"steps": 2})
 
+    @async_test
+    async def test_emit_sends_the_kernel_current_directory(self) -> None:
+        sent: list[dict[str, Any]] = []
+
+        async def record(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            sent.append(payload or {})
+            return {"accepted": ["design"], "missing": []}
+
+        previous = os.getcwd()
+        with TemporaryDirectory() as moved, patch.object(rlm_module, "host_request", record):
+            os.chdir(moved)
+            try:
+                await rlm_module.rlm.factory.emit(design=Path("PLAN.md"))
+            finally:
+                os.chdir(previous)
+            self.assertEqual(sent, [{"outputs": {"design": "PLAN.md"}, "cwd": os.path.realpath(moved)}])
+
 
 class FactoryGraphWatchTest(_ExecutorTestCase):
     """The graph snapshot (structure fused with live state), the bounded

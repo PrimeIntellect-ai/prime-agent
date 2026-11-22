@@ -933,6 +933,25 @@ async fn a_refused_emit_writes_nothing() {
     assert!(!fixture.session_dir.join(super::FACTORY_FILES_DIR).exists());
 }
 
+/// A relative file port resolves against the directory the kernel was in
+/// at the emit, not the session's cwd from when the engine was built.
+#[tokio::test]
+async fn a_relative_file_port_resolves_against_the_emit_cwd() {
+    let fixture = EmitFixture::new();
+    let moved = fixture.cwd.join("moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    std::fs::write(moved.join("PLAN.md"), "# Plan\n").unwrap();
+    fixture
+        .request(
+            "factory.emit",
+            json!({"outputs": {"design": "PLAN.md"}, "cwd": moved.display().to_string()}),
+        )
+        .await
+        .unwrap();
+    let copy = fixture.written()["design"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read_to_string(copy).unwrap(), "# Plan\n");
+}
+
 /// `factory.inputs` answers the values bound into the child's contract.
 #[tokio::test]
 async fn factory_inputs_answers_the_bound_inputs() {
