@@ -513,6 +513,53 @@ mod tests {
         assert!(retired.exists());
     }
 
+    /// The keep window protects AGED copies too: an interrupted rebuild leaves
+    /// the partial tree as the newest copy, so the two newest must survive even
+    /// when they are old. Without this, dropping the keep-window skip would
+    /// leave both age tests green while losing the recovery guarantee.
+    #[cfg(unix)]
+    #[test]
+    fn the_keep_window_retains_aged_copies() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "kernel-venv.stale-1",
+            "kernel-venv.stale-2",
+            "kernel-venv.stale-3",
+        ] {
+            std::fs::create_dir_all(root.path().join(name).join("bin")).unwrap();
+        }
+        let old = std::time::SystemTime::now()
+            - super::venv::STALE_VENV_RETENTION
+            - std::time::Duration::from_secs(60);
+        for name in [
+            "kernel-venv.stale-1",
+            "kernel-venv.stale-2",
+            "kernel-venv.stale-3",
+        ] {
+            std::fs::File::open(root.path().join(name))
+                .expect("open a directory to age it")
+                .set_modified(old)
+                .expect("age the copy");
+        }
+        let venv = root.path().join("kernel-venv");
+        std::fs::create_dir_all(&venv).unwrap();
+
+        let retired = retire_stale_venv(&venv).unwrap();
+
+        let names = sibling_names(root.path());
+        assert!(
+            !names.iter().any(|sibling| sibling == "kernel-venv.stale-1"),
+            "the oldest aged copy goes: {names:?}"
+        );
+        for kept in ["kernel-venv.stale-2", "kernel-venv.stale-3"] {
+            assert!(
+                names.iter().any(|sibling| sibling == kept),
+                "the keep window retains an aged copy ({kept}): {names:?}"
+            );
+        }
+        assert!(retired.exists());
+    }
+
     /// Beyond the keep window, AGE decides: an old extra copy is pruned.
     ///
     /// Unix only: the fixture ages the directory with `File::set_modified`,
