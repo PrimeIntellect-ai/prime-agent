@@ -986,9 +986,10 @@ async fn factory_inputs_answers_the_bound_inputs() {
 
 /// Two emits at the same time both merge: the read-merge-write is one
 /// critical section per session dir, so neither call loses the ports of
-/// the other.
+/// the other. A corrupt outputs file refuses instead of silently resetting
+/// every port that was accepted before.
 #[test]
-fn concurrent_emits_both_merge() {
+fn concurrent_emits_merge_and_a_corrupt_file_refuses() {
     let fixture = EmitFixture::new();
     let emits: Vec<_> = [
         json!({"design": "DESIGN.md"}),
@@ -1018,6 +1019,25 @@ fn concurrent_emits_both_merge() {
         .collect();
     ports.sort();
     assert_eq!(ports, ["design", "verdict"]);
+
+    // A corrupt outputs file refuses: the earlier ports were NOT reset.
+    std::fs::write(fixture.outputs_file(), b"{ not json").unwrap();
+    let error = super::emit_outputs(
+        &fixture.contract,
+        &fixture.session_dir,
+        &fixture.cwd,
+        &json!({"outputs": {"verdict": {"decision": "approve"}}}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("factory-outputs.json is not readable"),
+        "the corrupt file must refuse loudly: {error}"
+    );
+    assert_eq!(
+        std::fs::read(fixture.outputs_file()).unwrap(),
+        b"{ not json"
+    );
 }
 
 /// The bytes the committed outputs file references for `port`.
