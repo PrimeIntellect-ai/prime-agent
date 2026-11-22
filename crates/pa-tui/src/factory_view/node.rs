@@ -797,7 +797,9 @@ impl NodeView {
             format!(
                 " · {}",
                 if self.run_name.is_empty() {
-                    self.run_id.clone()
+                    // The run id is kept raw for daemon round-tripping; a
+                    // header is user-facing text, so it is scrubbed here.
+                    crate::menu_panel::scrub_controls(&self.run_id)
                 } else {
                     self.run_name.clone()
                 }
