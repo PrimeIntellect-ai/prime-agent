@@ -260,7 +260,7 @@ impl AgentSessionEngine {
     /// A goal with no stamped owner counts as withdrawn while the session
     /// carries any withdrawal record: a cancel stops every continuation,
     /// and an unknown identity must never keep minting turns after one.
-    fn withdrawn_delivery_owns_goal(&self) -> bool {
+    pub(crate) fn withdrawn_delivery_owns_goal(&self) -> bool {
         let owner = self
             .goal_owner_delivery
             .lock()

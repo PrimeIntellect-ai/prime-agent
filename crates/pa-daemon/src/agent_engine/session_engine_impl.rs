@@ -83,6 +83,12 @@ impl SessionEngine for AgentSessionEngine {
         // The mirrored locks are async, so the mint runs on the engine runtime.
         let live = self.live_handles()?;
         let handles = &live.goal;
+        // A withdrawn chain's goal mints nothing here either: the worker
+        // gates this mint on the goal status alone, which stays active until
+        // the withdrawal's durable pause lands.
+        if self.withdrawn_delivery_owns_goal() {
+            return None;
+        }
         // The progress check's input, read before the driver lock. The
         // failed pair's DROP happens INSIDE the quiescence gate (an early
         // drop would remint).

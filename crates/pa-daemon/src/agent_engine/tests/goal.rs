@@ -970,6 +970,12 @@ fn a_withdrawal_retires_an_unstamped_goal_loop() {
         goal_work.lock().unwrap().is_empty(),
         "the unstamped goal minted a continuation turn after the cancel"
     );
+    // Consult C, the post-compaction mint: the worker gates it on the goal
+    // status alone, which stays active until the pause lands.
+    assert!(
+        engine.mint_post_compaction_goal_continuation().is_none(),
+        "the post-compaction mint minted an unstamped goal's continuation after a cancel"
+    );
     assert!(
         engine
             .runtime
@@ -977,9 +983,8 @@ fn a_withdrawal_retires_an_unstamped_goal_loop() {
         "the owed slot survives the withdrawal record's stop"
     );
     assert_eq!(engine.goal_state_value()["status"], "active");
-    // The durable stop: the in-memory record dies with the worker, and the
-    // post-compaction mint reads only the status, so the pause must take
-    // the unstamped goal as well.
+    // The durable stop: the in-memory record dies with the worker, so the
+    // pause must take the unstamped goal as well.
     engine.pause_goal_for_withdrawn_delivery("a2a-delivery");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while engine.goal_state_value()["status"] != "paused" {

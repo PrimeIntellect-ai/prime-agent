@@ -296,8 +296,8 @@ pub struct AgentSessionEngine {
     /// running delivery at the Active transition, read through the
     /// worker's probe — the same identity source the child stamp and
     /// the continuation mint carry): the withdrawal's goal pause stops
-    /// the goal the withdrawn delivery started, never another client's
-    /// goal on the shared session.
+    /// the goal the withdrawn delivery started, never a goal another
+    /// delivery stamped. A goal with no stamp pauses with any withdrawal.
     pub(crate) goal_owner_delivery: std::sync::Mutex<Option<String>>,
     /// The withdrawn delivery chains the goal loop must not mint for (a
     /// withdrawal records its admission id here, synchronously before the
@@ -307,19 +307,22 @@ pub struct AgentSessionEngine {
     /// after the mint window it must precede only under runtime starvation,
     /// and this record is the stop that does not depend on scheduling. The
     /// set is in-memory like the goal's ownership stamp; a worker rebuild
-    /// loses it (the withdrawal is long past then), and a resumed goal
-    /// re-stamps its owner at the Active transition, so a stale entry never
-    /// blocks a legitimately resumed loop. Bounded: the oldest id leaves at
-    /// the bound.
+    /// loses it (the withdrawal is long past then), and a goal a delivery
+    /// resumes re-stamps its owner at the Active transition, so a stale
+    /// entry never blocks that loop. A goal with no stamped owner counts as
+    /// withdrawn while the set holds any entry, so after a cancel no
+    /// unstamped goal mints on this worker until a rebuild. Bounded: the
+    /// oldest id leaves at the bound.
     pub(crate) goal_withdrawn_deliveries: std::sync::Mutex<Vec<String>>,
     /// The withdrawn delivery chains the autonomous loop must not mint
     /// for (a withdrawal records its admission id here): a boundary
     /// whose running delivery names a withdrawn chain mints nothing, so
     /// a canceled task's run-on continuation turns (its terminal
-    /// notice, a delivered deferral) spend no further model turn. The
-    /// set is in-memory like the goal's ownership stamp; a worker
-    /// rebuild loses it (the withdrawal is long past then). Bounded:
-    /// the oldest id leaves at the bound.
+    /// notice, a delivered deferral) spend no further model turn. A
+    /// boundary with no running delivery mints nothing while the set
+    /// holds any entry. The set is in-memory like the goal's ownership
+    /// stamp; a worker rebuild loses it (the withdrawal is long past
+    /// then). Bounded: the oldest id leaves at the bound.
     pub(crate) autonomous_withdrawn_deliveries: std::sync::Mutex<Vec<String>>,
     /// The worker's running-delivery probe (the parent worker wires its
     /// core's running admission ids here): answers the delivery whose
