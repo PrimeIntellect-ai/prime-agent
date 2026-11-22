@@ -484,25 +484,15 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_copy_past_the_retention_window_is_pruned() {
-        // The newest STALE_VENV_KEEP copies are always kept, so this test
-        // needs one MORE candidate than that: the oldest of three is pruned.
+    /// Beyond the keep window, AGE decides: a fresh extra copy is kept.
+    fn a_fresh_copy_beyond_the_keep_window_is_not_pruned() {
         let root = tempfile::tempdir().unwrap();
-        let mut aged = Vec::new();
         for name in [
             "kernel-venv.stale-1",
             "kernel-venv.stale-2",
             "kernel-venv.stale-3",
         ] {
-            let path = root.path().join(name);
-            std::fs::create_dir_all(path.join("bin")).unwrap();
-            let old = std::time::SystemTime::now()
-                - super::venv::STALE_VENV_RETENTION
-                - std::time::Duration::from_secs(60);
-            std::fs::File::open(&path)
-                .map(|file| file.set_modified(old))
-                .ok();
-            aged.push(path);
+            std::fs::create_dir_all(root.path().join(name).join("bin")).unwrap();
         }
         let venv = root.path().join("kernel-venv");
         std::fs::create_dir_all(&venv).unwrap();
@@ -510,15 +500,56 @@ mod tests {
         let retired = retire_stale_venv(&venv).unwrap();
 
         let names = sibling_names(root.path());
+        for name in [
+            "kernel-venv.stale-1",
+            "kernel-venv.stale-2",
+            "kernel-venv.stale-3",
+        ] {
+            assert!(
+                names.iter().any(|sibling| sibling == name),
+                "a fresh copy is never pruned: {names:?}"
+            );
+        }
+        assert!(retired.exists());
+    }
+
+    /// Beyond the keep window, AGE decides: an old extra copy is pruned.
+    ///
+    /// Unix only: the fixture ages the directory with `File::set_modified`,
+    /// and a directory cannot be opened as a file on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn a_aged_copy_beyond_the_keep_window_is_pruned() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "kernel-venv.stale-1",
+            "kernel-venv.stale-2",
+            "kernel-venv.stale-3",
+        ] {
+            std::fs::create_dir_all(root.path().join(name).join("bin")).unwrap();
+        }
+        let old = std::time::SystemTime::now()
+            - super::venv::STALE_VENV_RETENTION
+            - std::time::Duration::from_secs(60);
+        std::fs::File::open(root.path().join("kernel-venv.stale-1"))
+            .expect("open a directory to age it")
+            .set_modified(old)
+            .expect("age the oldest copy");
+        let venv = root.path().join("kernel-venv");
+        std::fs::create_dir_all(&venv).unwrap();
+
+        let retired = retire_stale_venv(&venv).unwrap();
+
+        let names = sibling_names(root.path());
         assert!(
-            !names.iter().any(|name| name == "kernel-venv.stale-1"),
-            "the oldest copy is pruned: {names:?}"
+            !names.iter().any(|sibling| sibling == "kernel-venv.stale-1"),
+            "the aged copy beyond the keep window is pruned: {names:?}"
         );
         assert!(
-            names.iter().any(|name| name == "kernel-venv.stale-3"),
-            "the newest kept copies survive: {names:?}"
+            names.iter().any(|sibling| sibling == "kernel-venv.stale-3"),
+            "recent copies survive: {names:?}"
         );
-        assert!(retired.exists(), "the just-retired copy survives");
+        assert!(retired.exists());
     }
 
     #[test]
