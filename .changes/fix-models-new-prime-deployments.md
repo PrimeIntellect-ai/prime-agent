@@ -1,0 +1,1 @@
+- `/model` now lists a model that Prime Inference just deployed (for example Inkling 2 Mini) the next time you open the picker, instead of up to an hour later.

@@ -531,26 +531,21 @@ impl ModelRegistry {
     /// private routes). Both fetches are awaited, so the resolved catalog
     /// reflects them when the call returns.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
-        self.refresh_available_models_forced(false).await
+        self.refresh_available_models_with_trigger(pa_models::RefreshTrigger::Hourly)
+            .await
     }
 
     /// [`ModelRegistry::refresh_available_models`] with the refresh trigger's
     /// gating: forced triggers (startup, auth change) skip the hourly catalog
-    /// gate, picker-open keeps it.
+    /// gate; a picker open skips it for the Prime Inference snapshot only.
     pub async fn refresh_available_models_with_trigger(
         &mut self,
         trigger: pa_models::RefreshTrigger,
     ) -> Vec<Model> {
-        self.refresh_available_models_forced(trigger.forced()).await
-    }
-
-    /// The awaited refresh body: reload, the gated-or-forced chain fetch,
-    /// then the auth-filtered catalog.
-    async fn refresh_available_models_forced(&mut self, force: bool) -> Vec<Model> {
         self.refresh();
         let credentials = self.prime_credentials();
         self.catalog
-            .refresh_with_credentials(force, credentials.as_ref())
+            .refresh_with_credentials(trigger, credentials.as_ref())
             .await;
         self.load_models();
         self.get_available().into_iter().cloned().collect()

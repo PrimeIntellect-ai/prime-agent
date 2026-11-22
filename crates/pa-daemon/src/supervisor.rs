@@ -341,7 +341,10 @@ impl Supervisor {
                 let catalog = pa_core::models::catalog_for(Some(&agent_dir.join("models.json")));
                 let credentials = pa_core::models::prime_credentials_for_dir(agent_dir);
                 catalog
-                    .refresh_with_credentials(false, credentials.as_ref())
+                    .refresh_with_credentials(
+                        pa_core::models::RefreshTrigger::Hourly,
+                        credentials.as_ref(),
+                    )
                     .await;
                 let count = catalog.resolve(credentials.as_ref()).len();
                 supervisor.note_catalog_refresh(count);

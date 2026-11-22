@@ -705,15 +705,32 @@ mod tests {
         );
 
         // Release the held fetch: the one refresh cycle lands (provider +
-        // snapshot = 2 requests total), the queued trailing re-arm finds
-        // every gate warm and fetches nothing.
+        // snapshot = 2 requests), and the queued trailing re-arm refetches
+        // only the Prime Inference snapshot (the provider gate is warm).
         let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
         await_catalog_changed(&mut fixture.events).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() < requests_before + 3 {
+            assert!(
+                Instant::now() < deadline,
+                "the trailing re-arm never ran: {:?}",
+                fixture.server.recorded_requests()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let heads = fixture.server.recorded_requests();
+        let burst: Vec<&str> = heads[requests_before..]
+            .iter()
+            .map(|head| head.lines().next().unwrap_or_default())
+            .collect();
         assert_eq!(
-            fixture.server.request_count() - requests_before,
-            2,
-            "the burst cost exactly one refresh cycle: {:?}",
-            fixture.server.recorded_requests()
+            burst,
+            [
+                "GET /catalog HTTP/1.1",
+                "GET /api/v1/models HTTP/1.1",
+                "GET /api/v1/models HTTP/1.1",
+            ],
+            "the burst cost one refresh cycle plus one trailing snapshot fetch"
         );
         let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
         assert!(has_model(&fresh, "probe-v2"));
@@ -721,29 +738,70 @@ mod tests {
         assert_canonical_models_order(&fresh);
     }
 
-    /// Repeat picker opens inside the hourly window stay gated: no new
-    /// fetches, no event, so event -> re-fetch -> refresh terminates.
+    /// Repeat picker opens inside the hourly window keep the provider catalog
+    /// gated and refetch only the Prime Inference snapshot; an unchanged
+    /// snapshot broadcasts nothing, so event -> re-fetch -> refresh terminates.
     #[tokio::test]
-    async fn repeat_opens_inside_the_gate_add_no_fetches_and_stay_silent() {
+    async fn repeat_opens_refetch_only_the_prime_snapshot_and_stay_silent() {
         let mut fixture = fixture(create_phase_answers()).await;
+        let unchanged = pi_snapshot_payload_with(
+            "live/team-a-marker",
+            vec![private_item("internal/team-a-private")],
+        );
         let requests_before = fixture.server.request_count();
-        for _ in 0..3 {
+        for open in 1..=3 {
+            fixture.server.push(Answer::Raw(ok_json(&unchanged)));
             let served = get_model_catalog(&fixture.worker, "catalog-session").await;
             assert!(has_model(&served, "probe-v1"));
             assert!(has_model(&served, "live/team-a-marker"));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while fixture.server.request_count() < requests_before + open {
+                assert!(
+                    Instant::now() < deadline,
+                    "open {open} never refetched the snapshot"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
-        // The hourly gate held for every open (the create-path refresh
-        // armed it).
-        assert_eq!(
-            fixture.server.request_count(),
-            requests_before,
-            "repeat opens stayed gated"
+        let heads = fixture.server.recorded_requests();
+        assert!(
+            heads[requests_before..]
+                .iter()
+                .all(|head| head.starts_with("GET /api/v1/models ")),
+            "only the Prime Inference snapshot was refetched: {heads:?}"
         );
         // Nothing broadcast: a spurious broadcast lands inside the bound;
-        // an honestly gated refresh lets it elapse.
+        // an unchanged snapshot lets it elapse.
         assert!(
             !catalog_changed_within(&mut fixture.events, Duration::from_millis(250)).await,
-            "a gated refresh must not broadcast model_catalog_changed"
+            "an unchanged snapshot must not broadcast model_catalog_changed"
+        );
+    }
+
+    /// A route Prime deploys after the last snapshot lists on the next
+    /// picker open, without waiting for the hourly gate: the open serves the
+    /// cached snapshot, and the refreshed one lands with the new route.
+    #[tokio::test]
+    async fn a_picker_open_lists_a_newly_deployed_prime_route() {
+        let mut fixture = fixture(create_phase_answers()).await;
+        fixture
+            .server
+            .push(Answer::Raw(ok_json(&pi_snapshot_payload_with(
+                "live/team-a-marker",
+                vec![
+                    private_item("internal/team-a-private"),
+                    private_item("thinkingmachines/inkling-2-mini"),
+                ],
+            ))));
+
+        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert!(!has_model(&served, "thinkingmachines/inkling-2-mini"));
+
+        await_catalog_changed(&mut fixture.events).await;
+        let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert!(
+            has_model(&fresh, "thinkingmachines/inkling-2-mini"),
+            "the newly deployed route lists"
         );
     }
 

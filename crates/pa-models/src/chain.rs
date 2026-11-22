@@ -26,7 +26,8 @@ pub enum RefreshTrigger {
     Startup,
     /// The hourly timer (interval-gated).
     Hourly,
-    /// The model/plugin picker opened (interval-gated).
+    /// The model/plugin picker opened (interval-gated, except the Prime
+    /// Inference snapshot, which refetches on every open).
     PickerOpen,
     /// Auth changed (forced — the account's view may be different).
     AuthChange,
@@ -266,17 +267,19 @@ impl ModelCatalog {
     /// Awaited refresh of both catalog layers — the public provider catalog and, when `credentials`
     /// are given, the credentialed Prime Inference snapshot. Unlike
     /// [`ModelCatalog::trigger_refresh_with_credentials`] (fire-and-forget), `resolve` reflects the
-    /// refreshed state as soon as this future returns.
+    /// refreshed state as soon as this future returns. A picker open skips the hourly gate for the
+    /// Prime Inference snapshot (TS refetches it on every open), so a newly deployed route lists
+    /// without waiting for the next hourly refresh; the provider catalog keeps the gate.
     pub async fn refresh_with_credentials(
         &self,
-        force: bool,
+        trigger: RefreshTrigger,
         credentials: Option<&PrimeCredentials>,
     ) {
         self.provider_cache
             .refresh(
                 PUBLIC_SCOPE,
                 RefreshOptions {
-                    force,
+                    force: trigger.forced(),
                     headers: Vec::new(),
                     is_current: None,
                 },
@@ -284,6 +287,7 @@ impl ModelCatalog {
             .await;
         if let Some(credentials) = credentials {
             let inference = credentials.as_inference();
+            let force = trigger.forced() || matches!(trigger, RefreshTrigger::PickerOpen);
             self.prime_inference.refresh(&inference, force).await;
         }
     }
