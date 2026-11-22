@@ -257,7 +257,19 @@ const REFUSE_ACCOUNT_KERNEL_VENV_ENV: &str = "PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_
 fn refuse_account_venv_under_test(venv: &Path, account_home: Option<&Path>) -> anyhow::Result<()> {
     let under_test = cfg!(test)
         || std::env::var_os(REFUSE_ACCOUNT_KERNEL_VENV_ENV).is_some_and(|value| value != "0");
-    if under_test && account_home.is_some_and(|home| home_kernel_venv_dir(home) == venv) {
+    // Compare resolved locations: a `..` or symlinked spelling of the account
+    // venv is still the account venv.
+    let resolved = |path: &Path| {
+        path.canonicalize()
+            .or_else(|_| {
+                let parent = path.parent().unwrap_or(Path::new("/")).canonicalize()?;
+                Ok::<_, std::io::Error>(parent.join(path.file_name().unwrap_or_default()))
+            })
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    if under_test
+        && account_home.is_some_and(|home| resolved(&home_kernel_venv_dir(home)) == resolved(venv))
+    {
         return Err(anyhow!(
             "refusing to bootstrap the account's kernel venv ({}) from a cargo-launched build: \
              it serves your live sessions. Set PRIME_AGENT_KERNEL_VENV to a scratch dir, or set \
@@ -494,6 +506,13 @@ mod tests {
             "{message}"
         );
         assert_eq!(sibling_names(&venv), vec!["marker".to_string()]);
+        let alias = account_home
+            .path()
+            .join(".prime/agent/../agent/kernel-venv");
+        assert!(
+            refuse_account_venv_under_test(&alias, Some(account_home.path())).is_err(),
+            "a `..` spelling of the account venv is refused too"
+        );
         assert_eq!(
             sibling_names(venv.parent().unwrap()),
             vec!["kernel-venv".to_string()]
