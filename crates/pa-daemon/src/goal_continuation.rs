@@ -204,15 +204,15 @@ impl AgentSessionEngine {
             // delivery never pauses another client's goal on the shared
             // session. A goal with no stamp (started outside any
             // delivery's turn, or after a worker rebuild lost the
-            // in-memory slot) is not paused here — it belongs to no
-            // waiting task — but its mints still retire with the
-            // withdrawn record (see `withdrawn_delivery_owns_goal`).
+            // in-memory slot) counts as withdrawn and pauses too: a
+            // cancel stops every continuation, and the in-memory record
+            // alone would not survive a rebuild.
             if engine
                 .goal_owner_delivery
                 .lock()
                 .expect("goal owner delivery lock")
                 .as_deref()
-                != Some(admission.as_str())
+                .is_some_and(|owner| owner != admission)
             {
                 return;
             }

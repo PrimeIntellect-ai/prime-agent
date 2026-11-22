@@ -881,8 +881,9 @@ fn withdrawn_delivery_retires_the_goal_loop_before_the_pause_lands() {
 /// continuation. A goal whose owning delivery was never stamped (started
 /// outside a delivery's turn, or after a worker rebuild lost the slot)
 /// counts as withdrawn once the session carries a withdrawal record — the
-/// mint consults must not skip the withdrawn check on `None`. The durable
-/// pause keeps its own identity scope; this record closes the mint window.
+/// mint consults must not skip the withdrawn check on `None`. The record
+/// closes the mint window before the durable pause lands, and the pause
+/// takes the unstamped goal too, so no rebuild resumes its loop.
 #[test]
 fn a_withdrawal_retires_an_unstamped_goal_loop() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -945,8 +946,8 @@ fn a_withdrawal_retires_an_unstamped_goal_loop() {
         None,
         "no probe stamped an owner"
     );
-    // The withdrawal's synchronous record (the durable pause keeps its own
-    // identity scope and is not driven here).
+    // The withdrawal's synchronous record (the durable pause is driven
+    // last: the record alone holds the stop until it lands).
     engine.retire_withdrawn_goal_delivery("a2a-delivery");
     // Consult B, the settle hook: the children's settle must mint nothing.
     engine
@@ -960,7 +961,7 @@ fn a_withdrawal_retires_an_unstamped_goal_loop() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     // Consult A, the turn-end boundary: it mints nothing either, and the
-    // owed slot survives for its own surface.
+    // owed slot survives for the pause's durable drop.
     assert_eq!(
         engine.goal_turn_end_boundary(),
         crate::goal_continuation::GoalBoundary::Proceed
@@ -976,6 +977,19 @@ fn a_withdrawal_retires_an_unstamped_goal_loop() {
         "the owed slot survives the withdrawal record's stop"
     );
     assert_eq!(engine.goal_state_value()["status"], "active");
+    // The durable stop: the in-memory record dies with the worker, and the
+    // post-compaction mint reads only the status, so the pause must take
+    // the unstamped goal as well.
+    engine.pause_goal_for_withdrawn_delivery("a2a-delivery");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while engine.goal_state_value()["status"] != "paused" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the withdrawal's pause skipped the unstamped goal: {}",
+            engine.goal_state_value()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 /// The engine session's entries as their persisted wire shapes (the

@@ -247,8 +247,9 @@ impl AgentSessionEngine {
     /// identity-scoped like the goal pause (the deferral's owner is the
     /// delivery whose in-run hook deferred): one delivery's withdrawal
     /// never drops another client's owed continuation on the shared
-    /// session — an unstamped deferral (a harness engine without the
-    /// worker probe) keeps the retire's legacy behavior.
+    /// session — an unstamped deferral (armed on a turn with no stamped
+    /// identity) retires with any withdrawal, since a cancel stops every
+    /// continuation.
     pub(crate) fn retire_withdrawn_autonomous_deferral(&self, admission: &str) {
         // The withdrawn chain records FIRST, whatever the deferral holds:
         // a boundary whose running delivery names the chain mints nothing
@@ -538,8 +539,7 @@ mod tests {
     /// deferral's owner is the delivery whose in-run hook deferred, so a
     /// withdrawal naming another delivery never drops it — one client's
     /// cancel keeps another client's owed continuation on the shared
-    /// session. An unstamped deferral (no worker probe wired) keeps the
-    /// unconditional legacy retire.
+    /// session. An unstamped deferral retires with any withdrawal.
     #[test]
     fn a_retire_matches_the_deferrals_own_delivery() {
         let _faux = FAUX_TEST_LOCK
@@ -581,9 +581,8 @@ mod tests {
         );
     }
 
-    /// An unstamped deferral (a harness engine with no worker probe)
-    /// keeps the legacy unconditional retire: the flag clears whatever
-    /// the withdrawal names.
+    /// An unstamped deferral (armed on a turn with no stamped identity)
+    /// counts as withdrawn: the flag clears whatever the withdrawal names.
     #[test]
     fn an_unstamped_deferral_retires_with_any_withdrawal() {
         let _faux = FAUX_TEST_LOCK
@@ -602,7 +601,7 @@ mod tests {
             !engine
                 .autonomous_awaits_rlm_work
                 .load(std::sync::atomic::Ordering::SeqCst),
-            "the unstamped deferral retires with the legacy unconditional stop"
+            "the unstamped deferral retires with any withdrawal"
         );
     }
 

@@ -2228,13 +2228,14 @@ async fn cancel_task(
             // cleared at its settle. A task waiting out the daemon's
             // autonomous continuation reaches here (`awaiting_completion`:
             // the supervisor no longer holds the admission, but the run
-            // the task waits on is the session's own — the minted
-            // continuation carries the task's client id, so the
-            // withdraw below sweeps the queued rows and aborts the
-            // running turn, and its loop stop pauses the goal and drops
-            // the owed autonomous deferral, so the loop cannot re-mint
-            // the canceled task another turn behind the unsettled
-            // children). The owed state is
+            // the task waits on is the session's own — a continuation
+            // minted in the task's turn carries the task's client id, so
+            // the withdraw below sweeps its queued rows and aborts its
+            // running turn; one minted outside that turn carries no id,
+            // which the loop stop counts as withdrawn. The loop stop
+            // pauses the goal and drops the owed autonomous deferral, so
+            // the loop cannot re-mint the canceled task another turn
+            // behind the unsettled children). The owed state is
             // frame-ordered at the pump but can race this cancel (the
             // task's response still in flight): observe it bounded
             // before refusing — a spurious refusal would make a
@@ -2268,8 +2269,8 @@ async fn cancel_task(
             // clear: every delivery this conversation named carries the
             // task's delivery id — the unique admission id the A2A
             // server mints per task and its prompt carries on the wire
-            // (the engine's minted continuations carry it too, stamped
-            // from the owning turn at their mint) — so
+            // (the engine's continuations minted in the task's turn carry
+            // it too, stamped from the owning turn at their mint) — so
             // `withdraw_admission` takes exactly the task's own queued
             // rows and aborts the turn running its own delivery:
             // another client's rows (its own admissions, its plain
