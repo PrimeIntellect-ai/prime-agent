@@ -444,16 +444,22 @@ impl FactoryActivityRequest {
         if action == "run" && spec_id.is_none_or(|id| id.trim().is_empty()) {
             return Err(anyhow!("factory activity run requires specId"));
         }
-        // `peek` serves the unscoped list the overview reads and takes no
-        // target: a targeted peek would answer one snapshot with no live
-        // claim behind it.
+        // `library` is the target-free action pair: the list with no
+        // target, or one machine's graph payload when `specId` names it
+        // (`runId` names a run, which the library never reads).
+        // `graph` takes a target optionally; `peek` serves the
+        // unscoped list the overview reads and takes none: a targeted
+        // peek would answer one snapshot with no `armed` marker — a
+        // rehydrated run reading as executing — so the request refuses
+        // the target up front (the same rejection the supervisor's
+        // `overview` arm applies to its selectors).
         if action == "peek"
             && (run_id.is_some_and(|id| !id.trim().is_empty())
                 || spec_id.is_some_and(|id| !id.trim().is_empty()))
         {
             return Err(anyhow!("factory activity peek takes no runId or specId"));
         }
-        if !matches!(action, "graph" | "run" | "peek")
+        if !matches!(action, "graph" | "run" | "library" | "peek")
             && run_id.is_none_or(|id| id.trim().is_empty())
         {
             return Err(anyhow!("factory activity {action} requires runId"));

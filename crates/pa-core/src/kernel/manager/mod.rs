@@ -697,10 +697,11 @@ impl ReplKernelManager {
     /// [`Self::bash_activity`] this bypasses the cell FIFO (a running turn
     /// must never delay the live view) and never boots an idle kernel.
     ///
-    /// `action` is one of `graph`/`status`/`watch`/`run`/`stop`/`resume`
-    /// and `peek` (the all-session overview's arming-free live list, which
-    /// takes no target); `run_id`/`spec_id` carry the target and
-    /// `timeout_ms` bounds a watch.
+    /// `action` is one of `graph`/`status`/`watch`/`run`/`stop`/`resume`/
+    /// `library` (the machine library's list/graph reads) and `peek`
+    /// (the all-session overview's arming-free live list, which takes no
+    /// target); `run_id`/`spec_id` carry the target and `timeout_ms`
+    /// bounds a watch.
     /// The kernel owns the run registry, so the reply is the kernel's
     /// result payload verbatim.
     ///
