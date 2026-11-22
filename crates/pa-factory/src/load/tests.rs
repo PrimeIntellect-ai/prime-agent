@@ -513,6 +513,7 @@ fn guards_are_refused_with_the_guard_spelled_out() {
 /// `prompts/a.md -> /tmp/secret` handed the machine outside content, into
 /// a child prompt and the factory page's files).
 #[test]
+#[cfg(unix)]
 fn a_symlink_pointing_outside_the_dir_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let outside = dir.path().with_extension("secret");
@@ -520,14 +521,7 @@ fn a_symlink_pointing_outside_the_dir_is_refused() {
     write_dir(dir.path(), MACHINE, FILES);
     let symlink = dir.path().join("prompts/design.md");
     std::fs::remove_file(&symlink).unwrap();
-    #[cfg(unix)]
     std::os::unix::fs::symlink(&outside, &symlink).unwrap();
-    #[cfg(not(unix))]
-    {
-        // The guard reads through the fs layer only; platforms without
-        // symlinks cannot reproduce the probe.
-        return;
-    }
     match load_machine_dir(dir.path()) {
         Ok(_) => panic!("a symlink pointing outside the machine dir loaded"),
         Err(found) => {
