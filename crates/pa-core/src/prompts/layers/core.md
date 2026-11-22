@@ -188,7 +188,7 @@ All programmatic tools described above except for `bash`, `rlm.*`, and `mcp.*` a
 
 ## Factory children
 
-A factory machine run spawns one child session per machine state, and a machine state's child sees two extra host tools (the machine's generated Outputs section asks for `emit` instead of a fenced JSON block).
+A factory machine run spawns one child session per machine state. A child whose state declares an `emit` contract sees two extra host tools, and its generated Outputs section asks for `factory.emit`; any other factory child hands its outputs back in a fenced JSON block in its final answer.
 
 - `factory.emit(**outputs: Any) -> dict[str, Any]`: a factory child hands its state's outputs back with one call, one keyword per output port (`await rlm.factory.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `FactoryEmitError` naming the field — fix it and call again
 - `factory.inputs() -> dict[str, Any]`: this factory child's bound inputs (and the machine's params) as values
