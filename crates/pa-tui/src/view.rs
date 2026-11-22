@@ -17,6 +17,7 @@ mod flush;
 mod frame;
 mod geometry;
 mod handoff;
+mod inbox_run;
 mod layout;
 pub(crate) mod lazy;
 mod panels;
