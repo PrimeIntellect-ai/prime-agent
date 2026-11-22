@@ -517,6 +517,10 @@ mod tests {
     /// the partial tree as the newest copy, so the two newest must survive even
     /// when they are old. Without this, dropping the keep-window skip would
     /// leave both age tests green while losing the recovery guarantee.
+    ///
+    /// Unix only for the FIXTURE's sake, not the rule's: it ages directories
+    /// with `File::open` + `set_modified`, and Windows cannot open a directory
+    /// as a file. The rule itself is platform-independent.
     #[cfg(unix)]
     #[test]
     fn the_keep_window_retains_aged_copies() {
