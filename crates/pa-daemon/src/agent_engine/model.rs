@@ -512,19 +512,28 @@ impl AgentSessionEngine {
         resolved
     }
 
-    /// Force-refresh the OAuth credential `provider` rejected, on the store
-    /// the per-call resolution reads (its last read served the rejected call).
+    /// Recover the credential `provider` rejected, on the store the per-call
+    /// resolution reads (its last read served the rejected call). A dropped
+    /// override also leaves the selection, which re-installs it per call.
     pub(crate) fn refresh_rejected_request_auth(
         &self,
         provider: &str,
     ) -> Result<(), pa_core::auth::OAuthRefreshFailure> {
-        self.request_auth_registry
+        let recovery = self
+            .request_auth_registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
-            .map_or(Ok(()), |registry| {
+            .map_or(Ok(pa_core::auth::RejectedAuthRecovery::Kept), |registry| {
                 registry.auth.refresh_rejected_oauth(provider)
-            })
+            })?;
+        if recovery == pa_core::auth::RejectedAuthRecovery::OverrideDropped {
+            self.selection
+                .write()
+                .expect("model selection lock")
+                .api_key = None;
+        }
+        Ok(())
     }
 
     /// Request auth for a model call outside the session stream

@@ -1,0 +1,1 @@
+- A session started with an explicit API key that the provider rejects (401) now retries once with the stored subscription credential instead of re-sending the rejected key until `/reload`.

@@ -1022,3 +1022,151 @@ async fn an_auth_rejection_whose_recovery_ends_the_turn_never_retries() {
         }]
     );
 }
+
+/// A session whose runtime override went stale, over the shared credential
+/// store the daemon re-reads per call: the first call serves the override,
+/// a peer then writes `rotated` to the store, and the provider accepts only
+/// `accepted`. Returns the turn's final message, every key served, and how
+/// often the auth recovery ran.
+async fn run_with_stale_override(
+    stored: serde_json::Value,
+    rotated: serde_json::Value,
+    accepted: Option<&'static str>,
+) -> (AssistantMessage, Vec<String>, usize) {
+    use crate::auth::{AuthStorage, AuthStorageBackend, InMemoryAuthStorageBackend, NoOAuth};
+    let backend = Arc::new(InMemoryAuthStorageBackend::default());
+    let write = move |backend: &InMemoryAuthStorageBackend, document: &serde_json::Value| {
+        let content = document.to_string();
+        backend
+            .with_lock(&mut |_| Ok(((), Some(content.clone()))))
+            .unwrap();
+    };
+    write(&backend, &stored);
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::new(NoOAuth),
+    );
+    auth.set_runtime_api_key("test", "stale-key".to_string());
+    let auth = Arc::new(Mutex::new(auth));
+    let served = Arc::new(Mutex::new(Vec::<String>::new()));
+    let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_auth = Arc::clone(&auth);
+    let recovery_count = Arc::clone(&recoveries);
+    let mut recovery = move |message: &AssistantMessage| {
+        recovery_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let verdict = match recovery_auth
+            .lock()
+            .unwrap()
+            .refresh_rejected_oauth(&message.provider)
+        {
+            Ok(_) => AuthRecovery::Retry,
+            Err(failure) => AuthRecovery::EndTurn(failure.to_string()),
+        };
+        Box::pin(async move { verdict }) as AuthRecoveryFuture
+    };
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        || {
+            let key = {
+                let mut auth = auth.lock().unwrap();
+                auth.reload();
+                auth.get_api_key("test").unwrap_or_default()
+            };
+            let mut served = served.lock().unwrap();
+            if served.is_empty() {
+                write(&backend, &rotated);
+            }
+            served.push(key.clone());
+            async move {
+                Ok(if Some(key.as_str()) == accepted {
+                    ok_message()
+                } else {
+                    error_message(Some("auth"), Some(401), None)
+                })
+            }
+        },
+        |_| async { Ok(()) },
+        |_| async { true },
+        None,
+        Some(&mut recovery),
+    )
+    .await
+    .unwrap();
+    let served = served.lock().unwrap().clone();
+    (
+        message,
+        served,
+        recoveries.load(std::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+fn stored_oauth(access: &str) -> serde_json::Value {
+    serde_json::json!({
+        "test": { "type": "oauth", "access": access, "refresh": "refresh", "expires": 4_102_444_800_000_i64 }
+    })
+}
+
+fn stored_api_key(key: &str) -> serde_json::Value {
+    serde_json::json!({ "test": { "type": "api_key", "key": key } })
+}
+
+/// A 401 on a stale override over a stored subscription drops the override
+/// and re-reads the store: the one retry serves the rotated token.
+#[tokio::test]
+async fn a_401_on_a_stale_override_retries_with_the_rotated_stored_token() {
+    let outcome = run_with_stale_override(
+        stored_oauth("old-access"),
+        stored_oauth("rotated-access"),
+        Some("rotated-access"),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        (
+            ok_message(),
+            vec!["stale-key".to_string(), "rotated-access".to_string()],
+            1
+        )
+    );
+}
+
+/// An override over a stored API key stands through the rejection: the
+/// retry re-sends it and its 401 surfaces.
+#[tokio::test]
+async fn a_401_on_an_override_over_a_stored_api_key_keeps_the_override() {
+    let outcome = run_with_stale_override(
+        stored_api_key("stored-key"),
+        stored_api_key("rotated-key"),
+        Some("rotated-key"),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        (
+            error_message(Some("auth"), Some(401), None),
+            vec!["stale-key".to_string(), "stale-key".to_string()],
+            1
+        )
+    );
+}
+
+/// The reload is bounded by the one auth retry: a second 401 surfaces.
+#[tokio::test]
+async fn a_second_401_after_the_reload_surfaces() {
+    let outcome = run_with_stale_override(
+        stored_oauth("old-access"),
+        stored_oauth("rotated-access"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        (
+            error_message(Some("auth"), Some(401), None),
+            vec!["stale-key".to_string(), "rotated-access".to_string()],
+            1
+        )
+    );
+}

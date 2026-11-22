@@ -237,6 +237,30 @@ fn a_cleared_selection_key_stops_serving() {
     );
 }
 
+/// A 401 on the create-config key over a stored subscription drops the key
+/// from the selection: the retry's resolution serves the stored token, the
+/// effect `/reload` has, instead of re-sending the rejected key.
+#[test]
+fn a_rejected_selection_key_over_a_stored_subscription_stops_serving() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-access");
+    let engine = live_auth_engine(dir.path(), Some("sk-stale"), "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-stale")
+    );
+    engine
+        .refresh_rejected_request_auth("battery")
+        .expect("the recovery reloads without a token fetch");
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("stored-access")
+    );
+}
+
 /// A logout (another process empties the store) changes the very next
 /// call: the resolution's own answer — the configured `models.json`
 /// fallback key — streams per call, and the captured pair never resends
