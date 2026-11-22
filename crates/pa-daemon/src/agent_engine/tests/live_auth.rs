@@ -24,6 +24,13 @@ fn write_credential_backed_faux_provider(agent_dir: &std::path::Path) {
                         "id": "mock-1", "name": "Mock 1",
                         "contextWindow": 128_000, "maxTokens": 16384,
                     }],
+                },
+                "primary": {
+                    "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-primary-config",
+                    "models": [{
+                        "id": "mock-1", "name": "Mock 1",
+                        "contextWindow": 128_000, "maxTokens": 16384,
+                    }],
                 }
             }
         })
@@ -258,6 +265,53 @@ fn a_rejected_selection_key_over_a_stored_subscription_stops_serving() {
     assert_eq!(
         engine.resolve_request_auth(&model).api_key.as_deref(),
         Some("stored-access")
+    );
+}
+
+/// A rejected backup provider's 401 drops the runtime override for that
+/// provider only: the session's explicit key still serves the primary the
+/// user configured it for, while the backup retry serves its stored token.
+#[test]
+fn a_backup_rejection_keeps_the_selection_key_for_the_primary_provider() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "battery-access");
+    let engine = live_auth_engine(dir.path(), Some("sk-primary"), "primary", "mock-1");
+    let primary = engine.resolve_model().expect("the primary model resolves");
+    assert_eq!(primary.provider, "primary");
+    let mut battery = primary.clone();
+    battery.provider = "battery".to_string();
+    assert_eq!(
+        engine.resolve_request_auth(&primary).api_key.as_deref(),
+        Some("sk-primary")
+    );
+    assert_eq!(
+        engine.resolve_request_auth(&battery).api_key.as_deref(),
+        Some("sk-primary"),
+        "the selection key installs for a backup provider too"
+    );
+    engine
+        .refresh_rejected_request_auth("battery")
+        .expect("the recovery reloads without a token fetch");
+    assert_eq!(
+        engine.resolve_request_auth(&battery).api_key.as_deref(),
+        Some("battery-access"),
+        "the rejected provider's retry serves its stored token"
+    );
+    assert_eq!(
+        engine.resolve_request_auth(&primary).api_key.as_deref(),
+        Some("sk-primary"),
+        "the primary's explicit key is not cleared by a backup provider's 401"
+    );
+    engine.configure_model(EngineModelSelection {
+        api_key: Some("sk-reconfigured".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        engine.resolve_request_auth(&battery).api_key.as_deref(),
+        Some("sk-reconfigured"),
+        "a new explicit key applies to the provider an earlier 401 dropped"
     );
 }
 

@@ -377,6 +377,7 @@ impl SessionEngine for AgentSessionEngine {
 
     fn configure_model(&self, selection: EngineModelSelection) {
         // Merge like the TS runtime config: explicit wire flags replace; absent fields keep.
+        let replaces_key = selection.api_key.is_some();
         {
             let mut current = self.selection.write().expect("model selection lock");
             if selection.provider.is_some() {
@@ -391,6 +392,14 @@ impl SessionEngine for AgentSessionEngine {
             if selection.thinking.is_some() {
                 current.thinking = selection.thinking;
             }
+        }
+        if replaces_key {
+            // An explicit key re-applies to every provider, including one a
+            // 401 dropped earlier.
+            self.dropped_selection_api_key_providers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         // The merge may have changed the selection: drop the cached level;
         // later summary/state calls stay side-effect-free.

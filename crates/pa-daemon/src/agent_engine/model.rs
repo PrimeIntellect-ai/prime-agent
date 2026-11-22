@@ -100,6 +100,12 @@ impl AgentSessionEngine {
     /// flags survive every replacement; the cached thinking level drops (the
     /// clamp follows the moved-to model).
     fn reset_selection_to_spawn_fallback(&self) {
+        // A restore re-applies the create's explicit flags: a provider that
+        // dropped the key earlier serves it again, like the selection reset.
+        self.dropped_selection_api_key_providers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         *self
             .effective_thinking
             .write()
@@ -494,11 +500,19 @@ impl AgentSessionEngine {
         // another process wrote serves the next call, and a failed read
         // keeps the last read's data (TS `this.data`).
         registry.auth.reload();
+        // The selection key is session-wide, but a provider that rejected it
+        // keeps its stored credential: a 401 there drops the key for that
+        // provider alone, never for the primary it was configured for.
+        let selection_key_dropped = self
+            .dropped_selection_api_key_providers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&model.provider);
         match &self.current_selection().api_key {
-            Some(api_key) => registry
+            Some(api_key) if !selection_key_dropped => registry
                 .auth
                 .set_runtime_api_key(&model.provider, api_key.clone()),
-            None => registry.auth.remove_runtime_api_key(&model.provider),
+            _ => registry.auth.remove_runtime_api_key(&model.provider),
         }
         // The registry's single possibly-refreshing lookup answers the key,
         // the headers, the request model, and whether a live source served
@@ -514,7 +528,9 @@ impl AgentSessionEngine {
 
     /// Recover the credential `provider` rejected, on the store the per-call
     /// resolution reads (its last read served the rejected call). A dropped
-    /// override also leaves the selection, which re-installs it per call.
+    /// override is remembered for that provider, so the retry serves the
+    /// store while the selection's key still serves the provider it was
+    /// configured for.
     pub(crate) fn refresh_rejected_request_auth(
         &self,
         provider: &str,
@@ -528,10 +544,10 @@ impl AgentSessionEngine {
                 registry.auth.refresh_rejected_oauth(provider)
             })?;
         if recovery == pa_core::auth::RejectedAuthRecovery::OverrideDropped {
-            self.selection
-                .write()
-                .expect("model selection lock")
-                .api_key = None;
+            self.dropped_selection_api_key_providers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(provider.to_string());
         }
         Ok(())
     }

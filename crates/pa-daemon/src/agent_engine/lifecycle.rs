@@ -164,6 +164,7 @@ impl AgentSessionEngine {
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             request_auth_oauth: std::sync::Arc::new(pa_core::auth::ProviderOAuth::new()),
             request_auth_registry: std::sync::Mutex::new(None),
+            dropped_selection_api_key_providers: std::sync::Mutex::default(),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
