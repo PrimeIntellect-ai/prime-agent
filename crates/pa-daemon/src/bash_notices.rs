@@ -62,9 +62,9 @@ impl AgentSessionEngine {
         );
     }
 
-    /// The `bash.completed`/`bash.consumed`/`bash.waiting`/`factory.progress`
-    /// kernel host handlers. Registered only when both seams are wired — no
-    /// worker queue leaves the requests honestly unavailable.
+    /// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
+    /// handlers. Registered only when both seams are wired — no worker queue
+    /// leaves the requests honestly unavailable.
     pub(crate) fn register_kernel_notice_host_handlers(&self, handlers: &mut HostRequestHandlers) {
         let Some(notice) = self
             .kernel_notice_sink

@@ -536,7 +536,7 @@ pub(crate) fn admit_kernel_notice(
     work_notify: &Arc<Notify>,
     notice: crate::engine::KernelNotice,
     session_is_closed: impl Fn() -> bool,
-) -> bool {
+) {
     let crate::engine::KernelNotice { row, preview_label } = notice;
     // Block rows (a rich cell completion) keep a readable text preview for
     // the queue strip while the custom row carries the actual blocks.
@@ -546,11 +546,8 @@ pub(crate) fn admit_kernel_notice(
     let mut core_guard = core.lock().unwrap();
     // A notice that raced past the sink's first check is refused here or wiped
     // by the close's clear — never a completion turn for a closed session.
-    if session_is_closed()
-        || (row.custom_type == pa_core::session_engine::messages::BASH_WAITING_NOTICE_CUSTOM_TYPE
-            && (core_guard.busy || core_guard.compacting))
-    {
-        return false;
+    if session_is_closed() {
+        return;
     }
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
@@ -587,7 +584,6 @@ pub(crate) fn admit_kernel_notice(
         },
     );
     work_notify.notify_one();
-    true
 }
 
 /// The queue-strip coalescing key of the inbox arrival notice: one

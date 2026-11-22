@@ -103,7 +103,7 @@ pub struct SessionEngineConfig {
     pub on_background_cell: Option<crate::kernel::shared::BackgroundCellCallback>,
     /// The daemonless kernel-notice wake (TS `resumeIfIdle`): with it
     /// the engine registers the `bash.completed`/`bash.consumed`/
-    /// `bash.waiting`/`factory.progress` handlers whose in-process sinks steer the notice
+    /// `factory.progress` handlers whose in-process sinks steer the notice
     /// row onto the session's agent and fire the wake. `None` installs nothing —
     /// the daemon keeps its worker-lane sinks via the extra handlers.
     pub bash_notice_wake: Option<super::bash_notices::BashNoticeWake>,

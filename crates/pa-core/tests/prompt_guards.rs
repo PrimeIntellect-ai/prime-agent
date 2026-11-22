@@ -187,12 +187,10 @@ const INTERNAL_HOST_REQUESTS: &[&str] = &[
     "mcp.config",
     "mcp.refresh",
     "mcp.begin_login",
-    // The runtime's detached-bash notice family (the kernel's bash module
-    // fires them; the model never calls them): the completion pair plus
-    // the waiting keepalive.
+    // The runtime's detached-bash notice pair (the kernel's bash module
+    // fires them; the model never calls them).
     "bash.completed",
     "bash.consumed",
-    "bash.waiting",
     // The factory module reports run milestones; the model never calls it.
     "factory.progress",
 ];
