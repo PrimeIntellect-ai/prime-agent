@@ -44,25 +44,67 @@ pub(crate) fn home_kernel_venv_dir(home: &Path) -> PathBuf {
 pub(crate) fn retire_stale_venv(venv: &Path) -> anyhow::Result<PathBuf> {
     let name = venv.file_name().unwrap_or_default().to_string_lossy();
     let prefix = format!("{name}.stale-");
-    // Prune before the rename, and never fail on it: an error after the rename
-    // would return with the live path already vacated. A copy that cannot be
-    // removed now is retried by the next rebuild.
-    let parent = venv.parent().unwrap_or(Path::new("/"));
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
-    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let retired = venv.with_file_name(format!("{prefix}{stamp}"));
+    // Rename FIRST: it is the only step that can fail, and a failure here must
+    // leave the live path untouched. An earlier version pruned before renaming,
+    // which could delete the last good copy after an interrupted rebuild.
     crate::platform::rename_onto(venv, &retired)
         .with_context(|| format!("moving {} to {}", venv.display(), retired.display()))?;
+    // Then prune stale copies that are OLD, best-effort and never fatal. The
+    // rename already freed the live path, so a copy that cannot be removed now
+    // is simply retried later. Age, not recency, decides: after an interrupted
+    // rebuild the newest stale copy may be the PARTIAL tree while an older one
+    // is the last good venv, so nothing recent is ever a prune candidate.
+    prune_old_stale_copies(venv, &prefix, &retired);
     Ok(retired)
+}
+
+/// How old a `kernel-venv.stale-*` copy must be before it is even a prune
+/// candidate. A failed rebuild is rare and each leaves one copy, so this is
+/// bounded in practice while a recent copy stays available as recovery.
+pub(crate) const STALE_VENV_RETENTION: std::time::Duration =
+    std::time::Duration::from_hours(7 * 24);
+
+/// How many retired copies are always kept, newest first. Two, so that an
+/// interrupted rebuild - whose newest copy is the PARTIAL tree - always leaves
+/// the previous complete venv recoverable.
+pub(crate) const STALE_VENV_KEEP: usize = 2;
+
+/// Remove `kernel-venv.stale-*` siblings that are both past
+/// [`STALE_VENV_RETENTION`] and beyond the newest [`STALE_VENV_KEEP`] copies,
+/// never the copy this call just retired, and never failing the caller.
+///
+/// The name carries a unix-millisecond stamp, so a name sort is a time sort.
+fn prune_old_stale_copies(venv: &Path, prefix: &str, keep: &Path) {
+    let parent = venv.parent().unwrap_or(Path::new("/"));
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut candidates: Vec<(String, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (entry.path() != keep && name.starts_with(prefix)).then(|| (name, entry.path()))
+        })
+        .collect();
+    candidates.sort();
+    // Newest first; the newest STALE_VENV_KEEP are never pruned.
+    candidates.reverse();
+    let now = std::time::SystemTime::now();
+    for (_name, path) in candidates.into_iter().skip(STALE_VENV_KEEP) {
+        let old = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STALE_VENV_RETENTION);
+        if old {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 fn xdg_kernel_venv_dir() -> PathBuf {

@@ -454,10 +454,12 @@ mod tests {
     }
 
     #[test]
-    fn retiring_a_venv_keeps_only_the_newest_stale_copy() {
+    fn retiring_a_venv_keeps_the_retired_copy_and_recent_stale_copies() {
         let root = tempfile::tempdir().unwrap();
-        let older = root.path().join("kernel-venv.stale-1");
-        std::fs::create_dir_all(older.join("bin")).unwrap();
+        // A recent stale copy stays: after an interrupted rebuild it may be the
+        // last good venv, so recency alone must never prune it.
+        let recent = root.path().join("kernel-venv.stale-recent");
+        std::fs::create_dir_all(recent.join("bin")).unwrap();
         let venv = root.path().join("kernel-venv");
         std::fs::create_dir_all(&venv).unwrap();
         std::fs::write(venv.join("marker"), "newest").unwrap();
@@ -466,15 +468,57 @@ mod tests {
 
         let retired = retire_stale_venv(&venv).unwrap();
 
-        let retired_name = retired.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(
-            sibling_names(root.path()),
-            vec!["kernel-venv.bootstrap.lock".to_string(), retired_name]
-        );
+        let mut names = sibling_names(root.path());
+        names.sort();
+        let mut want = vec![
+            "kernel-venv.bootstrap.lock".to_string(),
+            "kernel-venv.stale-recent".to_string(),
+            retired.file_name().unwrap().to_string_lossy().into_owned(),
+        ];
+        want.sort();
+        assert_eq!(names, want);
         assert_eq!(
             std::fs::read_to_string(retired.join("marker")).unwrap(),
             "newest"
         );
+    }
+
+    #[test]
+    fn a_stale_copy_past_the_retention_window_is_pruned() {
+        // The newest STALE_VENV_KEEP copies are always kept, so this test
+        // needs one MORE candidate than that: the oldest of three is pruned.
+        let root = tempfile::tempdir().unwrap();
+        let mut aged = Vec::new();
+        for name in [
+            "kernel-venv.stale-1",
+            "kernel-venv.stale-2",
+            "kernel-venv.stale-3",
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.join("bin")).unwrap();
+            let old = std::time::SystemTime::now()
+                - super::venv::STALE_VENV_RETENTION
+                - std::time::Duration::from_secs(60);
+            std::fs::File::open(&path)
+                .map(|file| file.set_modified(old))
+                .ok();
+            aged.push(path);
+        }
+        let venv = root.path().join("kernel-venv");
+        std::fs::create_dir_all(&venv).unwrap();
+
+        let retired = retire_stale_venv(&venv).unwrap();
+
+        let names = sibling_names(root.path());
+        assert!(
+            !names.iter().any(|name| name == "kernel-venv.stale-1"),
+            "the oldest copy is pruned: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "kernel-venv.stale-3"),
+            "the newest kept copies survive: {names:?}"
+        );
+        assert!(retired.exists(), "the just-retired copy survives");
     }
 
     #[test]

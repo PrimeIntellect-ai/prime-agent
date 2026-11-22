@@ -25,6 +25,8 @@ mod uv;
 mod version;
 
 use layout::home_dir;
+#[cfg(test)]
+pub(crate) use layout::STALE_VENV_RETENTION;
 pub(crate) use layout::{
     expand_home, home_kernel_venv_dir, resolve_writable_kernel_venv_dir, retire_stale_venv,
 };
