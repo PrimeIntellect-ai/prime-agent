@@ -195,7 +195,9 @@ fn print_problems(dir: &Path, problems: &[pa_factory::Diagnostic], json: bool) -
 /// Merge the machine directories of every library level into the
 /// kernel's `list` result. Within a level a machine directory wins over a
 /// MACHINE.md of the same name; an earlier level wins over a later one,
-/// the order `rlm.factory.run` resolves names in.
+/// the order `rlm.factory.run` resolves names in. `run` resolves a
+/// directory by its folder name, so a directory that fails to load or
+/// declares another name is a warning, never a row.
 pub(crate) fn add_machine_dirs(result: &mut Value) {
     let levels: Vec<(String, PathBuf)> = result
         .get("levels")
@@ -217,10 +219,13 @@ pub(crate) fn add_machine_dirs(result: &mut Value) {
             .position(|(level, _)| level == source)
             .unwrap_or(levels.len())
     };
-    // (level rank, 0 for a directory or 1 for MACHINE.md) per name.
-    let mut chosen: std::collections::BTreeMap<String, ((usize, u8), Value)> =
+    // (level rank, 0 for a directory or 1 for MACHINE.md) per name. A
+    // directory that cannot run under its folder name still claims that
+    // name with no row: `_resolve_machine_dir` picks it first, so a later
+    // machine of the same name must not look usable.
+    let mut chosen: std::collections::BTreeMap<String, ((usize, u8), Option<Value>)> =
         std::collections::BTreeMap::new();
-    let mut offer = |name: String, rank: (usize, u8), row: Value| {
+    let mut offer = |name: String, rank: (usize, u8), row: Option<Value>| {
         if chosen.get(&name).is_none_or(|(held, _)| rank < *held) {
             chosen.insert(name, (rank, row));
         }
@@ -240,7 +245,7 @@ pub(crate) fn add_machine_dirs(result: &mut Value) {
             .get("source")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        offer(name, (rank_of(source), 1), row);
+        offer(name, (rank_of(source), 1), Some(row));
     }
     let mut warnings: Vec<Value> = result
         .get("warnings")
@@ -258,27 +263,37 @@ pub(crate) fn add_machine_dirs(result: &mut Value) {
             .collect();
         dirs.sort();
         for dir in dirs {
-            match pa_factory::load_machine_dir(&dir) {
-                Ok(machine) => offer(
-                    machine.name.clone(),
-                    (rank, 0),
-                    json!({
-                        "name": machine.name,
-                        "description": machine.description,
-                        "version": machine.version.to_string(),
-                        "author": machine.author.unwrap_or_default(),
-                        "source": source,
-                        "path": dir.display().to_string(),
-                    }),
-                ),
+            let folder = dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let row = match pa_factory::load_machine_dir(&dir) {
+                Ok(machine) if machine.name == folder => Some(json!({
+                    "name": machine.name,
+                    "description": machine.description,
+                    "version": machine.version.to_string(),
+                    "author": machine.author.unwrap_or_default(),
+                    "source": source,
+                    "path": dir.display().to_string(),
+                })),
+                Ok(machine) => {
+                    let declared = machine.name;
+                    warnings.push(json!(format!(
+                        "{}: declares the name {declared:?}; rename the directory or the machine so they match",
+                        dir.display()
+                    )));
+                    None
+                }
                 Err(problems) => {
                     let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
                     warnings.push(json!(format!("{}: {}", dir.display(), lines.join("; "))));
+                    None
                 }
-            }
+            };
+            offer(folder, (rank, 0), row);
         }
     }
-    let machines: Vec<Value> = chosen.into_values().map(|(_, row)| row).collect();
+    let machines: Vec<Value> = chosen.into_values().filter_map(|(_, row)| row).collect();
     if let Some(object) = result.as_object_mut() {
         object.insert("machines".to_string(), Value::Array(machines));
         object.insert("warnings".to_string(), Value::Array(warnings));
@@ -365,6 +380,38 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("broken: machine.toml: missing field `name`"));
+    }
+
+    #[test]
+    fn a_directory_that_cannot_run_by_its_folder_name_hides_that_name() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("sweep")).unwrap();
+        std::fs::write(repo.path().join("sweep/machine.toml"), "format = 1\n").unwrap();
+        write_machine(repo.path(), "declared", "Declared elsewhere.");
+        std::fs::rename(repo.path().join("declared"), repo.path().join("folder")).unwrap();
+        let file_row = |name: &str| json!({"name": name, "description": "A file.", "version": "1", "author": "", "source": "user", "path": format!("/user/{name}/MACHINE.md")});
+        let mut result = json!({
+            "ok": true,
+            "levels": [
+                {"source": "repo", "path": repo.path().display().to_string()},
+                {"source": "user", "path": "/user"},
+            ],
+            "machines": [file_row("declared"), file_row("folder"), file_row("sweep")],
+            "warnings": [],
+        });
+        add_machine_dirs(&mut result);
+        assert_eq!(result["machines"], json!([file_row("declared")]));
+        let folder = repo.path().join("folder").display().to_string();
+        let warnings = result["warnings"].as_array().unwrap();
+        assert_eq!(
+            warnings[0],
+            json!(format!("{folder}: declares the name \"declared\"; rename the directory or the machine so they match"))
+        );
+        assert!(warnings[1]
+            .as_str()
+            .unwrap()
+            .contains("sweep: machine.toml: missing field `name`"));
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]
