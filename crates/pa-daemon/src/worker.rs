@@ -21,6 +21,7 @@ mod connection;
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
 pub(crate) use summary::emit_action_update_fresh;
 
+mod inbox_router;
 mod queue;
 
 pub(crate) use queue::admit_inbox_notice_locked;
@@ -1335,6 +1336,8 @@ mod prompt_image_tests;
 mod compaction_admission_tests;
 #[cfg(test)]
 mod inbox_queue_tests;
+#[cfg(test)]
+mod inbox_wake_policy_tests;
 #[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]

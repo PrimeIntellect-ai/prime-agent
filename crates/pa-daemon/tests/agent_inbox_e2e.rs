@@ -1150,7 +1150,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     assert!(
         !notice_candidates
             .iter()
-            .any(|(text, _)| text.contains("[agent-message from")),
+            .any(|(text, _)| text.starts_with("[agent-message from")),
         "no full agent-message row steers while the inbox is on: {notice_candidates:?}"
     );
 

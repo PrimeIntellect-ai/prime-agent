@@ -1,5 +1,6 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
+use super::inbox_router::{idle_debounce_ms, notice_text};
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
     SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
@@ -617,11 +618,12 @@ pub(crate) fn admit_inbox_notice(
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
+    let debounce_ms = idle_debounce_ms(engine);
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
     // them would queue an invisible row for a busy session. The guard
     // drops with this statement: the checkpoint re-locks the core.
-    let queued = admit_inbox_notice_locked(
+    let admission = admit_inbox_notice_locked(
         &mut core.lock().unwrap(),
         inbox,
         arrivals,
@@ -639,8 +641,42 @@ pub(crate) fn admit_inbox_notice(
             operation: "steer_queued",
         },
     );
-    work_notify.notify_one();
-    Ok(queued)
+    // Rule 4: a joined row is already covered by the wake that opened it.
+    // A busy session folds a new row into the turn at its next boundary;
+    // an idle one waits out the debounce window, and every arrival inside
+    // the window joins the row, so the window ends in one wake.
+    match (admission.wake, admission.parked) {
+        (InboxWake::Joined, _) => {}
+        (InboxWake::Opened, true) => work_notify.notify_one(),
+        (InboxWake::Opened, false) if debounce_ms == 0 => work_notify.notify_one(),
+        (InboxWake::Opened, false) => {
+            let work_notify = Arc::clone(work_notify);
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(debounce_ms);
+            tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                work_notify.notify_one();
+            });
+        }
+    }
+    Ok(admission.parked)
+}
+
+/// What one inbox admission did to the wake rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboxWake {
+    /// A new wake row queued.
+    Opened,
+    /// The message joined the queued row of an earlier arrival.
+    Joined,
+}
+
+/// One inbox admission's outcome: whether the session was busy (the
+/// receipt's `deliveryStatus`) and what happened to the wake rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InboxAdmission {
+    pub(crate) parked: bool,
+    pub(crate) wake: InboxWake,
 }
 
 /// [`admit_inbox_notice`] over an already locked core, without the
@@ -656,7 +692,7 @@ pub(crate) fn admit_inbox_notice_locked(
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
-) -> Result<bool, String> {
+) -> Result<InboxAdmission, String> {
     // A notice that raced past the sink's first check is refused here
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
@@ -685,7 +721,7 @@ pub(crate) fn admit_inbox_notice_locked(
     } else {
         (TurnPolicy::Injected, false)
     };
-    {
+    let coalescing = {
         let mut arrivals = arrivals.lock().unwrap();
         // A queued notice row covers its arrivals until it delivers; no
         // row means the last notice already delivered (or was cleared).
@@ -699,7 +735,7 @@ pub(crate) fn admit_inbox_notice_locked(
         }
         arrivals.push(message);
         let (count, _, _) = inbox.count();
-        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&arrivals, count);
+        let (preview, text) = notice_text(&arrivals, count);
         // A follow-up arrival never demotes a queued steering notice: the
         // batch keeps the most urgent lane it has already ridden.
         let queued_steering = core_guard
@@ -750,8 +786,16 @@ pub(crate) fn admit_inbox_notice_locked(
             policy,
             forced_batch: false,
         });
-    }
-    Ok(queued)
+        coalescing
+    };
+    Ok(InboxAdmission {
+        parked: queued,
+        wake: if coalescing {
+            InboxWake::Joined
+        } else {
+            InboxWake::Opened
+        },
+    })
 }
 
 /// Retract or re-render the queued inbox wake rows over the live store:
@@ -799,7 +843,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
         changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
     } else {
-        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
+        let (preview, text) = notice_text(&batch, count);
         let text = inbox.with_persistence_error_clause(text);
         let core_guard = &mut *core_guard;
         let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);

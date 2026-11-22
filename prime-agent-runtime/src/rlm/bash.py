@@ -48,6 +48,8 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
+# The output tail a [bash-done] wake row shows (the daemon caps it further).
+_COMPLETION_NOTICE_TAIL_CAP = 400
 # Display MIME the host aggregates into a per-cell summary of the bash()
 # commands the cell ran (first capped command, count, line total).
 _BASH_COMMAND_MIME = "application/vnd.prime-agent.bash-command+json"
@@ -179,6 +181,8 @@ def _capped(command: str) -> str:
     if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
         return command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
     return command
+
+
 
 
 def _completion_reaches(
@@ -851,6 +855,7 @@ class BashHandle:
                     "pid": self._pid,
                     "command": command,
                     "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
                 }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
@@ -1281,7 +1286,13 @@ class PersistentBashHandle(BashHandle):
                 return
             command = _capped(self.command)
             reply = await repl.host_request(
-                {"type": "bash.completed", "pid": self._pid, "command": command, "exitCode": result.exit_code}
+                {
+                    "type": "bash.completed",
+                    "pid": self._pid,
+                    "command": command,
+                    "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
+                }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
                 self._arm_consumed_notice(command)
