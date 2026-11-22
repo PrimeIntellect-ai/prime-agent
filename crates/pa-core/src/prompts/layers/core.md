@@ -185,3 +185,10 @@ prime-agent has support for programmatic tools that are defined in the MCP forma
 prime-agent provides multiple executable skills, described by their SKILL.md and executable code. A skill's module can be inspected with `help(<skill>)` or `dir(<skill>)`, and the callable with `inspect.signature(<skill>.<function>)`, if information is missing. The executable code is always pre-imported in the REPL as a programmatic tool, and a callable skill module can be called directly (`await <skill>(...)`).
 
 All programmatic tools described above except for `bash`, `rlm.*`, and `mcp.*` are implemented as executable skills and will be listed again in the dynamic tail of this prompt. Additional executable and non-executable skills may exist as well; non-executable (markdown) skills are documentation read from disk, and each skill is also available as a shell command by the same name.
+
+## Factory children
+
+A factory machine run spawns one child session per machine state, and a machine state's child sees two extra host tools (the machine's generated Outputs section asks for `emit` instead of a fenced JSON block).
+
+- `factory.emit(**outputs: Any) -> dict[str, Any]`: a factory child hands its state's outputs back with one call, one keyword per output port (`await rlm.factory.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `FactoryEmitError` naming the field — fix it and call again
+- `factory.inputs() -> dict[str, Any]`: this factory child's bound inputs (and the machine's params) as values
