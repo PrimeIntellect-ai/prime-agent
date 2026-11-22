@@ -244,8 +244,10 @@ async fn ensure_kernel_python_uncached(
     .await
 }
 
-/// Set for every cargo-launched process by the workspace's `.cargo/config.toml`,
-/// so a test binary, and any worker it spawns, inherits it.
+/// Set to `1` for every cargo-launched process (tests and `cargo run`) by the
+/// workspace's `.cargo/config.toml`, so a test binary, and any worker it spawns,
+/// inherits it. `0` turns the refusal off: cargo's `[env]` never overrides a
+/// variable that is already set, so unsetting it would not.
 const REFUSE_ACCOUNT_KERNEL_VENV_ENV: &str = "PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV";
 
 /// A test must never build into the account's own kernel venv: that venv serves
@@ -253,11 +255,14 @@ const REFUSE_ACCOUNT_KERNEL_VENV_ENV: &str = "PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_
 /// the installed one. `account_home` comes from the user database, so a test
 /// that points `HOME` at a temp dir still bootstraps there.
 fn refuse_account_venv_under_test(venv: &Path, account_home: Option<&Path>) -> anyhow::Result<()> {
-    let under_test = cfg!(test) || std::env::var_os(REFUSE_ACCOUNT_KERNEL_VENV_ENV).is_some();
+    let under_test = cfg!(test)
+        || std::env::var_os(REFUSE_ACCOUNT_KERNEL_VENV_ENV).is_some_and(|value| value != "0");
     if under_test && account_home.is_some_and(|home| home_kernel_venv_dir(home) == venv) {
         return Err(anyhow!(
-            "refusing to bootstrap the real kernel venv at {} from a test or another \
-             cargo-launched build; set PRIME_AGENT_KERNEL_VENV to a temp dir",
+            "refusing to bootstrap the account's kernel venv ({}) from a cargo-launched build: \
+             it serves your live sessions. Set PRIME_AGENT_KERNEL_VENV to a scratch dir, or set \
+             {REFUSE_ACCOUNT_KERNEL_VENV_ENV}=0 to use the account venv deliberately (it will be \
+             renamed to kernel-venv.stale-<timestamp> and rebuilt).",
             venv.display()
         ));
     }
@@ -478,11 +483,15 @@ mod tests {
                 .await
                 .expect_err("a test must not bootstrap the account's venv");
 
+        // The refusal names both ways forward: a scratch venv, or the marker off.
+        let message = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("refusing to bootstrap the real kernel venv"),
-            "{error}"
+            message.contains("Set PRIME_AGENT_KERNEL_VENV to a scratch dir"),
+            "{message}"
+        );
+        assert!(
+            message.contains("set PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV=0"),
+            "{message}"
         );
         assert_eq!(sibling_names(&venv), vec!["marker".to_string()]);
         assert_eq!(
