@@ -1161,7 +1161,16 @@ fn saved_usage(record: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::supervisor::SupervisorOptions;
+    use crate::test_support::KernelEnvOverride;
     use pa_types::daemon::DaemonWorkerDescriptor;
+
+    /// The overview resolves its saved catalog through `paths::sessions_dir`,
+    /// which honors `PRIME_AGENT_SESSION_DIR`: a test run from a session that
+    /// exports it would read that folder instead of the temp agent dir. The
+    /// guard clears it under the crate-wide env lock for the test's whole body.
+    fn without_session_dir_override() -> KernelEnvOverride {
+        KernelEnvOverride::apply(&[(paths::SESSION_DIR_ENV, None)])
+    }
 
     /// One durable record in the executor's registry serialization shape
     /// (`_run_json` in rlm/factory.py): the fields the projection reads,
@@ -1568,8 +1577,10 @@ mod tests {
     /// the resident push alone, and its cached live rows — the
     /// background refresh's last successful read — reach the reply with
     /// their owner/run identity and progress, marked live while fresh.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the async overview read
     #[tokio::test]
     async fn a_memory_only_residents_cached_live_rows_reach_the_overview() {
+        let _env = without_session_dir_override();
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -1641,8 +1652,10 @@ mod tests {
     /// closed-page bound — a snapshot with no confirmed read behind it
     /// must not paint a ticking live claim, even while the run it holds
     /// may still be executing behind its owner's pending read.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the async overview read
     #[tokio::test]
     async fn stale_cached_live_rows_serve_saved_not_live() {
+        let _env = without_session_dir_override();
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -1702,8 +1715,10 @@ mod tests {
     /// barrier — and the reply itself stays nonblocking. At most one
     /// read per owner is in flight: a poll that returns while a read is
     /// pending never stacks a second one.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the async overview read
     #[tokio::test]
     async fn a_busy_owner_never_delays_a_healthy_owners_refresh() {
+        let _env = without_session_dir_override();
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -2021,8 +2036,10 @@ mod tests {
     /// page exists for drown in them. A fresh record of the same owner
     /// lists, marked saved: the bound is the record's age, never the
     /// owner's erasure (the record stays on disk).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the async overview read
     #[tokio::test]
     async fn an_old_durable_record_of_a_non_resident_owner_does_not_list() {
+        let _env = without_session_dir_override();
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         let sessions = agent_dir.join("sessions");
@@ -2402,8 +2419,10 @@ mod tests {
     /// `sessionFile` and the saved catalog never lists that directory —
     /// the roster root (not residency) is what keeps the owner and its
     /// passive child readable, through that directory's own ledger.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the async overview read
     #[tokio::test]
     async fn a_passivated_custom_directory_owner_stays_in_the_overview() {
+        let _env = without_session_dir_override();
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
