@@ -7546,6 +7546,58 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(sum("-i1-a2" in name for name in names), 1)
 
     @async_test
+    async def test_a_resume_during_the_pause_notice_readmits_every_omitted_instance(self) -> None:
+        # Macroscope finding: the first omitted instance's failure awaited the
+        # pause notice; a resume() landing there re-admitted only that
+        # instance, and the old settle pass then failed the second instance
+        # from its stale list and paused the run again.
+        self.emitted("child-1", {"items": ["a", "b"]})
+        self.emitted("child-4", {"report": "a"})  # fan i0 resume emit
+        self.emitted("child-5", {"report": "b"})  # fan i1 resume emit
+        progress_gate = self.host.gate("factory.progress", 1)
+        progress_entered = self.host.gate_entered("factory.progress", 1)
+        self.store_machine(
+            {
+                "params": {"task": "ship it"},
+                "states": [
+                    state(
+                        "plan",
+                        entry=True,
+                        subagent={"prompt": "Plan {task}."},
+                        outputs=[{"name": "items", "type": "json"}],
+                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
+                    ),
+                    state(
+                        "fan",
+                        subagent={"prompt": "Do {items}."},
+                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
+                        outputs=[{"name": "report", "type": "text"}],
+                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                        foreach={"over": "items", "max": 2},
+                        retries=0,
+                    ),
+                ],
+                "transitions": [{"from": "plan", "to": "fan"}],
+            }
+        )
+        result = await self.start()
+        await progress_entered.wait()
+        run = self.executor._runs[result["run_id"]]
+        self.assertEqual(run.state, "paused")
+        old_task = run.task
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        self.assertEqual(resumed["state"], "running")
+        progress_gate.set()
+        await old_task
+        final = await self.settle(result)
+
+        self.assertEqual(final["state"], "done")
+        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
+        self.assertEqual(len(names), 4)
+        self.assertEqual(sum("-i0-a2" in name for name in names), 1)
+        self.assertEqual(sum("-i1-a2" in name for name in names), 1)
+
+    @async_test
     async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
         nodes = Path(self.host.session_root) / "nodes"
         nodes.mkdir()
