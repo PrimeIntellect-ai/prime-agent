@@ -477,6 +477,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_pruning_failure_never_leaves_the_venv_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        // An older stale copy that cannot be removed: its subdirectory is read-only.
+        let locked = root.path().join("kernel-venv.stale-1").join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("file"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let venv = root.path().join("kernel-venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("marker"), "live").unwrap();
+
+        let outcome = retire_stale_venv(&venv);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let retired = outcome.expect("a pruning failure is not fatal");
+        assert_eq!(
+            std::fs::read_to_string(retired.join("marker")).unwrap(),
+            "live"
+        );
+    }
+
     #[tokio::test]
     async fn the_account_venv_is_never_bootstrapped_from_a_test() {
         let account_home = tempfile::tempdir().unwrap();

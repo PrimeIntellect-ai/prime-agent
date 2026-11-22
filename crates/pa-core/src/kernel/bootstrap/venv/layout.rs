@@ -35,8 +35,8 @@ pub(crate) fn home_kernel_venv_dir(home: &Path) -> PathBuf {
 }
 
 /// Move a venv built for another runtime to `<venv>.stale-<unix-ms>` beside it,
-/// then remove every other `<venv>.stale-*` sibling, so only the newest retired
-/// copy stays on disk.
+/// after removing every older `<venv>.stale-*` sibling, so only the newest
+/// retired copy stays on disk.
 ///
 /// A bootstrap never deletes the venv it replaces: the caller may be a worktree
 /// binary or an older install whose runtime differs from the one the user's
@@ -44,21 +44,24 @@ pub(crate) fn home_kernel_venv_dir(home: &Path) -> PathBuf {
 pub(crate) fn retire_stale_venv(venv: &Path) -> anyhow::Result<PathBuf> {
     let name = venv.file_name().unwrap_or_default().to_string_lossy();
     let prefix = format!("{name}.stale-");
+    // Prune before the rename, and never fail on it: an error after the rename
+    // would return with the live path already vacated. A copy that cannot be
+    // removed now is retried by the next rebuild.
+    let parent = venv.parent().unwrap_or(Path::new("/"));
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let retired = venv.with_file_name(format!("{prefix}{stamp}"));
-    std::fs::rename(venv, &retired)
+    crate::platform::rename_onto(venv, &retired)
         .with_context(|| format!("moving {} to {}", venv.display(), retired.display()))?;
-    let parent = venv.parent().unwrap_or(Path::new("/"));
-    for entry in std::fs::read_dir(parent)?.flatten() {
-        let path = entry.path();
-        if path != retired && entry.file_name().to_string_lossy().starts_with(&prefix) {
-            std::fs::remove_dir_all(&path)
-                .with_context(|| format!("removing older {}", path.display()))?;
-        }
-    }
     Ok(retired)
 }
 
