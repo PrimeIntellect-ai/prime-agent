@@ -50,18 +50,6 @@ impl KernelNotice {
         }
     }
 
-    /// The `[turn-held]` pacing notice for one delivery that outlived the
-    /// worker's turn-held window: it rides the same steering lane as a
-    /// bash completion, so the queued row cuts the held turn at its next
-    /// boundary and delivers as the next turn's injected prompt.
-    #[must_use]
-    pub fn turn_held(elapsed_ms: u64) -> Self {
-        Self {
-            row: messages::create_turn_held_message(elapsed_ms, crate::autonomous::now_millis()),
-            preview_label: messages::TURN_HELD_PREVIEW_LABEL,
-        }
-    }
-
     /// The `[waiting]` keepalive for a parked session whose background
     /// commands are still running: one paced notice per window so idle
     /// clocks never close a session mid-wait.

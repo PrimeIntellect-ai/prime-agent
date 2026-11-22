@@ -364,14 +364,6 @@ impl ReplKernelManager {
 
         let mut frame = request.to_json();
         frame["id"] = json!(request_id);
-        // The in-cell span guard follows the limit the watchdog enforces: the
-        // runtime's timer starts when it reads this frame, so it must know the
-        // same budget instead of a default of its own. Zero disables both.
-        if matches!(&request, Request::Execute { .. }) {
-            if let Some(ms) = execution.opts.cell_timeout_ms.filter(|ms| *ms > 0) {
-                frame["timeout_ms"] = json!(ms);
-            }
-        }
 
         let (mut send_task, stdin_retire) = {
             let writer = lock(&self.inner.child).as_ref().map(|c| c.stdin.clone());
@@ -467,78 +459,6 @@ impl ReplKernelManager {
 #[cfg(test)]
 mod tests {
     use super::{append_truncated, HeadTailBuffer};
-
-    /// The execute frame carries the host's cell limit, so the runtime's
-    /// in-cell span guard fires on the same budget as the watchdog instead of
-    /// a default of its own. A request with no limit sends no field at all.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn the_execute_frame_carries_the_cell_timeout_for_the_span_guard() {
-        use super::*;
-        use std::os::unix::fs::PermissionsExt;
-
-        const RECORDING_RUNTIME: &str = r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-
-print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
-path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "request.json")
-for line in sys.stdin:
-    req = json.loads(line)
-    if req.get("type") == "execute":
-        with open(path, "w") as fh:
-            json.dump(req, fh)
-        print(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}), flush=True)
-"#;
-
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let python = dir.path().join("recording-kernel");
-        std::fs::write(&python, RECORDING_RUNTIME).expect("write fake kernel");
-        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake kernel");
-        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
-            python: Some(python),
-            ..Default::default()
-        });
-        manager
-            .start(KernelStartOptions::default())
-            .await
-            .expect("ready handshake");
-        let recorded = |path: &std::path::Path| -> serde_json::Value {
-            serde_json::from_str(&std::fs::read_to_string(path).expect("recorded frame"))
-                .expect("frame json")
-        };
-        let request = crate::kernel::protocol::Request::Execute {
-            code: "1 + 1".to_string(),
-        };
-        manager
-            .enqueue_request(
-                request.clone(),
-                ExecuteOptions {
-                    cell_timeout_ms: Some(400),
-                    ..ExecuteOptions::default()
-                },
-                None,
-            )
-            .await
-            .expect("bounded frame");
-        assert_eq!(
-            recorded(&dir.path().join("request.json"))["timeout_ms"],
-            400
-        );
-        manager
-            .enqueue_request(request, ExecuteOptions::default(), None)
-            .await
-            .expect("unbounded frame");
-        assert!(
-            recorded(&dir.path().join("request.json"))
-                .get("timeout_ms")
-                .is_none(),
-            "no announced limit leaves the guard disarmed"
-        );
-        manager.kill();
-    }
 
     #[cfg(unix)]
     #[tokio::test]

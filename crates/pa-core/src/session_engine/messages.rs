@@ -56,12 +56,6 @@ pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
 pub const BASH_WAITING_NOTICE_CUSTOM_TYPE: &str = "bash_waiting_notice";
 /// The queue-strip label the waiting keepalive's queued row carries.
 pub const BASH_WAITING_PREVIEW_LABEL: &str = "Waiting on background commands";
-/// The durable row the worker's turn-held pacing window admits on the
-/// session's steering lane: one notice per delivery that stays busy past
-/// the window, cutting the held turn at its next boundary.
-pub const TURN_HELD_NOTICE_CUSTOM_TYPE: &str = "turn_held_notice";
-/// The queue-strip label the turn-held notice's queued row carries.
-pub const TURN_HELD_PREVIEW_LABEL: &str = "Turn held";
 
 /// Why an unsuccessful compaction ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,32 +280,6 @@ No action needed — end the turn and park; a [bash-done] notification wakes you
         content: UserContent::Text(content),
         display: true,
         details: Some(serde_json::json!({ "pids": pids, "count": count })),
-        timestamp,
-        rest: serde_json::Map::default(),
-    }
-}
-
-/// The turn-held pacing notice: `[turn-held] ...`, the one-row teaching
-/// nudge the daemon worker admits when a delivery stays busy past its
-/// turn-held window. The details keep the window in milliseconds.
-#[must_use]
-pub fn create_turn_held_message(
-    elapsed_ms: u64,
-    timestamp: u64,
-) -> pa_types::session::CustomMessage {
-    let seconds = elapsed_ms / 1000;
-    let content = format!(
-        "[turn-held] This turn has been open for {seconds}s. If you are waiting on background \
-work, end the turn now: [bash-done] and agent-message notifications resume a parked turn, while \
-sleep(), subprocess polling, and repeated handle awaits inside cells just hold the kernel. If \
-background work cannot wake you (a subprocess or detached pid), wrap it in a bash() wait \
-command or relaunch it via bash(). Keep python cells short; long work belongs in bash()."
-    );
-    pa_types::session::CustomMessage {
-        custom_type: TURN_HELD_NOTICE_CUSTOM_TYPE.to_string(),
-        content: UserContent::Text(content),
-        display: true,
-        details: Some(serde_json::json!({ "elapsedMs": elapsed_ms })),
         timestamp,
         rest: serde_json::Map::default(),
     }
@@ -857,37 +825,6 @@ state
         };
         assert!(text.contains("pid 42 `build.sh`"), "{text}");
         assert!(text.contains("and 4 more"), "{text}");
-    }
-
-    #[test]
-    fn turn_held_message_carries_the_notice_contract() {
-        let message = create_turn_held_message(60_000, 1_000);
-        assert_eq!(message.custom_type, "turn_held_notice");
-        assert!(message.display);
-        assert_eq!(message.timestamp, 1_000);
-        let UserContent::Text(text) = &message.content else {
-            panic!("the notice is text content: {message:?}");
-        };
-        assert!(
-            text.starts_with("[turn-held] This turn has been open for 60s."),
-            "the header carries the elapsed window: {text}"
-        );
-        assert!(
-            text.contains("end the turn now"),
-            "the notice teaches the parked-turn contract: {text}"
-        );
-        assert!(
-            text.contains("sleep(), subprocess polling"),
-            "the notice names the in-cell waiting anti-patterns: {text}"
-        );
-        let details = message.details.unwrap();
-        assert_eq!(details["elapsedMs"], 60_000);
-        let message = create_turn_held_message(150_000, 2_000);
-        let UserContent::Text(text) = &message.content else {
-            panic!("the notice is text content: {message:?}");
-        };
-        assert!(text.starts_with("[turn-held] This turn has been open for 150s."));
-        assert_eq!(message.timestamp, 2_000);
     }
 
     #[test]
