@@ -569,11 +569,20 @@ impl AgentView {
             .iter()
             .filter_map(|i| shift(*i))
             .collect();
+        // A toggled run head the splice removes hands its expansion to the
+        // run's first surviving notice.
+        let orphaned_runs = self.toggled_cards.range(range.clone()).any(|&index| {
+            matches!(self.chat[index], ChatEntry::InboxNotice(_))
+                && self.inbox_run(index).end > range.end
+        });
         self.toggled_cards = self
             .toggled_cards
             .iter()
             .filter_map(|i| shift(*i))
             .collect();
+        if orphaned_runs {
+            self.toggled_cards.insert(range.start + inserted);
+        }
         self.entry_layout.splice(
             range.clone(),
             std::iter::repeat_n([None, None, None], inserted),

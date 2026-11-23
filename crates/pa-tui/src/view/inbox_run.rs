@@ -230,6 +230,25 @@ mod tests {
         assert!((1..5).all(|index| view.inbox_run_expanded(index)));
     }
 
+    /// An older-history trim that drops a click-expanded run's head keeps
+    /// the surviving run expanded.
+    #[test]
+    fn a_trimmed_run_head_keeps_the_run_expanded() {
+        let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+        view.push_entry(ChatEntry::User {
+            text: "older".to_string(),
+        });
+        for index in 0..3 {
+            view.push_entry(notice(&format!("[inbox 19:1{index} UTC] newer")));
+        }
+        view.toggle_card_expansion(1);
+        assert!(view.inbox_run_expanded(3));
+        view.render_frame(80, 24);
+        view.drop_leading_entries(2);
+        assert_eq!(view.inbox_run(1), 0..2);
+        assert!((0..2).all(|index| view.inbox_run_expanded(index)));
+    }
+
     /// A click on a run in a paused, tail-anchored window folds every
     /// member's row change: the window keeps its absolute scroll start,
     /// like the full rebuild.
