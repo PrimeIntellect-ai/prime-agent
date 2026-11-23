@@ -289,8 +289,9 @@ impl BotManager {
         Ok(record)
     }
 
-    /// Delete every sandbox the bot's label names and its checkpoint, then
-    /// forget the bot. Deleting an unknown bot succeeds.
+    /// Delete every sandbox the bot's label names and its checkpoints, then
+    /// forget the bot. A checkpoint that fails to delete is kept in the
+    /// registry, and boot reconcile tries it again. Deleting an unknown bot succeeds.
     ///
     /// # Errors
     /// Returns an error when a sandbox delete fails.
@@ -347,7 +348,9 @@ impl BotManager {
             }
             self.save(record)?;
         }
-        Ok(())
+        let orphans = lock(&self.registry).take_orphans()?;
+        let failed = self.delete_checkpoints(orphans).await;
+        lock(&self.registry).add_orphans(failed)
     }
 
     fn lock_for(&self, bot_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -714,10 +717,9 @@ impl BotManager {
             return Ok(());
         };
         let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
-        let mut failed = self.delete_checkpoints(stale).await;
-        failed.append(&mut record.older_checkpoint_ids);
-        record.older_checkpoint_ids = failed;
-        self.save(record.clone())
+        self.save(record.clone())?;
+        let failed = self.delete_checkpoints(stale).await;
+        lock(&self.registry).add_orphans(failed)
     }
 
     /// Delete checkpoints; returns the ones that could not be deleted.
@@ -749,21 +751,15 @@ impl BotManager {
         for sandbox_id in &sandbox_ids {
             retry(|| self.platform.delete(sandbox_id)).await?;
         }
-        let Some(mut record) = record else {
+        let Some(record) = record else {
             return Ok(());
         };
-        let mut checkpoints = std::mem::take(&mut record.older_checkpoint_ids);
-        checkpoints.extend(record.checkpoint_id.take());
+        let mut checkpoints = record.older_checkpoint_ids;
+        checkpoints.extend(record.checkpoint_id);
         let failed = self.delete_checkpoints(checkpoints).await;
-        if failed.is_empty() {
-            return lock(&self.registry).remove(bot_id);
-        }
-        // Keep the record so a later delete retries the checkpoints.
-        record.sandbox_id = None;
-        record.status = BotStatus::Stopped;
-        record.older_checkpoint_ids = failed;
-        self.save(record)?;
-        bail!("bot {bot_id}: some checkpoints could not be deleted")
+        let mut registry = lock(&self.registry);
+        registry.remove(bot_id)?;
+        registry.add_orphans(failed)
     }
 }
 

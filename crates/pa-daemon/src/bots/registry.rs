@@ -90,15 +90,19 @@ pub struct BotRecord {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RegistryFile {
     bots: BTreeMap<String, BotRecord>,
+    /// Checkpoints whose delete failed; boot reconcile retries them.
+    #[serde(default)]
+    orphaned_checkpoints: Vec<String>,
 }
 
 /// The on-disk cache. Callers serialize access (the manager holds it in a mutex).
 #[derive(Debug)]
 pub struct BotRegistry {
     path: PathBuf,
-    bots: BTreeMap<String, BotRecord>,
+    file: RegistryFile,
 }
 
 impl BotRegistry {
@@ -114,26 +118,23 @@ impl BotRegistry {
     /// Returns an error when the file exists but cannot be read or parsed.
     pub fn load(agent_dir: &Path) -> Result<Self> {
         let path = Self::path_in(agent_dir);
-        let bots = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                serde_json::from_str::<RegistryFile>(&text)
-                    .with_context(|| format!("parse {}", path.display()))?
-                    .bots
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        let file = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str::<RegistryFile>(&text)
+                .with_context(|| format!("parse {}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RegistryFile::default(),
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
-        Ok(Self { path, bots })
+        Ok(Self { path, file })
     }
 
     #[must_use]
     pub fn get(&self, bot_id: &str) -> Option<&BotRecord> {
-        self.bots.get(bot_id)
+        self.file.bots.get(bot_id)
     }
 
     #[must_use]
     pub fn all(&self) -> Vec<BotRecord> {
-        self.bots.values().cloned().collect()
+        self.file.bots.values().cloned().collect()
     }
 
     /// Insert or replace one record and persist.
@@ -141,7 +142,7 @@ impl BotRegistry {
     /// # Errors
     /// Returns an error when the file cannot be written.
     pub fn put(&mut self, record: BotRecord) -> Result<()> {
-        self.bots.insert(record.bot_id.clone(), record);
+        self.file.bots.insert(record.bot_id.clone(), record);
         self.save()
     }
 
@@ -150,19 +151,39 @@ impl BotRegistry {
     /// # Errors
     /// Returns an error when the file cannot be written.
     pub fn remove(&mut self, bot_id: &str) -> Result<()> {
-        if self.bots.remove(bot_id).is_some() {
+        if self.file.bots.remove(bot_id).is_some() {
             self.save()?;
         }
         Ok(())
+    }
+
+    /// Remember checkpoints whose delete failed, and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be written.
+    pub fn add_orphans(&mut self, checkpoints: Vec<String>) -> Result<()> {
+        if checkpoints.is_empty() {
+            return Ok(());
+        }
+        self.file.orphaned_checkpoints.extend(checkpoints);
+        self.save()
+    }
+
+    /// Take the remembered orphan checkpoints, and persist.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be written.
+    pub fn take_orphans(&mut self) -> Result<Vec<String>> {
+        let orphans = std::mem::take(&mut self.file.orphaned_checkpoints);
+        self.save()?;
+        Ok(orphans)
     }
 
     fn save(&self) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             pa_core::platform::perms::create_dir_all_private(dir)?;
         }
-        let text = serde_json::to_string_pretty(&RegistryFile {
-            bots: self.bots.clone(),
-        })?;
+        let text = serde_json::to_string_pretty(&self.file)?;
         crate::descriptor::write_file_atomic(&self.path, &text)
     }
 }
