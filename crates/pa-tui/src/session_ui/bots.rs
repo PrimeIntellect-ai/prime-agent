@@ -17,7 +17,11 @@ use crate::interactive::{BotAttach, SelectionOrigin, SessionPanel, SessionSelect
 
 /// One background `/bots` delivery: a fetched `list_bots` answer, or an attach outcome.
 pub(crate) enum BotsUpdate {
-    Catalog(Result<Value, String>),
+    /// One `list_bots` outcome, tagged with the request number it answers.
+    Catalog {
+        request: u64,
+        result: Result<Value, String>,
+    },
     /// One attach outcome, tagged with the request number it answers.
     Attached {
         request: u64,
@@ -80,12 +84,17 @@ const LOCAL_ONLY_COMMANDS: &[&str] = &[
 impl SessionUi {
     /// Open the `/bots` page and fetch its rows in the background.
     pub(crate) fn open_bots_page(&mut self, view: &mut AgentView) {
-        view.overlay = Some(Overlay::Bots(BotsView::default()));
+        let mut page = BotsView::default();
+        self.spawn_bots_refresh(&mut page);
+        view.overlay = Some(Overlay::Bots(page));
         self.dirty = true;
-        self.spawn_bots_refresh();
     }
 
-    fn spawn_bots_refresh(&self) {
+    /// Fetch the page's rows; the page keeps the request number and applies only its answer.
+    fn spawn_bots_refresh(&mut self, page: &mut BotsView) {
+        self.bots_requests += 1;
+        let request = self.bots_requests;
+        page.set_catalog_request(request);
         let client = self.client.clone();
         let tx = self.bots_updates.clone();
         tokio::spawn(async move {
@@ -100,7 +109,7 @@ impl SessionUi {
                 )
                 .await
                 .map_err(|error| page_error(&error));
-            let _ = tx.send(BotsUpdate::Catalog(result));
+            let _ = tx.send(BotsUpdate::Catalog { request, result });
         });
     }
 
@@ -146,7 +155,9 @@ impl SessionUi {
             return;
         };
         match update {
-            BotsUpdate::Catalog(result) => match result.and_then(|data| parse_bots(&data)) {
+            // An answer to an older fetch (a refresh, or a closed page) drops.
+            BotsUpdate::Catalog { request, .. } if !page.awaits_catalog(request) => return,
+            BotsUpdate::Catalog { result, .. } => match result.and_then(|data| parse_bots(&data)) {
                 Ok(catalog) => page.apply_catalog(catalog),
                 Err(error) => page.set_fetch_error(Some(error)),
             },
@@ -187,12 +198,12 @@ impl SessionUi {
         };
         match page.handle_key(&id, view.editor.keybindings()) {
             BotsAction::None | BotsAction::ToggleDetail => {}
-            BotsAction::Refresh => self.spawn_bots_refresh(),
+            BotsAction::Refresh => self.spawn_bots_refresh(page),
             BotsAction::Attach { bot_id, name } => {
                 page.set_attach_error(None);
-                self.bots_attach_requests += 1;
-                page.set_attaching(Some((self.bots_attach_requests, name.clone())));
-                self.spawn_bot_attach(self.bots_attach_requests, bot_id, name);
+                self.bots_requests += 1;
+                page.set_attaching(Some((self.bots_requests, name.clone())));
+                self.spawn_bot_attach(self.bots_requests, bot_id, name);
             }
             BotsAction::Close => {
                 view.overlay = None;

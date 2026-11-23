@@ -221,6 +221,8 @@ pub struct BotsView {
     fetch_error: Option<String>,
     /// The last failed attach (a version mismatch shows here); a fetch never clears it.
     attach_error: Option<String>,
+    /// The latest `list_bots` request; only its answer applies.
+    catalog_request: u64,
     /// The attach request in flight: `(request number, bot name)`.
     attaching: Option<(u64, String)>,
 }
@@ -284,6 +286,17 @@ impl BotsView {
     /// A failed attach (`Some`), or a new attach clearing the last one (`None`).
     pub fn set_attach_error(&mut self, error: Option<String>) {
         self.attach_error = error;
+    }
+
+    /// The `list_bots` request whose answer this page waits for.
+    pub fn set_catalog_request(&mut self, request: u64) {
+        self.catalog_request = request;
+    }
+
+    /// Whether `request` is the latest `list_bots` request of this page.
+    #[must_use]
+    pub fn awaits_catalog(&self, request: u64) -> bool {
+        self.catalog_request == request
     }
 
     /// The attach in flight (`Some((request, name))`), or none.
