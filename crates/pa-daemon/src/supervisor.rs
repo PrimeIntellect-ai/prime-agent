@@ -490,10 +490,21 @@ impl Supervisor {
         // pre-warmup cold-read behavior, never a colder one).
         {
             let supervisor = Arc::clone(&self);
-            let mut adopted = adoption_signal;
+            let mut adopted = adoption_signal.clone();
             tokio::spawn(async move {
                 Supervisor::wait_for_adoption_signal(&mut adopted).await;
                 supervisor.spawn_passive_catalog_warmup();
+            });
+        }
+
+        // Bots: after adoption (deliveries resolve the owner sessions), catch
+        // up every running bot and pause the idle ones.
+        {
+            let supervisor = Arc::clone(&self);
+            let mut adopted = adoption_signal;
+            tokio::spawn(async move {
+                Supervisor::wait_for_adoption_signal(&mut adopted).await;
+                supervisor.reconcile_bots_on_boot().await;
             });
         }
 

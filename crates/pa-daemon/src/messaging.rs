@@ -188,6 +188,7 @@ impl Supervisor {
             Ok(manager) => manager,
             Err(error) => return fail(format!("{error:#}")),
         };
+        Self::touch_bot(&bot.bot_id);
         let msg_id = format!("agentmsg_{}", uuid::Uuid::new_v4());
         let ledger = crate::bots::ledger::BotLedger::new(agent_dir, &bot.bot_id);
         // One deadline for wake, link, and send, inside the worker's wait:
@@ -218,11 +219,13 @@ impl Supervisor {
             },
         )
         .await;
+        // Follow even after a failed send: a bot the send resumed then still
+        // gets its reply delivered and its pause re-armed.
+        self.follow_bot(&bot.bot_id);
         let (record, receipt) = match sent {
             Ok(sent) => sent,
             Err(error) => return fail(format!("message to bot {}: {error}", bot.name)),
         };
-        // The bot now runs a turn; the reply path follows it from here.
         let field = |name: &str| receipt.get(name).cloned().unwrap_or(Value::Null);
         response_success(
             Some(command_id),

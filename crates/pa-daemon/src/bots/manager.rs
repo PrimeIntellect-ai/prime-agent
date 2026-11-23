@@ -867,6 +867,10 @@ fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
         ),
         ("BOT_CLIENT".to_string(), BOT_CLIENT.to_string()),
         ("BOT_NAME".to_string(), record.name.clone()),
+        (
+            super::remote_parent::REMOTE_PARENT_ENV.to_string(),
+            super::remote_parent::REMOTE_PARENT_NAME.to_string(),
+        ),
         ("BOT_CONFIG".to_string(), config.to_string()),
         (
             "NODE_EXTRA_CA_CERTS".to_string(),

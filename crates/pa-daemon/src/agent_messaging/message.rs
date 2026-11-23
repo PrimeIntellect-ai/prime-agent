@@ -206,6 +206,16 @@ impl AgentMessageController for LinkAgentMessageController {
         }
         // TS `selectAgentFamily` order: parent, siblings by name, then
         // children by name.
+        // A bot's guest daemon: the owner on the Mac is the one parent.
+        if parent_member.is_none() {
+            parent_member =
+                crate::bots::remote_parent::remote_parent_name().map(|name| AgentFamilyMember {
+                    relationship: AgentFamilyRelationship::Parent,
+                    id: crate::bots::remote_parent::REMOTE_PARENT_TARGET.to_string(),
+                    name: Some(name),
+                    aliases: Vec::new(),
+                });
+        }
         siblings.sort_by(|left, right| left.member_name().cmp(right.member_name()));
         child_members.sort_by(|left, right| left.member_name().cmp(right.member_name()));
         Ok(parent_member
@@ -267,6 +277,11 @@ impl LinkAgentMessageController {
         }
         if input.target == self.active_session_id {
             anyhow::bail!("Agent messaging cannot target the sending session");
+        }
+        if input.target == crate::bots::remote_parent::REMOTE_PARENT_TARGET {
+            if let Some(name) = crate::bots::remote_parent::remote_parent_name() {
+                return queue_for_remote_parent(input, name);
+            }
         }
         // A delivery to one of this session's own children starts a follow-up turn there:
         // re-arm that child's usage observation BEFORE the delivery (a fast child can
@@ -465,6 +480,29 @@ fn child_member(
         name: name.or_else(|| (!child.session_name.is_empty()).then(|| child.session_name.clone())),
         aliases,
     }
+}
+
+/// Queue one message for the bot's owner in the guest outbox; the owner's
+/// daemon delivers it after this turn.
+fn queue_for_remote_parent(
+    input: AgentMessageSendInput,
+    name: String,
+) -> anyhow::Result<AgentMessageReceipt> {
+    let agent_dir = crate::paths::agent_dir()?;
+    let entry = crate::bots::remote_parent::append(&agent_dir, &input.message)?;
+    Ok(AgentMessageReceipt {
+        id: entry.id,
+        target: input.target,
+        target_session_id: None,
+        target_session_name: Some(name),
+        target_runtime_kind: None,
+        message: input.message,
+        delivery_status: AgentMessageDeliveryStatus::Queued,
+        delivery_mode: Some("follow_up"),
+        receiver_role: input.receiver_role,
+        delivered_at: None,
+        queued_at: Some(crate::util::iso_from_unix_ms(entry.at_ms)),
+    })
 }
 
 /// Map a delivery receipt payload (the `worker_deliver_message` response data) onto the

@@ -130,7 +130,7 @@ impl Supervisor {
         }
     }
 
-    async fn spawn_bot(&self, spec: &BotSpec, rlm_max_depth: u64) -> Result<BotRecord> {
+    async fn spawn_bot(self: &Arc<Self>, spec: &BotSpec, rlm_max_depth: u64) -> Result<BotRecord> {
         let agent_dir = &self.options.agent_dir;
         admit_bot_spawn(agent_dir).await?;
         let manager = super::manager_for(agent_dir)?;
@@ -182,8 +182,11 @@ impl Supervisor {
             ))
         });
         match started {
-            // The bot now runs a turn; the reply path follows it from here.
-            Ok(record) => Ok(record),
+            // The bot now runs a turn; follow it to deliver its reply.
+            Ok(record) => {
+                self.follow_bot(&record.bot_id);
+                Ok(record)
+            }
             // A failed spawn leaves nothing billing, whatever step it reached.
             Err(error) => match manager.delete(&spec.bot_id).await {
                 Ok(()) => Err(error.context("the bot was deleted")),
