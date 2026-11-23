@@ -226,10 +226,22 @@ pub async fn provision(
     agent_dir: &Path,
     provider: &str,
 ) -> Provisioned {
-    let mut auth = AuthStorage::create(agent_dir);
-    let injections = injections(&mut auth, provider);
+    // Reading the auth storage may run a `!command` key: keep it off the runtime.
+    let (agent_dir, required) = (agent_dir.to_path_buf(), provider.to_string());
+    let (injections, prime_team) = match tokio::task::spawn_blocking(move || {
+        let mut auth = AuthStorage::create(&agent_dir);
+        (
+            injections(&mut auth, &required),
+            effective_prime_team(&auth),
+        )
+    })
+    .await
+    {
+        Ok(read) => read,
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    };
     let mut provisioned = provision_injections(client, injections).await;
-    provisioned.prime_team = effective_prime_team(&auth);
+    provisioned.prime_team = prime_team;
     provisioned
 }
 
