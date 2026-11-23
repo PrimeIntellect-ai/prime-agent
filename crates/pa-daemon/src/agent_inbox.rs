@@ -242,8 +242,8 @@ impl InboxRouter {
 /// Move every waiting message from the outgoing session's inbox into the
 /// successor's (a replacement: the outgoing session never reopens through
 /// this worker). The successor's copies are written first and the
-/// outgoing records removed after, so a crash in between leaves a message
-/// in both inboxes, never in neither. Each copy keeps its arrival time
+/// outgoing records removed after (only once the copies are durable), so
+/// a crash leaves a message in both inboxes, never in neither. Each copy keeps its arrival time
 /// and carries `meta.movedFrom` (`<session id>/<inbox id>`), so a repeated
 /// move after such a crash never adds a second copy.
 pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from_session: &str) {
@@ -285,7 +285,11 @@ pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from
         }
         moved.insert(message.id);
     }
-    from.withdraw_ids(&moved);
+    // A memory-only successor (its journal write failed) keeps the
+    // outgoing records: a crash must not lose what it cannot persist.
+    if to.persistence_error().is_none() {
+        from.withdraw_ids(&moved);
+    }
 }
 
 /// `agentInbox.enabled` (default on): the kill switch that restores
