@@ -141,8 +141,7 @@ pub(super) fn arm_shutdown_recovery(
         view,
     );
     // TS #2458's yield rule: the shutdown recovery owns the run — a session-plane retry armed by an
-    // earlier direct-link loss would race it through a dying supervisor, and its expiry would block
-    // submits after a later reconnect lands.
+    // earlier direct-link loss would race it through a dying supervisor.
     *session_reconnect = None;
     *reconnect = Some(ReconnectLoop::start_shutdown());
     session.dirty = true;
