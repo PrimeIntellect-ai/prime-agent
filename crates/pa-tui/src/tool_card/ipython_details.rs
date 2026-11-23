@@ -1,9 +1,20 @@
 //! Parsing of ipython execution `details` for the cell card: the
 //! details record, the background-shell handle repr, literal shell
-//! launches, the transcript reads, and the edit-confirmation and
-//! agent-message-receipt suppressions.
+//! launches, the transcript reads, the inbox messages, and the
+//! edit-confirmation and agent-message-receipt suppressions.
 
-use serde_json::Value;
+use pa_types::inbox_notice::{
+    INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED,
+    INBOX_CLASS_CHILD_FAILED, INBOX_CLASS_HEARTBEAT,
+};
+use serde_json::{json, Value};
+
+use crate::chat::ChatEntry;
+use crate::custom_message::{
+    custom_message_entries, AGENT_MESSAGE_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
+    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+};
 
 /// Parsed `details` of one ipython execution result.
 pub(crate) struct IpythonDetails {
@@ -19,6 +30,9 @@ pub(crate) struct IpythonDetails {
     pub(crate) sent_agent_messages: Vec<Value>,
     pub(crate) bash_commands: Option<BashCommands>,
     pub(crate) transcript_reads: Vec<TranscriptRead>,
+    /// The messages the cell's `rlm.inbox.read` calls returned, decoded as
+    /// the transcript rows they replaced.
+    pub(crate) inbox_messages: Vec<ChatEntry>,
 }
 
 pub(crate) struct IpythonError {
@@ -157,6 +171,7 @@ impl IpythonDetails {
             sent_agent_messages: Vec::new(),
             bash_commands: None,
             transcript_reads: Vec::new(),
+            inbox_messages: Vec::new(),
         };
         let Some(record) = details.as_object() else {
             return empty;
@@ -207,8 +222,44 @@ impl IpythonDetails {
                 .and_then(Value::as_array)
                 .map(|reads| reads.iter().filter_map(TranscriptRead::parse).collect())
                 .unwrap_or_default(),
+            inbox_messages: record
+                .get("inboxMessages")
+                .and_then(Value::as_array)
+                .map(|messages| messages.iter().flat_map(inbox_message_entries).collect())
+                .unwrap_or_default(),
         }
     }
+}
+
+/// One `rlm.inbox.read` message as the custom row it replaced in the
+/// transcript, decoded by the transcript's own dispatch. A class without
+/// a dedicated row renders the generic panel under its class name.
+fn inbox_message_entries(message: &Value) -> Vec<ChatEntry> {
+    let class = message.get("class").and_then(Value::as_str).unwrap_or("");
+    let text = message.get("text").and_then(Value::as_str).unwrap_or("");
+    let mut details = message
+        .get("meta")
+        .filter(|meta| meta.is_object())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let custom_type = match class {
+        INBOX_CLASS_AGENT_MESSAGE => {
+            details["message"] = json!(text);
+            AGENT_MESSAGE_CUSTOM_TYPE
+        }
+        INBOX_CLASS_CHILD_EXITED => RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+        INBOX_CLASS_CHILD_FAILED => RLM_CHILD_FAILURE_CUSTOM_TYPE,
+        INBOX_CLASS_HEARTBEAT => HEARTBEAT_PROMPT_CUSTOM_TYPE,
+        INBOX_CLASS_BASH_DONE => ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+        _ => class,
+    };
+    custom_message_entries(&json!({
+        "role": "custom",
+        "customType": custom_type,
+        "content": text,
+        "details": details,
+        "display": true,
+    }))
 }
 
 /// `formatDuration`: whole `ms` below a second, tenths above.
@@ -438,5 +489,18 @@ mod tests {
             "deliveryStatus": "delivered",
         }))
         .is_none());
+    }
+
+    /// The cell can emit any inbox-message display: a non-object `meta`
+    /// decodes like a missing one instead of panicking the card.
+    #[test]
+    fn inbox_message_with_non_object_meta_decodes_like_a_missing_one() {
+        let without_meta = serde_json::json!({ "class": "agent-message", "text": "Done." });
+        let mut string_meta = without_meta.clone();
+        string_meta["meta"] = serde_json::json!("oops");
+        assert_eq!(
+            inbox_message_entries(&string_meta),
+            inbox_message_entries(&without_meta)
+        );
     }
 }

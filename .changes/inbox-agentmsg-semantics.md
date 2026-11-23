@@ -1,0 +1,1 @@
+- Pausing agent messages no longer deletes inbox messages, clearing them removes only messages the agent has not been told about yet, a message to a closing session is refused instead of being silently stranded, and clearing the queue keeps the inbox notice for mail that has not been announced.

@@ -1,0 +1,1 @@
+- A `--model` or model selection the catalog cannot match exactly now shows a warning (stderr in print mode, a warning row in the chat) instead of silently running on a made-up custom model id.

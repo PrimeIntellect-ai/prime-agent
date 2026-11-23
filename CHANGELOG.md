@@ -1,7 +1,6 @@
 # Changelog
 
-Release notes for Prime Agent. Historical TypeScript release notes are
-recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
+Release notes for Prime Agent. Historical TypeScript release notes are recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
 
 ## [0.10.5] - 2026-11-18
 
