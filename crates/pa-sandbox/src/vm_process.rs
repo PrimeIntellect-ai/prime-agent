@@ -495,7 +495,16 @@ where
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let outcome = self.unary(method, &request_bytes, timeout).await;
+            // The deadline covers the whole attempt: the transport bounds only
+            // the response head, and a stalled body must not hang the call.
+            let outcome =
+                tokio::time::timeout(timeout, self.unary(method, &request_bytes, timeout))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(CommandSessionError::timeout(format!(
+                            "Command session {method} timed out"
+                        )))
+                    });
             match outcome {
                 Ok(()) => return Ok(()),
                 Err(error) => {

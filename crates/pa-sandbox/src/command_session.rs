@@ -126,7 +126,8 @@ pub enum OutputChannel {
 /// `CommandSessionEndEvent`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndEvent {
-    /// Process exit code when the platform reports one.
+    /// Process exit code; `Some(0)` for a clean exit without one (proto3
+    /// omits a zero), `None` when the end carries an error or no exit.
     pub exit_code: Option<i32>,
     /// True when the session ended by process exit; true unless the
     /// platform says otherwise.
@@ -313,7 +314,7 @@ fn decode_event(reader: &mut Reader<'_>, context: &str) -> Result<CommandSession
     let mut keepalive = false;
     while !reader.is_eof() {
         let (field, wire) = reader.tag(context)?;
-        if wire != WIRE_LEN {
+        if wire != WIRE_LEN && (1..=4).contains(&field) {
             return Err(ProtoError::invalid_wire(format!(
                 "{context}: event members must be length-delimited"
             )));
@@ -408,7 +409,7 @@ fn decode_data_event(
     let mut pty: Option<Vec<u8>> = None;
     while !reader.is_eof() {
         let (field, wire) = reader.tag(context)?;
-        if wire != WIRE_LEN {
+        if wire != WIRE_LEN && (1..=3).contains(&field) {
             return Err(ProtoError::invalid_wire(format!(
                 "{context}: output members must be length-delimited"
             )));
@@ -486,9 +487,13 @@ fn decode_end_event(reader: &mut Reader<'_>, context: &str) -> Result<EndEvent, 
     // subset of its fields, so nothing here is required. An end event
     // always means the session is no longer running, hence the defaulted
     // `exited` (TS parity).
+    let exited = exited.unwrap_or(true);
+    // proto3 omits a zero `exit_code`, so a clean exit with no error and
+    // no code exited 0.
+    let exit_code = exit_code.or_else(|| (exited && error.is_none()).then_some(0));
     Ok(EndEvent {
         exit_code,
-        exited: exited.unwrap_or(true),
+        exited,
         status,
         error,
     })
@@ -780,7 +785,8 @@ mod tests {
                 error: Some("killed".to_string()),
             })
         );
-        // The deployed end event can carry a subset (even nothing).
+        // The deployed end event can carry a subset (even nothing); proto3
+        // omits a zero exit code, so a clean exit reads as exit 0.
         let body = response_body(3, &[]);
         let decoded = decode_command_session_event_response(&body, "StartResponse")
             .unwrap()
@@ -788,7 +794,7 @@ mod tests {
         assert_eq!(
             decoded,
             CommandSessionEvent::End(EndEvent {
-                exit_code: None,
+                exit_code: Some(0),
                 exited: true,
                 status: None,
                 error: None,

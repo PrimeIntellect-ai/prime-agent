@@ -114,20 +114,27 @@ pub(crate) fn proto_fault(
     fault.with_context(method, url, None, None)
 }
 
+/// How long an error-body preview may take; a peer that holds the body
+/// open past it yields the bytes read so far.
+const ERROR_PREVIEW_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Read at most [`MAX_ERROR_BODY_BYTES`] of an error response body for a
-/// preview (TS `boundedErrorBody`).
+/// preview (TS `boundedErrorBody`), within [`ERROR_PREVIEW_TIMEOUT`].
 pub(crate) async fn read_error_preview(body: &mut ResponseChunks) -> String {
     let mut read = Vec::new();
-    while read.len() < MAX_ERROR_BODY_BYTES {
-        match body.next_chunk().await {
-            Ok(Some(chunk)) => {
-                let room = MAX_ERROR_BODY_BYTES - read.len();
-                let take = chunk.len().min(room);
-                read.extend_from_slice(&chunk[..take]);
+    let _ = tokio::time::timeout(ERROR_PREVIEW_TIMEOUT, async {
+        while read.len() < MAX_ERROR_BODY_BYTES {
+            match body.next_chunk().await {
+                Ok(Some(chunk)) => {
+                    let room = MAX_ERROR_BODY_BYTES - read.len();
+                    let take = chunk.len().min(room);
+                    read.extend_from_slice(&chunk[..take]);
+                }
+                Ok(None) | Err(_) => break,
             }
-            Ok(None) | Err(_) => break,
         }
-    }
+    })
+    .await;
     String::from_utf8_lossy(&read).into_owned()
 }
 

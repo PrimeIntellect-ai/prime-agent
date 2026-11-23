@@ -215,8 +215,8 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(Vec<u8>, us
         let head = String::from_utf8_lossy(&buffer[..head_end]);
         let content_length = head
             .lines()
-            .find_map(|line| line.split_once(':'))
-            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
             .and_then(|(_, value)| value.trim().parse::<usize>().ok())
             .unwrap_or(0);
         if buffer.len() >= head_end + 4 + content_length {

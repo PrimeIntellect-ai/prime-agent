@@ -80,7 +80,7 @@ impl CommandSessionStream {
     /// sent and no further reattach is attempted. Buffered events may
     /// still drain; the stream ends afterwards. Idempotent.
     pub async fn release(&mut self) {
-        let _ = self.release.send(true);
+        self.release.send_replace(true);
         if let Some(pump) = self.pump.take() {
             let _ = pump.await;
         }

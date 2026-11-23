@@ -26,7 +26,7 @@ pub const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// Per-sandbox gateway credentials (the `POST /sandbox/{id}/auth`
 /// response; `snake_case` wire form). The token is sandbox-bound and
 /// short-lived; callers own caching and expiry refresh (TS contract).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GatewayAuth {
     /// The sandbox the credentials belong to.
     pub sandbox_id: String,
@@ -42,6 +42,19 @@ pub struct GatewayAuth {
     /// the crate carries no datetime parser — consumers convert on
     /// demand).
     pub expires_at: String,
+}
+
+impl std::fmt::Debug for GatewayAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayAuth")
+            .field("sandbox_id", &self.sandbox_id)
+            .field("gateway_url", &self.gateway_url)
+            .field("user_namespace", &self.user_namespace)
+            .field("job_id", &self.job_id)
+            .field("token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Options for the gateway credential fetch.

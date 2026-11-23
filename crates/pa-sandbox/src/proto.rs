@@ -172,6 +172,12 @@ impl<'a> Reader<'a> {
                 )));
             };
             self.pos += 1;
+            // The tenth byte carries only bit 63; anything more overflows u64.
+            if shift == 63 && *byte & 0x7f > 1 {
+                return Err(ProtoError::invalid_wire(format!(
+                    "{context}: varint overflows u64"
+                )));
+            }
             value |= u64::from(*byte & 0x7f) << shift;
             if *byte & 0x80 == 0 {
                 return Ok(value);
@@ -497,6 +503,17 @@ mod tests {
                 "{bad:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn a_tenth_varint_byte_over_one_bit_is_rejected() {
+        let mut overflow = [0x80; 10];
+        overflow[9] = 0x02;
+        let mut reader = Reader::new(&overflow);
+        assert_eq!(
+            reader.varint("t").unwrap_err().kind(),
+            ProtoErrorKind::InvalidWire
+        );
     }
 
     #[test]

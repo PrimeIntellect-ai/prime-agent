@@ -637,6 +637,40 @@ async fn a_401_refreshes_the_gateway_token_exactly_once() {
 }
 
 #[tokio::test]
+async fn a_stalled_unary_body_times_out_instead_of_hanging() {
+    // The head arrives but the declared body never does: every attempt
+    // hits the control deadline, and the call fails as a timeout.
+    let stalled = ScriptedResponse {
+        head_delay: Duration::ZERO,
+        raw: b"HTTP/1.1 200 OK\r\ncontent-type: application/proto\r\ncontent-length: 1\r\n\r\n"
+            .to_vec(),
+        stream: Vec::new(),
+        close: false,
+        hold: true,
+    };
+    let server = MockServer::start_scripts(vec![stalled; 3]).await;
+    let client = client_for(auth(server.url(""), TOKEN));
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.send_input(
+            UUID,
+            InputChannel::Stdin,
+            b"zz",
+            SendInputOptions {
+                control: ControlOptions {
+                    connect_timeout_ms: Some(Duration::from_millis(200)),
+                },
+                input_uuid: None,
+            },
+        ),
+    )
+    .await
+    .expect("the control deadline bounds the body read")
+    .unwrap_err();
+    assert_eq!(error.code(), CommandSessionErrorCode::Timeout);
+}
+
+#[tokio::test]
 async fn unary_retries_transient_faults_with_identical_bytes() {
     let server = MockServer::start(Vec::new()).await;
     server.push_raw(json_response(
