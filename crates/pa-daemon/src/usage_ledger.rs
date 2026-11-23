@@ -355,8 +355,10 @@ impl UsageLedger {
             return Ok(Vec::new());
         }
         append_records(&self.shard_path(session_id), &fresh)?;
-        // The first real rows replace a legacy snapshot: the totals move by
-        // the change in own spend, never by the rows' whole sum.
+        // The first real rows replace a legacy snapshot, whose input still
+        // holds the cache tokens: the totals over it refold from the shards
+        // instead of moving by a field-wise difference.
+        let replaces_snapshot = shard.ids.is_empty() && shard.snapshot.is_some();
         let before = shard.own();
         for record in fresh {
             shard.add(record.id, &record.usage);
@@ -369,7 +371,9 @@ impl UsageLedger {
             if moved.contains(&member) {
                 break;
             }
-            if let Some(total) = state.totals.get_mut(&member) {
+            if replaces_snapshot {
+                state.totals.remove(&member);
+            } else if let Some(total) = state.totals.get_mut(&member) {
                 add_assistant_usage(total, &added);
             }
             current = tree.node(&member).map(|node| node.parent.clone());
@@ -428,6 +432,11 @@ mod tests {
 
     /// One billed assistant turn appended to a transcript (the header first).
     fn append_turn(path: &Path, row_id: &str, cost: f64) {
+        append_usage(path, row_id, &usage(cost));
+    }
+
+    /// [`append_turn`] with the turn's whole usage block.
+    fn append_usage(path: &Path, row_id: &str, usage: &Usage) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut lines = String::new();
         if !path.exists() {
@@ -438,7 +447,7 @@ mod tests {
             &json!({
                 "type": "message", "id": row_id, "parentId": null, "timestamp": "t",
                 "message": {"role": "assistant", "content": [], "stopReason": "stop",
-                    "timestamp": 1, "usage": usage(cost)},
+                    "timestamp": 1, "usage": usage},
             })
             .to_string(),
         );
@@ -596,8 +605,9 @@ mod tests {
     }
 
     /// A legacy child's delete snapshot bills until its transcript reappears;
-    /// the real rows then replace it without a double count or a drop, and
-    /// later rows add exactly once.
+    /// the real rows then replace it without a double count or a drop (also of
+    /// the cache reads the snapshot folded into its input), and later rows add
+    /// exactly once.
     #[test]
     fn real_rows_replace_a_legacy_delete_snapshot() {
         let home = home();
@@ -613,23 +623,36 @@ mod tests {
             json!({
                 "v": 1, "op": "delete", "at": "t", "childId": "sub-c",
                 "child": child.to_string_lossy(), "reason": "user",
-                "usage": {"inputTokens": 10, "outputTokens": 1, "cost": 0.5},
+                "usage": {"inputTokens": 110, "outputTokens": 1, "cost": 0.5},
             })
         )
         .unwrap();
         drop(file);
+        let input_tokens = |ledger: &UsageLedger| {
+            crate::session_usage::session_usage_summary_from(&ledger.spend(&home.root).total)
+                .map_or(0, |summary| summary.input_tokens)
+        };
         let ledger = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
         ledger.reconcile_family(&home.root).unwrap();
         assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
+        assert_eq!(input_tokens(&ledger), 120);
 
-        append_turn(&home.child, "c1", 0.5);
+        let cache_split = Usage {
+            cache_read: 100,
+            total_tokens: 111,
+            ..usage(0.5)
+        };
+        append_usage(&home.child, "c1", &cache_split);
         ledger.reconcile_family(&home.root).unwrap();
         assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
+        assert_eq!(input_tokens(&ledger), 120);
         append_turn(&home.child, "c2", 0.25);
         ledger.reconcile_family(&home.root).unwrap();
         assert!((root_total(&home, &ledger) - 1.75).abs() < 1e-9);
+        assert_eq!(input_tokens(&ledger), 130);
         assert!(ledger.reconcile_family(&home.root).unwrap().is_empty());
         let restarted = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
         assert!((root_total(&home, &restarted) - 1.75).abs() < 1e-9);
+        assert_eq!(input_tokens(&restarted), 130);
     }
 }
