@@ -5,10 +5,12 @@
 current suite size that phase alone bills ~13 minutes per push and per PR.
 This script enumerates the workspace's test units the same way cargo does
 (via `cargo metadata --no-deps`, no build) and runs the subset assigned to one
-shard of N. The 8-way assignment uses measured unit durations recorded in
-`ci_test_shard_durations.json` and a static partition map; units added later
-fall back to a stable crc32 assignment until their timings are recorded.
-A unit always lands in exactly one shard, keeping flake attribution stable.
+shard of N. The assignment balances the measured unit durations recorded in
+`ci_test_shard_durations.json`: longest unit first, each onto the least-loaded
+shard, with shard 1 starting at the lifecycle checks' duration (they run only
+there). Units without a recorded duration count as the median one. Every
+shard computes the same assignment from the full enumeration, so a unit lands
+in exactly one shard.
 
 Unit kinds (the exact set `cargo test --workspace` builds and runs; every
 target honors its manifest `test` flag exactly as cargo does, so a target
@@ -36,9 +38,9 @@ silently regress when targets are added or renamed.
 The PR smoke gate narrows the selection, never the partition: `--crates
 a,b` restricts the units this wave runs to the named packages' (a PR's
 runtime smoke covers what it touched; the push wave runs the full union —
-main is the authority). The measured 8-way assignment is untouched — a unit
-still lands in exactly one shard — so the narrow and full runs of a unit are
-the same leg. Every shard records the
+main is the authority). The assignment is computed over the full
+enumeration, not the selection — a unit still lands in exactly one shard — so
+the narrow and full runs of a unit are the same leg. Every shard records the
 selection scope in its manifest, and the summary job audits the union
 against the SELECTED set: coverage can never silently regress, and a
 narrowed run can never masquerade as a full one.
@@ -59,10 +61,10 @@ import hashlib
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import time
-import zlib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,14 +95,23 @@ def _unit_id(package: str, kind: str, name: str | None) -> str:
     return f"{package}#{kind}:{name}"
 
 
-_DURATION_MAP_PATH = Path(__file__).with_name("ci_test_shard_durations.json")
-_DURATION_DATA = json.loads(_DURATION_MAP_PATH.read_text(encoding="utf-8"))
+TIMINGS = json.loads(Path(__file__).with_name("ci_test_shard_durations.json")
+                     .read_text(encoding="utf-8"))
 
 
-def shard_of(unit_id: str, total: int) -> int:
-    if total == _DURATION_DATA["total"] and unit_id in _DURATION_DATA["assignments"]:
-        return _DURATION_DATA["assignments"][unit_id] - 1
-    return zlib.crc32(unit_id.encode("utf-8")) % total
+def shard_assignment(unit_ids: list[str], total: int) -> dict[str, int]:
+    """Each unit's 0-based shard: longest first onto the least-loaded shard."""
+    seconds = TIMINGS["unit_seconds"]
+    default = statistics.median(seconds.values())
+    estimate = {uid: seconds.get(uid, default) for uid in unit_ids}
+    loads = [0.0] * total
+    loads[0] = TIMINGS["shard_1_lifecycle_checks_seconds"]
+    assignment = {}
+    for uid in sorted(estimate, key=lambda u: (-estimate[u], u)):
+        shard = min(range(total), key=lambda s: (loads[s], s))
+        assignment[uid] = shard
+        loads[shard] += estimate[uid]
+    return assignment
 
 
 def _unit_package(unit_id: str) -> str:
@@ -212,6 +223,7 @@ def write_manifest(path: Path, shard: int, total: int, all_ids: list[str],
                    commit_sha: str | None = None) -> None:
     selection_ids = [i for i in all_ids
                      if crates is None or _unit_package(i) in set(crates)]
+    assignment = shard_assignment(all_ids, total)
     if commit_sha is None:
         commit_sha = os.environ.get("GITHUB_SHA") or subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True,
@@ -230,7 +242,7 @@ def write_manifest(path: Path, shard: int, total: int, all_ids: list[str],
         "units": results,
         # Complete means: every unit this wave SELECTED for this shard ran.
         "complete": len(results) == sum(1 for i in selection_ids
-                                        if shard_of(i, total) == shard - 1),
+                                        if assignment[i] == shard - 1),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -315,7 +327,8 @@ def main() -> int:
                 f"{', '.join(unknown)} (known: {', '.join(sorted(known))})")
     all_ids = [u["id"] for u in units]
     selection = selected_units(units, crates)
-    mine = [u for u in selection if shard_of(u["id"], args.total) == args.shard - 1]
+    assignment = shard_assignment(all_ids, args.total)
+    mine = [u for u in selection if assignment[u["id"]] == args.shard - 1]
     if crates is None:
         print(f"[shard {args.shard}/{args.total}] {len(mine)}/{len(units)} units "
               "(full selection)")
@@ -337,7 +350,7 @@ def main() -> int:
 
     if args.list:
         for u in units:
-            print(f"  shard {shard_of(u['id'], args.total) + 1}: {u['id']}")
+            print(f"  shard {assignment[u['id']] + 1}: {u['id']}")
         return 0
 
     results = []

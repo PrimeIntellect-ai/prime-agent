@@ -5,7 +5,7 @@ the summary's scope-aware partition audit.
 
 The contracts, pinned on the REAL workspace enumeration (cargo metadata
 only - no builds):
-  - the measured static assignment is untouched by --crates: a narrowed
+  - the duration-balanced assignment is untouched by --crates: a narrowed
     run's unit lands in the same shard the full run assigns it;
   - the full selection is the default (push waves) and audits green;
   - a crate selection narrows the universe; the union of the shards' runs
@@ -30,7 +30,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -70,9 +69,10 @@ class EnumerationTestCase(unittest.TestCase):
     def write_wave(self, directory: Path, crates, results_by_shard=None,
                    scope_by_shard=None):
         selection = SHARD.selected_units(self.units, crates)
+        assignment = SHARD.shard_assignment(self.all_ids, TOTAL)
         for shard in range(1, TOTAL + 1):
             mine = [u for u in selection
-                    if SHARD.shard_of(u["id"], TOTAL) == shard - 1]
+                    if assignment[u["id"]] == shard - 1]
             results = results_by_shard(shard, mine) if results_by_shard \
                 else [dict(id=u["id"], package=u["package"], kind=u["kind"],
                            name=u["name"], rc=0, seconds=1.0,
@@ -85,22 +85,28 @@ class EnumerationTestCase(unittest.TestCase):
 
     def test_the_assignment_is_stable_under_the_selection(self):
         """The narrowed universe never moves a unit between shards."""
-        for unit in self.units:
-            shard = SHARD.shard_of(unit["id"], TOTAL)
-            self.assertEqual(unit["id"],
-                             [u["id"] for u in self.units
-                              if SHARD.shard_of(u["id"], TOTAL) == shard
-                              and u["id"] == unit["id"]][0])
+        assignment = SHARD.shard_assignment(self.all_ids, TOTAL)
+        for shard in range(1, TOTAL + 1):
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "ci_test_shard.py"),
+                 "--shard", str(shard), "--total", str(TOTAL),
+                 "--crates", "pa-daemon", "--print-selection"],
+                capture_output=True, text=True, cwd=REPO, check=True)
+            selected = [line.split("selected: ", 1)[1]
+                        for line in result.stdout.splitlines() if "selected: " in line]
+            self.assertEqual(selected, [u["id"] for u in self.units
+                                        if u["package"] == "pa-daemon"
+                                        and assignment[u["id"]] == shard - 1])
 
-    def test_recorded_durations_balance_the_eight_way_partition(self):
-        data = SHARD._DURATION_DATA
-        loads = [0.0] * data["total"]
-        crc32_loads = [0.0] * data["total"]
-        self.assertEqual(set(data["assignments"]), set(data["unit_seconds"]))
-        for unit_id, seconds in data["unit_seconds"].items():
-            loads[data["assignments"][unit_id] - 1] += seconds
-            crc32_loads[zlib.crc32(unit_id.encode("utf-8")) % data["total"]] += seconds
-        self.assertLess(max(loads), max(crc32_loads))
+    def test_recorded_durations_balance_the_partition(self):
+        """Greedy least-loaded placement: no shard ends more than one unit
+        above the lightest shard."""
+        seconds = SHARD.TIMINGS["unit_seconds"]
+        loads = [0.0] * TOTAL
+        loads[0] = SHARD.TIMINGS["shard_1_lifecycle_checks_seconds"]
+        for unit_id, shard in SHARD.shard_assignment(list(seconds), TOTAL).items():
+            loads[shard] += seconds[unit_id]
+        self.assertLessEqual(max(loads) - min(loads), max(seconds.values()))
 
     def test_crate_selection_covers_exactly_that_crates_units(self):
         crate = sorted(p for p in self.packages if p != "pa-agent")[0]
@@ -133,15 +139,16 @@ class AuditTestCase(unittest.TestCase):
                    drop_unit=False, add_outside=False, scope_by_shard=None):
         selection = [u["id"] for u in self.units
                      if crates is None or u["package"] in set(crates)]
+        assignment = SHARD.shard_assignment(self.all_ids, TOTAL)
         for shard in range(1, TOTAL + 1):
-            mine = [i for i in selection if SHARD.shard_of(i, TOTAL) == shard - 1]
+            mine = [i for i in selection if assignment[i] == shard - 1]
             results = [dict(id=i, rc=0, seconds=1.0, failed_tests=[]) for i in mine]
             if break_shard == shard and drop_unit and results:
                 results = results[:-1]
             if break_shard == shard and add_outside:
                 outside = [i for i in self.all_ids
                            if i not in set(selection)
-                           and SHARD.shard_of(i, TOTAL) == shard - 1]
+                           and assignment[i] == shard - 1]
                 if outside:
                     results.append(dict(id=outside[0], rc=0, seconds=1.0,
                                         failed_tests=[]))
@@ -203,7 +210,8 @@ class AuditTestCase(unittest.TestCase):
             # Drop the unit from the run AND from the shard's recorded
             # selection reality: rewrite one manifest with the unit missing
             # from its units and its complete flag falsified.
-            shard = next(SHARD.shard_of(i, TOTAL) + 1 for i in self.selection)
+            assignment = SHARD.shard_assignment(self.all_ids, TOTAL)
+            shard = assignment[self.selection[0]] + 1
             path = directory / f"shard-manifest-{shard}.json"
             manifest = json.loads(path.read_text())
             if manifest["units"]:

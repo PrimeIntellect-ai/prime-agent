@@ -41,17 +41,7 @@ import re
 import sys
 from pathlib import Path
 
-
-_DURATION_MAP_PATH = Path(__file__).with_name("ci_test_shard_durations.json")
-_DURATION_DATA = json.loads(_DURATION_MAP_PATH.read_text(encoding="utf-8"))
-
-
-def shard_of(unit_id: str, total: int) -> int:
-    # Keep byte-identical with scripts/ci_test_shard.py.
-    if total == _DURATION_DATA["total"] and unit_id in _DURATION_DATA["assignments"]:
-        return _DURATION_DATA["assignments"][unit_id] - 1
-    import zlib
-    return zlib.crc32(unit_id.encode("utf-8")) % total
+from ci_test_shard import shard_assignment
 
 
 def load_manifests(manifest_dir: Path, total: int):
@@ -178,6 +168,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
                         "ref changed mid-run or a manifest is stale; rerun CI")
         return problems + incomplete, failed_units
     all_ids = manifests[1]["all_unit_ids"]
+    assignment = shard_assignment(all_ids, total)
     if len(all_ids) != len(set(all_ids)):
         problems.append("enumeration contains duplicate unit ids")
     expected_digest = hashlib.sha256("\n".join(all_ids).encode("utf-8")).hexdigest()
@@ -211,8 +202,8 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
             if uid not in all_ids:
                 problems.append(f"shard {shard}: executed unknown unit {uid}")
                 continue
-            if shard_of(uid, total) != shard - 1:
-                problems.append(f"shard {shard}: unit {uid} belongs to shard {shard_of(uid, total) + 1}")
+            if assignment[uid] != shard - 1:
+                problems.append(f"shard {shard}: unit {uid} belongs to shard {assignment[uid] + 1}")
             if uid in executed:
                 problems.append(f"unit {uid} ran in shards {executed[uid]} "
                                 f"and {shard} — assignments must be disjoint")
@@ -233,7 +224,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
 
     for shard, manifest in sorted(manifests.items()):
         if manifest.get("complete") is not True:
-            assigned = [i for i in selection if shard_of(i, total) == shard - 1]
+            assigned = [i for i in selection if assignment[i] == shard - 1]
             unfinished = sorted(set(assigned) - {u["id"] for u in manifest["units"]})
             problems.append(f"shard {shard} is incomplete; units it never "
                             f"reported: {unfinished}")
