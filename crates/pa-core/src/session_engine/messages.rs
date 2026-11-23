@@ -244,14 +244,11 @@ pub fn create_async_bash_completion_message(
     if let Some(output) = output {
         let _ = write!(content, "\n\nOutput (tail):\n{output}");
     }
-    let mut details = serde_json::json!({
+    let details = serde_json::json!({
         "pid": pid,
         "command": command,
         "exitCode": exit_code,
     });
-    if let Some(output) = output {
-        details["output"] = serde_json::json!(output);
-    }
     pa_types::session::CustomMessage {
         custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
         content: UserContent::Text(content),
@@ -933,15 +930,12 @@ state
             text.ends_with("Output (tail):\ngates ok\n"),
             "the tail renders after the command: {text}"
         );
-        let details = message.details.unwrap();
-        assert_eq!(details["output"], "gates ok\n");
         // An empty tail keeps the pointer-only shape.
         let message = create_async_bash_completion_message(8, "silent", 0, Some(""), 4_000);
         assert!(
             !matches!(&message.content, UserContent::Text(text) if text.contains("Output")),
             "an empty tail renders no output section: {message:?}"
         );
-        assert!(message.details.unwrap().get("output").is_none());
     }
 
     #[test]
