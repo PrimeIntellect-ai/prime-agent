@@ -84,6 +84,7 @@ fn request(name: &str, target: RlmSpawnTarget) -> RlmSpawnRequest {
         name: Some(name.to_string()),
         model: None,
         thinking: None,
+        kind: pa_core::session_engine::rlm_host::RlmSpawnKind::Subagent,
         cwd: None,
         spawned_by_request_id: None,
         factory: None,

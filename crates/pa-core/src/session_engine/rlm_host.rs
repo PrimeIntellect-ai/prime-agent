@@ -702,7 +702,9 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory", "kind", "target"],
+        &[
+            "name", "model", "thinking", "cwd", "factory", "kind", "target",
+        ],
     )?;
     let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
         None => RlmSpawnKind::Subagent,

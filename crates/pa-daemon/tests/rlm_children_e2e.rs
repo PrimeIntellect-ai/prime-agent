@@ -767,6 +767,7 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         cwd: None,
         spawned_by_request_id: None,
         factory: None,
+        target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
     };
     let handle = children
         .spawn(request)
@@ -1025,6 +1026,7 @@ async fn a_passivated_decision_child_revives_as_a_decision_child_and_answers() {
         cwd: None,
         spawned_by_request_id: None,
         factory: None,
+        target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
     };
     let handle = children
         .spawn(request)
