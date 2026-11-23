@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::markdown::{render_markdown, MarkdownStyle};
 use crate::theme::{Theme, ThemeColor};
-use crate::width::truncate_line;
+use crate::width::{truncate_line, wrap_line};
 use crate::{Line, Span};
 
 use super::diagram::node_glyph;
@@ -200,6 +200,12 @@ impl NodeDocument {
                 .map(scrub)
                 .filter(|text| !text.is_empty())
         };
+        let raw_text = |field: &str| {
+            instance
+                .and_then(|instance| instance.get(field))
+                .and_then(Value::as_str)
+                .map(scrub)
+        };
         let flag = |field: &str| {
             instance
                 .and_then(|instance| instance.get(field))
@@ -207,13 +213,34 @@ impl NodeDocument {
                 .unwrap_or(false)
         };
         let entry_flag = |field: &str| entry.get(field).and_then(Value::as_bool).unwrap_or(false);
+        // A preview trimmed to nothing still carries its flag: keep the
+        // empty section so the view can show the truncation warning instead
+        // of hiding the field.
+        let preview = |field: &str, truncated: &str| {
+            let value = raw_text(field);
+            if value.as_ref().is_some_and(|value| !value.is_empty()) || flag(truncated) {
+                Some(value.unwrap_or_default())
+            } else {
+                None
+            }
+        };
+        let entry_text = |field: &str| {
+            entry
+                .get(field)
+                .and_then(Value::as_str)
+                .map(scrub)
+                .filter(|text| !text.is_empty())
+        };
         let number = |field: &str| {
             instance
                 .and_then(|instance| instance.get(field))
                 .and_then(Value::as_u64)
         };
         let outputs = match entry.get("outputs") {
-            Some(Value::String(outputs)) => Some(scrub(outputs)).filter(|text| !text.is_empty()),
+            Some(Value::String(outputs)) => {
+                let outputs = scrub(outputs);
+                (!outputs.is_empty() || entry_flag("outputsTruncated")).then_some(outputs)
+            }
             None | Some(Value::Null) => None,
             Some(_) => return None,
         };
@@ -238,9 +265,9 @@ impl NodeDocument {
             session_dir: text("sessionDir"),
             prompt: text("prompt").unwrap_or_default(),
             prompt_truncated: flag("promptTruncated"),
-            inputs: text("inputs"),
+            inputs: preview("inputs", "inputsTruncated"),
             inputs_truncated: flag("inputsTruncated"),
-            answer: text("answer"),
+            answer: preview("answer", "answerTruncated"),
             answer_truncated: flag("answerTruncated"),
             provisional: flag("provisional"),
             capture_failed: flag("captureFailed"),
@@ -248,7 +275,17 @@ impl NodeDocument {
             outputs_truncated: entry_flag("outputsTruncated"),
             output_errors,
             output_errors_truncated: entry_flag("outputErrorsTruncated"),
-            error: text("error"),
+            // A binding failure before any instance exists records its
+            // diagnostic on the entry, not on an instance. Never borrow it
+            // for an existing instance: a foreach entry carries the failed
+            // sibling's error while its other instances stay healthy.
+            error: text("error").or_else(|| {
+                if instance.is_none() {
+                    entry_text("error")
+                } else {
+                    None
+                }
+            }),
         })
     }
 }
@@ -275,8 +312,9 @@ pub struct NodeView {
     pub files: Option<NodeFiles>,
     files_open: bool,
     files_scroll: usize,
-    request_epoch: u64,
-    last_width: Cell<Option<usize>>,
+    request_epoch: Option<u64>,
+    requested_selector: Option<(u64, u64)>,
+    last_viewport: Cell<Option<(usize, usize)>>,
 }
 
 impl NodeView {
@@ -296,8 +334,9 @@ impl NodeView {
             files: None,
             files_open: false,
             files_scroll: 0,
-            request_epoch: 0,
-            last_width: Cell::new(None),
+            request_epoch: None,
+            requested_selector: None,
+            last_viewport: Cell::new(None),
         }
     }
 
@@ -326,7 +365,11 @@ impl NodeView {
         let entry = data.get("entry")?;
         let never_entered = entry.is_null();
         let instance = data.get("instance").filter(|instance| !instance.is_null());
-        let document = NodeDocument::parse(entry, instance);
+        let document = if never_entered {
+            None
+        } else {
+            Some(NodeDocument::parse(entry, instance)?)
+        };
         let selected = if document
             .as_ref()
             .is_some_and(|document| document.index.is_none())
@@ -349,8 +392,9 @@ impl NodeView {
             files: None,
             files_open: false,
             files_scroll: 0,
-            request_epoch: 0,
-            last_width: Cell::new(None),
+            request_epoch: None,
+            requested_selector: None,
+            last_viewport: Cell::new(None),
         })
     }
 
@@ -381,14 +425,15 @@ impl NodeView {
         NodeTarget {
             run_id: self.run_id.clone(),
             state_id: self.state_id.clone(),
-            instance: self.selected_selector(),
+            instance: self.requested_selector.or(self.selected_selector()),
         }
     }
 
     /// Fold one `node` reply into the open view: the instance list and
     /// the document replace theirs, the selection follows its instance
-    /// when present, the scroll resets, and the files document (fetched
-    /// separately) survives. An empty entry leaves no instance selected.
+    /// when present, the scroll survives refreshes of the same instance,
+    /// and the files document (fetched separately) survives. An empty
+    /// entry leaves no instance selected.
     /// A malformed reply keeps the last good document and reports on the
     /// error row instead.
     pub fn merge_reply(&mut self, data: &Value) {
@@ -396,9 +441,11 @@ impl NodeView {
             self.error = Some(MALFORMED_NODE_REPLY_ERROR.to_string());
             return;
         };
+        let selection_changed = self.document_selector() != reply.document_selector();
         if !reply.run_name.is_empty() {
             self.run_name = reply.run_name;
         }
+        self.requested_selector = None;
         self.instances = reply.instances;
         self.document = reply.document;
         self.never_entered = reply.never_entered;
@@ -408,13 +455,51 @@ impl NodeView {
                 .iter()
                 .position(|row| row.entry == Some(entry) && row.index == Some(index))
         });
-        self.scroll = 0;
+        if selection_changed {
+            self.scroll_to_selected(self.last_viewport.get().map_or(0, |size| size.1));
+        }
         self.error = None;
     }
 
+    /// Move the walk to another instance: it drops the fetch the previous
+    /// selection had in flight and the error row that fetch set, so the
+    /// document never reads as failed while it shows another instance's
+    /// good reply.
+    fn move_selection(&mut self, selected: Option<usize>, viewport_rows: usize) {
+        self.selected = selected;
+        self.scroll_to_selected(viewport_rows);
+        self.request_epoch = None;
+        self.requested_selector = None;
+        self.error = None;
+    }
+
+    fn scroll_to_selected(&mut self, viewport_rows: usize) {
+        self.scroll = self.selected.map_or(0, |index| {
+            index.saturating_sub(visible_rows(viewport_rows, self.error.is_some()) - 1)
+        });
+    }
+
     /// Mark the newest node-document request for this mounted view.
-    pub fn set_request_epoch(&mut self, request_epoch: u64) {
-        self.request_epoch = request_epoch;
+    pub fn set_request_epoch(&mut self, request_epoch: u64, selector: Option<(u64, u64)>) {
+        self.request_epoch = Some(request_epoch);
+        self.requested_selector = selector;
+    }
+
+    /// Whether the mounted view is waiting for a node-document reply.
+    pub fn request_in_flight(&self) -> bool {
+        self.request_epoch.is_some()
+    }
+
+    /// Retire the request one delivery answered, when no newer fetch
+    /// replaced it. A rebind can move the view to another session while a
+    /// fetch is in flight, so that reply can never land; its epoch would
+    /// otherwise stay set and every later refresh would skip the view. The
+    /// requested selector stays: the retry must fetch the instance the
+    /// user opened, not the latest one.
+    pub fn retire_request(&mut self, request_epoch: u64) {
+        if self.request_epoch == Some(request_epoch) {
+            self.request_epoch = None;
+        }
     }
 
     /// Apply a node-document reply only if no newer instance fetch replaced it.
@@ -423,20 +508,21 @@ impl NodeView {
         request_epoch: u64,
         result: Result<Value, String>,
     ) -> bool {
-        if self.request_epoch != request_epoch {
+        if self.request_epoch != Some(request_epoch) {
             return false;
         }
+        self.request_epoch = None;
         match result {
             Ok(data) => self.merge_reply(&data),
-            Err(message) => self.set_error(message),
+            Err(message) => self.set_error(&message),
         }
         true
     }
 
     /// Record the node fetch's failure on the error row (the last good
     /// document stays).
-    pub fn set_error(&mut self, message: String) {
-        self.error = Some(message);
+    pub fn set_error(&mut self, message: &str) {
+        self.error = Some(crate::menu_panel::scrub_controls(message));
     }
 
     /// Fold the template-files fetch (the machine's `library` payload)
@@ -477,9 +563,9 @@ impl NodeView {
         let page_down = kb.matches(key, "tui.select.pageDown");
         if self.files_open {
             let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-            let width = self.last_width.get().unwrap_or_default();
+            let width = self.last_viewport.get().map_or(0, |size| size.0);
             let total = self.files_document(&theme, width).len();
-            let visible = visible_rows(viewport_rows, total);
+            let visible = visible_rows(viewport_rows, self.files_error.is_some());
             let step = if page_up || page_down { visible } else { 1 };
             let delta = if up || page_up {
                 -(step as isize)
@@ -488,9 +574,10 @@ impl NodeView {
             } else {
                 return false;
             };
-            self.files_scroll = (self.files_scroll as isize + delta)
-                .clamp(0, total.saturating_sub(visible) as isize)
-                as usize;
+            let max_scroll = total.saturating_sub(visible);
+            self.files_scroll = self.files_scroll.min(max_scroll);
+            self.files_scroll =
+                (self.files_scroll as isize + delta).clamp(0, max_scroll as isize) as usize;
             return true;
         }
         if up {
@@ -500,8 +587,7 @@ impl NodeView {
                 None => self.instances.len().checked_sub(1),
             };
             if selected != self.selected {
-                self.selected = selected;
-                self.scroll = 0;
+                self.move_selection(selected, viewport_rows);
             }
             return true;
         }
@@ -514,27 +600,26 @@ impl NodeView {
                 None => (!self.instances.is_empty()).then_some(0),
             };
             if selected != self.selected {
-                self.selected = selected;
-                self.scroll = 0;
+                self.move_selection(selected, viewport_rows);
             }
             return true;
         }
         if page_up || page_down {
             let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
             let width = self
-                .last_width
+                .last_viewport
                 .get()
-                .unwrap_or_default()
+                .map_or(0, |size| size.0)
                 .saturating_sub(4)
-                .max(20);
+                .max(1);
             let total = self.document_lines(Some(&theme), width).len();
-            let visible = visible_rows(viewport_rows, total);
+            let visible = visible_rows(viewport_rows, self.error.is_some());
+            let max_scroll = total.saturating_sub(visible);
+            self.scroll = self.scroll.min(max_scroll);
             self.scroll = if page_up {
                 self.scroll.saturating_sub(visible)
             } else {
-                self.scroll
-                    .saturating_add(visible)
-                    .min(total.saturating_sub(visible))
+                self.scroll.saturating_add(visible).min(max_scroll)
             };
             return true;
         }
@@ -543,8 +628,7 @@ impl NodeView {
 
     /// The instance document's rows: the instance list, then the
     /// selected instance's sections. Markdown sections render through
-    /// the colored Markdown renderer (the files view's own), so the
-    /// node's text keeps its color; JSON sections render as code.
+    /// the shared Markdown renderer; JSON sections render as code.
     fn document_lines(&self, theme: Option<&Theme>, width: usize) -> Vec<Line> {
         let mut rows: Vec<Line> = Vec::new();
         for (index, instance) in self.instances.iter().enumerate() {
@@ -569,12 +653,24 @@ impl NodeView {
             }
         }
         if self.instances.is_empty() {
+            // No document yet reads as loading, and a failed first fetch
+            // reads as its error row alone; only a settled reply that
+            // carries an entry may claim the state created no instance.
             let text = if self.never_entered {
-                "  not yet entered"
+                Some("  not yet entered")
+            } else if self.document.is_some() {
+                Some("  no instances were created")
+            } else if self.error.is_none() {
+                Some("  loading…")
             } else {
-                "  no instances were created"
+                None
             };
-            plain_line(&mut rows, theme, text, ThemeColor::Muted);
+            if let Some(text) = text {
+                plain_line(&mut rows, theme, text, ThemeColor::Muted);
+            }
+        }
+        if self.selected_selector() != self.document_selector() {
+            return rows;
         }
         let Some(document) = &self.document else {
             return rows;
@@ -592,13 +688,12 @@ impl NodeView {
         };
         let code = |rows: &mut Vec<Line>, text: &str| {
             for line in text.lines() {
-                if let Some(theme) = theme {
-                    rows.push(vec![
-                        theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())
-                    ]);
+                let styled = if let Some(theme) = theme {
+                    vec![theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())]
                 } else {
-                    rows.push(vec![Span::raw(line.to_string())]);
-                }
+                    vec![Span::raw(line.to_string())]
+                };
+                rows.extend(wrap_line(&styled, width));
             }
         };
         let markdown = |rows: &mut Vec<Line>, text: &str| {
@@ -649,22 +744,25 @@ impl NodeView {
                 ThemeColor::Muted,
             );
         }
-        // The realized prompt: the exact text the child received —
-        // Markdown, colored like the template file it realizes.
+        // The realized prompt is the exact text the child received.
         rows.push(vec![Span::raw("")]);
         section(&mut rows, "realized prompt");
         if document.prompt.is_empty() {
-            let text = if document.entry.is_some()
-                && document.index.is_none()
-                && matches!(document.status.as_str(), "done" | "error" | "cancelled")
-            {
-                "    (the entry settled without creating an instance)"
-            } else if document.capture_failed {
-                "    (the answer capture failed; no realized prompt is available)"
+            if document.prompt_truncated {
+                plain_line(&mut rows, theme, "    … (truncated)", ThemeColor::Warning);
             } else {
-                "    (not yet entered — nothing realized)"
-            };
-            plain_line(&mut rows, theme, text, ThemeColor::Muted);
+                let text = if document.entry.is_some()
+                    && document.index.is_none()
+                    && matches!(document.status.as_str(), "done" | "error" | "cancelled")
+                {
+                    "    (the entry settled without creating an instance)"
+                } else if document.capture_failed {
+                    "    (the answer capture failed; no realized prompt is available)"
+                } else {
+                    "    (not yet entered — nothing realized)"
+                };
+                plain_line(&mut rows, theme, text, ThemeColor::Muted);
+            }
         } else {
             markdown(&mut rows, &document.prompt);
             if document.prompt_truncated {
@@ -721,7 +819,14 @@ impl NodeView {
         if let Some(error) = &document.error {
             rows.push(vec![Span::raw("")]);
             section(&mut rows, "error");
-            plain_line(&mut rows, theme, &format!("    {error}"), ThemeColor::Error);
+            for line in error.lines() {
+                let styled = if let Some(theme) = theme {
+                    vec![theme.fg_span(ThemeColor::Error, format!("    {line}"))]
+                } else {
+                    vec![Span::raw(format!("    {line}"))]
+                };
+                rows.extend(wrap_line(&styled, width));
+            }
         }
         rows
     }
@@ -828,15 +933,17 @@ impl NodeView {
             format!(
                 " · {}",
                 if self.run_name.is_empty() {
-                    self.run_id.clone()
+                    // The run id is kept raw for daemon round-tripping; a
+                    // header is user-facing text, so it is scrubbed here.
+                    crate::menu_panel::scrub_controls(&self.run_id)
                 } else {
                     self.run_name.clone()
                 }
             ),
         ));
         let mut rows = vec![header, vec![Span::raw("")]];
-        self.last_width.set(Some(width));
-        let inner_width = width.saturating_sub(4).max(20);
+        self.last_viewport.set(Some((width, viewport_rows)));
+        let inner_width = width.saturating_sub(4).max(1);
 
         let (document, scroll) = if self.files_open {
             (self.files_document(theme, width), self.files_scroll)
@@ -849,9 +956,7 @@ impl NodeView {
             self.error.as_ref()
         };
         let error_rows = usize::from(error.is_some());
-        let visible = viewport_rows
-            .saturating_sub(rows.len() + 4 + error_rows)
-            .max(1);
+        let visible = visible_rows(viewport_rows, error.is_some());
         let scroll = scroll.min(document.len().saturating_sub(visible));
         rows.extend(document.into_iter().skip(scroll).take(visible));
         while rows.len() < viewport_rows.saturating_sub(2 + error_rows) {
@@ -892,7 +997,7 @@ impl NodeView {
         let esc = key("tui.select.cancel", "Esc");
         if self.files_open {
             return format!(
-                "{arrows}/{pages} scroll · {} back to the node · {esc} back to the diagram",
+                "{arrows}/{pages} scroll · {}/{esc} back to node document",
                 key("tui.select.confirm", "Enter")
             );
         }
@@ -912,7 +1017,533 @@ fn plain_line(rows: &mut Vec<Line>, theme: Option<&Theme>, text: &str, color: Th
     }
 }
 
-/// The windowed row count for one document total.
-fn visible_rows(viewport_rows: usize, total: usize) -> usize {
-    viewport_rows.saturating_sub(6).max(4).min(total.max(1))
+/// The document height after the header, footer, and optional error row.
+fn visible_rows(viewport_rows: usize, has_error: bool) -> usize {
+    viewport_rows
+        .saturating_sub(6 + usize::from(has_error))
+        .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn reply_with_instances(count: usize) -> Value {
+        json!({
+            "state": {"instances": (0..count).map(|index| json!({
+                "entry": 0, "index": index, "status": "running"
+            })).collect::<Vec<_>>()},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "old prompt",
+                "answer": "old answer", "outputs": {"value": "old output"}},
+        })
+    }
+
+    #[test]
+    fn moving_below_the_viewport_keeps_the_selected_instance_visible() {
+        let reply = reply_with_instances(30);
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        for _ in 0..20 {
+            assert!(node.handle_key("down", &kb, 12));
+        }
+        assert_eq!(node.selected_selector(), Some((0, 20)));
+        let rows = node.render(&theme, 80, &kb, 12);
+        assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+        let mut reply = reply;
+        reply["instance"]["index"] = json!(20);
+        node.merge_reply(&reply);
+        let rows = node.render(&theme, 80, &kb, 12);
+        assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+        let mut restored = NodeView::loading("run", "worker");
+        restored.merge_reply(&reply);
+        let rows = restored.render(&theme, 80, &kb, 12);
+        assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+    }
+
+    #[test]
+    fn page_up_clamps_after_refresh_or_a_larger_viewport() {
+        let mut reply = reply_with_instances(1);
+        reply["instance"]["prompt"] = json!("long row\n".repeat(200));
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        node.render(&theme, 80, &kb, 20);
+        node.scroll = 150;
+        reply["instance"]["prompt"] = json!("short row\n".repeat(40));
+        node.merge_reply(&reply);
+        let visible = visible_rows(20, false);
+        let total = node.document_lines(Some(&theme), 76).len();
+        let end = total.saturating_sub(visible);
+        assert!(node.handle_key("pageup", &kb, 20));
+        assert_eq!(node.scroll, end.saturating_sub(visible));
+
+        node.scroll = total.saturating_sub(visible_rows(12, false));
+        let larger_visible = visible_rows(30, false);
+        assert!(node.handle_key("pageup", &kb, 30));
+        assert_eq!(
+            node.scroll,
+            total
+                .saturating_sub(larger_visible)
+                .saturating_sub(larger_visible)
+        );
+    }
+
+    #[test]
+    fn files_page_up_moves_from_the_clamped_end_after_refresh_or_resize() {
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        for refresh in [false, true] {
+            let mut node =
+                NodeView::parse_reply("run", "worker", &reply_with_instances(1)).unwrap();
+            node.set_files(NodeFiles {
+                files: vec![("prompt.md".to_string(), "# file row\n".repeat(100))],
+                state_files: vec![("worker".to_string(), vec!["prompt.md".to_string()])],
+            });
+            assert!(node.handle_key("enter", &kb, 12));
+            node.render(&theme, 80, &kb, 12);
+            node.files_scroll = node.files_document(&theme, 80).len() - visible_rows(12, false);
+            if refresh {
+                node.set_files(NodeFiles {
+                    files: vec![("prompt.md".to_string(), "# file row\n".repeat(40))],
+                    state_files: vec![("worker".to_string(), vec!["prompt.md".to_string()])],
+                });
+            }
+            let viewport_rows = 30;
+            node.render(&theme, 80, &kb, viewport_rows);
+            let visible = visible_rows(viewport_rows, false);
+            let end = node
+                .files_document(&theme, 80)
+                .len()
+                .saturating_sub(visible);
+            assert!(node.handle_key("pageup", &kb, viewport_rows));
+            assert_eq!(node.files_scroll, end.saturating_sub(visible));
+        }
+    }
+
+    #[test]
+    fn long_input_output_and_output_error_values_remain_readable() {
+        let input = format!("{}input_tail", "input_value".repeat(12));
+        let output = format!("{}output_tail", "output_value".repeat(12));
+        let output_error = format!("{}error_tail", "error_value".repeat(12));
+        let mut reply = reply_with_instances(1);
+        reply["instance"]["inputs"] = json!(format!("{{\"input\":\"{input}\"}}"));
+        reply["entry"]["outputs"] = json!(format!("{{\"output\":\"{output}\"}}"));
+        reply["entry"]["outputErrors"] = json!({"output": output_error});
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .render(&theme, 40, &KeybindingsManager::new(), 100)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        for value in [input, output, output_error] {
+            assert!(text.contains(&value), "clipped value: {value}");
+        }
+    }
+
+    #[test]
+    fn long_daemon_errors_wrap_instead_of_clipping_their_tail() {
+        let error = format!(
+            "Traceback (most recent call last):\n{}ValueError: terminal_error_tail_marker",
+            "  File \"worker.py\", line 1, in <module>\n".repeat(8)
+        );
+        let mut reply = reply_with_instances(1);
+        reply["instance"]["error"] = json!(error);
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .render(&theme, 40, &KeybindingsManager::new(), 200)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(
+            text.contains("terminal_error_tail_marker"),
+            "the error tail was clipped: {text}"
+        );
+    }
+
+    #[test]
+    fn node_fetch_errors_render_without_terminal_controls() {
+        let mut node = NodeView::loading("run", "worker");
+        node.set_error("fetch failed\u{1b}]52;c;ZXZpbA==\u{7}");
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let text = node
+            .render(&theme, 80, &KeybindingsManager::new(), 12)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("Error: fetch failed"), "{text:?}");
+        assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
+    }
+
+    #[test]
+    fn a_healthy_instance_does_not_borrow_the_entry_error() {
+        let reply = json!({
+            "state": {"instances": [{"entry": 0, "index": 1, "status": "done"}]},
+            "entry": {"index": 0, "status": "error", "error": "sibling 0 failed"},
+            "instance": {"entry": 0, "index": 1, "status": "done", "prompt": "healthy"},
+        });
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        assert_eq!(node.document.as_ref().unwrap().error, None);
+    }
+
+    #[test]
+    fn an_entry_error_reaches_the_document_without_an_instance() {
+        let reply = json!({
+            "state": {"instances": []},
+            "entry": {
+                "index": 3,
+                "status": "error",
+                "error": "input 'items' from state 'src' is unavailable",
+            },
+            "instance": null,
+        });
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        assert_eq!(
+            node.document.as_ref().unwrap().error.as_deref(),
+            Some("input 'items' from state 'src' is unavailable")
+        );
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("is unavailable"), "{text}");
+    }
+
+    #[test]
+    fn previews_truncated_to_empty_keep_their_sections_and_warnings() {
+        let reply = json!({
+            "state": {"instances": [{"entry": 0, "index": 0, "status": "done"}]},
+            "entry": {"index": 0, "status": "done", "outputs": "", "outputsTruncated": true},
+            "instance": {
+                "index": 0, "status": "done",
+                "prompt": "", "promptTruncated": true,
+                "inputs": "", "inputsTruncated": true,
+                "answer": "", "answerTruncated": true,
+            },
+        });
+        let node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let document = node.document.as_ref().unwrap();
+        assert_eq!(document.inputs.as_deref(), Some(""));
+        assert_eq!(document.answer.as_deref(), Some(""));
+        assert_eq!(document.outputs.as_deref(), Some(""));
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        for section in ["realized prompt", "inputs", "answer", "outputs"] {
+            assert!(text.contains(section), "missing {section}: {text}");
+        }
+        assert!(!text.contains("not yet entered"), "{text}");
+        assert_eq!(text.matches("truncated").count(), 4, "{text}");
+    }
+
+    #[test]
+    fn files_back_hint_matches_the_document_return_target() {
+        let mut node = NodeView::parse_reply("run", "worker", &reply_with_instances(1)).unwrap();
+        node.set_files(NodeFiles {
+            files: vec![("prompt.md".to_string(), "file body".to_string())],
+            state_files: vec![("worker".to_string(), vec!["prompt.md".to_string()])],
+        });
+        let kb = KeybindingsManager::new();
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        assert!(node.handle_key("enter", &kb, 20));
+        let files_rows = node.render(&theme, 160, &kb, 20);
+        let hint = files_rows
+            .last()
+            .unwrap()
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(hint.contains("back to node document"));
+        assert!(node.step_back());
+        let document = node
+            .render(&theme, 160, &kb, 20)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(document.contains("old prompt"));
+        assert!(!document.contains("file body"));
+        assert!(!node.step_back());
+    }
+
+    #[test]
+    fn failed_explicit_request_keeps_its_selector_for_the_retry() {
+        for mut node in [
+            NodeView::loading("run", "worker"),
+            NodeView::parse_reply("run", "worker", &reply_with_instances(4)).unwrap(),
+        ] {
+            node.set_request_epoch(1, Some((2, 3)));
+            assert!(node.apply_request_result(1, Err("timeout".to_string())));
+            assert!(!node.request_in_flight());
+            assert_eq!(node.target().instance, Some((2, 3)));
+            let mut reply = reply_with_instances(4);
+            reply["entry"]["index"] = json!(2);
+            reply["instance"]["index"] = json!(3);
+            reply["state"]["instances"][3]["entry"] = json!(2);
+            node.set_request_epoch(2, node.target().instance);
+            assert!(node.apply_request_result(2, Ok(reply)));
+            assert_eq!(node.target().instance, Some((2, 3)));
+            assert!(node.handle_key("up", &KeybindingsManager::new(), 20));
+            assert_eq!(node.target().instance, Some((0, 2)));
+        }
+    }
+
+    #[test]
+    fn a_changed_selection_hides_the_previous_instances_sections() {
+        let reply = reply_with_instances(2);
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        assert!(node.handle_key("down", &kb, 20));
+        node.set_request_epoch(1, Some((0, 1)));
+        assert!(node.apply_request_result(1, Err("timeout".to_string())));
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        for stale in ["old prompt", "old answer", "old output"] {
+            assert!(!text.contains(stale), "stale detail: {stale}");
+        }
+        assert!(node.handle_key("up", &kb, 20));
+        let text = node
+            .document_lines(None, 80)
+            .into_iter()
+            .flatten()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert!(text.contains("old prompt"));
+    }
+
+    #[test]
+    fn returning_to_the_loaded_instance_rejects_the_pending_reply() {
+        let reply = json!({
+            "state": {"instances": [
+                {"entry": 0, "index": 0, "status": "running"},
+                {"entry": 0, "index": 1, "status": "running"},
+            ]},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "loaded"},
+        });
+        let mut node = NodeView::parse_reply("run", "worker", &reply).unwrap();
+        let kb = KeybindingsManager::new();
+        assert!(node.handle_key("down", &kb, 20));
+        node.set_request_epoch(7, None);
+        assert!(node.handle_key("up", &kb, 20));
+        let mut late = reply;
+        late["instance"]["index"] = json!(1);
+        late["instance"]["prompt"] = json!("superseded");
+        assert!(!node.apply_request_result(7, Ok(late)));
+        assert_eq!(node.selected_selector(), Some((0, 0)));
+        assert_eq!(node.document.unwrap().prompt, "loaded");
+    }
+
+    #[test]
+    fn refreshing_the_same_instance_preserves_document_scroll() {
+        let mut reply = json!({
+            "state": {"instances": [
+                {"entry": 0, "index": 0, "status": "running"},
+                {"entry": 0, "index": 1, "status": "running"},
+            ]},
+            "entry": {"index": 0, "status": "running"},
+            "instance": {"index": 0, "status": "running", "prompt": "body row\n".repeat(20)},
+        });
+        let mut node = NodeView::parse_reply("run", "worker", &reply).expect("node reply");
+        node.scroll = 5;
+        reply["instance"]["answer"] = json!("new answer");
+        node.merge_reply(&reply);
+        assert_eq!(node.scroll, 5);
+
+        reply["instance"]["index"] = json!(1);
+        node.merge_reply(&reply);
+        assert_eq!(node.scroll, 1);
+    }
+
+    #[test]
+    fn node_replies_clear_only_the_current_pending_request() {
+        let mut node = NodeView::loading("run", "worker");
+        node.set_request_epoch(1, None);
+        node.set_request_epoch(2, None);
+        assert!(!node.apply_request_result(1, Err("stale".to_string())));
+        assert!(node.request_in_flight());
+        assert!(node.apply_request_result(2, Err("current".to_string())));
+        assert!(!node.request_in_flight());
+        assert!(!node.apply_request_result(2, Err("duplicate".to_string())));
+        assert_eq!(node.error.as_deref(), Some("current"));
+    }
+
+    #[test]
+    fn malformed_documents_preserve_the_last_good_reply() {
+        let reply = json!({
+            "state": {"instances": [{"entry": 0, "index": 0, "status": "done"}]},
+            "entry": {"index": 0, "status": "done", "outputs": "saved outputs"},
+            "instance": {"index": 0, "status": "done", "prompt": "saved prompt"},
+        });
+        let good = NodeView::parse_reply("run", "worker", &reply).expect("node reply");
+        for malformed in [
+            json!({"index": 0, "outputs": "new outputs"}),
+            json!({"index": 0, "status": "done", "outputs": {"invalid": true}}),
+            json!({"index": 0, "status": "done", "outputErrors": "invalid"}),
+        ] {
+            let mut bad_reply = reply.clone();
+            bad_reply["entry"] = malformed;
+            bad_reply["instance"] = Value::Null;
+            let mut node = good.clone();
+            node.merge_reply(&bad_reply);
+            let mut expected = good.clone();
+            expected.error = Some(MALFORMED_NODE_REPLY_ERROR.to_string());
+            assert_eq!(node, expected);
+        }
+        let mut never_entered = reply;
+        never_entered["entry"] = Value::Null;
+        never_entered["instance"] = Value::Null;
+        let mut node = good;
+        node.merge_reply(&never_entered);
+        assert!(node.never_entered);
+        assert_eq!(node.document, None);
+        assert_eq!(node.error, None);
+    }
+
+    #[test]
+    fn paging_reaches_the_document_tail_in_small_viewports() {
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let keybindings = KeybindingsManager::new();
+        let content = format!("{}tail marker", "body row\n".repeat(20));
+        for files_open in [false, true] {
+            for with_error in [false, true] {
+                for viewport_rows in [6, 8, 12] {
+                    let mut node = NodeView::loading("run", "worker");
+                    node.document = Some(NodeDocument {
+                        status: "done".to_string(),
+                        outputs: Some(content.clone()),
+                        ..NodeDocument::default()
+                    });
+                    node.set_files(NodeFiles {
+                        files: vec![("prompt.md".to_string(), content.clone())],
+                        state_files: vec![("worker".to_string(), vec!["prompt.md".to_string()])],
+                    });
+                    if with_error {
+                        if files_open {
+                            node.set_files_error("refresh failed");
+                        } else {
+                            node.set_error("refresh failed");
+                        }
+                    }
+                    node.files_open = files_open;
+                    node.render(&theme, 80, &keybindings, viewport_rows);
+                    for _ in 0..50 {
+                        assert!(node.handle_key("pagedown", &keybindings, viewport_rows));
+                    }
+                    let rows = node.render(&theme, 80, &keybindings, viewport_rows);
+                    let text = rows
+                        .iter()
+                        .flatten()
+                        .map(|span| span.content.as_str())
+                        .collect::<String>();
+                    assert!(
+                        text.contains("tail marker"),
+                        "tail inaccessible: files={files_open}, error={with_error}, rows={viewport_rows}"
+                    );
+                    if with_error {
+                        assert!(text.contains("refresh failed"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moving_the_instance_walk_changes_the_node_selector() {
+        let reply = json!({
+            "name": "machine",
+            "state": {
+                "id": "worker",
+                "status": "done",
+                "instances": [
+                    {"entry": 0, "index": 0, "status": "done"},
+                    {"entry": 0, "index": 1, "status": "done"},
+                ],
+            },
+            "entry": {"index": 0, "status": "done"},
+            "instance": {
+                "entry": 0,
+                "index": 0,
+                "status": "done",
+                "prompt": "first prompt",
+            },
+        });
+        let mut node = NodeView::parse_reply("run", "worker", &reply).expect("node reply");
+        let keybindings = KeybindingsManager::new();
+        assert_eq!(node.selected_selector(), Some((0, 0)));
+        assert_eq!(node.document_selector(), Some((0, 0)));
+
+        assert!(node.handle_key("down", &keybindings, 20));
+        assert_eq!(node.selected_selector(), Some((0, 1)));
+        assert_eq!(node.document_selector(), Some((0, 0)));
+    }
+
+    #[test]
+    fn the_loading_mount_reads_as_loading_not_as_an_empty_node() {
+        let document_text = |node: &NodeView| {
+            node.document_lines(None, 80)
+                .into_iter()
+                .flatten()
+                .map(|span| span.content)
+                .collect::<String>()
+        };
+        let mut node = NodeView::loading("run", "worker");
+        assert!(document_text(&node).contains("loading…"));
+        assert!(!document_text(&node).contains("no instances were created"));
+        node.set_error("request failed");
+        assert!(!document_text(&node).contains("no instances were created"));
+        assert!(!document_text(&node).contains("loading…"));
+        node.error = None;
+        node.merge_reply(&json!({
+            "state": {"instances": []},
+            "entry": {"index": 0, "status": "pending"},
+            "instance": null,
+        }));
+        let text = document_text(&node);
+        assert!(text.contains("no instances were created"));
+        assert!(!text.contains("loading…"));
+    }
+
+    #[test]
+    fn moving_the_walk_clears_the_previous_fetch_error() {
+        let mut node = NodeView::parse_reply("run", "worker", &reply_with_instances(2)).unwrap();
+        let keybindings = KeybindingsManager::new();
+        assert!(node.handle_key("down", &keybindings, 20));
+        node.set_request_epoch(1, Some((0, 1)));
+        assert!(node.apply_request_result(1, Err("request failed".to_string())));
+        assert_eq!(node.error.as_deref(), Some("request failed"));
+        assert!(node.handle_key("up", &keybindings, 20));
+        assert_eq!(node.selected_selector(), Some((0, 0)));
+        assert_eq!(node.document_selector(), Some((0, 0)));
+        assert!(node.error.is_none());
+    }
+
+    #[test]
+    fn retiring_a_superseded_request_drops_only_its_own_epoch() {
+        let mut node = NodeView::loading("run", "worker");
+        node.set_request_epoch(1, Some((0, 1)));
+        node.set_request_epoch(2, Some((0, 2)));
+        node.retire_request(1);
+        assert!(node.request_in_flight());
+        node.retire_request(2);
+        assert!(!node.request_in_flight());
+        // The retry still asks for the instance the request named.
+        assert_eq!(node.target().instance, Some((0, 2)));
+    }
 }

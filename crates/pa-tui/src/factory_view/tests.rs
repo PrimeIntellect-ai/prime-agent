@@ -775,6 +775,7 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     let open_node = |state: &str| FactoryViewAction::OpenNode {
         run_id: "run-abc12345".to_string(),
         state_id: state.to_string(),
+        selector: None,
     };
     assert_eq!(view.handle_key("enter", &kb()), open_node("collect"));
     // The session UI mounts the node view on OpenNode; once mounted, it
@@ -790,6 +791,36 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     // A state without a child still opens its node view.
     let _ = view.handle_key("down", &kb());
     assert_eq!(view.handle_key("enter", &kb()), open_node("fixing"));
+}
+
+#[test]
+fn node_errors_keep_the_footer_within_short_viewports() {
+    let mut view = FactoryView::new(Vec::new(), 20);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child open failed".to_string()));
+    let full = view.render(&theme(), 110, &kb());
+    let footer = full.last().unwrap().clone();
+    for budget in 0..=6 {
+        view.viewport_rows = budget;
+        let rows = view.render(&theme(), 110, &kb());
+        assert!(rows.len() <= budget, "budget {budget}: {rows:?}");
+        if budget > 0 {
+            assert_eq!(rows.last(), Some(&footer), "budget {budget}");
+        }
+    }
+}
+
+#[test]
+fn the_node_view_honors_rebound_confirm_before_literal_shortcuts() {
+    for key in ["right", "left", "o"] {
+        let rebound = KeybindingsManager::with_user_bindings(
+            serde_json::from_value(json!({"tui.select.confirm": [key]})).unwrap(),
+        );
+        let mut view = FactoryView::new(Vec::new(), 40);
+        view.node = Some(node::NodeView::loading("run", "worker"));
+        assert_eq!(view.handle_key(key, &rebound), FactoryViewAction::None);
+        assert!(view.node.as_mut().unwrap().step_back(), "{key} opens files");
+    }
 }
 
 /// The accident this page had: on a live run, repeated navigation —
@@ -1943,6 +1974,23 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
     );
 }
 
+#[test]
+fn node_panels_show_factory_errors_in_documents_and_files() {
+    let mut view = FactoryView::new(Vec::new(), 12);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child session not found".to_string()));
+    for files_open in [false, true] {
+        if files_open {
+            assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+        }
+        let rows = frame_text(&mut view);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("child session not found")));
+        assert!(rows.len() <= 12);
+    }
+}
+
 /// The dock's expanded items list the live runs, paused first, beside
 /// a count of the running runs only.
 #[test]
@@ -2360,7 +2408,7 @@ fn a_late_node_reply_does_not_replace_the_newer_instance_document() {
         })
     };
     let mut view = node::NodeView::loading("run-abc12345", "reviewing");
-    view.set_request_epoch(2);
+    view.set_request_epoch(2, None);
     assert!(view.apply_request_result(2, Ok(reply("newer"))));
     assert!(!view.apply_request_result(1, Ok(reply("older"))));
     assert!(!view.apply_request_result(1, Err("old timeout".to_string())));
@@ -2368,7 +2416,9 @@ fn a_late_node_reply_does_not_replace_the_newer_instance_document() {
         view.error, None,
         "a stale error leaves the newer reply alone"
     );
-    assert!(view.apply_request_result(2, Err("current timeout".to_string())));
+    // A delivery retires its request; the next fetch carries a new epoch.
+    view.set_request_epoch(3, None);
+    assert!(view.apply_request_result(3, Err("current timeout".to_string())));
     assert_eq!(view.error.as_deref(), Some("current timeout"));
     assert_eq!(
         view.document
@@ -2604,8 +2654,8 @@ fn node_and_files_errors_clear_only_with_their_matching_success() {
     });
     let mut view = node::NodeView::parse_reply("run-abc12345", "reviewing", &initial)
         .expect("the node reply parses");
-    view.set_request_epoch(1);
-    view.set_error("node request failed".to_string());
+    view.set_request_epoch(1, None);
+    view.set_error("node request failed");
     view.set_files_error("library request failed");
     let next = json!({
         "state": {"id": "reviewing", "instances": [
@@ -2670,7 +2720,7 @@ fn node_and_files_errors_clear_only_with_their_matching_success() {
     );
 
     assert!(view.step_back());
-    view.set_error("node request failed".to_string());
+    view.set_error("node request failed");
     view.set_files(node::NodeFiles::default());
     let document_text = view
         .render(&theme, 80, &kb, 30)
