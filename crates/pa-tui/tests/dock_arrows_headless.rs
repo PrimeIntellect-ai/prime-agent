@@ -265,7 +265,7 @@ fn line_of(frame: &str, needle: &str) -> Option<usize> {
 #[test]
 fn focus_expands_the_dock_into_one_row_per_group_and_unfocus_collapses_it() {
     let collapsed =
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 1 heartbeat  \u{b7}  \u{25b8} 0 shells  \u{b7}  Pursuing goal (0s)";
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 1 heartbeat  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{25c8} 0 bots  \u{b7}  Pursuing goal (0s)";
     let steps = vec![
         HeadlessStep::WaitRender {
             needle: collapsed.to_string(),
@@ -293,6 +293,7 @@ fn focus_expands_the_dock_into_one_row_per_group_and_unfocus_collapses_it() {
         "\u{25c6} subagents",
         "\u{25f7} heartbeats",
         "\u{25b8} shells",
+        "\u{25c8} bots",
         "Pursuing goal (0s)",
     ]
     .iter()
@@ -301,7 +302,7 @@ fn focus_expands_the_dock_into_one_row_per_group_and_unfocus_collapses_it() {
     let first = rows[0].unwrap_or_else(|| panic!("no subagents row:\n{expanded}"));
     assert_eq!(
         rows,
-        (first..first + 4).map(Some).collect::<Vec<_>>(),
+        (first..first + 5).map(Some).collect::<Vec<_>>(),
         "one row per group, stacked in the groups' order:\n{expanded}"
     );
     assert!(
@@ -354,6 +355,14 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
             HeadlessStep::Key(down()),
             HeadlessStep::Key(open),
             HeadlessStep::WaitRender {
+                needle: "sandboxes this Mac owns".to_string(),
+                timeout_ms: 5_000,
+            },
+            HeadlessStep::Key(escape()),
+            HeadlessStep::WaitMs(100),
+            HeadlessStep::Key(down()),
+            HeadlessStep::Key(open),
+            HeadlessStep::WaitRender {
                 needle: "No live factory runs.".to_string(),
                 timeout_ms: 5_000,
             },
@@ -385,6 +394,7 @@ fn enter_and_right_open_every_rows_page_and_down_wraps_to_the_top() {
         for page in [
             "No running or paused heartbeats",
             "No background commands",
+            "sandboxes this Mac owns",
             "No live factory runs.",
             "status   active",
         ] {
@@ -585,14 +595,14 @@ fn a_roster_push_alone_remounts_the_dock_count_and_the_title_cost() {
 #[test]
 fn b_a_goal_update_alone_mounts_the_dock_goal_row() {
     let steps = vec![HeadlessStep::WaitRender {
-        needle: "shells  \u{b7}  Pursuing goal (12s)".to_string(),
+        needle: "bots  \u{b7}  Pursuing goal (12s)".to_string(),
         timeout_ms: 5_000,
     }];
     let pushes = vec![goal_event_push(12)];
     let outcome = run_plan_with_roster(steps, None, None, Vec::new(), pushes);
     let last = outcome.frames.last().cloned().unwrap_or_default();
     assert!(
-        last.contains("shells  \u{b7}  Pursuing goal (12s)"),
+        last.contains("bots  \u{b7}  Pursuing goal (12s)"),
         "the goal update mounted the dock's goal row:\n{}",
         outcome.frames.join("\n")
     );

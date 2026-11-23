@@ -1,5 +1,6 @@
 //! Headless e2e for the `/bots` page: the rows the daemon answered, the error a malformed
-//! answer shows, the attach refusal, and the attach into the bot's own session view.
+//! answer shows, the attach refusal, the attach into the bot's own session view, and the
+//! status bar's bots group that opens the page.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -35,7 +36,8 @@ fn serve(listener: &UnixListener, mock: &Mock) {
         &json!({
             "type": "daemon_hello",
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
+            // The kernel-bash lane arms the 2s poll that refreshes the dock's bots count.
+            "serverCapabilities": ["kernel_bash_activity"],
         }),
     );
     let mut line = String::new();
@@ -237,6 +239,64 @@ fn the_page_lists_the_bots_and_counts_the_bad_rows() {
     );
     assert!(rows[at("triage")].contains("v0.10.5"), "{frame}");
     assert!(frame.contains("1 malformed bot rows skipped"), "{frame}");
+}
+
+#[test]
+fn the_status_bar_counts_the_running_bots_and_opens_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = json!({"bots": [
+        bot("b1", "nightly-digest", "paused", None),
+        bot("b2", "triage", "running", None),
+    ]});
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(list, Err("unused")),
+        vec![
+            wait("\u{25c8} 1 bot"),
+            // Focus the dock, step subagents -> heartbeats -> shells -> bots, and open it.
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            wait("1 running \u{b7} 1 alive"),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            wait("sandboxes this Mac owns"),
+        ],
+    );
+    let dock = last_frame_with(&outcome, "\u{25c8} 1 bot");
+    assert!(
+        dock.contains("\u{25b8} 0 shells  \u{b7}  \u{25c8} 1 bot"),
+        "{dock}"
+    );
+    assert!(last_frame_with(&outcome, "sandboxes this Mac owns").contains("nightly-digest"));
+}
+
+#[test]
+fn esc_from_the_bots_command_lands_on_the_dock_bots_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(json!({"bots": []}), Err("unused")),
+        vec![
+            HeadlessStep::Submit("/bots".into()),
+            wait("sandboxes this Mac owns"),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            HeadlessStep::WaitGone {
+                needle: "sandboxes this Mac owns".to_string(),
+                timeout_ms: 10_000,
+            },
+            // The exit focused the dock's bots group: Enter reopens the page.
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            wait("sandboxes this Mac owns"),
+        ],
+    );
+    assert!(!outcome.return_to_agents_view);
+    assert!(outcome
+        .frames
+        .last()
+        .is_some_and(|frame| frame.contains("sandboxes this Mac owns")));
 }
 
 #[test]

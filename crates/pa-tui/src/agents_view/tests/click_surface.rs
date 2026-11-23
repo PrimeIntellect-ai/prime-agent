@@ -246,15 +246,15 @@ fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
 fn long_session_names_clip_to_the_name_column() {
     let (mode, index) = mode_with_row(&"a".repeat(100), "mock-1");
     let layout = build_layout(&mode.rows, 120);
-    assert_eq!(layout.name_width, 28);
+    assert_eq!(layout.name_width, 40);
     assert_eq!(layout.model_width, 12);
     let line = mode.render_row(&mode.rows[index], &layout, 120, false);
     let text = flat(&line);
-    // The name cell clips with an empty ellipsis marker: it keeps the icon and space plus 26
+    // The name cell clips with an empty ellipsis marker: it keeps the icon and space plus 38
     // name characters.
-    assert_eq!(text, expected_row(&"a".repeat(26), &layout));
+    assert_eq!(text, expected_row(&"a".repeat(38), &layout));
     let model_at = text.find("mock-1").expect("model column present");
-    assert_eq!(str_width(&text[..model_at]), 28 + 2);
+    assert_eq!(str_width(&text[..model_at]), 40 + 2);
     assert!(text.ends_with("$0.00   1s"));
 }
 
@@ -272,12 +272,12 @@ fn the_model_column_fits_the_widest_model_name_and_gives_way_first() {
         let available = width - 4 - str_width(&layout.details[&title]);
         if width == 140 {
             assert!(text.contains(model), "{text:?}");
-            assert_eq!(layout.name_width, 28);
+            assert_eq!(layout.name_width, 40);
             assert!(str_width(&text) <= width);
         } else {
             assert!(!text.contains(model), "{text:?}");
             assert_eq!(str_width(&text), width);
-            assert!(layout.name_width >= available.div_ceil(2).min(28));
+            assert!(layout.name_width >= available.div_ceil(2).min(40));
         }
     }
 }
@@ -302,10 +302,10 @@ fn deep_rows_clip_their_indent_to_the_name_column() {
 fn short_session_names_pad_to_the_name_column() {
     let (mode, index) = mode_with_row("short name", "mock-1");
     let layout = build_layout(&mode.rows, 120);
-    assert_eq!(layout.name_width, 28);
+    assert_eq!(layout.name_width, 40);
     let line = mode.render_row(&mode.rows[index], &layout, 120, false);
     let text = flat(&line);
-    let name_cell = format!("short name{}", " ".repeat(28 - 2 - 10));
+    let name_cell = format!("short name{}", " ".repeat(40 - 2 - 10));
     assert_eq!(text, expected_row(&name_cell, &layout));
 }
 

@@ -28,7 +28,7 @@ pub(crate) use apply::CompactionAbortNote;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
 pub(crate) use bash::BashActivityUpdate;
 use bash::{ResyncBash, SideBashRun};
-pub(crate) use bots::{connect_bot, BotsUpdate};
+pub(crate) use bots::{connect_bot, request_bot_attach, BotsUpdate};
 pub(crate) use factory::FactoryUpdate;
 use heartbeats::paused_heartbeat_count;
 pub(crate) use heartbeats::HeartbeatsUpdate;
@@ -339,6 +339,12 @@ pub(crate) struct SessionUi {
     bot: Option<crate::interactive::BotAttach>,
     /// The last `/bots` request number (a fetch or attach result answers one request).
     bots_requests: u64,
+    /// The last `list_bots` rows (the dock's bots group reads them).
+    bots_catalog: Vec<crate::bots_view::BotRow>,
+    /// The dock's `list_bots` request in flight: the 2s poll skips while one is open.
+    bots_dock_request: Option<u64>,
+    /// The request number of the `list_bots` answer `bots_catalog` holds.
+    bots_catalog_request: u64,
     /// The bot view's link closed (its error row showed once).
     bot_link_closed: bool,
     /// The activity dock holds keyboard focus (and renders expanded).

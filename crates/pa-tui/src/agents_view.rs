@@ -41,6 +41,7 @@ mod render;
 use render::cell;
 use render::Renderer;
 
+mod bots;
 mod content_search;
 mod delete;
 mod heartbeats;
@@ -309,6 +310,10 @@ enum UiInput {
         query: String,
         outcome: Result<Vec<String>, String>,
     },
+    /// The `list_bots` fetch landed: the bot rows merge into their sections.
+    BotsLoaded(Result<crate::bots_view::BotsCatalog, String>),
+    /// The selected bot's `attach_bot` landed: the endpoint its session view connects through.
+    BotAttached(Result<crate::interactive::BotAttach, String>),
 }
 
 /// The flow's roster connection: one daemon connection alive across the flow's view runs, so a
@@ -487,6 +492,12 @@ struct AgentsViewMode {
     heartbeats: Vec<crate::heartbeats_picker::HeartbeatEntry>,
     /// The latest `list_persistent_shells` data: every persistent shell machine-wide.
     persistent_shells: Value,
+    /// The sandbox bots from `list_bots` (the bot rows' source).
+    bots: Vec<crate::bots_view::BotRow>,
+    /// The bot row whose attach the run loop dispatches next.
+    pending_bot_attach: Option<AgentsViewRow>,
+    /// The bot row whose attach is in flight; its outcome opens the bot's session view.
+    attaching_bot: Option<AgentsViewRow>,
     /// The bash view an orphan's open mounts over the list.
     shell_view: Option<crate::bash_view::BashView>,
     /// The open bash view's action the run loop dispatches (output fetch or kill).
@@ -594,6 +605,9 @@ impl AgentsViewMode {
             actions: Vec::new(),
             heartbeats: Vec::new(),
             persistent_shells: Value::Null,
+            bots: Vec::new(),
+            pending_bot_attach: None,
+            attaching_bot: None,
             shell_view: None,
             pending_shell_action: None,
             pending_shell_open: None,
@@ -861,6 +875,8 @@ async fn run_agents_view_surface(
         persistent_shells::spawn_list_fetch(&client, ui_tx.clone());
     }
     let mut shells_fetch_at: Option<tokio::time::Instant> = None;
+    // The bot rows: one fetch as the view mounts.
+    bots::spawn_bots_fetch(&client, ui_tx.clone());
     // The activity lines' counts: one cycle in flight at a time, the next armed when it lands.
     if activity_fetch.is_none() {
         activity_fetch = Some(session_activity::spawn_session_activity_fetch(
@@ -1037,6 +1053,8 @@ async fn run_agents_view_surface(
                 UiInput::KillResult { key, outcome } => {
                     mode.kill_result(&key, outcome);
                 }
+                UiInput::BotsLoaded(result) => mode.apply_bots_loaded(result),
+                UiInput::BotAttached(result) => mode.bot_attached(result),
                 // The saved-catalog scan landed: the Inactive section builds now.
                 UiInput::SavedLoaded {
                     sessions,
@@ -1151,6 +1169,10 @@ async fn run_agents_view_surface(
                     ui_tx.clone(),
                     action,
                 ));
+            }
+            // Enter (or a click) on a bot row queues its attach.
+            if let Some(row) = mode.pending_bot_attach.take() {
+                bots::spawn_bot_attach(&client, ui_tx.clone(), &row);
             }
             // An exit decision skips sync terminal I/O: a wedged pty must
             // not prevent the reader-armed force-quit deadline from firing.
@@ -1524,6 +1546,8 @@ fn is_daemon_answer(input: &UiInput) -> bool {
             | UiInput::PersistentShellKilled { .. }
             | UiInput::SessionActivityLoaded(_)
             | UiInput::ContentSearchLoaded { .. }
+            | UiInput::BotsLoaded(_)
+            | UiInput::BotAttached(_)
     )
 }
 

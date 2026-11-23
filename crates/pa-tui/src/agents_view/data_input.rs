@@ -142,6 +142,7 @@ impl AgentsViewMode {
                 }
             }
         }
+        self.merge_bot_rows(&mut rows);
         // The machine-wide persistent shells head the unscoped, unsearched list.
         if !scope_active && self.query.trim().is_empty() {
             rows.splice(0..0, self.persistent_shell_rows(&records));

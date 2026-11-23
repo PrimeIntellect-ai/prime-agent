@@ -78,9 +78,24 @@ impl AgentView {
                 dock.extend(factory_view.render(&self.theme, width, kb));
                 Some(dock)
             }
+            // The `/bots` page: the full-height layout under the top bar.
             Some(Overlay::Bots(bots_view)) => {
-                dock.extend(bots_view.render(&self.theme, width, kb, info_viewport_rows));
-                Some(dock)
+                let rows = height.saturating_sub(1);
+                let mut frame = vec![pad_row(
+                    render_top_bar(&self.chrome, &self.theme, width),
+                    width,
+                )];
+                frame.extend(
+                    bots_view
+                        .render(&self.theme, width, kb, rows)
+                        .into_iter()
+                        .take(rows)
+                        .map(|line| pad_row(line, width)),
+                );
+                frame.resize_with(height, || vec![Span::raw(" ".repeat(width))]);
+                self.frame_rows = frame.len();
+                self.apply_frame_selection(&mut frame, 1, width);
+                return frame;
             }
             Some(Overlay::Heartbeats(picker)) => {
                 dock.extend(picker.render(&self.theme, width, kb));

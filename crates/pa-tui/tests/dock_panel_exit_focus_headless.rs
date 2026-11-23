@@ -260,6 +260,8 @@ fn goal_exit_plan(exit: KeyCode) -> Vec<HeadlessStep> {
         HeadlessStep::WaitMs(150),
         key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
+        key(KeyCode::Down),
+        HeadlessStep::WaitMs(150),
         key(KeyCode::Enter),
         wait_render("land the dock exit focus"),
         key(exit),
@@ -294,6 +296,8 @@ fn heartbeats_command_path_esc_returns_to_the_dock_item() {
         // The dock's selection walks to the goal section before the command opens the panel.
         wait_render("Pursuing goal (0s)"),
         alt_a(),
+        HeadlessStep::WaitMs(150),
+        key(KeyCode::Down),
         HeadlessStep::WaitMs(150),
         key(KeyCode::Down),
         HeadlessStep::WaitMs(150),

@@ -60,6 +60,39 @@ pub(crate) async fn connect_bot(
     crate::daemon_client::DaemonClient::connect_stream(stream).await
 }
 
+/// Ask the local daemon to attach `bot_id` (`attach_bot`): the daemon resumes a paused sandbox
+/// first, then answers the single-use endpoint the view connects through.
+pub(crate) async fn request_bot_attach(
+    client: &crate::daemon_client::DaemonClient,
+    bot_id: String,
+    name: String,
+) -> Result<BotAttach, String> {
+    let data = client
+        .request_ok_with_timeout(
+            DaemonCommand::AttachBot {
+                id: None,
+                bot_id: bot_id.clone(),
+                rest: Map::default(),
+            },
+            ATTACH_TIMEOUT_MS,
+        )
+        .await
+        .map_err(|error| page_error(&error))?;
+    let field = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("the attach_bot answer carries no {key}"))
+    };
+    Ok(BotAttach {
+        bot_id,
+        name,
+        endpoint: PathBuf::from(field("endpoint")?),
+        guest_session_id: field("guestSessionId")?,
+    })
+}
+
 /// The slash commands that act on this Mac, never on a bot: an attached bot view refuses them.
 const LOCAL_ONLY_COMMANDS: &[&str] = &[
     "bots",
@@ -86,6 +119,11 @@ const LOCAL_ONLY_COMMANDS: &[&str] = &[
 impl SessionUi {
     /// Open the `/bots` page and fetch its rows in the background.
     pub(crate) fn open_bots_page(&mut self, view: &mut AgentView) {
+        // The page owns the frame: a focused dock under it would take the page's keys. The dock
+        // selection moves to the bots group, so the page's exit lands there.
+        self.activity_group = crate::chrome::ActivityGroup::Bots;
+        self.subagents_focused = false;
+        self.update_subagent_summary(view);
         let mut page = BotsView::default();
         self.spawn_bots_refresh(&mut page);
         view.overlay = Some(Overlay::Bots(page));
@@ -94,9 +132,21 @@ impl SessionUi {
 
     /// Fetch the page's rows; the page keeps the request number and applies only its answer.
     fn spawn_bots_refresh(&mut self, page: &mut BotsView) {
+        page.set_catalog_request(self.spawn_bots_fetch());
+    }
+
+    /// The dock's `list_bots` poll: one request at a time, and none in a bot view (the client
+    /// talks to the bot's guest daemon there).
+    pub(crate) fn spawn_bots_dock_refresh(&mut self) {
+        if self.bot.is_none() && self.bots_dock_request.is_none() {
+            self.bots_dock_request = Some(self.spawn_bots_fetch());
+        }
+    }
+
+    /// One background `list_bots` request; returns its request number.
+    fn spawn_bots_fetch(&mut self) -> u64 {
         self.bots_requests += 1;
         let request = self.bots_requests;
-        page.set_catalog_request(request);
         let client = self.client.clone();
         let tx = self.bots_updates.clone();
         tokio::spawn(async move {
@@ -113,6 +163,7 @@ impl SessionUi {
                 .map_err(|error| page_error(&error));
             let _ = tx.send(BotsUpdate::Catalog { request, result });
         });
+        request
     }
 
     /// The attach runs in the background: the daemon may resume a paused sandbox first.
@@ -120,67 +171,64 @@ impl SessionUi {
         let client = self.client.clone();
         let tx = self.bots_updates.clone();
         tokio::spawn(async move {
-            let result = client
-                .request_ok_with_timeout(
-                    DaemonCommand::AttachBot {
-                        id: None,
-                        bot_id: bot_id.clone(),
-                        rest: Map::default(),
-                    },
-                    ATTACH_TIMEOUT_MS,
-                )
-                .await
-                .map_err(|error| page_error(&error))
-                .and_then(|data| {
-                    let field = |key: &str| {
-                        data.get(key)
-                            .and_then(Value::as_str)
-                            .filter(|text| !text.is_empty())
-                            .map(str::to_string)
-                            .ok_or_else(|| format!("the attach_bot answer carries no {key}"))
-                    };
-                    Ok(BotAttach {
-                        bot_id,
-                        name,
-                        endpoint: PathBuf::from(field("endpoint")?),
-                        guest_session_id: field("guestSessionId")?,
-                    })
-                });
+            let result = request_bot_attach(&client, bot_id, name).await;
             let _ = tx.send(BotsUpdate::Attached { request, result });
         });
     }
 
-    /// Fold one background delivery into the open page. A delivery for a closed page drops (an
+    /// Fold one background delivery. A newer `list_bots` answer feeds the dock; the open page
+    /// applies only the answer it waits for. An attach result for a closed page drops (an
     /// unused attach endpoint expires in the daemon).
     pub(crate) fn apply_bots_update(&mut self, update: BotsUpdate, view: &mut AgentView) {
-        let Some(Overlay::Bots(page)) = view.overlay.as_mut() else {
-            return;
-        };
         match update {
-            // An answer to an older fetch (a refresh, or a closed page) drops.
-            BotsUpdate::Catalog { request, .. } if !page.awaits_catalog(request) => return,
-            BotsUpdate::Catalog { result, .. } => match result.and_then(|data| parse_bots(&data)) {
-                Ok(catalog) => page.apply_catalog(catalog),
-                Err(error) => page.set_fetch_error(Some(error)),
-            },
-            // A result for an attach this page is not waiting for (an earlier request, or one
-            // from a closed page) drops.
-            BotsUpdate::Attached { request, .. } if !page.is_attaching(request) => return,
-            BotsUpdate::Attached {
-                result: Ok(bot), ..
-            } => {
-                self.pending_selection = Some(SessionSelection::Bot(bot));
-                self.pending_selection_origin = Some(SelectionOrigin {
-                    panel: SessionPanel::Bots { error: None },
-                    closes_to_agents_view: self.panel_returns_to_agents_view,
-                });
-                self.exit_requested = true;
+            BotsUpdate::Catalog { request, result } => {
+                if self.bots_dock_request == Some(request) {
+                    self.bots_dock_request = None;
+                }
+                let result = result.and_then(|data| parse_bots(&data));
+                if let Ok(catalog) = &result {
+                    if request > self.bots_catalog_request {
+                        self.bots_catalog_request = request;
+                        self.bots_catalog.clone_from(&catalog.rows);
+                        self.update_subagent_summary(view);
+                        self.dirty = true;
+                    }
+                }
+                let Some(Overlay::Bots(page)) = view.overlay.as_mut() else {
+                    return;
+                };
+                // An answer to an older fetch (a refresh, or the dock's poll) does not apply.
+                if !page.awaits_catalog(request) {
+                    return;
+                }
+                match result {
+                    Ok(catalog) => page.apply_catalog(catalog),
+                    Err(error) => page.set_fetch_error(Some(error)),
+                }
             }
-            BotsUpdate::Attached {
-                result: Err(error), ..
-            } => {
-                page.set_attaching(None);
-                page.set_attach_error(Some(error));
+            BotsUpdate::Attached { request, result } => {
+                // A result for an attach this page is not waiting for (an earlier request, or
+                // one from a closed page) drops.
+                let Some(Overlay::Bots(page)) = view.overlay.as_mut() else {
+                    return;
+                };
+                if !page.is_attaching(request) {
+                    return;
+                }
+                match result {
+                    Ok(bot) => {
+                        self.pending_selection = Some(SessionSelection::Bot(bot));
+                        self.pending_selection_origin = Some(SelectionOrigin {
+                            panel: SessionPanel::Bots { error: None },
+                            closes_to_agents_view: self.panel_returns_to_agents_view,
+                        });
+                        self.exit_requested = true;
+                    }
+                    Err(error) => {
+                        page.set_attaching(None);
+                        page.set_attach_error(Some(error));
+                    }
+                }
             }
         }
         self.dirty = true;
@@ -207,9 +255,12 @@ impl SessionUi {
                 page.set_attaching(Some((self.bots_requests, name.clone())));
                 self.spawn_bot_attach(self.bots_requests, bot_id, name);
             }
+            // The exit restores the dock's own group, like the sibling dock pages.
             BotsAction::Close => {
                 view.overlay = None;
-                self.close_panel_to_agents_view();
+                if !self.close_panel_to_agents_view() {
+                    self.focus_activity_dock(view);
+                }
             }
         }
         self.dirty = true;

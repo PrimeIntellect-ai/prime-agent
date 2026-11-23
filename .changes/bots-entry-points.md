@@ -1,0 +1,1 @@
+feat: the status bar shows a `◈ bots` group that counts the running bots and opens the `/bots` page, the agents view lists the bots as rows whose Enter attaches to the bot, and the `/bots` page fills the full screen

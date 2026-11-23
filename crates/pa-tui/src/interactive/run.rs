@@ -1685,9 +1685,9 @@ async fn run_interactive_surface(
                 session.selection_auto_scroll_tick(&mut view);
             }
             () = async {
-                // The 2s bash-activity poll, on its own absolute deadline and only on daemons that
-                // advertise the kernel-bash registry (without the capability every fire was a
-                // no-op, so the arm parks).
+                // The 2s bash-activity poll (the dock's bots count rides it), on its own absolute
+                // deadline and only on daemons that advertise the kernel-bash registry (without
+                // the capability every fire was a no-op, so the arm parks).
                 if !bash_refresh_wanted {
                     std::future::pending::<()>().await;
                 }
@@ -1698,6 +1698,7 @@ async fn run_interactive_surface(
             } => {
                 last_bash_refresh = Instant::now();
                 session.spawn_bash_activity_refresh();
+                session.spawn_bots_dock_refresh();
                 session.refresh_expanded_dock(&mut view);
             }
             () = async {
