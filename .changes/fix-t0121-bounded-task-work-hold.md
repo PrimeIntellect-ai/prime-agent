@@ -1,0 +1,1 @@
+- A machine run no longer waits silently when a finished state's child leaves background jobs running: after 15 minutes the run pauses and names the child.

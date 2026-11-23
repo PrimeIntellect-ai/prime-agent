@@ -8053,6 +8053,22 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(len(self.host.spawn_calls("build")), 1)
 
     @async_test
+    async def test_background_jobs_that_never_end_pause_the_run_instead_of_holding_it(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        started_at = self.clock.now
+        started = await self.start()
+        status = await self.settle(started)
+
+        self.assertEqual(status["state"], "paused")
+        self.assertIn("still runs background jobs", status["pause_reason"])
+        self.assertGreaterEqual(self.clock.now - started_at, factory_module.TASK_WORK_WAIT_SECONDS)
+        self.assertEqual(self.node_status(status, "design")["status"], "done")
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.assertIn("child-1", self.host.children)
+        self.assertIn("factory_task_work_held", [event["kind"] for event in status["events"]])
+
+    @async_test
     async def test_valid_emit_with_unverified_activity_is_stored_but_holds_successor(self) -> None:
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = None

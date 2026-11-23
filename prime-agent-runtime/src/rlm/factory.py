@@ -1262,6 +1262,12 @@ REPAIR_WAIT_SECONDS = 600.0
 """How long a child that settled owing outputs has, after the one repair
 message, to emit them before its entry fails with ``missing_output``."""
 
+TASK_WORK_WAIT_SECONDS = 900.0
+"""How long a settled child's background jobs may hold the next admission
+before the run pauses and names them: an accepted emit whose child left a
+long job running (a recursive grep over the agent dir) otherwise held the
+run silently for hours."""
+
 REPAIR_POLL_SECONDS = 5.0
 """How often a repairing child's outputs file is re-read."""
 
@@ -1825,6 +1831,8 @@ class _NodeInstance:
     # for its emitted outputs until this deadline
     ownership_change_in_progress: bool = False  # an admission or deletion owns the actor slot
     factory_task_activity: str | None = None  # busy, idle, or unverified for factory children
+    task_work_until: float | None = None  # a settled busy child: when its background
+    # jobs stop holding the next admission and the run pauses instead
     process: "_PythonProcess | None" = None  # a python state's running call
     deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
@@ -2100,6 +2108,7 @@ def _instance_json(instance: _NodeInstance) -> dict[str, Any]:
         "factory_task_activity": instance.factory_task_activity,
         "repair_sent": instance.repair_sent,
         "awaiting_outputs_until": instance.awaiting_outputs_until,
+        "task_work_until": instance.task_work_until,
         "deadline": instance.deadline,
     }
 
@@ -2110,7 +2119,8 @@ def _instance_from_json(data: dict[str, Any]) -> _NodeInstance:
         "status", "attempt", "retry_base", "infra_respawned", "capture_failed",
         "rate_limit_streak", "child_id", "spawned_at", "duration_ms", "answer",
         "provisional", "error", "tool_uses", "inputs", "session_dir",
-        "child_name", "factory_task_activity", "repair_sent", "awaiting_outputs_until", "deadline",
+        "child_name", "factory_task_activity", "repair_sent", "awaiting_outputs_until",
+        "task_work_until", "deadline",
     ):
         setattr(instance, field, data.get(field))
     instance.attempt = data.get("attempt") or 0
@@ -2232,6 +2242,7 @@ def rebase_run_clocks(
             for instance in entry.instances:
                 instance.spawned_at = shift(instance.spawned_at)
                 instance.awaiting_outputs_until = shift(instance.awaiting_outputs_until)
+                instance.task_work_until = shift(instance.task_work_until)
                 instance.deadline = shift(instance.deadline)
 
 
@@ -6425,7 +6436,32 @@ class FactoryExecutor:
                     self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
-                task_work_waiting = task_work_waiting or result.factory_task_busy
+                if not result.factory_task_busy:
+                    instance.task_work_until = None
+                    continue
+                if instance.task_work_until is None:
+                    instance.task_work_until = self._now_fn() + TASK_WORK_WAIT_SECONDS
+                elif self._now_fn() >= instance.task_work_until:
+                    run.state = "paused"
+                    self._mark_paused(run)
+                    run.pause_reason = (
+                        f"{state.state_id} settled, but its child {instance.child_name or instance.child_id} "
+                        f"still runs background jobs after {int(TASK_WORK_WAIT_SECONDS)}s, so no next "
+                        "state starts on the shared checkout; delete that child to cancel its jobs, "
+                        "then resume"
+                    )
+                    self._event(
+                        run,
+                        "factory_task_work_held",
+                        node=state.state_id,
+                        entry=entry.index,
+                        instance=instance.index,
+                        child=instance.child_id,
+                        detail=run.pause_reason,
+                    )
+                    self._touch(run)
+                    return
+                task_work_waiting = True
             if task_work_waiting and not python_calls and not repairing:
                 await self._sleep_fn(REPAIR_POLL_SECONDS)
             for state, entry, instance in repairing:
