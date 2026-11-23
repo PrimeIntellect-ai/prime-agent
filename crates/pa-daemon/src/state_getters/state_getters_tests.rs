@@ -508,6 +508,7 @@ async fn get_context_tree_lists_persisted_children() {
             depth: 1,
             name: "deleted-child".to_string(),
             factory: None,
+            decision_child: false,
         })
         .unwrap();
     ledger

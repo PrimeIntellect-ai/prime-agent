@@ -494,6 +494,7 @@ mod tests {
                 depth: 1,
                 name: "api-reviewer".into(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         (ledger, sessions_dir)

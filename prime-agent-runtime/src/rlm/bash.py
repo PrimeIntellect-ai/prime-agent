@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn, cast
 
 from . import _winjob
+from .inbox_lifecycle import NoticeLifecycle
 
 _IS_POSIX = os.name == "posix"
 
@@ -415,7 +416,7 @@ class BashHandle:
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
-        self._result_consumed = False
+        self._notice_state = NoticeLifecycle.QUEUED
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
@@ -816,25 +817,34 @@ class BashHandle:
                 return
         callback()
 
-    def _note_result_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
-        """Record a result read that reaches the model: only reads during a live
-        cell count (a detached reader between turns must keep the notice — it is
-        the idle session's only wake-up), and an awaiting reader must be one the
-        live cell waits for."""
+    def _note_result_consumed(self) -> None:
+        """Record a read of the finished result from any cell or task while a
+        cell is live: a read before completion does not count, and neither does
+        a read with no live cell (it reaches nobody, and the notice is the idle
+        session's only wake-up). Read before the notice left the kernel, the
+        notice is never sent; read after, the host is asked to withdraw it."""
         if not self._done.is_set():
             return
-        owner = _live_cell_owner()
-        if owner is None:
-            return
-        if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
+        if _live_cell_owner() is None:
             return
         with self._callback_lock:
-            if self._result_consumed:
+            if self._notice_state is NoticeLifecycle.QUEUED:
+                self._notice_state = NoticeLifecycle.CONSUMED
+            elif self._notice_state is NoticeLifecycle.SENT:
+                self._notice_state = NoticeLifecycle.WITHDRAWN
+            else:
                 return
-            self._result_consumed = True
             notice, self._consumed_notice = self._consumed_notice, None
         if notice is not None:
             notice()
+
+    def _claim_notice(self) -> bool:
+        """Mark the notice as sent unless a read already consumed it."""
+        with self._callback_lock:
+            if self._notice_state is not NoticeLifecycle.QUEUED:
+                return False
+            self._notice_state = NoticeLifecycle.SENT
+            return True
 
     def _schedule_background_completion_notice(self) -> None:
         cell_finished = self._creating_cell_finished
@@ -876,7 +886,7 @@ class BashHandle:
             # fired between the exit and the await would interrupt the
             # awaiting cell and lose the result.
             await self._awaiters_free_event().wait()
-            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
+            if self._awaited_by_creating_cell or not repl.is_active() or not self._claim_notice():
                 return
             command = _capped(self.command)
             reply = await repl.host_request(
@@ -911,7 +921,7 @@ class BashHandle:
         dispatch = functools.partial(self._notify_result_consumed, command)
 
         with self._callback_lock:
-            if not self._result_consumed:
+            if self._notice_state is NoticeLifecycle.SENT:
                 self._consumed_notice = dispatch
                 return
         dispatch()
@@ -1141,7 +1151,7 @@ class BashHandle:
             ):
                 self._awaited_by_creating_cell = True
             if completed:
-                self._note_result_consumed(current_task)
+                self._note_result_consumed()
             self._end_await()
         if degraded:
             snapshot = self._degrade_snapshot()
@@ -1241,7 +1251,7 @@ class PersistentBashHandle(BashHandle):
         self._completion_error: OSError | ValueError | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
-        self._result_consumed = False
+        self._notice_state = NoticeLifecycle.QUEUED
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         self._reaped = False
@@ -1343,7 +1353,7 @@ class PersistentBashHandle(BashHandle):
                 await self._creating_cell_finished.wait()
             # Same gate as a background command: an in-flight await owns the completion.
             await self._awaiters_free_event().wait()
-            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
+            if self._awaited_by_creating_cell or not repl.is_active() or not self._claim_notice():
                 return
             command = _capped(self.command)
             reply = await repl.host_request(

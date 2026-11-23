@@ -1,0 +1,1 @@
+- Fixed a failed uninstall of a shadowing Python-skill distribution still recording the selected skill as installed, which left the shadowing package active in the kernel venv and blocked retries; the kernel now starts with a warning and the next session retries the uninstall.
