@@ -1769,6 +1769,34 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
 
+    async def test_persistent_completion_notice_waits_for_an_in_flight_await(self):
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        with mock.patch.object(bash_module.PersistentBashHandle, "_schedule_background_completion_notice"):
+            handle = bash("true", persistent=True)
+        self.pgids.append(handle.pid)
+        await handle._wait()
+        # The creating cell has finished; an await of THIS handle is in flight.
+        handle._creating_cell_finished = asyncio.Event()
+        handle._creating_cell_finished.set()
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            handle._begin_await()
+            notice = asyncio.ensure_future(handle._notify_completion())
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual([call["type"] for call in calls], ["bash.completed"])
+
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
         self.pgids.append(handle.pid)

@@ -1431,6 +1431,8 @@ class PersistentBashHandle(BashHandle):
             result = await self._wait()
             if self._creating_cell_finished is not None:
                 await self._creating_cell_finished.wait()
+            # Same gate as a background command: an in-flight await owns the completion.
+            await self._awaiters_free_event().wait()
             if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
                 return
             command = _capped(self.command)
