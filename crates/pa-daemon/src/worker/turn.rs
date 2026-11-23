@@ -116,6 +116,16 @@ impl TurnRunner {
                 self.run_turn(engine, lane, items).await;
             } else {
                 self.idle_notify.notify_waiters();
+                // A held inbox row (`SessionCore::inbox_wake_hold`) is not
+                // idle: no activity stamp, no kernel release. It wakes the
+                // runner at its due time; any queued work wakes it sooner.
+                if let Some(due) = inbox_hold {
+                    tokio::select! {
+                        () = self.work_notify.notified() => {}
+                        () = tokio::time::sleep_until(due) => {}
+                    }
+                    continue;
+                }
                 // Every park re-stamps the activity end: the idle-eviction
                 // window measures from the TRUE last activity.
                 {
@@ -131,15 +141,6 @@ impl TurnRunner {
                 // window arms for any idle unattached session under a live
                 // threshold; the select's notified arm is the wake path — a
                 // queued delivery wins the race and the next park re-arms.
-                // A held inbox row (`SessionCore::inbox_wake_hold`) wakes
-                // the runner at its due time; any queued work wakes it sooner.
-                if let Some(due) = inbox_hold {
-                    tokio::select! {
-                        () = self.work_notify.notified() => {}
-                        () = tokio::time::sleep_until(due) => {}
-                    }
-                    continue;
-                }
                 match self.idle_passivation_window() {
                     Some(remaining) => {
                         tokio::select! {
@@ -492,6 +493,8 @@ impl TurnRunner {
             let mut last_retry_error: Option<String> = None;
             // A failed run's `agent_end` frame, held for the frame after it.
             let mut held_run_end: Option<Value> = None;
+            // Whether the run's latest `turn_end` ran tools.
+            let mut last_turn_ran_tools = false;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
@@ -544,9 +547,15 @@ impl TurnRunner {
                 // continuing in the next delivery. Clear before the frame:
                 // its roster flush must not publish the stale note.
                 if let EngineEvent::TurnEnd { tool_results, .. } = &event {
-                    core.run_cut_at_tool_boundary = !tool_results.is_empty();
+                    last_turn_ran_tools = !tool_results.is_empty();
                 }
                 let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
+                // A queued steer cuts a run only at a tool boundary, and the
+                // row that cut it stays queued until the runner takes it.
+                if agent_end {
+                    core.run_cut_at_tool_boundary =
+                        last_turn_ran_tools && !core.steering.is_empty();
+                }
                 let more_queued =
                     agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
                 if agent_end && !more_queued {
