@@ -563,7 +563,8 @@ fn attach_guard_counts_attaches() {
 
 /// Live: one real bot on this build through spawn, a task and its reply,
 /// and delete. Run in a linux-x64 checkout after `make bot-tarball`, with
-/// `PRIME_API_KEY` (and `PRIME_TEAM_ID`) set:
+/// `PRIME_API_KEY` (and `PRIME_TEAM_ID`) set and
+/// `PRIME_AGENT_BOT_TARBALL=target/release/prime-agent-<version>-linux-x64.tar.gz`:
 /// `cargo test -p pa-daemon --lib bots::tests::live -- --ignored`.
 #[tokio::test]
 #[ignore = "creates a real Prime sandbox"]
@@ -578,6 +579,14 @@ async fn live_spawn_reply_delete() {
         },
     )
     .unwrap();
+    assert!(
+        matches!(
+            version::ReleaseSource::resolve(),
+            version::ReleaseSource::LocalTarball(_)
+        ),
+        "set {} to a tarball of this build",
+        version::TARBALL_OVERRIDE_ENV
+    );
     let dir = tempfile::tempdir().unwrap();
     let platform = Arc::new(super::platform::PrimePlatform::new(client, dir.path()));
     let manager =
@@ -606,16 +615,19 @@ async fn live_spawn_reply_delete() {
         let mut reply = String::new();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
         while reply.is_empty() && tokio::time::Instant::now() < deadline {
-            super::replies::sync_deliveries(
-                &mut guest,
-                &ledger,
-                &spawned.guest_session_id,
-                |text| {
-                    reply = text;
-                    async { anyhow::Ok(()) }
-                },
+            tokio::time::timeout_at(
+                deadline,
+                super::replies::sync_deliveries(
+                    &mut guest,
+                    &ledger,
+                    &spawned.guest_session_id,
+                    |text| {
+                        reply = text;
+                        async { anyhow::Ok(()) }
+                    },
+                ),
             )
-            .await?;
+            .await??;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         anyhow::Ok((spawned, reply))
