@@ -186,11 +186,10 @@ async def _waiting_keepalive_loop() -> None:
     from . import repl
 
     tick = min(_WAITING_TICK_SECONDS, _WAITING_KEEPALIVE_SECONDS / 4.0)
-    # Seed the window at the loop's own start: `time.monotonic()` has an
-    # unspecified origin (typically boot), so a zero seed would make the
-    # first notice wait for host uptime to cross the window instead of one
-    # window of parked work.
-    last_sent: float | None = time.monotonic()
+    # The window starts at the loop's own start and restarts on every tick
+    # with nothing running, so each job's first notice waits one window:
+    # `time.monotonic()` has an unspecified origin (typically boot).
+    last_sent = time.monotonic()
     while True:
         await asyncio.sleep(tick)
         with _live_lock:
@@ -200,11 +199,12 @@ async def _waiting_keepalive_loop() -> None:
                 if not handle._reaped
             ]
         if not live:
+            last_sent = time.monotonic()
             continue
         if repl.request_in_flight():
             continue
         now = time.monotonic()
-        if last_sent is not None and now - last_sent < _WAITING_KEEPALIVE_SECONDS:
+        if now - last_sent < _WAITING_KEEPALIVE_SECONDS:
             continue
         shown = live[:_COMPLETION_NOTICE_COMMAND_CAP]
         pids = [handle._pid for handle in shown]

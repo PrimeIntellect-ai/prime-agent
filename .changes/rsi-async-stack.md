@@ -1,1 +1,1 @@
-- Python runtime: the async discipline is enforced end to end. Banned in-cell waits and spawns are declined before execution, a completed background bash job's notice carries its output tail, parked sessions get paced keepalive notices while their background work runs, and the kernel owns its SIGINT mask at startup.
+- The first `[waiting]` notice for each background job now comes one full window after the job starts, also when an earlier job already finished.
