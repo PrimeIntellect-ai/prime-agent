@@ -313,9 +313,8 @@ without its project Python code.",
     ]),
 ];
 
-/// Command names that print guidance instead of starting a session: names that
-/// once existed, and `machine`, which reads like the machine commands under
-/// `factory`.
+/// Command names that print guidance to the replacement command instead of
+/// starting a session.
 pub const REMOVED_COMMAND_NAMES: &[&str] = &[
     "app",
     "daemon",
