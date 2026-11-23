@@ -141,10 +141,36 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
 fn double_quoted(rest: &str, plain: &mut String, tokens: &mut Vec<(String, Scope)>) -> usize {
     let mut start = 0usize;
     let mut j = 1usize;
+    // The paren depth inside `$(...)`, whose own quotes do not end the string.
+    let mut substitution = 0usize;
     while j < rest.len() {
         let ch = rest[j..].chars().next().expect("char boundary");
         match ch {
             '\\' => j += 1 + rest[j + 1..].chars().next().map_or(0, char::len_utf8),
+            '$' if rest[j + 1..].starts_with('(') => {
+                substitution += 1;
+                j += 2;
+            }
+            '(' if substitution > 0 => {
+                substitution += 1;
+                j += 1;
+            }
+            ')' if substitution > 0 => {
+                substitution -= 1;
+                j += 1;
+            }
+            '"' if substitution > 0 => {
+                // A string inside the substitution: skip it whole.
+                j += 1;
+                while let Some(c) = rest[j..].chars().next() {
+                    j += c.len_utf8();
+                    match c {
+                        '\\' => j += rest[j..].chars().next().map_or(0, char::len_utf8),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
             '"' => {
                 push(&rest[start..=j], Scope::String, plain, tokens);
                 return j + 1;
@@ -400,6 +426,14 @@ mod tests {
             assert!(scoped(code, Scope::String).is_empty(), "{code}");
             assert_eq!(scoped(code, Scope::BuiltIn).last().unwrap(), "ls", "{code}");
         }
+    }
+
+    #[test]
+    fn quotes_inside_a_command_substitution_stay_in_the_string() {
+        let code = r#"echo "$(echo "a # b")"; ls"#;
+        assert!(scoped(code, Scope::Comment).is_empty());
+        assert_eq!(scoped(code, Scope::String), vec![r#""$(echo "a # b")""#]);
+        assert_eq!(scoped(code, Scope::BuiltIn), vec!["echo", "ls"]);
     }
 
     #[test]
