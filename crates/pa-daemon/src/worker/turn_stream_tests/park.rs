@@ -133,10 +133,10 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
     );
 }
 
-/// The inbox arrival row, due `hold` from now: what the queue admission
+/// The inbox arrival row, due `due_in` from now: what the queue admission
 /// queues for a held success.
-fn queue_arrival_row(core: &mut SessionCore, hold: std::time::Duration) {
-    core.inbox_wake_due = Some(tokio::time::Instant::now() + hold);
+fn queue_arrival_row(core: &mut SessionCore, due_in: std::time::Duration) {
+    core.inbox_wake_due = Some(tokio::time::Instant::now() + due_in);
     core.steering.push_back(QueuedItem {
         priority: QueuePriority::Human,
         preview: None,
@@ -208,9 +208,9 @@ async fn only_a_run_cut_by_a_queued_steer_skips_the_hold() {
             ..GateProbeEngine::default()
         });
         let runner = burst_runner(engine.clone());
-        let hold = std::time::Duration::from_secs(30);
+        let due_in = std::time::Duration::from_secs(30);
         if cut_by_the_row {
-            queue_arrival_row(&mut runner.core.lock().unwrap(), hold);
+            queue_arrival_row(&mut runner.core.lock().unwrap(), due_in);
         }
         runner
             .run_turn(
@@ -234,7 +234,7 @@ async fn only_a_run_cut_by_a_queued_steer_skips_the_hold() {
             .await;
         let mut core = runner.core.lock().unwrap();
         if !cut_by_the_row {
-            queue_arrival_row(&mut core, hold);
+            queue_arrival_row(&mut core, due_in);
         }
         let held = core.inbox_wake_hold(tokio::time::Instant::now()).is_some();
         assert_eq!(held, !cut_by_the_row, "cut by the row: {cut_by_the_row}");
