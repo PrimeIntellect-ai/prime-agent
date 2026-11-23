@@ -2714,7 +2714,7 @@ class FactorySettingReadTest(unittest.TestCase):
     def test_round_trips_the_real_settings_document_shape(self) -> None:
         # A settings file as the daemon writes it: flat camelCase keys and
         # nested feature objects (agentTraces/telemetry/terminal); the
-        # factory key is shaped exactly like the other feature toggles.
+        # machine key is shaped exactly like the other feature toggles.
         # /machine on writes enabled true over the same document...
         document = {
             "defaultProvider": "prime-inference",
@@ -2729,7 +2729,7 @@ class FactorySettingReadTest(unittest.TestCase):
         self.write_settings(document)
         self.assertTrue(factory_module.factory_enabled())
         # ...and /machine off writes enabled false, leaving the rest intact.
-        document["factory"] = {"enabled": False}
+        document["machine"] = {"enabled": False}
         self.write_settings(document)
         self.assertFalse(factory_module.factory_enabled())
 
@@ -3463,7 +3463,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
             },
         )
         for spec_id in ("empty", "cyclic"):
-            with self.assertRaisesRegex(ValueError, "factory"):
+            with self.assertRaisesRegex(ValueError, "machine"):
                 await self.start(spec_id)
         self.assertEqual(self.host.calls, [])
 
@@ -13611,7 +13611,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
         with patch.object(sys, "stderr", captured):
             for _ in range(5):
                 rebooted.graph()
-        line = "cannot render in the factory"
+        line = "cannot render in the machine"
         self.assertEqual(captured.getvalue().count(line), 1, "the guard printed per poll")
 
 
