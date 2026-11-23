@@ -1,0 +1,280 @@
+//! Print mode over a running daemon (TS main.ts `useDaemonClient` +
+//! `runPrintModeWithConnection`): the daemon hosts the session and holds
+//! its lease, so family peers list and message it while the run is in
+//! flight. The run creates a client-owned daemon session for the selected
+//! session, prompts it, waits for headless completion (RLM quiescence
+//! included), and prints the same output the daemonless runtime prints.
+
+use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent};
+use pa_types::daemon::{DaemonCommand, PromptInput};
+use serde_json::{json, Map, Value};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::mode::{AppMode, RunOptions};
+
+/// Turn-long requests carry no timer: the response or the closed daemon
+/// connection ends the wait.
+const NO_TIMEOUT_MS: u64 = u64::MAX;
+
+/// Run print mode through the daemon on the resolved socket. `None` when
+/// no current daemon answers: the caller runs daemonless.
+///
+/// # Errors
+///
+/// Returns the failure text when the daemon refuses the session or a
+/// prompt, or the connection drops mid-run.
+pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i32>, String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    rt.block_on(async {
+        let socket = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
+        let Ok((client, mut events)) = DaemonClient::connect(&socket).await else {
+            return Ok(None);
+        };
+        if !crate::interactive_mode::is_current_daemon(client.hello()) {
+            client.close();
+            return Ok(None);
+        }
+        crate::telemetry_notice::print_if_due(&options.config);
+        let (_cwd, create) = crate::print_runtime::headless_daemon_create(options)?;
+        // TS `assertWorkerCreateOwner` (B-11): the run-owned session never
+        // takes over a file a live daemon worker already hosts.
+        if let DaemonCommand::Create {
+            session_path: Some(session_path),
+            ..
+        } = &create
+        {
+            let list = client
+                .request_ok(DaemonCommand::List {
+                    id: None,
+                    all: None,
+                    cwd: None,
+                    session_dir: None,
+                    include_client_owned: None,
+                    rest: Map::default(),
+                })
+                .await
+                .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
+            if let Some(refusal) = live_session_refusal(
+                Some(&list),
+                std::path::Path::new(session_path),
+            ) {
+                client.close();
+                return Err(refusal);
+            }
+        }
+        let summary = client
+            .request_ok(create)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        let active_session_id = summary
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        // Attach, prompt, and settle the session, then print the result (TS
+        // `runPrintModeWithConnectionInternal`).
+        let exit: Result<i32, String> = async {
+            let json_mode = options.app_mode == AppMode::Json;
+            let failed = |error: anyhow::Error| format!("{error:#}");
+            client
+                .request_ok(DaemonCommand::Attach {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    client_id: None,
+                    capabilities: None,
+                    resume_cursor: None,
+                    telemetry_disabled: None,
+                    recovery_config: None,
+                    env: None,
+                    launch_env: None,
+                    rest: Map::default(),
+                })
+                .await
+                .map_err(failed)?;
+            if json_mode {
+                let header = client
+                    .request_ok(DaemonCommand::GetSessionHeader {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        rest: Map::default(),
+                    })
+                    .await
+                    .map_err(failed)?;
+                if let Some(header) = header.get("header").filter(|header| !header.is_null()) {
+                    println!("{header}");
+                }
+            }
+            // The `@file` image attachments ride the initial prompt only.
+            let prompts = options
+                .initial_message
+                .iter()
+                .map(|prompt| (prompt, options.initial_images.as_slice()))
+                .chain(options.messages.iter().map(|prompt| (prompt, &[][..])));
+            for (prompt, images) in prompts {
+                let command = DaemonCommand::PromptAndWait {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    message: prompt.clone(),
+                    input: PromptInput {
+                        content: None,
+                        images: (!images.is_empty()).then(|| {
+                            images
+                                .iter()
+                                .map(|image| {
+                                    json!({ "type": "image", "data": image.data, "mimeType": image.mime_type })
+                                })
+                                .collect()
+                        }),
+                        streaming_behavior: None,
+                        queue_if_busy: None,
+                        expand_prompt_templates: None,
+                        source: None,
+                        agent_message_id: None,
+                        custom_message: None,
+                        queue_key: None,
+                        prefix_messages: None,
+                        admission_id: None,
+                        rlm_notice_nonce: None,
+                    },
+                    rest: Map::default(),
+                };
+                relay_events_until(
+                    client.request_ok_with_timeout(command, NO_TIMEOUT_MS),
+                    &mut events,
+                    json_mode,
+                    &active_session_id,
+                )
+                .await
+                .map_err(failed)?;
+            }
+            // The daemonless print's #2270 contract: every admitted descendant
+            // settles before the terminal result is read.
+            let status = relay_events_until(
+                client.request_ok_with_timeout(
+                    DaemonCommand::WaitForHeadlessCompletion {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        wait_for_rlm_quiescence: Some(true),
+                        rest: Map::default(),
+                    },
+                    NO_TIMEOUT_MS,
+                ),
+                &mut events,
+                json_mode,
+                &active_session_id,
+            )
+            .await
+            .map_err(failed)?;
+            let status: pa_core::autonomous::AgentAutonomousStatus =
+                serde_json::from_value(status).map_err(|error| error.to_string())?;
+            let mut exit_code = 0;
+            if !json_mode {
+                let messages = client
+                    .request_ok(DaemonCommand::GetMessages {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        page: None,
+                        capabilities: None,
+                        rest: Map::default(),
+                    })
+                    .await
+                    .map_err(failed)?;
+                let messages: Vec<pa_types::session::AgentMessage> = messages
+                    .get("messages")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|message| serde_json::from_value(message.clone()).ok())
+                    .collect();
+                crate::print_runtime::emit_text_terminal_result(&messages, &mut exit_code);
+            }
+            if let Some(stderr) = crate::headless_autonomous::autonomous_exit_stderr(
+                &status,
+                pa_core::autonomous::now_millis(),
+            ) {
+                eprintln!("{stderr}");
+                exit_code = 1;
+            }
+            Ok(exit_code)
+        }
+        .await;
+        // The run's session ends with it. A reused session another client
+        // created is not this client's to stop: the daemon refuses, and
+        // that session keeps running.
+        let _ = client
+            .request(DaemonCommand::CompleteOwnedSession {
+                id: None,
+                active_session_id,
+                rest: Map::default(),
+            })
+            .await;
+        client.close();
+        exit.map(Some)
+    })
+}
+
+/// The refusal for a session file a live daemon worker already hosts, from a
+/// daemon `list` answer: the descriptive message (operator-directed) points
+/// at attaching to the live session instead of reopening its file.
+pub(crate) fn live_session_refusal(
+    list: Option<&serde_json::Value>,
+    session_path: &std::path::Path,
+) -> Option<String> {
+    let target = pa_daemon::lease::canonical_session_path(session_path);
+    let row = list
+        .and_then(|data| data.get("sessions"))
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|row| {
+            row.get("sessionFile")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|file| {
+                    pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) == target
+                })
+        })?;
+    if let Some(holder) =
+        pa_tui::session_open_error::holder_from_roster(std::slice::from_ref(row), &target)
+    {
+        return Some(pa_tui::session_open_error::already_active_error(
+            &holder, &target,
+        ));
+    }
+    let active_session_id = row
+        .get("activeSessionId")
+        .or_else(|| row.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    Some(format!(
+        "Session is already active in {active_session_id}: {}",
+        target.display()
+    ))
+}
+
+/// Await one request while relaying the session's streamed events: json
+/// mode prints each one (TS writes every `session_event`), text mode
+/// drops them. The worker flushes a turn's events before its response, so
+/// every event the request produced is relayed when it returns.
+async fn relay_events_until<T>(
+    request: impl std::future::Future<Output = T>,
+    events: &mut UnboundedReceiver<DaemonClientEvent>,
+    json_mode: bool,
+    active_session_id: &str,
+) -> T {
+    let mut request = std::pin::pin!(request);
+    loop {
+        tokio::select! {
+            biased;
+            Some(event) = events.recv() => {
+                if let DaemonClientEvent::SessionEvent { active_session_id: from, event, .. } = event {
+                    if json_mode && from == active_session_id {
+                        println!("{event}");
+                    }
+                }
+            }
+            result = &mut request => return result,
+        }
+    }
+}

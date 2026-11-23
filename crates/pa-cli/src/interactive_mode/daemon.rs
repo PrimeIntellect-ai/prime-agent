@@ -33,18 +33,22 @@ async fn probe_daemon(socket_path: &Path) -> DaemonProbe {
     else {
         return DaemonProbe::Absent;
     };
-    let hello = client.hello();
-    let current = hello.get("protocol").and_then(|p| p.get("version"))
-        == Some(&serde_json::json!(
-            pa_types::daemon::DAEMON_PROTOCOL_VERSION
-        ))
-        && hello.get("schemaId") == Some(&serde_json::json!(pa_types::daemon::DAEMON_SCHEMA_ID));
-    if current {
+    if is_current_daemon(client.hello()) {
         client.close();
         DaemonProbe::Current
     } else {
         DaemonProbe::Stale(Box::new(client))
     }
+}
+
+/// Whether a `daemon_hello` comes from a supervisor speaking this build's
+/// protocol and schema.
+pub(crate) fn is_current_daemon(hello: &serde_json::Value) -> bool {
+    hello.get("protocol").and_then(|p| p.get("version"))
+        == Some(&serde_json::json!(
+            pa_types::daemon::DAEMON_PROTOCOL_VERSION
+        ))
+        && hello.get("schemaId") == Some(&serde_json::json!(pa_types::daemon::DAEMON_SCHEMA_ID))
 }
 
 /// Ensure a current daemon is listening on `socket_path`, spawning this

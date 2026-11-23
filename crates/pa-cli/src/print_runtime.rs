@@ -105,7 +105,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let (actual_cwd, create) = daemon_acp_create(options)?;
+    let (actual_cwd, create) = headless_daemon_create(options)?;
     pa_daemon::acp::daemon::run_daemon_attached_acp_mode(pa_daemon::acp::daemon::DaemonAcpOptions {
         socket_path,
         actual_cwd,
@@ -116,24 +116,28 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     .map_err(|error| format!("{error:#}"))
 }
 
-/// The ACP daemon session's create (TS main.ts `defaultSessionConfig` +
-/// the startup create): the session the flags select, client-owned only
-/// for `--no-session`, plus the session's cwd. The worker opens and
-/// leases the selected file itself.
-fn daemon_acp_create(
+/// The headless daemon session's create for ACP and print (TS main.ts
+/// `defaultSessionConfig` and the startup create): the session the flags
+/// select, plus the session's cwd. The worker opens and leases the selected file
+/// itself. TS `isClientOwnedDaemonSession`: an ACP session is client-owned
+/// only for `--no-session`; a print session always is, so it ends with
+/// the run.
+pub(crate) fn headless_daemon_create(
     options: &RunOptions,
 ) -> Result<(std::path::PathBuf, pa_types::daemon::DaemonCommand), String> {
     use pa_types::daemon::DaemonSessionLifecycle;
     let config = &options.config;
     let session_dir = replacement_session_dir(options);
-    let (cwd, session_path, lifecycle) = if options.session.no_session {
-        (
-            config.cwd.clone(),
-            None,
-            DaemonSessionLifecycle::ClientOwned,
-        )
+    let acp = options.app_mode == AppMode::Acp;
+    let lifecycle = if acp && !options.session.no_session {
+        DaemonSessionLifecycle::Resident
     } else {
-        let (cwd, session_path) = match select_headless_session(options)? {
+        DaemonSessionLifecycle::ClientOwned
+    };
+    let (cwd, session_path) = if options.session.no_session {
+        (config.cwd.clone(), None)
+    } else {
+        match select_headless_session(options)? {
             HeadlessSession::Fork(source) => {
                 let fork = pa_core::session::manager::SessionManager::fork_from(
                     &source,
@@ -150,22 +154,32 @@ fn daemon_acp_create(
                 Some(path),
             ),
             HeadlessSession::Fresh => (config.cwd.clone(), None),
-        };
-        (cwd, session_path, DaemonSessionLifecycle::Resident)
+        }
     };
     // The CLI session flags, under the TS `runtimeConfigFromArgs`
-    // names. `--api-key` stays off: the create config is persisted.
+    // names.
     let mut create_config = serde_json::json!({
         "cwd": cwd.display().to_string(),
         "sessionDir": session_dir.display().to_string(),
         // The telemetry execution mode (TS main.ts `executionMode: appMode`).
-        "executionMode": "acp",
+        "executionMode": options.app_mode.as_str(),
     });
     if let Some(provider) = &config.provider {
         create_config["provider"] = serde_json::json!(provider);
     }
     if let Some(model) = &config.model {
         create_config["model"] = serde_json::json!(model);
+    }
+    // ACP keeps `--api-key` and `--models` off its resident create, whose
+    // config is persisted; the run-scoped print session carries them like
+    // the interactive create.
+    if !acp {
+        if let Some(api_key) = &config.api_key {
+            create_config["apiKey"] = serde_json::json!(api_key);
+        }
+        if let Some(models) = &config.models {
+            create_config["models"] = serde_json::json!(models);
+        }
     }
     if let Some(thinking) = config.thinking {
         create_config["thinking"] = serde_json::json!(thinking.wire_name());
@@ -381,6 +395,19 @@ impl From<HeadlessEngine> for pa_daemon::rpc::session::RpcEngineHandle {
 }
 
 fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
+    // TS main.ts `useDaemonClient`: with a daemon running, print drives a
+    // daemon session, so the daemon holds the session lease and family
+    // peers list and message it; without one, print stays daemonless. Two
+    // inputs the daemon create cannot carry keep the run daemonless:
+    // `--goal`, and the inline faux script of the in-process verification
+    // seam (the daemon seam takes a script file).
+    if options.config.initial_goal.is_none()
+        && std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_none()
+    {
+        if let Some(exit_code) = crate::print_daemon::run_print_mode_via_daemon(options)? {
+            return Ok(exit_code);
+        }
+    }
     with_print_runtime(options, |options, lease| {
         Box::pin(print_mode_main(options, lease))
     })
@@ -1403,39 +1430,10 @@ fn session_open_guard(
             })
             .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
         if list.success {
-            let target = pa_daemon::lease::canonical_session_path(session_path);
-            for row in list
-                .data
-                .and_then(|data| data.get("sessions").cloned())
-                .and_then(|sessions| sessions.as_array().cloned())
-                .unwrap_or_default()
+            if let Some(refusal) =
+                crate::print_daemon::live_session_refusal(list.data.as_ref(), session_path)
             {
-                let Some(file) = row.get("sessionFile").and_then(serde_json::Value::as_str) else {
-                    continue;
-                };
-                if pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) != target {
-                    continue;
-                }
-                let active_session_id = row
-                    .get("activeSessionId")
-                    .or_else(|| row.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                // The descriptive refusal (operator-directed): attach to the live session instead
-                // of reopening its file.
-                let message = match pa_tui::session_open_error::holder_from_roster(
-                    std::slice::from_ref(&row),
-                    &target,
-                ) {
-                    Some(holder) => {
-                        pa_tui::session_open_error::already_active_error(&holder, &target)
-                    }
-                    None => format!(
-                        "Session is already active in {active_session_id}: {}",
-                        target.display()
-                    ),
-                };
-                return Err(message);
+                return Err(refusal);
             }
         }
     }
@@ -1771,13 +1769,8 @@ async fn run_prompts(
     if let Some(subscription) = unsubscribe {
         subscription.unsubscribe().await;
     }
-    let state = engine.session.agent().state().await;
-    let messages: Vec<pa_types::session::AgentMessage> =
-        state.messages.iter().filter_map(json_round_trip).collect();
-    let result = pa_core::session_engine::headless::select_headless_terminal_result(&messages);
     // The print-mode exit contract: json mode never derives the exit code from the
-    // terminal selection — only the autonomous gates exit non-zero; text mode prints
-    // the primary message (error to stderr with exit 1, settled answer to stdout).
+    // terminal selection — only the autonomous gates exit non-zero.
     let mut exit_code = 0;
     if !json_mode {
         let goal = engine.goal_state().await;
@@ -1789,22 +1782,10 @@ async fn run_prompts(
             eprintln!("{cap_reason}");
             exit_code = 1;
         }
-        if let Some(primary) = result.primary {
-            if let Some(stderr) = primary.stderr_text(&mut exit_code) {
-                eprintln!("{stderr}");
-            }
-            if exit_code == 0 {
-                if let Some(text) = primary.stdout_text() {
-                    println!("{text}");
-                }
-            }
-        }
-        for outcome in result.compaction_outcomes {
-            eprintln!("{}", outcome.content);
-            if outcome.outcome == "failed" {
-                exit_code = 1;
-            }
-        }
+        let state = engine.session.agent().state().await;
+        let messages: Vec<pa_types::session::AgentMessage> =
+            state.messages.iter().filter_map(json_round_trip).collect();
+        emit_text_terminal_result(&messages, &mut exit_code);
     }
     // The autonomous contract applies to both output modes.
     if let Some(stderr) = autonomous.exit_stderr().await {
@@ -1812,6 +1793,32 @@ async fn run_prompts(
         exit_code = 1;
     }
     Ok(exit_code)
+}
+
+/// The text-mode terminal output: the selected primary message (an error to
+/// stderr with exit 1, the settled answer to stdout) and the compaction
+/// outcomes after it. Both print paths read the session's messages into it.
+pub(crate) fn emit_text_terminal_result(
+    messages: &[pa_types::session::AgentMessage],
+    exit_code: &mut i32,
+) {
+    let result = pa_core::session_engine::headless::select_headless_terminal_result(messages);
+    if let Some(primary) = result.primary {
+        if let Some(stderr) = primary.stderr_text(exit_code) {
+            eprintln!("{stderr}");
+        }
+        if *exit_code == 0 {
+            if let Some(text) = primary.stdout_text() {
+                println!("{text}");
+            }
+        }
+    }
+    for outcome in result.compaction_outcomes {
+        eprintln!("{}", outcome.content);
+        if outcome.outcome == "failed" {
+            *exit_code = 1;
+        }
+    }
 }
 
 #[cfg(test)]
