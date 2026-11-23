@@ -510,12 +510,16 @@ impl BotPlatform for PrimePlatform {
             let started = tokio::time::timeout(
                 STREAM_START_WAIT,
                 // The relay lives as long as the link: no process deadline.
+                // A silent reattach loses stdout, so a stream fault ends the link.
                 spawn_exec_halves(
                     &source,
                     &request,
                     StartOptions {
+                        stream: StreamOptions {
+                            max_reconnects: Some(0),
+                            ..StreamOptions::default()
+                        },
                         connect_timeout_ms: Some(0),
-                        ..StartOptions::default()
                     },
                 ),
             )
