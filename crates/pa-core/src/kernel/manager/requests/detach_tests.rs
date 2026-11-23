@@ -73,6 +73,60 @@ async fn a_wake_caught_by_a_blocked_write_stops_the_cell_at_the_write_ceiling() 
     manager.kill();
 }
 
+/// A stale wake (its level predicate shows the input consumed) that
+/// lands during a slow write starts no write ceiling: the write finishes
+/// after the ceiling would have expired and the cell settles normally.
+#[tokio::test]
+async fn a_stale_wake_during_a_slow_write_starts_no_write_ceiling() {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let python = dir.path().join("slow-reader");
+    std::fs::write(
+        &python,
+        "#!/usr/bin/env python3\nimport json, sys, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(2)\nfor line in sys.stdin:\n    req = json.loads(line)\n    print(json.dumps({'event': 'done', 'id': req.get('id'), 'status': 'ok'}), flush=True)\n",
+    )
+    .expect("write fake kernel");
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake kernel");
+    let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+        python: Some(python),
+        ..Default::default()
+    });
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("ready handshake");
+    let wake = std::sync::Arc::new(crate::kernel::cell_wake::CellWake::with_pending(
+        std::sync::Arc::new(|| false),
+    ));
+    {
+        let wake = std::sync::Arc::clone(&wake);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            wake.request();
+        });
+    }
+    // Larger than the stdin pipe: the write blocks until the kernel reads.
+    let code = "x".repeat(1024 * 1024);
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        manager.execute(
+            &code,
+            ExecuteOptions {
+                wake: Some(wake),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("the slow write settles")
+    .expect("execute returns a result");
+    assert_eq!(result.status, ExecuteStatus::Ok);
+    manager.kill();
+}
+
 /// Wait until `ready` holds; fail with `what` past `within`.
 async fn wait_until(within: std::time::Duration, what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + within;

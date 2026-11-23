@@ -586,8 +586,13 @@ impl ReplKernelManager {
                         break r.unwrap_or_else(|e| Err(anyhow!("{e}")));
                     }
                     () = awakened(write_wake_rx.as_mut()) => {
-                        write_ceiling
-                            .get_or_insert_with(|| tokio::time::Instant::now() + ceiling_ms);
+                        // A wake whose level shows the input consumed or
+                        // cleared would not detach the wait, so it starts
+                        // no ceiling either.
+                        if wake_pending.as_ref().is_none_or(|pending| pending()) {
+                            write_ceiling
+                                .get_or_insert_with(|| tokio::time::Instant::now() + ceiling_ms);
+                        }
                     }
                     () = write_budget => {
                         // The budget that fires mid-write starts the ceiling
