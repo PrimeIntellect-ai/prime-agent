@@ -100,8 +100,6 @@ async fn execute_compaction_with_late_abort_cancels_before_the_commit() {
 
 /// The summary a late abort discards was still a billed call: it lands as
 /// a `model_usage` row on the session, billed on the summarizer's model.
-/// The abort lands after the summarizer resolved, while the commit waits
-/// for the session lock.
 #[tokio::test]
 async fn a_late_abort_records_the_discarded_summary_call() {
     let registration = faux_registration();
@@ -112,37 +110,74 @@ async fn a_late_abort_records_the_discarded_summary_call() {
             pa_ai::faux::FauxAssistantMessageOptions::default(),
         ),
     )]);
-    let controller = pa_agent::abort::AbortController::new();
-    let signal = controller.signal();
     let tmp = tempfile::tempdir().unwrap();
+    // The edit in the summarized history gives the summary a file-operations
+    // block, which the summary sink receives only after the summarizer call
+    // resolved and was billed.
+    let mut manager = SessionManager::in_memory(tmp.path());
+    let user = |text: &str| {
+        AgentMessage::User(pa_types::ai::UserMessage {
+            content: UserContent::Text(text.to_string()),
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        })
+    };
+    manager.append_message(user("turn zero")).unwrap();
+    let mut edit_arguments = serde_json::Map::new();
+    edit_arguments.insert("path".to_string(), serde_json::json!("a.rs"));
+    manager
+        .append_message(AgentMessage::Assistant(AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::ToolCall(
+                pa_types::ai::ToolCall {
+                    id: "tc1".to_string(),
+                    name: "edit".to_string(),
+                    arguments: edit_arguments,
+                    thought_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+            api: "faux".to_string(),
+            provider: "faux".to_string(),
+            model: "compact-m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::ToolUse,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        }))
+        .unwrap();
+    manager.append_message(user("turn one")).unwrap();
+    manager.append_message(user("turn two")).unwrap();
     let session = crate::session_engine::AgentSession::new(
         std::sync::Arc::new(pa_agent::agent::Agent::new(
             pa_agent::agent::AgentOptions::default(),
         )),
-        session_with_turns(tmp.path(), 3),
+        manager,
         vec![],
     )
     .await
     .unwrap();
     session.set_compaction_settings(super::super::compaction::CompactionSettings {
-        keep_recent_tokens: 20,
+        keep_recent_tokens: 2,
         ..Default::default()
     });
-    let persistence = session.shared_persistence();
-    let hold_the_commit = async {
-        // The summarizer request starts after the prepare released the lock.
-        while registration.call_count() == 0 {
-            tokio::task::yield_now().await;
-        }
-        let _commit_blocked = persistence.lock().await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        controller.abort();
-    };
-    let (result, ()) = tokio::join!(
-        session.compact(None, &model, None, Some(&signal)),
-        hold_the_commit
-    );
-    let error = result.unwrap_err();
+    let controller = pa_agent::abort::AbortController::new();
+    session.set_compaction_summary_sink({
+        let controller = controller.clone();
+        std::sync::Arc::new(move |delta: &str| {
+            if delta.contains("<modified-files>") {
+                controller.abort();
+            }
+        })
+    });
+    let error = session
+        .compact(None, &model, None, Some(&controller.signal()))
+        .await
+        .unwrap_err();
     assert!(pa_agent::abort::is_abort_error(&error), "{error:#}");
     let billed = session
         .shared_persistence()
