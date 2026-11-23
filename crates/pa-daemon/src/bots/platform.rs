@@ -118,6 +118,8 @@ const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 /// A bootstrap or install command gets this long before sandboxd kills it.
 const EXEC_DEADLINE_MS: u64 = 10 * 60 * 1000;
+/// The daemon stops waiting on a silent gateway this long after sandboxd's kill.
+const EXEC_WAIT: Duration = Duration::from_millis(EXEC_DEADLINE_MS + 60_000);
 /// The daemon keeps this much of each guest output channel; the rest is dropped.
 const MAX_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -429,6 +431,15 @@ impl BotPlatform for PrimePlatform {
         env: &'a BTreeMap<String, String>,
         stdin: Option<&'a [u8]>,
     ) -> BoxFuture<'a, PlatformResult<ExecOutput>> {
-        self.run(sandbox_id, script, env, stdin).boxed()
+        async move {
+            tokio::time::timeout(EXEC_WAIT, self.run(sandbox_id, script, env, stdin))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(PlatformError::Transient(
+                        "the gateway sent no command result in time".into(),
+                    ))
+                })
+        }
+        .boxed()
     }
 }
