@@ -23,6 +23,7 @@ VM sandbox that hosts each bot.
   wait budget fails with `timeout`.
 - Checkpoints: create, fetch, delete (404 is success), and wait until
   `DURABLE`.
+- VM exec: `CommandSessionClient` starts, connects to, writes stdin to, and signals a guest process over the sandbox gateway. `PlatformGatewayAuthSource` fetches the gateway credentials, and the `secrets` module lists and creates platform secrets.
 
 ## Safety contract
 
