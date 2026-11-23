@@ -1,1 +1,1 @@
-- The factory machine loader refuses a prompt, context, rubric, or python module that points outside the machine directory through a symlink, instead of loading the outside file.
+- The machine loader refuses a prompt, context, rubric, or python module that points outside the machine directory through a symlink, instead of loading the outside file.

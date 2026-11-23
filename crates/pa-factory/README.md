@@ -1,8 +1,8 @@
 # pa-factory
 
-The factory machine directory format: the loader, type checker, validator,
+The machine directory format: the loader, type checker, validator,
 compiler, and v1 converter. One implementation serves the CLI
-(`prime-agent factory validate|compile|convert|list`) and the session's
+(`prime-agent machine validate|compile|convert|list`) and the session's
 `factory.compile` host request, so they cannot disagree about a machine.
 
 ## Format
@@ -60,7 +60,7 @@ and each member names it in `next`.
   a [`Diagnostic`] (`file: key.path: message`).
 - Check types (`types::check_value`) with exact value paths, for params
   and for outputs: each state's [`Contract`] (written into the canonical
-  spec as `emit`) is what a child's `rlm.factory.emit` and a python
+  spec as `emit`) is what a child's `rlm.machine.emit` and a python
   state's returned dict are checked against.
 - Compile to the canonical v1 machine spec (`run`, `params`, `states`,
   `transitions`) the Python executor validates and runs. Prompts gain the

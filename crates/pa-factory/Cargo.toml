@@ -3,7 +3,7 @@ name = "pa-factory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The factory machine directory format: loader, type checker, validator, and compiler."
+description = "The machine directory format: loader, type checker, validator, and compiler."
 
 [dependencies]
 serde.workspace = true

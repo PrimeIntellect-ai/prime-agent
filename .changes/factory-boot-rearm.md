@@ -1,1 +1,1 @@
-- Persisted factory runs re-arm on their own when the kernel boots, so a restarted kernel collects their children without anyone needing to make a factory call first.
+- Persisted machine runs re-arm on their own when the kernel boots, so a restarted kernel collects their children without anyone needing to make a machine call first.
