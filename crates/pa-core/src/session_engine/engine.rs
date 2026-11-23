@@ -127,10 +127,6 @@ pub struct SessionEngineConfig {
 
 pub struct SessionEngine {
     pub session: AgentSession,
-    /// The session's shared cell wake (an embedding may fire it to end a
-    /// running cell's wait early); always present, private when the config
-    /// supplied none.
-    pub cell_wake: Arc<crate::kernel::cell_wake::CellWake>,
     pub skills: Vec<crate::skills::Skill>,
     /// Skill-loading diagnostics; the connection resource snapshot
     /// surfaces them.
@@ -515,7 +511,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         websearch_env,
         session_artifact_dir,
         cell_timeout_ms,
-        cell_wake.clone(),
+        cell_wake,
         config.on_background_cell.clone(),
         on_restore,
         config.on_background_work_settled.clone(),
@@ -963,7 +959,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         });
     Ok(SessionEngine {
         session,
-        cell_wake,
         skills: resources.skills,
         skill_diagnostics: resources.skill_diagnostics,
         prompt_templates: resources.prompts,
@@ -1002,13 +997,6 @@ impl SessionEngine {
         &self,
     ) -> std::sync::Weak<crate::kernel::provisioner::IpythonKernelProvisioner> {
         std::sync::Arc::downgrade(&self.provisioner)
-    }
-
-    /// The session's shared cell wake: the embedding fires it when a user
-    /// message or inbox arrival must end a running cell's wait early.
-    #[must_use]
-    pub fn cell_wake(&self) -> Arc<crate::kernel::cell_wake::CellWake> {
-        Arc::clone(&self.cell_wake)
     }
 
     /// Whether the session's kernel has live background `bash()` work
