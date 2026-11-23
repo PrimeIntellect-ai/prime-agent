@@ -459,6 +459,7 @@ mod tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         ledger
@@ -469,6 +470,7 @@ mod tests {
                 depth: 1,
                 name: "moved".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
 

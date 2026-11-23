@@ -284,6 +284,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
             depth: 1,
             name: "panel nav worker".to_string(),
             factory: None,
+            decision_child: false,
         })
         .expect("append spawn edge");
 
@@ -480,6 +481,7 @@ async fn the_title_bills_a_passive_subagents_spend() {
             depth: 1,
             name: "title bill worker".to_string(),
             factory: None,
+            decision_child: false,
         })
         .expect("append spawn edge");
 
@@ -570,6 +572,7 @@ async fn the_title_bills_a_deleted_subagents_spend() {
             depth: 1,
             name: "title del worker".to_string(),
             factory: None,
+            decision_child: false,
         })
         .expect("append spawn edge");
     ledger

@@ -70,6 +70,7 @@ fn family() -> Family {
                 depth,
                 name: child_id.to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
     }

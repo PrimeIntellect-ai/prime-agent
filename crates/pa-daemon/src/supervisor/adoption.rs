@@ -792,6 +792,11 @@ impl Supervisor {
                 factory: metadata
                     .get("factory")
                     .and_then(|factory| serde_json::from_value(factory.clone()).ok()),
+                decision_child: config
+                    .as_ref()
+                    .and_then(|config| config.get("decisionChild"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));

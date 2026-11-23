@@ -489,6 +489,7 @@ mod tests {
                 depth: 1,
                 name: "c".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         Home {

@@ -176,7 +176,16 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
             if !is_subagent_descendant(&records[*child], &records[*position]) {
                 continue;
             }
-            rollup.descendant_count += 1 + rollups[*child].descendant_count;
+            // The count skips the hidden Decision API child
+            // (`decisionChild`), so `N subagents` never counts servers the
+            // user cannot see or manage.
+            let decision_child = records[*child]
+                .daemon
+                .as_ref()
+                .is_some_and(crate::subagents::is_decision_child_summary);
+            if !decision_child {
+                rollup.descendant_count += 1 + rollups[*child].descendant_count;
+            }
         }
         rollups[*position] = rollup;
     }
@@ -307,10 +316,18 @@ pub fn has_session_children(records: &[UnifiedRecord], key: &SelectionKey) -> bo
         }
     });
     root.is_some_and(|root| {
-        index
-            .children_by_parent
-            .get(&root)
-            .is_some_and(|children| !children.is_empty())
+        index.children_by_parent.get(&root).is_some_and(|children| {
+            // The Decision API child (`decisionChild`) renders no row: an
+            // invisible child never arms the expand affordance, so a parent
+            // whose only children are hidden System 1 servers reports no
+            // children.
+            children.iter().any(|child| {
+                !records[*child]
+                    .daemon
+                    .as_ref()
+                    .is_some_and(crate::subagents::is_decision_child_summary)
+            })
+        })
     })
 }
 
