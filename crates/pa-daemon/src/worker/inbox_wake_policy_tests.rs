@@ -1,27 +1,32 @@
-//! The inbox wake rules wired through the queue admission: an idle
-//! session wakes for every unread arrival once the debounce window ends,
-//! a burst inside the window makes one wake whose row names the count and
-//! the kinds, and a busy session folds arrivals into the one queued row.
+//! The inbox wake rules wired through the queue admission and the
+//! runner's pickup: a success-only idle wake is held (never dropped) and
+//! delivers at its hold expiry, a waking arrival flushes the held
+//! successes into its own row, a run cut at a tool boundary continues at
+//! once while a run that ended on its own holds the successes that landed
+//! during it, and a delivery consumes the items it shows.
 use super::inbox_queue_tests::{routing_state, steering_rows};
 use super::*;
 use pa_core::session_engine::inbox::{InboxArrivals, InboxNotice, SessionInbox};
 
-/// Just short of the default `agentInbox.idleDebounceMs` (5 s).
-const INSIDE_THE_WINDOW: Duration = Duration::from_millis(4_999);
+/// The default `agentInbox.successHoldMs` (30 s) and `idleDebounceMs` (5 s).
+const HOLD: Duration = Duration::from_secs(30);
+const DEBOUNCE: Duration = Duration::from_secs(5);
+const JUST_BEFORE_THE_HOLD: Duration = Duration::from_millis(29_999);
 
-fn notice(class: &'static str, text: &str) -> InboxNotice {
+fn notice(class: &'static str, text: &str, exit_code: i64) -> InboxNotice {
     InboxNotice {
         class,
         sender: Some("sender".to_string()),
         text: text.to_string(),
-        meta: json!({ "exitCode": 0 }),
+        meta: json!({ "exitCode": exit_code }),
     }
 }
 
-fn bash_done(pid: u32) -> InboxNotice {
+fn bash_done(pid: u32, exit_code: i64) -> InboxNotice {
     notice(
         pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
-        &format!("[bash-done pid:{pid} exit:0]"),
+        &format!("[bash-done pid:{pid} exit:{exit_code}]"),
+        exit_code,
     )
 }
 
@@ -46,60 +51,164 @@ fn admit(
     .expect("the admission succeeds");
 }
 
-async fn woken_within(notify: &Notify, window: Duration) -> bool {
-    tokio::time::timeout(window, notify.notified())
-        .await
-        .is_ok()
+fn hold(worker: &Worker) -> Option<tokio::time::Instant> {
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .inbox_wake_hold(tokio::time::Instant::now())
 }
 
-/// The stall guard: an agent that ended its turn to wait for a short
-/// successful command is woken by it, once the window ends.
-#[tokio::test(start_paused = true)]
-async fn an_idle_short_success_wakes_once_the_debounce_window_ends() {
-    let (worker, inbox, arrivals, notify) = routing_state();
-    admit(&worker, &notify, &inbox, &arrivals, bash_done(1));
-    assert_eq!(steering_rows(&worker).len(), 1);
-    assert!(!woken_within(&notify, INSIDE_THE_WINDOW).await);
-    assert!(woken_within(&notify, Duration::from_millis(2)).await);
+/// Take the queued arrival row the way the runner's pickup does.
+fn deliver(
+    worker: &Worker,
+    arrivals: &InboxArrivals,
+    inbox: &Arc<SessionInbox>,
+) -> (String, Option<String>) {
+    let mut core = worker.core.lock().unwrap();
+    let mut item = core.steering.pop_front().expect("the queued arrival row");
+    deliver_inbox_arrival_row_locked(&mut core, &mut item, arrivals, inbox);
+    (item.message, item.preview)
 }
 
 #[tokio::test(start_paused = true)]
-async fn five_idle_arrivals_inside_the_window_make_one_wake_naming_count_and_kinds() {
-    let (worker, inbox, arrivals, notify) = routing_state();
-    for pid in 1..=4 {
-        admit(&worker, &notify, &inbox, &arrivals, bash_done(pid));
-    }
+async fn an_idle_success_is_held_and_delivers_at_the_hold_expiry() {
+    let (worker, inbox, arrivals, _) = routing_state();
+    let start = tokio::time::Instant::now();
+    // The worker's own runner takes the row: it parks until the due time.
     admit(
         &worker,
-        &notify,
+        &worker.work_notify,
         &inbox,
         &arrivals,
-        notice(pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE, "hello"),
+        bash_done(1, 0),
     );
-    let rows = steering_rows(&worker);
-    assert_eq!(rows.len(), 1, "one row covers all five: {rows:?}");
-    assert!(
-        rows[0]
-            .0
-            .contains("5 new messages (4 bash-done, 1 agent-message); total waiting: 5."),
-        "{rows:?}"
+    assert_eq!(hold(&worker), Some(start + HOLD));
+    tokio::time::advance(JUST_BEFORE_THE_HOLD).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        steering_rows(&worker).len(),
+        1,
+        "held, neither dropped nor delivered early"
     );
-    assert!(!woken_within(&notify, INSIDE_THE_WINDOW).await);
-    assert!(woken_within(&notify, Duration::from_millis(2)).await);
-    assert!(
-        !woken_within(&notify, Duration::from_secs(600)).await,
-        "the later arrivals add no wake"
-    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let mut delivered = false;
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+        if steering_rows(&worker).is_empty() {
+            delivered = true;
+            break;
+        }
+    }
+    assert!(delivered, "the runner delivers the row at the hold expiry");
 }
 
 #[tokio::test(start_paused = true)]
-async fn busy_arrivals_fold_into_one_row_without_a_debounce() {
+async fn a_waking_arrival_flushes_the_held_successes_into_its_row() {
+    for waking in [
+        bash_done(3, 7),
+        notice(
+            pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
+            "hello",
+            0,
+        ),
+        notice(
+            pa_types::inbox_notice::INBOX_CLASS_CHILD_EXITED,
+            "child done",
+            0,
+        ),
+    ] {
+        let (worker, inbox, arrivals, notify) = routing_state();
+        admit(&worker, &notify, &inbox, &arrivals, bash_done(1, 0));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        admit(&worker, &notify, &inbox, &arrivals, bash_done(2, 0));
+        let flushed_at = tokio::time::Instant::now();
+        admit(&worker, &notify, &inbox, &arrivals, waking);
+        assert_eq!(hold(&worker), Some(flushed_at + DEBOUNCE));
+        let rows = steering_rows(&worker);
+        assert_eq!(rows.len(), 1, "one row carries all three: {rows:?}");
+        assert!(rows[0].0.contains("3 new"), "{rows:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_success_landing_in_a_turn_joins_it_or_is_held_after_it() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.core.lock().unwrap().busy = true;
-    admit(&worker, &notify, &inbox, &arrivals, bash_done(1));
-    admit(&worker, &notify, &inbox, &arrivals, bash_done(2));
-    let rows = steering_rows(&worker);
-    assert_eq!(rows.len(), 1, "one folded row: {rows:?}");
-    assert!(rows[0].0.contains("2 new bash-done messages"), "{rows:?}");
-    assert!(woken_within(&notify, Duration::from_millis(1)).await);
+    let start = tokio::time::Instant::now();
+    admit(&worker, &notify, &inbox, &arrivals, bash_done(1, 0));
+    // The run was cut at a tool boundary: the row continues the turn now.
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = false;
+        core.run_cut_at_tool_boundary = true;
+    }
+    assert_eq!(hold(&worker), None);
+    // The run ended on its own: no fresh turn for the success alone.
+    worker.core.lock().unwrap().run_cut_at_tool_boundary = false;
+    assert_eq!(hold(&worker), Some(start + HOLD));
+    // Any other queued work starts a turn the held row joins.
+    worker.core.lock().unwrap().follow_up.push_back(QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "user prompt".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+    assert_eq!(hold(&worker), None);
+}
+
+#[tokio::test]
+async fn a_delivery_consumes_what_it_shows_and_leaves_counted_items_waiting() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    admit(&worker, &notify, &inbox, &arrivals, bash_done(1, 0));
+    let (text, preview) = deliver(&worker, &arrivals, &inbox);
+    assert_eq!(inbox.count().0, 0, "the shown item is consumed");
+    assert!(
+        text.contains("1 new message (bash-done); shown below and marked read; total waiting: 0.\n\n[bash-done pid:1 exit:0]"),
+        "{text}"
+    );
+    assert!(!text.contains("rlm.inbox.read()"), "{text}");
+    assert_eq!(preview.as_deref(), Some("Inbox: 1 new message (bash-done)"));
+    let journal = std::fs::read_to_string(inbox.journal_path().unwrap()).unwrap();
+    assert!(
+        journal
+            .lines()
+            .last()
+            .unwrap()
+            .contains("\"kind\":\"withdrawn\""),
+        "{journal}"
+    );
+
+    // Above the inline limit a success is one shown line; a failure is
+    // only counted and waits for a read.
+    admit(&worker, &notify, &inbox, &arrivals, bash_done(2, 0));
+    admit(&worker, &notify, &inbox, &arrivals, bash_done(3, 0));
+    admit(&worker, &notify, &inbox, &arrivals, bash_done(4, 7));
+    let (text, _) = deliver(&worker, &arrivals, &inbox);
+    assert_eq!(
+        inbox
+            .waiting_messages()
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[bash-done pid:4 exit:7]"]
+    );
+    assert!(
+        text.contains(
+            "3 new bash-done messages; 2 shown below and marked read; total waiting: 1. \
+             Read them with msgs = await rlm.inbox.read().\n\n\
+             [bash-done pid:2 exit:0]\n[bash-done pid:3 exit:0]"
+        ),
+        "{text}"
+    );
 }

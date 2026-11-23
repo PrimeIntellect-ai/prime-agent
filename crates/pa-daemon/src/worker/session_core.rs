@@ -99,6 +99,13 @@ pub(crate) struct SessionCore {
     /// (`preparing` at pickup, `committing` at the first row, `running` at the
     /// first assistant frame) and clears it once the turn settles.
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
+    /// The earliest instant the queued inbox arrival row may start a turn on
+    /// an idle session (the success hold or the debounce, see
+    /// `inbox_router::wake_delay`); cleared when the row delivers.
+    pub(crate) inbox_wake_due: Option<tokio::time::Instant>,
+    /// The last run's final turn ran tools: a queued steer stopped it at a
+    /// tool boundary, so the row that stopped it continues the turn at once.
+    pub(crate) run_cut_at_tool_boundary: bool,
 }
 
 impl SessionCore {
@@ -115,6 +122,24 @@ impl SessionCore {
         input_pauses: &crate::session_input_pause::InputPauseTable,
     ) -> bool {
         input_pauses.paused() || self.queued_input_suspended || self.compacting
+    }
+
+    /// The instant the turn runner waits for instead of taking queued work:
+    /// `Some` only while the inbox arrival row is the only queued item, its
+    /// due time is still ahead, and the last run ended on its own. Any other
+    /// queued work starts a turn the row joins, and a run cut at a tool
+    /// boundary continues at once with the row that cut it.
+    pub(crate) fn inbox_wake_hold(
+        &self,
+        now: tokio::time::Instant,
+    ) -> Option<tokio::time::Instant> {
+        let only_the_arrival_row = self.follow_up.is_empty()
+            && self.steering.len() == 1
+            && self.steering[0].queue_key.as_deref() == Some(super::INBOX_ARRIVAL_QUEUE_KEY);
+        if !only_the_arrival_row || self.run_cut_at_tool_boundary {
+            return None;
+        }
+        self.inbox_wake_due.filter(|due| *due > now)
     }
 
     /// A created session core for command modules' unit tests (the private
@@ -163,6 +188,8 @@ impl SessionCore {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
+            inbox_wake_due: None,
+            run_cut_at_tool_boundary: false,
         }
     }
 }

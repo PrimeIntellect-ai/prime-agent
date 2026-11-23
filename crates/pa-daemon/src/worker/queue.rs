@@ -1,6 +1,6 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
-use super::inbox_router::{idle_debounce_ms, notice_text};
+use super::inbox_router::{delivered_notice_text, notice_text, shown_items, wake_delay};
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
     SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
@@ -618,16 +618,18 @@ pub(crate) fn admit_inbox_notice(
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
-    let debounce_ms = idle_debounce_ms(engine);
+    // Read before the lock: the settings lookup touches the disk.
+    let wake_delay = wake_delay(&notice, engine);
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
     // them would queue an invisible row for a busy session. The guard
     // drops with this statement: the checkpoint re-locks the core.
-    let admission = admit_inbox_notice_locked(
+    let queued = admit_inbox_notice_locked(
         &mut core.lock().unwrap(),
         inbox,
         arrivals,
         notice,
+        wake_delay,
         lane,
         session_is_closed,
         engine,
@@ -641,58 +643,28 @@ pub(crate) fn admit_inbox_notice(
             operation: "steer_queued",
         },
     );
-    // Rule 4: a joined row is already covered by the wake that opened it.
-    // A busy session folds a new row into the turn at its next boundary;
-    // an idle one waits out the debounce window, and every arrival inside
-    // the window joins the row, so the window ends in one wake.
-    match (admission.wake, admission.parked) {
-        (InboxWake::Joined, _) => {}
-        (InboxWake::Opened, true) => work_notify.notify_one(),
-        (InboxWake::Opened, false) if debounce_ms == 0 => work_notify.notify_one(),
-        (InboxWake::Opened, false) => {
-            let work_notify = Arc::clone(work_notify);
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(debounce_ms);
-            tokio::spawn(async move {
-                tokio::time::sleep_until(deadline).await;
-                work_notify.notify_one();
-            });
-        }
-    }
-    Ok(admission.parked)
-}
-
-/// What one inbox admission did to the wake rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InboxWake {
-    /// A new wake row queued.
-    Opened,
-    /// The message joined the queued row of an earlier arrival.
-    Joined,
-}
-
-/// One inbox admission's outcome: whether the session was busy (the
-/// receipt's `deliveryStatus`) and what happened to the wake rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InboxAdmission {
-    pub(crate) parked: bool,
-    pub(crate) wake: InboxWake,
+    // The runner decides when the row starts a turn (the row's due time,
+    // `SessionCore::inbox_wake_hold`); an arrival may have moved it closer.
+    work_notify.notify_one();
+    Ok(queued)
 }
 
 /// [`admit_inbox_notice`] over an already locked core, without the
 /// checkpoint and wake (the checkpoint re-locks the core, so the caller
 /// runs both after releasing its guard): the heartbeat route holds the
-/// lock across its live-job check and withdrawal.
+/// lock across its live-job check and withdrawal. `wake_delay` is the
+/// arrival's [`wake_delay`], read before the caller took the lock.
 #[allow(clippy::too_many_arguments)] // the wrapper's seams minus the lock-order handles
 pub(crate) fn admit_inbox_notice_locked(
     core_guard: &mut SessionCore,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     notice: pa_core::session_engine::inbox::InboxNotice,
+    wake_delay: std::time::Duration,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
-) -> Result<InboxAdmission, String> {
+) -> Result<bool, String> {
     // A notice that raced past the sink's first check is refused here
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
@@ -721,7 +693,7 @@ pub(crate) fn admit_inbox_notice_locked(
     } else {
         (TurnPolicy::Injected, false)
     };
-    let coalescing = {
+    {
         let mut arrivals = arrivals.lock().unwrap();
         // A queued notice row covers its arrivals until it delivers; no
         // row means the last notice already delivered (or was cleared).
@@ -733,6 +705,13 @@ pub(crate) fn admit_inbox_notice_locked(
         if !coalescing {
             arrivals.clear();
         }
+        // Rules 2 and 4: the row's due time is the earliest of its
+        // arrivals' own, so a waking arrival flushes held successes.
+        let due = tokio::time::Instant::now() + wake_delay;
+        core_guard.inbox_wake_due = Some(match core_guard.inbox_wake_due {
+            Some(earlier) if coalescing => earlier.min(due),
+            _ => due,
+        });
         arrivals.push(message);
         let (count, _, _) = inbox.count();
         let (preview, text) = notice_text(&arrivals, count);
@@ -786,16 +765,8 @@ pub(crate) fn admit_inbox_notice_locked(
             policy,
             forced_batch: false,
         });
-        coalescing
-    };
-    Ok(InboxAdmission {
-        parked: queued,
-        wake: if coalescing {
-            InboxWake::Joined
-        } else {
-            InboxWake::Opened
-        },
-    })
+    }
+    Ok(queued)
 }
 
 /// Retract or re-render the queued inbox wake rows over the live store:
@@ -884,6 +855,44 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
         }
     }
     changed
+}
+
+/// Deliver the inbox arrival row the runner just picked: the row
+/// re-renders over the live batch and withdraws the items it shows
+/// (`inbox_router::shown_items`) from the inbox in the same step, so the
+/// waiting count drains with the delivery and the model is never told to
+/// read what it was just shown. Items the row only counts wait for a read.
+/// A recovered row (its batch unknown) delivers as queued.
+pub(crate) fn deliver_inbox_arrival_row_locked(
+    core_guard: &mut SessionCore,
+    item: &mut QueuedItem,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) {
+    core_guard.inbox_wake_due = None;
+    {
+        let mut batch = arrivals.lock().unwrap();
+        let waiting = inbox.waiting_ids();
+        batch.retain(|message| waiting.contains(&message.id));
+        if batch.is_empty() {
+            return;
+        }
+        let shown = shown_items(&batch)
+            .into_iter()
+            .map(|message| message.id.clone())
+            .collect();
+        inbox.withdraw_ids(&shown);
+        let (count, _, _) = inbox.count();
+        let (preview, text) = delivered_notice_text(&batch, count);
+        rerender_inbox_notice(
+            item,
+            &inbox.with_persistence_error_clause(text),
+            batch.len(),
+        );
+        item.preview = Some(preview);
+    }
+    // A queued reminder follows the drained count.
+    refresh_inbox_wake_rows_locked(core_guard, arrivals, inbox);
 }
 
 /// Admit one periodic unread reminder: while the inbox stays non-empty,

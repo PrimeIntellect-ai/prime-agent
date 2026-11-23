@@ -2,11 +2,11 @@
 //! engine, and settles the result.
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    deliver_inbox_arrival_row_locked, emit_refinement_event_for_session, emit_refinement_row,
+    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
+    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,10 @@ pub(super) struct TurnRunner {
     /// runner reads it at every boundary so a create-time rebind is always
     /// current.
     pub(super) herdr: std::sync::Arc<std::sync::Mutex<crate::herdr::HerdrReporter>>,
+    /// The batch the queued inbox arrival row covers (the worker's
+    /// `inbox_arrivals`) and the engine whose live inbox it consumes from.
+    pub(super) inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals,
+    pub(super) inbox_engine: Option<std::sync::Weak<crate::agent_engine::AgentSessionEngine>>,
 }
 
 /// The idle-passivation context on the turn runner: the worker token
@@ -45,6 +49,14 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
+            // The live inbox store, fetched before the core lock (its slot
+            // has its own mutex): a picked arrival row consumes from it.
+            let inbox = self
+                .inbox_engine
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|engine| engine.inbox());
+            let mut inbox_hold = None;
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
@@ -59,28 +71,20 @@ impl TurnRunner {
                 if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     None
+                } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
+                    core.busy = false;
+                    inbox_hold = Some(due);
+                    None
                 } else if core.steering.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::Steering);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::Steering, items))
+                    Some((
+                        Lane::Steering,
+                        self.pick(&mut core, Lane::Steering, inbox.as_ref()),
+                    ))
                 } else if core.follow_up.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::FollowUp, items))
+                    Some((
+                        Lane::FollowUp,
+                        self.pick(&mut core, Lane::FollowUp, inbox.as_ref()),
+                    ))
                 } else {
                     core.busy = false;
                     None
@@ -127,6 +131,15 @@ impl TurnRunner {
                 // window arms for any idle unattached session under a live
                 // threshold; the select's notified arm is the wake path — a
                 // queued delivery wins the race and the next park re-arms.
+                // A held inbox row (`SessionCore::inbox_wake_hold`) wakes
+                // the runner at its due time; any queued work wakes it sooner.
+                if let Some(due) = inbox_hold {
+                    tokio::select! {
+                        () = self.work_notify.notified() => {}
+                        () = tokio::time::sleep_until(due) => {}
+                    }
+                    continue;
+                }
                 match self.idle_passivation_window() {
                     Some(remaining) => {
                         tokio::select! {
@@ -142,6 +155,36 @@ impl TurnRunner {
                 }
             }
         }
+    }
+
+    /// Take the next delivery from `lane` and mark the session busy with
+    /// it. An inbox arrival row delivers through
+    /// [`deliver_inbox_arrival_row_locked`], which consumes what it shows.
+    fn pick(
+        &self,
+        core: &mut SessionCore,
+        lane: Lane,
+        inbox: Option<&std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>,
+    ) -> Vec<QueuedItem> {
+        let mut items = gather_delivery_batch(core, lane);
+        if let Some(inbox) = inbox {
+            for item in items
+                .iter_mut()
+                .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+            {
+                deliver_inbox_arrival_row_locked(core, item, &self.inbox_arrivals, inbox);
+            }
+        }
+        core.running_admission_ids = items
+            .iter()
+            .filter_map(|item| item.admission_id.clone())
+            .collect();
+        core.busy = true;
+        core.abort_requested = false;
+        core.retry_abort_requested = false;
+        core.run_cut_at_tool_boundary = false;
+        core.running_tool_calls.clear();
+        items
     }
 
     /// Release a parked parent-owned child's kernel; the engine owns the
@@ -489,6 +532,9 @@ impl TurnRunner {
                 // completion that cut this run) keeps the note for the work
                 // continuing in the next delivery. Clear before the frame:
                 // its roster flush must not publish the stale note.
+                if let EngineEvent::TurnEnd { tool_results, .. } = &event {
+                    core.run_cut_at_tool_boundary = !tool_results.is_empty();
+                }
                 let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
                 let more_queued =
                     agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());

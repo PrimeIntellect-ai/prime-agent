@@ -30,13 +30,13 @@ pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
     admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
-    enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
-    queue_lanes, queued_bash_completion_notices, refresh_inbox_wake_rows_locked,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
-    withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle,
-    ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    deliver_inbox_arrival_row_locked, enqueue_priority, gather_delivery_batch,
+    parse_custom_message, parse_prompt_images, queue_lanes, queued_bash_completion_notices,
+    refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy,
+    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -335,6 +335,8 @@ impl Worker {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
+            inbox_wake_due: None,
+            run_cut_at_tool_boundary: false,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
             tool_use_count: 0,
@@ -780,6 +782,8 @@ impl Worker {
                     worker_token,
                 },
                 herdr: std::sync::Arc::clone(&herdr_slot),
+                inbox_arrivals: std::sync::Arc::clone(&inbox_arrivals),
+                inbox_engine: agent_engine.as_ref().map(std::sync::Arc::downgrade),
             };
             tokio::spawn(async move {
                 runner.run().await;
