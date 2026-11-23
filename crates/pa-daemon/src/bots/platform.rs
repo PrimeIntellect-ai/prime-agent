@@ -77,8 +77,10 @@ pub trait BotPlatform: Send + Sync {
     /// Request a pause; returns the pause checkpoint id when the platform reports one.
     fn pause<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<Option<String>>>;
     fn resume<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>>;
-    /// Take a disk checkpoint and wait until it is durable; returns its id.
+    /// Start a disk checkpoint; returns its id.
     fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>>;
+    /// Wait until the checkpoint is durable.
+    fn wait_checkpoint<'a>(&'a self, checkpoint_id: &'a str) -> BoxFuture<'a, PlatformResult<()>>;
     /// True when the checkpoint exists and is durable.
     fn checkpoint_durable<'a>(
         &'a self,
@@ -326,17 +328,22 @@ impl BotPlatform for PrimePlatform {
 
     fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>> {
         async move {
-            let checkpoint = self
-                .client
+            self.client
                 .create_checkpoint(sandbox_id)
                 .await
-                .map_err(|error| map_error(&error))?;
-            let durable = self
-                .client
-                .wait_for_checkpoint(&checkpoint.id, CHECKPOINT_WAIT, CHECKPOINT_POLL)
+                .map(|checkpoint| checkpoint.id)
+                .map_err(|error| map_error(&error))
+        }
+        .boxed()
+    }
+
+    fn wait_checkpoint<'a>(&'a self, checkpoint_id: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            self.client
+                .wait_for_checkpoint(checkpoint_id, CHECKPOINT_WAIT, CHECKPOINT_POLL)
                 .await
-                .map_err(|error| map_error(&error))?;
-            Ok(durable.id)
+                .map(drop)
+                .map_err(|error| map_error(&error))
         }
         .boxed()
     }

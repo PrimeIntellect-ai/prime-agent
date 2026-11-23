@@ -60,9 +60,12 @@ pub struct BotRecord {
     #[serde(default)]
     pub sandbox_id: Option<String>,
     pub status: BotStatus,
-    /// The newest durable checkpoint that can restore this bot.
+    /// The newest checkpoint of this bot; it may still be uploading.
     #[serde(default)]
     pub checkpoint_id: Option<String>,
+    /// Older checkpoints kept until a newer one is durable, oldest first.
+    #[serde(default)]
+    pub older_checkpoint_ids: Vec<String>,
     /// The prime-agent version installed in the guest.
     #[serde(default)]
     pub version: String,

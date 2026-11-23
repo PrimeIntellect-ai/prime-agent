@@ -25,6 +25,10 @@ pub(crate) struct FakeState {
     /// The next create commits, then answers with a transport error.
     pub lose_next_create_reply: bool,
     pub refuse_pause: bool,
+    /// New pause checkpoints stay pending (not durable).
+    pub pause_checkpoints_pending: bool,
+    /// Checkpoints that exist but are not durable yet.
+    pub pending_checkpoints: std::collections::HashSet<String>,
     pub unpublished: bool,
 }
 
@@ -146,6 +150,9 @@ impl BotPlatform for FakePlatform {
                 .cloned()
                 .unwrap_or_default();
             state.checkpoints.insert(checkpoint.clone(), version);
+            if state.pause_checkpoints_pending {
+                state.pending_checkpoints.insert(checkpoint.clone());
+            }
             Ok(Some(checkpoint))
         }
         .boxed()
@@ -177,11 +184,24 @@ impl BotPlatform for FakePlatform {
         .boxed()
     }
 
+    fn wait_checkpoint<'a>(&'a self, checkpoint_id: &'a str) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            self.state().pending_checkpoints.remove(checkpoint_id);
+            Ok(())
+        }
+        .boxed()
+    }
+
     fn checkpoint_durable<'a>(
         &'a self,
         checkpoint_id: &'a str,
     ) -> BoxFuture<'a, PlatformResult<bool>> {
-        async move { Ok(self.state().checkpoints.contains_key(checkpoint_id)) }.boxed()
+        async move {
+            let state = self.state();
+            Ok(state.checkpoints.contains_key(checkpoint_id)
+                && !state.pending_checkpoints.contains(checkpoint_id))
+        }
+        .boxed()
     }
 
     fn delete_checkpoint<'a>(
@@ -389,6 +409,37 @@ async fn refused_pause_checkpoints_and_restores() {
     // The restored disk holds the session file; the guest reopens it, and the version matches.
     assert_eq!(restored.guest_session_file, spawned.guest_session_file);
     assert_eq!(platform.state().installs, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restore_falls_back_to_the_newest_durable_checkpoint() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    platform.state().pause_checkpoints_pending = true;
+
+    let paused = manager.pause("bot-a").await.unwrap();
+    assert_eq!(paused.older_checkpoint_ids, vec![durable.clone()]);
+    assert!(
+        platform.state().checkpoints.contains_key(&durable),
+        "kept until a newer one is durable"
+    );
+
+    // The paused sandbox is lost while its newest checkpoint still uploads.
+    let sandbox_id = paused.sandbox_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(durable.as_str())
+    );
 }
 
 #[tokio::test(start_paused = true)]

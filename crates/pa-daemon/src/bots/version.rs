@@ -16,10 +16,10 @@ pub const TARBALL_OVERRIDE_ENV: &str = "PRIME_AGENT_BOT_TARBALL";
 /// The exit code [`INSTALL_SCRIPT`] returns when the release is not published.
 pub const UNPUBLISHED_EXIT_CODE: i32 = 3;
 
-/// The version of this binary.
+/// The product version of this binary (the version the daemon hello reports).
 #[must_use]
 pub fn local_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate::protocol::app_version()
 }
 
 /// Where the guest gets the release from.
