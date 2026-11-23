@@ -320,6 +320,10 @@ impl SessionUi {
                 }
             }
             DaemonClientEvent::DaemonClosing { reason, update } => {
+                // A bot view never resumes: the closing guest daemon is a lost link.
+                if self.bot_link_lost(&ConnectionEvent::ShutdownNotice, view) {
+                    return;
+                }
                 if let Some(update) = update {
                     // Spec §10: reattach is the default end state. The banner carries the
                     // resume contract; the interactive run's reconnect loop drives the rest.
