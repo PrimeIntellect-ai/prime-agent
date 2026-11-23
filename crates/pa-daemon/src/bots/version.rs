@@ -100,10 +100,13 @@ if [ -n "${PA_TARBALL_BYTES:-}" ]; then
   echo "${PA_TARBALL_SHA256}  $asset" | sha256sum -c - >/dev/null
 else
   base="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PA_VERSION}"
-  if ! curl -fsSL -o SHA256SUMS "$base/SHA256SUMS" || ! curl -fsSL -o "$asset" "$base/$asset"; then
+  status="$(curl -sSL --retry 3 -o SHA256SUMS -w '%{http_code}' "$base/SHA256SUMS" || true)"
+  if [ "$status" = 404 ]; then
     echo "prime-agent ${PA_VERSION} has no published linux-x64 release" >&2
     exit 3
   fi
+  test "$status" = 200
+  curl -fsSL --retry 3 -o "$asset" "$base/$asset"
   awk -v f="$asset" '$2 == f || $2 == "*" f { print $1 "  " f }' SHA256SUMS > expected
   test -s expected
   sha256sum -c expected >/dev/null

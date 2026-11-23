@@ -61,7 +61,13 @@ pub struct BotSpec {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write;
+            write!(hex, "{byte:02x}").expect("write to String");
+            hex
+        })
 }
 
 /// The process-wide manager, built on first use from the daemon's Prime

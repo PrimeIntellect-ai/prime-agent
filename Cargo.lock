@@ -1633,7 +1633,6 @@ dependencies = [
  "filetime",
  "futures",
  "globset",
- "hex",
  "nix",
  "pa-agent",
  "pa-ai",

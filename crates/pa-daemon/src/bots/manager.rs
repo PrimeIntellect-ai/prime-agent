@@ -538,7 +538,11 @@ impl BotManager {
             }
             match self.create(record, Some(&checkpoint), deadline).await {
                 Ok(sandbox) => return Ok(sandbox),
-                Err(error) if record.sandbox_id.is_some() => return Err(error),
+                // The restore may exist (still booting, or its create reply was
+                // lost): keep the checkpoint and let the next wake find it.
+                Err(error) if record.sandbox_id.is_some() || is_transient(&error) => {
+                    return Err(error)
+                }
                 Err(error) => {
                     eprintln!(
                         "pa-daemon: bot {}: checkpoint restore failed: {error:#}",
@@ -710,13 +714,22 @@ impl BotManager {
             return Ok(());
         };
         let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
-        self.save(record.clone())?;
-        for checkpoint in stale {
+        let mut failed = self.delete_checkpoints(stale).await;
+        failed.append(&mut record.older_checkpoint_ids);
+        record.older_checkpoint_ids = failed;
+        self.save(record.clone())
+    }
+
+    /// Delete checkpoints; returns the ones that could not be deleted.
+    async fn delete_checkpoints(&self, checkpoints: Vec<String>) -> Vec<String> {
+        let mut failed = Vec::new();
+        for checkpoint in checkpoints {
             if let Err(error) = retry(|| self.platform.delete_checkpoint(&checkpoint)).await {
-                eprintln!("pa-daemon: could not delete old bot checkpoint {checkpoint}: {error}");
+                eprintln!("pa-daemon: could not delete bot checkpoint {checkpoint}: {error}");
+                failed.push(checkpoint);
             }
         }
-        Ok(())
+        failed
     }
 
     async fn delete_locked(&self, bot_id: &str) -> Result<()> {
@@ -736,22 +749,29 @@ impl BotManager {
         for sandbox_id in &sandbox_ids {
             retry(|| self.platform.delete(sandbox_id)).await?;
         }
-        let checkpoints = record
-            .map(|record| {
-                record
-                    .older_checkpoint_ids
-                    .into_iter()
-                    .chain(record.checkpoint_id)
-            })
-            .into_iter()
-            .flatten();
-        for checkpoint in checkpoints {
-            if let Err(error) = retry(|| self.platform.delete_checkpoint(&checkpoint)).await {
-                eprintln!("pa-daemon: could not delete bot checkpoint {checkpoint}: {error}");
-            }
+        let Some(mut record) = record else {
+            return Ok(());
+        };
+        let mut checkpoints = std::mem::take(&mut record.older_checkpoint_ids);
+        checkpoints.extend(record.checkpoint_id.take());
+        let failed = self.delete_checkpoints(checkpoints).await;
+        if failed.is_empty() {
+            return lock(&self.registry).remove(bot_id);
         }
-        lock(&self.registry).remove(bot_id)
+        // Keep the record so a later delete retries the checkpoints.
+        record.sandbox_id = None;
+        record.status = BotStatus::Stopped;
+        record.older_checkpoint_ids = failed;
+        self.save(record)?;
+        bail!("bot {bot_id}: some checkpoints could not be deleted")
     }
+}
+
+fn is_transient(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<PlatformError>(),
+        Some(PlatformError::Transient(_) | PlatformError::Conflict(_))
+    )
 }
 
 /// sha256 of `bot_id:generation:source`, first 32 hex chars (orbs
@@ -843,7 +863,9 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         last_turn_at: None,
         guest_session_id: String::new(),
         guest_session_file: None,
-        generation: 0,
+        // The lost record's generation is unknown; a time-based one is past
+        // every generation the bot used, so no old idempotency key repeats.
+        generation: u32::try_from(now_ms() / 1000).unwrap_or(u32::MAX),
     }
 }
 
