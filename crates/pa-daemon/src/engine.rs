@@ -243,11 +243,11 @@ pub trait SessionEngine: Send + Sync {
         None
     }
     /// The worker's turn loop started: engines hosting RLM children hold
-    /// the task prompts of children spawned from here until `on_turn_done`.
+    /// task prompts until `on_turn_done`, unless a positive collect releases one.
     fn on_turn_start(&self) {}
     /// The worker's turn loop completed: engines hosting RLM children
-    /// release prompt tasks spawned mid-turn, so the parent's continuation
-    /// request always reaches the provider before a child's first turn.
+    /// release prompt tasks still held from this turn. A positive collect can
+    /// start its selected child before the parent continues.
     fn on_turn_done(&self) {}
 
     /// Finalize session telemetry at session close: emit `agent session

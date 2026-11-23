@@ -32,6 +32,9 @@ pub(crate) fn convert_content_blocks(content: &[UserOrToolContent]) -> Value {
             .map(|block| match crate::types::user_block_payload(block) {
                 crate::types::UserBlockPayload::Text(text) => text.to_string(),
                 crate::types::UserBlockPayload::Image { data, .. } => data.to_string(),
+                crate::types::UserBlockPayload::Video { .. } => {
+                    crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER.to_string()
+                }
                 crate::types::UserBlockPayload::Opaque(json) => json,
             })
             .collect::<Vec<_>>()
@@ -52,6 +55,10 @@ pub(crate) fn convert_content_blocks(content: &[UserOrToolContent]) -> Value {
                     "media_type": mime_type,
                     "data": data,
                 },
+            }),
+            crate::types::UserBlockPayload::Video { .. } => json!({
+                "type": "text",
+                "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER,
             }),
             crate::types::UserBlockPayload::Opaque(json) => json!({
                 "type": "text",
@@ -112,6 +119,10 @@ pub fn convert_messages(
                                     "media_type": mime_type,
                                     "data": data,
                                 },
+                            }),
+                            crate::types::UserBlockPayload::Video { .. } => json!({
+                                "type": "text",
+                                "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER,
                             }),
                             crate::types::UserBlockPayload::Opaque(json) => json!({
                                 "type": "text",

@@ -127,6 +127,21 @@ class TheMappingTestCase(unittest.TestCase):
         self.assertEqual(outputs["crates"], "pa-cli,pa-daemon,pa-perf")
         self.assertIn("guaranteed-metadata path .changes/daemon-fix.md", out)
 
+    def test_documentation_changes_do_not_defeat_crate_narrowing(self):
+        rc, out, outputs = run_mapper([
+            "crates/pa-core/src/lib.rs",
+            "docs/architecture.md",
+        ])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "pa-cli,pa-core,pa-daemon,pa-perf,pa-tui")
+        self.assertIn("guaranteed-metadata path docs/architecture.md", out)
+
+    def test_documentation_only_pr_keeps_the_full_selection(self):
+        rc, out, outputs = run_mapper(["docs/architecture.md"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "")
+        self.assertEqual(outputs["scope"], "all")
+
     def test_a_fragment_only_pr_keeps_the_full_selection(self):
         # Metadata never narrows on its own: with no crate path in the
         # list the full selection runs (an empty selection would run no
@@ -167,6 +182,7 @@ class TheMappingTestCase(unittest.TestCase):
             "scripts/ci_test_shard.py",
             "vendor/crossterm/src/lib.rs",
             "prime-agent-runtime/src/rlm/repl.py",
+            "README.md",
             "Cargo.toml",
             "install-rust.sh",
         ]:
@@ -183,11 +199,11 @@ class TheMappingTestCase(unittest.TestCase):
         # A rename from a non-crate path INTO a crate: the PR removed the
         # old path, so the full selection runs.
         rc, out, outputs = run_mapper([
-            "crates/pa-cli/src/new.rs\tdocs/old-location.md",
+            "crates/pa-cli/src/new.rs\tREADME.md",
         ])
         self.assertEqual(rc, 0, out)
         self.assertEqual(outputs["crates"], "")
-        self.assertIn("non-crate path docs/old-location.md", out)
+        self.assertIn("non-crate path README.md", out)
 
     def test_a_rename_within_crates_narrows_to_both_crates(self):
         rc, out, outputs = run_mapper([

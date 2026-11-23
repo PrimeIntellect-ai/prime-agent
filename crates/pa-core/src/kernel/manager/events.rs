@@ -6,7 +6,8 @@ use super::{
     Arc, Event, ExecBuffers, ExecuteStatus, Guarded, Inner, KernelBashCommands, KernelError,
     StreamName, Value, AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME,
     BASH_ACTIVITY_DISPLAY_MIME, BASH_COMMAND_DISPLAY_MIME, DIFF_DISPLAY_MIME,
-    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, TRANSCRIPT_READ_DISPLAY_MIME,
+    INBOX_MESSAGE_DISPLAY_MIME, MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
+    TRANSCRIPT_READ_DISPLAY_MIME,
 };
 
 impl Inner {
@@ -223,6 +224,9 @@ impl Inner {
         if let Some(read) = data.get(TRANSCRIPT_READ_DISPLAY_MIME) {
             buffers.transcript_reads.push(read.clone());
         }
+        if let Some(message) = data.get(INBOX_MESSAGE_DISPLAY_MIME) {
+            buffers.inbox_messages.push(message.clone());
+        }
         if let Some(payload) = data.get(BASH_COMMAND_DISPLAY_MIME) {
             if let (Some(command), Some(lines)) = (
                 payload.get("command").and_then(Value::as_str),
@@ -300,8 +304,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::kernel::manager::ReplKernelManager;
-    use crate::kernel::shared::{BackgroundWorkSettledCallback, KernelManagerOptions};
+    use crate::kernel::manager::{ActiveExecution, ReplKernelManager};
+    use crate::kernel::shared::{
+        BackgroundWorkSettledCallback, ExecuteOptions, KernelManagerOptions,
+    };
     use crate::platform::process::Signal;
     use serde_json::json;
 
@@ -386,6 +392,36 @@ mod tests {
         );
         manager.inner.cleanup_resources(Signal::Term);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn inbox_message_displays_collect_into_the_owning_cell() {
+        let manager = ReplKernelManager::new(KernelManagerOptions::default());
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let execution = Arc::new(ActiveExecution {
+            request_id: "cell-1".to_string(),
+            started: std::time::Instant::now(),
+            max_chars: 1_000,
+            opts: ExecuteOptions::default(),
+            namespace_code: true,
+            restores_namespace: false,
+            buffers: std::sync::Mutex::new(ExecBuffers::default()),
+            result_tx: std::sync::Mutex::new(Some(result_tx)),
+        });
+        lock(&manager.inner.guarded).active_execution = Some(Arc::clone(&execution));
+        let messages = [
+            json!({ "id": "inbox-1", "class": "bash-done", "arrivedAtMs": 1, "text": "a", "meta": {} }),
+            json!({ "id": "inbox-2", "class": "heartbeat", "arrivedAtMs": 2, "text": "b", "meta": {} }),
+        ];
+        for message in &messages {
+            let mut data = serde_json::Map::new();
+            data.insert(INBOX_MESSAGE_DISPLAY_MIME.to_string(), message.clone());
+            manager.inner.handle_event(Event::Display {
+                id: Some("cell-1".to_string()),
+                data: Value::Object(data),
+            });
+        }
+        assert_eq!(lock(&execution.buffers).inbox_messages, messages);
     }
 
     #[test]

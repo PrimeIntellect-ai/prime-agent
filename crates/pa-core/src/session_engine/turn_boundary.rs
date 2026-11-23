@@ -213,6 +213,7 @@ impl TurnBoundaryRequests {
                         "input": model_info.input.iter().map(|input| match input {
                             pa_types::ai::ModelInput::Text => "text",
                             pa_types::ai::ModelInput::Image => "image",
+                            pa_types::ai::ModelInput::Video => "video",
                         }).collect::<Vec<&str>>(),
                     }))
                 })
@@ -403,20 +404,12 @@ impl SessionEngine {
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> Option<anyhow::Result<super::compact_session::CompactOutcome>> {
         let pending = self.turn_boundary.take_compaction().await?;
-        let compact = async {
+        // `compact` owns the cancel boundary: `abort` stops it only before the commit.
+        Some(
             self.session
                 .compact(pending.instructions.as_deref(), model, api_key, abort)
-                .await
-        };
-        Some(match abort {
-            // The refinement is not raced — TS `abortCompaction` never
-            // aborts it.
-            Some(signal) => match pa_agent::abort::race_with_abort(compact, signal).await {
-                Ok(inner) => inner,
-                Err(error) => Err(error),
-            },
-            None => compact.await,
-        })
+                .await,
+        )
     }
 
     /// Start a pending model-requested refinement without waiting on planning or

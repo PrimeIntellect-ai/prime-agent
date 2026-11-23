@@ -639,7 +639,6 @@ fn ledger_child_records(
             // gone with the old process), so the retire-at-settle funnel
             // never runs for it — the flag is inert here either way.
             refine_child: false,
-            prompt_admitted: true,
             retirement: Retirement::live(),
             usage_registration_forgotten: false,
             session_file: Some(edge.child),

@@ -61,7 +61,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::registry::{ResidentWorker, WorkerRequest};
+    use crate::registry::{ResidentWorker, WorkerReply, WorkerRequest};
     use crate::supervisor::{Supervisor, SupervisorOptions};
     use pa_types::daemon::{DaemonErrorInfo, DaemonWorkerDescriptor};
 
@@ -315,5 +315,186 @@ mod tests {
             cmd_rx.try_recv().is_err(),
             "nothing was enqueued behind the retire"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abandoned_idle_slices_release_permits_and_pending_slots() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let resident = resident("w-slices");
+        let (_cmd_tx, mut cmd_rx) = wedged_worker(&resident).await;
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        resident.transition(crate::registry::WorkerTransition::SessionReady);
+        let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel(16);
+        let attached = crate::supervisor::subscribers::ClientSubscriptions::new(
+            "client".to_string(),
+            targeted_tx,
+        );
+        let mut detached_routes = Vec::new();
+
+        for index in 0..WORKER_INFLIGHT_CAPACITY {
+            let command: pa_types::daemon::DaemonCommand =
+                serde_json::from_value(serde_json::json!({
+                    "type": "wait_for_idle",
+                    "activeSessionId": "w-slices",
+                    "timeoutMs": 1,
+                }))
+                .expect("idle command");
+            let task_supervisor = Arc::clone(&supervisor);
+            let task_attached = Arc::clone(&attached);
+            let route = tokio::spawn(async move {
+                task_supervisor
+                    .route_client_command(
+                        &command,
+                        "client",
+                        &task_attached,
+                        format!("idle-{index}"),
+                        "wait_for_idle".to_string(),
+                        None,
+                    )
+                    .await
+            });
+            // The detached command route remains alive after its caller drops
+            // the response handle. Do not abort it before its own deadline.
+            detached_routes.push(route.abort_handle());
+            drop(route);
+            let request = cmd_rx.recv().await.expect("idle frame reaches worker");
+            assert_eq!(request.command_type, "wait_for_idle");
+            assert_eq!(request.payload["timeoutMs"], 1);
+        }
+
+        tokio::time::advance(std::time::Duration::from_millis(6_000)).await;
+        for _ in 0..WORKER_INFLIGHT_CAPACITY * 4 {
+            if resident.inflight.available_permits() == WORKER_INFLIGHT_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let permits_after_slices = resident.inflight.available_permits();
+        let pending_after_slices = resident.pending.lock().await.len();
+
+        let command: pa_types::daemon::DaemonCommand = serde_json::from_value(
+            serde_json::json!({"type": "get_state", "activeSessionId": "w-slices"}),
+        )
+        .expect("state command");
+        let task_supervisor = Arc::clone(&supervisor);
+        let task_attached = Arc::clone(&attached);
+        let control = tokio::spawn(async move {
+            task_supervisor
+                .route_client_command(
+                    &command,
+                    "client",
+                    &task_attached,
+                    "state-after-slices".to_string(),
+                    "get_state".to_string(),
+                    None,
+                )
+                .await
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_millis(1), cmd_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        if let Some(request) = &request {
+            let reply = resident
+                .pending
+                .lock()
+                .await
+                .remove(&request.request_id)
+                .expect("state route reply slot");
+            let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+                None,
+                "get_state",
+                Some(serde_json::json!({"state": "ok"})),
+            )));
+        }
+        let (lines, stop) = control.await.expect("state route task");
+        let control_admitted = request.is_some() && !stop && lines[0]["success"] == true;
+        for route in detached_routes {
+            route.abort();
+        }
+        assert_eq!(
+            permits_after_slices, WORKER_INFLIGHT_CAPACITY,
+            "each expired slice must return its worker permit"
+        );
+        assert_eq!(
+            pending_after_slices, 0,
+            "expired slices must remove reply slots"
+        );
+        assert!(
+            control_admitted,
+            "get_state must be admitted after the slices"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn omitted_and_long_explicit_idle_budgets_survive_a_virtual_hour() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let resident = resident("w-long-idle");
+        let (_cmd_tx, mut cmd_rx) = wedged_worker(&resident).await;
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        resident.transition(crate::registry::WorkerTransition::SessionReady);
+        let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel(16);
+        let attached = crate::supervisor::subscribers::ClientSubscriptions::new(
+            "client".to_string(),
+            targeted_tx,
+        );
+
+        for (command_id, timeout_ms) in [("idle-unbounded", None), ("idle-long", Some(7_200_000))] {
+            let mut value = serde_json::json!({
+                "type": "wait_for_idle",
+                "activeSessionId": "w-long-idle",
+            });
+            if let Some(timeout_ms) = timeout_ms {
+                value["timeoutMs"] = serde_json::json!(timeout_ms);
+            }
+            let command: pa_types::daemon::DaemonCommand =
+                serde_json::from_value(value).expect("idle command");
+            let task_supervisor = Arc::clone(&supervisor);
+            let task_attached = Arc::clone(&attached);
+            let route = tokio::spawn(async move {
+                task_supervisor
+                    .route_client_command(
+                        &command,
+                        "client",
+                        &task_attached,
+                        command_id.to_string(),
+                        "wait_for_idle".to_string(),
+                        None,
+                    )
+                    .await
+            });
+            let request = cmd_rx.recv().await.expect("idle frame reaches worker");
+            assert_eq!(request.command_type, "wait_for_idle");
+            assert_eq!(
+                request
+                    .payload
+                    .get("timeoutMs")
+                    .and_then(serde_json::Value::as_u64),
+                timeout_ms
+            );
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_hours(1)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !route.is_finished(),
+                "the {command_id} route must allow a healthy virtual-hour wait"
+            );
+            let reply = resident
+                .pending
+                .lock()
+                .await
+                .remove(&request.request_id)
+                .expect("long idle route reply slot");
+            let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+                None,
+                "wait_for_idle",
+                None,
+            )));
+            let (lines, stop) = route.await.expect("long idle route task");
+            assert!(!stop);
+            assert_eq!(lines[0]["success"], true);
+        }
     }
 }

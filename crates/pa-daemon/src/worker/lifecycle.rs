@@ -699,13 +699,24 @@ impl Worker {
         }
     }
 
-    /// `wait_for_idle`: park until the session is idle;
+    /// `wait_for_idle`: park until the session is idle or `timeoutMs` expires;
+    /// expiry returns `timedOut: true` without stopping the session.
     /// `waitForRlmQuiescence` also holds until its RLM children settled
     /// (the parent-side settle watcher and `collect` wait out a child's
     /// whole subtree this way).
     pub(crate) async fn handle_wait_for_idle(&self, payload: &Value) -> DaemonResponse {
-        self.wait_until_quiescent(payload).await;
-        response_success(None, "wait_for_idle", None)
+        let timed_out = if let Some(timeout_ms) = payload.get("timeoutMs").and_then(Value::as_u64) {
+            tokio::select! {
+                biased;
+                () = self.wait_until_quiescent(payload) => false,
+                () = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => true,
+            }
+        } else {
+            self.wait_until_quiescent(payload).await;
+            false
+        };
+        let data = timed_out.then(|| json!({"timedOut": true}));
+        response_success(None, "wait_for_idle", data)
     }
 
     /// The bash lane's outstanding work at a quiescence observation: live

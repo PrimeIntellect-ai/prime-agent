@@ -22,6 +22,9 @@ use diff::generate_diff_string;
 /// Mime types the model context accepts as images.
 pub const IMAGE_MIME_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// Mime types the model context accepts as videos (the attach-video skill's formats).
+pub const VIDEO_MIME_TYPES: [&str; 2] = ["video/mp4", "video/webm"];
+
 // Kernel execution types
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -68,6 +71,9 @@ pub struct ExecuteResult {
     /// The cell's `rlm.session.messages` reads (`transcriptReads` on the
     /// tool-result details).
     pub transcript_reads: Vec<serde_json::Value>,
+    /// The messages the cell's `rlm.inbox.read` calls returned
+    /// (`inboxMessages` on the tool-result details).
+    pub inbox_messages: Vec<serde_json::Value>,
     /// The time limit that interrupted this cell, if one did.
     pub timed_out_after_ms: Option<u64>,
     /// The cell ended the turn via the sanctioned `rlm.end_turn()` call:
@@ -174,6 +180,18 @@ pub fn image_blocks_from_attachments(attachments: &[KernelAttachment]) -> Vec<To
         .iter()
         .filter(|a| IMAGE_MIME_TYPES.contains(&a.mime_type.as_str()))
         .map(|a| ToolContentBlock::Image {
+            data: a.data.clone(),
+            mime_type: a.mime_type.clone(),
+        })
+        .collect()
+}
+
+/// Turn kernel video attachments into video blocks; non-videos are dropped.
+pub fn video_blocks_from_attachments(attachments: &[KernelAttachment]) -> Vec<ToolContentBlock> {
+    attachments
+        .iter()
+        .filter(|a| VIDEO_MIME_TYPES.contains(&a.mime_type.as_str()))
+        .map(|a| ToolContentBlock::Video {
             data: a.data.clone(),
             mime_type: a.mime_type.clone(),
         })
@@ -370,8 +388,10 @@ pub async fn execute_ipython(
     }
 
     let image_blocks = image_blocks_from_attachments(&r.attachments);
+    let video_blocks = video_blocks_from_attachments(&r.attachments);
     let mut content = vec![ToolContentBlock::text(text)];
     content.extend(image_blocks);
+    content.extend(video_blocks);
 
     // A timed-out cell is an error even when it had to be force-aborted:
     // nobody aborted it.
@@ -405,6 +425,9 @@ pub async fn execute_ipython(
     }
     if !r.transcript_reads.is_empty() {
         details["transcriptReads"] = json!(r.transcript_reads);
+    }
+    if !r.inbox_messages.is_empty() {
+        details["inboxMessages"] = json!(r.inbox_messages);
     }
     if let Some(background) = &r.background_output {
         details["backgroundOutput"] = json!(background);
@@ -511,6 +534,32 @@ mod tests {
         assert_eq!(
             timeout_arg_ms(&json!({ "timeout": 3600 })),
             Some(PYTHON_REPL_TIMEOUT_MAX_S * 1000)
+        );
+    }
+
+    #[test]
+    fn video_blocks_keep_only_video_attachments() {
+        let attachment = |mime_type: &str| KernelAttachment {
+            mime_type: mime_type.to_string(),
+            data: "QQ==".to_string(),
+        };
+        assert_eq!(
+            video_blocks_from_attachments(&[
+                attachment("image/png"),
+                attachment("video/mp4"),
+                attachment("application/pdf"),
+                attachment("video/webm"),
+            ]),
+            vec![
+                ToolContentBlock::Video {
+                    data: "QQ==".to_string(),
+                    mime_type: "video/mp4".to_string(),
+                },
+                ToolContentBlock::Video {
+                    data: "QQ==".to_string(),
+                    mime_type: "video/webm".to_string(),
+                },
+            ]
         );
     }
 

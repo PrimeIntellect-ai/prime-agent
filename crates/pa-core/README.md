@@ -3,55 +3,11 @@
 The session engine.
 
 ## Scope
-MCP host side (`mcp/`): auth gating for built-in integrations (the
-disabled-skill overrides and `/mcp list` status), the `mcpServers` settings
-seam, and the `mcp.*` host-request handlers the kernel's generic MCP
-client reaches through (`mcp.config`, `mcp.refresh`, optional
-`mcp.begin_login`). The OAuth flow lives behind it (`oauth*` submodules:
-RFC 9728 discovery, dynamic registration, PKCE, the local callback
-server, token refresh; `McpOAuthConfig::callback_port` selects an exact registered
-desktop callback port, while dynamic clients retain the candidate range.
-Slack's endpoint selects its documented public desktop client; `login.rs`: login execution that persists the
-endpoint-bound credential into the shared auth store and the
-`wire_begin_login`/`McpOAuth` refresh integration hosts wire). The MCP
-protocol itself runs kernel-side (Python
-stdio/HTTP); the engine never spawns MCP servers. Tools (python_repl + internal rename/stdout), rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, harness refinement, settings/config, package manager (npm/git/local source install/remove/list/update against settings), session manager (persist/resume). Autonomous mode
-(`autonomous`): runtime state with limit normalization, continuation and
-gate-failure texts, shell quality gates with retry windows and git
-worktree snapshotting, and the `AutonomousDriver` policy trait a turn
-loop consults after every settled turn (the engine holds no autonomous
-logic of its own). The RLM recursion host seam
-(`session_engine::rlm_host`): the trait the kernel's `rlm.spawn`/
-`rlm.create_session`/`rlm.list_subagents`/`rlm.collect`/
-`rlm.delete_subagent` host requests call into, with the roster/collect/
-selector-error vocabulary the daemon implements over the supervisor link.
-Platform wall (`platform`): process control (signals/process groups, kernel exit waits), file locking, file permissions, and shell selection - every OS-specific behavior in the engine lives there behind cfg-gated implementations (the durable-write rename primitive is pa-telemetry's `rename_onto`, re-exported as `platform::rename_onto`). Scheduled jobs (`cron`, the `AgentCronJobStore` port of `core/cron-jobs.ts`): file-backed job state under session artifacts (`scheduled-jobs.json` partitions) with cross-process locking, plus the public read-only scan (`cron::store::read_scheduled_jobs_artifact`) the update flow's roster projection and boot re-arm read. Tools (python_repl + internal rename/stdout), rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, harness refinement, settings/config, package manager (npm/git/local source install/remove/list/update against settings, plus `resolve()`: precedence-ranked session resource resolution over configured packages, settings arrays, auto-discovery, and bundled skills), session manager (persist/resume). origin/main
+MCP host side (`mcp/`): auth gating for built-in integrations (the disabled-skill overrides and `/mcp list` status), the `mcpServers` settings seam, and the `mcp.*` host-request handlers the kernel's generic MCP client reaches through (`mcp.config`, `mcp.refresh`, optional `mcp.begin_login`). The OAuth flow lives behind it (`oauth*` submodules: RFC 9728 discovery, dynamic registration, PKCE, the local callback server, token refresh; `McpOAuthConfig::callback_port` selects an exact registered desktop callback port, while dynamic clients retain the candidate range. Slack's endpoint selects its documented public desktop client; `login.rs`: login execution that persists the endpoint-bound credential into the shared auth store and the `wire_begin_login`/`McpOAuth` refresh integration hosts wire). The MCP protocol itself runs kernel-side (Python stdio/HTTP); the engine never spawns MCP servers. Tools (python_repl + internal rename/stdout), rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, harness refinement, settings/config, package manager (npm/git/local source install/remove/list/update against settings), session manager (persist/resume). Autonomous mode (`autonomous`): runtime state with limit normalization, continuation and gate-failure texts, shell quality gates with retry windows and git worktree snapshotting, and the `AutonomousDriver` policy trait a turn loop consults after every settled turn (the engine holds no autonomous logic of its own). The RLM recursion host seam (`session_engine::rlm_host`): the trait the kernel's `rlm.spawn`/ `rlm.create_session`/`rlm.list_subagents`/`rlm.collect`/ `rlm.delete_subagent` host requests call into, with the roster/collect/ selector-error vocabulary the daemon implements over the supervisor link. Platform wall (`platform`): process control (signals/process groups, kernel exit waits), file locking, file permissions, and shell selection - every OS-specific behavior in the engine lives there behind cfg-gated implementations (the durable-write rename primitive is pa-telemetry's `rename_onto`, re-exported as `platform::rename_onto`). Scheduled jobs (`cron`, the `AgentCronJobStore` port of `core/cron-jobs.ts`): file-backed job state under session artifacts (`scheduled-jobs.json` partitions) with cross-process locking, plus the public read-only scan (`cron::store::read_scheduled_jobs_artifact`) the update flow's roster projection and boot re-arm read. Tools (python_repl + internal rename/stdout), rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, harness refinement, settings/config, package manager (npm/git/local source install/remove/list/update against settings, plus `resolve()`: precedence-ranked session resource resolution over configured packages, settings arrays, auto-discovery, and bundled skills), session manager (persist/resume). origin/main
 
-Provider resilience policies in `session_engine`: the shared quick-retry
-policy (TS `provider-retry.ts`: permanent-kind classification,
-Retry-After-aware capped delays), the interactive auto-retry loop, and the
-provider-failover driver (when a provider exhausts its quick retries and
-another configured provider serves the same model, the failed turn
-re-routes to the next provider in catalog order; the TS
-`auto_retry_start`/`reason: "backup"` event vocabulary surfaces the
-progression). The drivers are pure decision logic: the host (pa-daemon)
-owns the attempt, the wait, and the model switch.
+Provider resilience policies in `session_engine`: the shared quick-retry policy (TS `provider-retry.ts`: permanent-kind classification, Retry-After-aware capped delays), the interactive auto-retry loop, and the provider-failover driver (when a provider exhausts its quick retries and another configured provider serves the same model, the failed turn re-routes to the next provider in catalog order; the TS `auto_retry_start`/`reason: "backup"` event vocabulary surfaces the progression). The drivers are pure decision logic: the host (pa-daemon) owns the attempt, the wait, and the model switch.
 
-Session HTML export (`export_html`): the standalone viewer file for
-`/export` and `session export` - the embedded product template
-(assets/export-html, vendored marked/highlight.js attributed in its
-NOTICE.md) plus the theme-to-CSS resolution over the bundled theme data
-(pa-types) and custom themes under `<agent-dir>/themes/`, the tools
-section mapping (`tools_section`: the session's tool registry to the
-template's name/description/parameters list), and the custom-tool
-pre-render pipeline (`ToolHtmlRenderer`/`pre_render_custom_tools` +
-`ansi_to_html`: the exporter walks the entries, the session layer's
-renderer produces line-oriented output, ANSI converts to inline-styled
-HTML at the export step), and the two entry points
-(`export_session_to_html` for the daemon worker's `export_html`
-command, `export_from_file` for the CLI). Terminal theme rendering stays
-pa-tui's; tool renderers live with the session's tool surface;
-the share-viewer flow (gist creation) is the caller's.
+Session HTML export (`export_html`): the standalone viewer file for `/export` and `session export` - the embedded product template (assets/export-html, vendored marked/highlight.js attributed in its NOTICE.md) plus the theme-to-CSS resolution over the bundled theme data (pa-types) and custom themes under `<agent-dir>/themes/`, the tools section mapping (`tools_section`: the session's tool registry to the template's name/description/parameters list), and the custom-tool pre-render pipeline (`ToolHtmlRenderer`/`pre_render_custom_tools` + `ansi_to_html`: the exporter walks the entries, the session layer's renderer produces line-oriented output, ANSI converts to inline-styled HTML at the export step), and the two entry points (`export_session_to_html` for the daemon worker's `export_html` command, `export_from_file` for the CLI). Terminal theme rendering stays pa-tui's; tool renderers live with the session's tool surface; the share-viewer flow (gist creation) is the caller's.
 
 ## Non-goals
 No provider HTTP (pa-ai), no loop policy (pa-agent), no daemon supervision (pa-daemon), no TUI (pa-tui). No update coordination (the pa-cli coordinator owns the FSM; the update-flow seam here is the daemon-free support layer: `update::version` (semver/channel policy), `update::install` (the managed install-root layout), `update::release` (the channel manifest fetch), `update::download` (sha256-verified archive download + staging)). The package manager installs sources and resolves resource paths only.
@@ -62,44 +18,8 @@ No provider HTTP (pa-ai), no loop policy (pa-agent), no daemon supervision (pa-d
 ## Depends on
 pa-types, pa-ai, pa-agent (one-way).
 
-The Unix platform process API exposes `current_user_id()` for the daemon
-endpoint namespace to match the TypeScript `process.getuid()` contract on
-macOS as well as Linux. This reads the OS identity without filesystem or
-subprocess work.
+The Unix platform process API exposes `current_user_id()` for the daemon endpoint namespace to match the TypeScript `process.getuid()` contract on macOS as well as Linux. This reads the OS identity without filesystem or subprocess work.
 
-Automatic trace delivery (`agent_traces::ContinuousTraceUpload`) owns consent-gated
-persist scheduling and startup outbox recovery alongside the existing manual uploader.
-Hosts reuse `load_settings` to capture consent before their existing settings parse,
-attach `persisted` after successful disk writes, and own the returned installation
-for the session lifetime. Replacements use `rebind` with the effective cwd; forks
-use `forked`. The installation never drains on drop. A detached process-wide runtime
-owns all transcript reads, scans, settings reloads, networking and retries; a maximum
-of 256 registered controllers and four deliveries bounds resident work. Admission
-returns `None` at capacity and logs rejection; hosts attach no hook in that case.
-Retired descriptors free capacity only after background recovery acknowledges them.
-Session replacement transfers its existing slot and cancels the predecessor; forks
-require a distinct slot. Replacement retains a bounded retirement flag until the
-background recovery snapshot acknowledges its exact controller identity. The synchronous
-persist seam checks the cached consent snapshot and performs an exists/create
-pending-marker write; consent metadata reads and reloads stay in the worker after
-the host captures its initial settings generation; it does not fsync the marker (matching TS v0.9.8 process-crash
-recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention
-records one stable fallback marker per session, which is retained conservatively
-until a future sender has delivered it. Its cost must be measured
-separately; startup/paint parity is not established by scheduler unit tests.
-Active requests monitor consent changes every second on the worker and cancel on
-revocation/errors; bytes already sent cannot be recalled. Recovery belongs to all
-live hosts sharing the agent directory and cancels when the last host disappears.
-Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
-and releases upload capacity during retry waits; exhaustion retains durable intent.
+Automatic trace delivery (`agent_traces::ContinuousTraceUpload`) owns consent-gated persist scheduling and startup outbox recovery alongside the existing manual uploader. Hosts reuse `load_settings` to capture consent before their existing settings parse, attach `persisted` after successful disk writes, and own the returned installation for the session lifetime. Replacements use `rebind` with the effective cwd; forks use `forked`. The installation never drains on drop. A detached process-wide runtime owns all transcript reads, scans, settings reloads, networking and retries; a maximum of 256 registered controllers and four deliveries bounds resident work. Admission returns `None` at capacity and logs rejection; hosts attach no hook in that case. Retired descriptors free capacity only after background recovery acknowledges them. Session replacement transfers its existing slot and cancels the predecessor; forks require a distinct slot. Replacement retains a bounded retirement flag until the background recovery snapshot acknowledges its exact controller identity. The synchronous persist seam checks the cached consent snapshot and performs an exists/create pending-marker write; consent metadata reads and reloads stay in the worker after the host captures its initial settings generation; it does not fsync the marker (matching TS v0.9.8 process-crash recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention records one stable fallback marker per session, which is retained conservatively until a future sender has delivered it. Its cost must be measured separately; startup/paint parity is not established by scheduler unit tests. Active requests monitor consent changes every second on the worker and cancel on revocation/errors; bytes already sent cannot be recalled. Recovery belongs to all live hosts sharing the agent directory and cancels when the last host disappears. Catch-up uses at most three delivery cycles per pending entry, honors Retry-After, and releases upload capacity during retry waits; exhaustion retains durable intent.
 
-`AgentSession::start_refinement` starts an ephemeral background job and returns its
-completion handle. Session disposal or branch navigation cancels planning and idle-boundary waiting;
-a commit already writing durable state finishes its audit and context append.
-Refinement owns the harness storage and session rows; the lower-level agent
-only owns atomic admission exclusion. No new dependency is introduced.
-Completed commits remain visible after resume through the harness digest, and
-unchanged state does not append another digest. Live refinement and digest
-refresh append context rows without replacing earlier rows. This preserves the
-message prefix when the system prompt, tools, model and provider construction
-are unchanged; it does not promise cache identity across restart or compaction.
+`AgentSession::start_refinement` starts an ephemeral background job and returns its completion handle. Session disposal or branch navigation cancels planning and idle-boundary waiting; a commit already writing durable state finishes its audit and context append. Refinement owns the harness storage and session rows; the lower-level agent only owns atomic admission exclusion. No new dependency is introduced. Completed commits remain visible after resume through the harness digest, and unchanged state does not append another digest. Live refinement and digest refresh append context rows without replacing earlier rows. This preserves the message prefix when the system prompt, tools, model and provider construction are unchanged; it does not promise cache identity across restart or compaction.

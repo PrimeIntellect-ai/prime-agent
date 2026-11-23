@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
+mod collect_release;
+
 /// How the fake supervisor answers a child `kill`.
 enum FakeKill {
     Success,
@@ -216,6 +218,9 @@ async fn spawn_fake_supervisor(
                             response_success(Some(&id), command_type, None)
                         }
                         "wait_for_idle" => {
+                            child_subagents
+                                .wait_for_idle_requests
+                                .fetch_add(1, Ordering::SeqCst);
                             tokio::time::sleep(std::time::Duration::from_millis(idle_delay_ms))
                                 .await;
                             // The quiescence arm also waits out the
@@ -305,6 +310,9 @@ async fn spawn_fake_supervisor(
                         }
                         "kill" => {
                             let _ = kill_tx.send(command.clone());
+                            if let Some(gate) = &child_subagents.kill_gate {
+                                gate.release.notified().await;
+                            }
                             match *kill_behavior {
                                 FakeKill::Success => {
                                     response_success(Some(&id), command_type, None)
@@ -380,6 +388,7 @@ async fn sessions_with_fake_supervisor(
 struct FakeChildSubagents {
     running: AtomicBool,
     quiescent_waits: std::sync::atomic::AtomicUsize,
+    wait_for_idle_requests: AtomicU32,
     answer_reads: AtomicU32,
     /// The fake answers `abort` with a real refusal (the cancel path's
     /// failed-abort lane).
@@ -390,6 +399,8 @@ struct FakeChildSubagents {
     peer_gate: Option<Arc<FakePeerGate>>,
     /// Holds the task `prompt` in flight: the worker has not accepted it yet.
     prompt_gate: Option<Arc<FakePeerGate>>,
+    /// Holds kill confirmation so tests control the retirement window.
+    kill_gate: Option<Arc<FakePeerGate>>,
 }
 
 #[derive(Default)]
@@ -881,9 +892,8 @@ async fn a_child_spawned_while_the_parent_is_idle_runs_without_a_turn_boundary()
     );
 }
 
-/// A spawn admitted mid-turn holds its task prompt until that parent turn
-/// completes, so the parent's continuation request reaches the provider
-/// before the child's first turn.
+/// A spawn admitted mid-turn normally holds its task prompt until that parent
+/// turn completes, unless a positive collect releases it first.
 #[tokio::test]
 async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -1152,10 +1162,15 @@ async fn a_collect_reading_the_admission_idle_window_keeps_the_child_running() {
     let handle = spawn_child(&sessions).await;
     let record = Arc::clone(&sessions.inner.children.lock().await[0]);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !record.lock().await.prompt_admitted {
-        assert!(Instant::now() < deadline, "the task prompt never admitted");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    assert!(
+        super::host::wait_for_prompt_state(
+            &record,
+            super::host::PromptWait::Admission,
+            Some(deadline),
+        )
+        .await,
+        "the task prompt never admitted"
+    );
 
     let results = sessions
         .collect(vec![handle.rlm_child_id.clone()], 0)
@@ -3091,7 +3106,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
-        run: RunState::running(),
+        run: RunState::admitted(),
         answer_preview: None,
         answer_text: None,
         answer_captured: false,
@@ -3103,7 +3118,6 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         notice_delivered: false,
         factory: false,
         refine_child: false,
-        prompt_admitted: true,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: None,
@@ -3164,7 +3178,7 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
-        run: RunState::running(),
+        run: RunState::admitted(),
         answer_preview: Some("the captured say".to_string()),
         answer_text: Some("the captured say".to_string()),
         answer_captured: true,
@@ -3176,7 +3190,6 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         notice_delivered: false,
         factory: false,
         refine_child: false,
-        prompt_admitted: true,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(

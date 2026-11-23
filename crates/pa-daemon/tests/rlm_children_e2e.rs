@@ -187,6 +187,28 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
     script
 }
 
+fn child_session_file(session_dir: &str) -> PathBuf {
+    std::fs::read_dir(session_dir)
+        .expect("child session directory")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
+        .expect("child session file")
+}
+
+fn spawn_kickoff_count(session_file: &Path, child_id: &str) -> usize {
+    let kickoff_id = format!("spawn:{child_id}");
+    std::fs::read_to_string(session_file)
+        .expect("read child session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| {
+            row.get("type").and_then(Value::as_str) == Some("custom_message")
+                && row.pointer("/details/id").and_then(Value::as_str) == Some(&kickoff_id)
+        })
+        .count()
+}
+
 /// Children registry bound to the running supervisor, with a parent identity rooted at `agent_dir`.
 fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
@@ -593,6 +615,92 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     assert_ne!(live[0].rlm_child_id, handle.rlm_child_id);
     // The live respawn answers, never the deleted generation's envelope.
     assert_ne!(live[0].status, "cancelled");
+}
+
+/// A positive collect during a parent turn releases only its selected child.
+#[tokio::test]
+async fn blocking_collect_releases_only_its_selected_task_prompt() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let script = write_script(dir.path(), "child answer");
+    let children = children(&socket, &agent_dir, &script, 0);
+    children.notify_turn_started();
+
+    let selected = children
+        .spawn(spawn_request("worker-selected", "selected task"))
+        .await
+        .expect("spawn selected child");
+    let deferred = children
+        .spawn(spawn_request("worker-deferred", "deferred task"))
+        .await
+        .expect("spawn deferred child");
+    let selected_file = child_session_file(&selected.session_dir);
+    let deferred_file = child_session_file(&deferred.session_dir);
+
+    let selected_result = children
+        .collect(vec![selected.rlm_child_id.clone()], 10_000)
+        .await
+        .expect("collect selected child");
+    assert_eq!(selected_result.len(), 1);
+    assert_eq!(selected_result[0].status, "done");
+    assert!(selected_result[0].settled);
+    assert_eq!(
+        selected_result[0].answer_preview.as_deref(),
+        Some("child answer")
+    );
+    assert_eq!(
+        spawn_kickoff_count(&selected_file, &selected.rlm_child_id),
+        1
+    );
+    assert_eq!(
+        spawn_kickoff_count(&deferred_file, &deferred.rlm_child_id),
+        0
+    );
+
+    children.notify_turn_done();
+    let deferred_result = children
+        .collect(vec![deferred.rlm_child_id.clone()], 10_000)
+        .await
+        .expect("collect child released at the turn boundary");
+    assert_eq!(deferred_result.len(), 1);
+    assert_eq!(deferred_result[0].status, "done");
+    assert!(deferred_result[0].settled);
+    assert_eq!(
+        deferred_result[0].answer_preview.as_deref(),
+        Some("child answer")
+    );
+
+    let repeated = children
+        .collect(
+            vec![selected.rlm_child_id.clone(), deferred.rlm_child_id.clone()],
+            1_000,
+        )
+        .await
+        .expect("repeat collect does not resend either prompt");
+    assert_eq!(repeated.len(), 2);
+    assert!(repeated
+        .iter()
+        .all(|result| result.status == "done" && result.settled));
+    assert_eq!(
+        spawn_kickoff_count(&selected_file, &selected.rlm_child_id),
+        1
+    );
+    assert_eq!(
+        spawn_kickoff_count(&deferred_file, &deferred.rlm_child_id),
+        1
+    );
+
+    children
+        .delete_subagent(selected.rlm_child_id)
+        .await
+        .expect("delete selected child");
+    children
+        .delete_subagent(deferred.rlm_child_id)
+        .await
+        .expect("delete deferred child");
 }
 
 #[tokio::test]

@@ -5,18 +5,13 @@ description: Search the web with the provider chosen in /settings (Serper or You
 
 # Web Search
 
-Search the web with the provider chosen in `/settings` → **Agents** → **Web search provider**:
-Serper (Google results, the default) or You.com Eco Search.
+Search the web with the provider chosen in `/settings` → **Agents** → **Web search provider**: Serper (Google results, the default) or You.com Eco Search.
 
 ## Setup
 
-Get a free API key for the chosen provider (Serper: https://serper.dev, You.com Eco:
-https://you.com/platform), then run `/mcp` in Prime Agent and choose
-**Serper (web search)** or **You.com Eco (web search)** to paste it.
-The key is stored in Prime Agent and made available to this skill automatically.
+Get a free API key for the chosen provider (Serper: https://serper.dev, You.com Eco: https://you.com/platform), then run `/mcp` in Prime Agent and choose **Serper (web search)** or **You.com Eco (web search)** to paste it. The key is stored in Prime Agent and made available to this skill automatically.
 
-If web search reports a missing key, walk the user through those two steps;
-don't ask them to set environment variables.
+If web search reports a missing key, walk the user through those two steps; don't ask them to set environment variables.
 
 Optional overrides (environment variables):
 

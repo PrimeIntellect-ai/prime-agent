@@ -1,0 +1,1 @@
+- The python_repl card now shows each message `rlm.inbox.read()` returned, rendered like the row it replaced. The inbox notice header now reads "Agent inbox · 3 new messages" or "3 unread messages".
