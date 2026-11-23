@@ -206,8 +206,9 @@ impl AgentMessageController for LinkAgentMessageController {
         }
         // TS `selectAgentFamily` order: parent, siblings by name, then
         // children by name.
-        // A bot's guest daemon: the owner on the Mac is the one parent.
-        if parent_member.is_none() {
+        // A bot's guest daemon: the owner on the Mac is the parent of its
+        // top-level session; a subagent with a restarting parent keeps it.
+        if parent_member.is_none() && identity.is_top_level() {
             parent_member =
                 crate::bots::remote_parent::remote_parent_name().map(|name| AgentFamilyMember {
                     relationship: AgentFamilyRelationship::Parent,

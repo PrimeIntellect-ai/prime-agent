@@ -170,6 +170,29 @@ async fn a_bot_message_to_its_owner_is_queued_durably() {
     assert_eq!(entries[0]["message"], "found it");
     assert!(outbox(&socket, 1).is_empty());
 
+    // A subagent whose recorded parent is not in the roster (restarting)
+    // never falls back to the owner.
+    let subagent = Arc::new(LinkAgentMessageController::new(
+        Arc::new(SupervisorLink::new(socket.clone())),
+        active.clone(),
+        worker_token(&agent_dir, &active),
+        Arc::new(std::sync::Mutex::new(Some(json!({
+            "activeSessionId": active,
+            "sessionName": "bot",
+            "runtimeKind": "subagent",
+            "parentSessionId": "restarting-parent",
+        })))),
+        None,
+    ));
+    let mut handlers = HostRequestHandlers::default();
+    register_agent_message_host_handlers(subagent as Arc<_>, &mut handlers);
+    let send = handlers.get("agent_message.send").expect("send handler");
+    let _ = send(HostRequestPayload {
+        data: json!({ "message": "for my parent", "receiver_role": "parent" }),
+    })
+    .await;
+    assert_eq!(outbox(&socket, 0), entries);
+
     drop(guest);
     let _guest = spawn_guest(&socket, &agent_dir);
     assert_eq!(outbox(&socket, 0), entries);
