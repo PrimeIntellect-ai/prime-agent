@@ -387,10 +387,15 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
     let mut active = None;
     for line in text.lines() {
         let marker = markdown_fence(line);
-        if let Some((delimiter, length, mermaid)) = active {
-            let closes = marker.is_some_and(|(ch, count, info)| {
-                ch == delimiter && count >= length && info.trim().is_empty()
-            });
+        if let Some((delimiter, length, column, mermaid)) = active {
+            // A closer sits at most three spaces past the opener's container
+            // column (a list item's closer is indented with its content).
+            let fence_text = line.trim_start_matches(' ');
+            let indent = line.len() - fence_text.len();
+            let closes = indent <= column + 3
+                && fence_run(fence_text).is_some_and(|(ch, count, info)| {
+                    ch == delimiter && count >= length && info.trim().is_empty()
+                });
             if mermaid {
                 if closes {
                     segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
@@ -407,9 +412,9 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
             }
             continue;
         }
-        if let Some((delimiter, length, info)) = marker {
+        if let Some((delimiter, length, info, column)) = marker {
             let mermaid = info.split_whitespace().next() == Some("mermaid");
-            active = Some((delimiter, length, mermaid));
+            active = Some((delimiter, length, column, mermaid));
             if mermaid {
                 if prose.trim().is_empty() {
                     prose.clear();
@@ -422,7 +427,7 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
         prose.push_str(line);
         prose.push('\n');
     }
-    if active.is_some_and(|(_, _, mermaid)| mermaid) {
+    if active.is_some_and(|(_, _, _, mermaid)| mermaid) {
         segments.push(FileSegment::Mermaid(fence));
     } else if !prose.trim().is_empty() {
         segments.push(FileSegment::Text(prose));
@@ -430,14 +435,40 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
     segments
 }
 
-fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
-    // CommonMark: a fence takes at most three spaces of indent; a deeper
-    // line is an indented code block's text, never a fence.
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 {
-        return None;
+/// A fence opener: its delimiter, run length, info string, and the column
+/// its list-item content starts at (0 outside a list), so `- ```python`
+/// opens a fence inside a list item.
+fn markdown_fence(line: &str) -> Option<(char, usize, &str, usize)> {
+    let mut rest = line;
+    loop {
+        // CommonMark: a fence or list marker takes at most three spaces of
+        // indent; a deeper line is an indented code block's text.
+        let content = rest.trim_start_matches(' ');
+        if rest.len() - content.len() > 3 {
+            return None;
+        }
+        let digits = content.len()
+            - content
+                .trim_start_matches(|ch: char| ch.is_ascii_digit())
+                .len();
+        let marker_end = match content[digits..].chars().next() {
+            Some('-' | '*' | '+') if digits == 0 => 1,
+            Some('.' | ')') if (1..=9).contains(&digits) => digits + 1,
+            Some(_) | None => break,
+        };
+        let Some(item) = content[marker_end..].strip_prefix(' ') else {
+            break;
+        };
+        rest = item.trim_start_matches(' ');
     }
-    let line = &line[indent..];
+    let column = line.len() - rest.len();
+    let (delimiter, length, info) = fence_run(rest.trim_start_matches(' '))?;
+    Some((delimiter, length, info, column))
+}
+
+/// A run of three or more backticks or tildes opening `line`, with the info
+/// string after it.
+fn fence_run(line: &str) -> Option<(char, usize, &str)> {
     let delimiter = line.chars().next()?;
     if !matches!(delimiter, '`' | '~') {
         return None;
@@ -554,6 +585,24 @@ mod tests {
             "decode took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn a_fence_inside_a_list_item_closes_before_a_later_mermaid_block() {
+        let graph = "flowchart TB\nA --> B\n";
+        for example in [
+            "- ```python\n  print(1)\n  ```\n",
+            "1. ```python\n   print(1)\n   ```\n",
+            "- outer\n  - ```python\n    print(1)\n    ```\n",
+        ] {
+            let text = format!("{example}\n```mermaid\n{graph}```\n");
+            let segments = super::split_mermaid_fences(&text);
+            assert!(
+                matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(diagram)] if prose.contains("print(1)") && diagram == graph),
+                "{example}: {} segments",
+                segments.len()
+            );
+        }
     }
 
     #[test]
