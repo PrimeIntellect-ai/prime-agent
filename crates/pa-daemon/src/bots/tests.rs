@@ -539,7 +539,7 @@ async fn a_failed_install_fails_spawn_and_cleans_up() {
         let (_dir, platform, manager) = setup();
         platform.state().install_exit_code = exit_code;
 
-        let error = manager.spawn(&spec("bot-a")).await.err().expect("refused");
+        let error = manager.spawn(&spec("bot-a")).await.expect_err("refused");
 
         assert_eq!(
             error.to_string(),
@@ -598,11 +598,17 @@ async fn live_spawn_reply_pause_delete() {
         let mut reply = String::new();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
         while reply.is_empty() && tokio::time::Instant::now() < deadline {
-            super::replies::sync_deliveries(&mut guest, &ledger, &spawned.guest_session_id, |text| {
-                reply = text;
-                async { anyhow::Ok(()) }
-            })
+            super::replies::sync_deliveries(
+                &mut guest,
+                &ledger,
+                &spawned.guest_session_id,
+                |text| {
+                    reply = text;
+                    async { anyhow::Ok(()) }
+                },
+            )
             .await?;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         drop(guest);
         let paused = manager.pause(&bot_id).await?;
@@ -619,7 +625,11 @@ async fn live_spawn_reply_pause_delete() {
     assert!(reply.to_lowercase().contains("pong"), "reply: {reply:?}");
     assert_eq!(resumed.guest_session_file, spawned.guest_session_file);
     assert!(left.iter().all(|sandbox| sandbox.status.is_terminal()));
-    for checkpoint in paused.checkpoint_id.iter().chain(&paused.older_checkpoint_ids) {
+    for checkpoint in paused
+        .checkpoint_id
+        .iter()
+        .chain(&paused.older_checkpoint_ids)
+    {
         assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
     }
 }

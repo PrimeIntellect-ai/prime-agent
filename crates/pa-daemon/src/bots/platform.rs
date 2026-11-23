@@ -302,7 +302,8 @@ fn map_error(error: &SandboxError) -> PlatformError {
             | SandboxErrorCode::RequestTimeout,
             _,
         ) => PlatformError::Transient(message),
-        (_, Some(status)) if status >= 500 => PlatformError::Transient(message),
+        // A rate limit passes: the caller retries with backoff.
+        (_, Some(status)) if status >= 500 || status == 429 => PlatformError::Transient(message),
         _ => PlatformError::Other(message),
     }
 }
@@ -569,5 +570,24 @@ impl BotPlatform for PrimePlatform {
             })
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pa_sandbox::types::Method;
+    use pa_sandbox::SandboxError;
+
+    use super::{map_error, PlatformError};
+
+    #[test]
+    fn a_rate_limit_is_retried() {
+        let error = SandboxError::http("Sandbox list failed with HTTP 429").with_http_context(
+            Method::Get,
+            "https://api.test/sandbox",
+            Some(429),
+            None,
+        );
+        assert!(matches!(map_error(&error), PlatformError::Transient(_)));
     }
 }
