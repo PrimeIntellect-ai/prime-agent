@@ -1028,13 +1028,13 @@ async fn a_fresh_session_reports_skill_problems_on_its_first_turn() {
 }
 
 /// A kernel probe whose liveness read requests the caller's abort. The
-/// read runs after the compaction row commits, inside the poll that makes
-/// the compaction result.
-struct AbortInFinalPoll {
+/// read runs after the compaction row commits; the prune that follows
+/// yields, so the compaction is still awaiting when the abort is visible.
+struct AbortAfterCommit {
     controller: pa_agent::abort::AbortController,
 }
 
-impl crate::session_engine::ipython_state::CompactionKernelProbe for AbortInFinalPoll {
+impl crate::session_engine::ipython_state::CompactionKernelProbe for AbortAfterCommit {
     fn has_running_kernel(&self) -> bool {
         self.controller.abort();
         true
@@ -1043,7 +1043,10 @@ impl crate::session_engine::ipython_state::CompactionKernelProbe for AbortInFina
     fn prune_oversized_variables(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<String>>> + Send + '_>> {
-        Box::pin(async { None })
+        Box::pin(async {
+            tokio::task::yield_now().await;
+            None
+        })
     }
 
     fn list_namespace_names(
@@ -1069,12 +1072,12 @@ fn compaction_reply(text: &str) -> pa_types::session::AgentMessage {
     ))
 }
 
-/// A model-requested compaction that commits, then sees the abort in the
-/// poll that returns its result, keeps that result. The result and the
-/// compaction row must both stand; reporting cancelled here skips the
-/// success event and the retry for work that is already durable.
+/// A model-requested compaction that commits, then sees the abort while it
+/// still awaits its kernel notice, finishes. The result, the compaction row,
+/// and the notice must all stand; reporting cancelled here skips the success
+/// event and the retry for work that is already durable.
 #[tokio::test]
-async fn a_committed_compaction_keeps_its_result_when_the_abort_lands_in_the_final_poll() {
+async fn a_committed_compaction_finishes_when_the_abort_lands_after_the_commit() {
     let dir = tempfile::TempDir::new().unwrap();
     let cwd = dir.path().join("project");
     let agent_dir = dir.path().join("agent");
@@ -1133,7 +1136,7 @@ async fn a_committed_compaction_keeps_its_result_when_the_abort_lands_in_the_fin
     let controller = pa_agent::abort::AbortController::new();
     engine
         .session
-        .set_kernel_state_probe(Some(Arc::new(AbortInFinalPoll {
+        .set_kernel_state_probe(Some(Arc::new(AbortAfterCommit {
             controller: controller.clone(),
         })));
     engine.turn_boundary.schedule_compaction(None).await;
@@ -1143,10 +1146,13 @@ async fn a_committed_compaction_keeps_its_result_when_the_abort_lands_in_the_fin
         .await
         .expect("the pending compaction is taken")
         .expect("the committed compaction keeps its result");
-    assert!(matches!(
-        outcome,
-        crate::session_engine::compact_session::CompactOutcome::Ran(_)
-    ));
+    let crate::session_engine::compact_session::CompactOutcome::Ran(run) = outcome else {
+        panic!("the committed compaction reports Ran");
+    };
+    assert!(
+        run.ipython_state.is_some(),
+        "the kernel notice lands after the abort"
+    );
     assert!(
         controller.is_aborted(),
         "the probe requested the abort after the commit"

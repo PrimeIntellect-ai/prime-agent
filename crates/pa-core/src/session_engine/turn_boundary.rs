@@ -404,21 +404,12 @@ impl SessionEngine {
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> Option<anyhow::Result<super::compact_session::CompactOutcome>> {
         let pending = self.turn_boundary.take_compaction().await?;
-        let compact = async {
+        // `compact` owns the cancel boundary: `abort` stops it only before the commit.
+        Some(
             self.session
                 .compact(pending.instructions.as_deref(), model, api_key, abort)
-                .await
-        };
-        Some(match abort {
-            // The refinement is not raced — TS `abortCompaction` never
-            // aborts it. A result that is ready when the abort lands stands;
-            // `compact` checks the signal before the durable append.
-            Some(signal) => match pa_agent::abort::race_keep_result(compact, signal).await {
-                Ok(inner) => inner,
-                Err(error) => Err(error),
-            },
-            None => compact.await,
-        })
+                .await,
+        )
     }
 
     /// Start a pending model-requested refinement without waiting on planning or

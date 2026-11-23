@@ -100,26 +100,20 @@ async fn execute_compaction_with_late_abort_cancels_before_the_commit() {
 
 /// The summary a late abort discards was still a billed call: it lands as
 /// a `model_usage` row on the session, billed on the summarizer's model.
+/// The abort lands after the summarizer resolved, while the commit waits
+/// for the session lock.
 #[tokio::test]
 async fn a_late_abort_records_the_discarded_summary_call() {
     let registration = faux_registration();
     let model = registration.get_model();
-    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Delayed {
-        message: pa_ai::faux::faux_assistant_text_message(
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
             "## Goal\nsummarized goal",
             pa_ai::faux::FauxAssistantMessageOptions::default(),
         ),
-        delay_ms: 200,
-    }]);
+    )]);
     let controller = pa_agent::abort::AbortController::new();
     let signal = controller.signal();
-    let aborter = {
-        let controller = controller.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            controller.abort();
-        })
-    };
     let tmp = tempfile::tempdir().unwrap();
     let session = crate::session_engine::AgentSession::new(
         std::sync::Arc::new(pa_agent::agent::Agent::new(
@@ -134,11 +128,21 @@ async fn a_late_abort_records_the_discarded_summary_call() {
         keep_recent_tokens: 20,
         ..Default::default()
     });
-    let error = session
-        .compact(None, &model, None, Some(&signal))
-        .await
-        .unwrap_err();
-    aborter.await.unwrap();
+    let persistence = session.shared_persistence();
+    let hold_the_commit = async {
+        // The summarizer request starts after the prepare released the lock.
+        while registration.call_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        let _commit_blocked = persistence.lock().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        controller.abort();
+    };
+    let (result, ()) = tokio::join!(
+        session.compact(None, &model, None, Some(&signal)),
+        hold_the_commit
+    );
+    let error = result.unwrap_err();
     assert!(pa_agent::abort::is_abort_error(&error), "{error:#}");
     let billed = session
         .shared_persistence()

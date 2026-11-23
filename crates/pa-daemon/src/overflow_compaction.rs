@@ -281,27 +281,18 @@ impl AgentSessionEngine {
             return OverflowAttempt::None;
         };
         let outcome = {
-            let compact = async {
-                engine
-                    .session
-                    .compact(
-                        custom_instructions.as_deref(),
-                        &model,
-                        api_key,
-                        Some(&signal),
-                    )
-                    .await
-            };
-            // A result that is ready when the abort lands stands: the
-            // signal is checked inside the run before the durable append.
-            let outcome = self
-                .runtime
-                .block_on(pa_agent::abort::race_keep_result(compact, &signal));
+            // The signal cancels the compaction only before its commit.
+            let outcome = self.runtime.block_on(engine.session.compact(
+                custom_instructions.as_deref(),
+                &model,
+                api_key,
+                Some(&signal),
+            ));
             self.clear_auto_compaction_abort(&controller);
             outcome
         };
         match outcome {
-            Ok(Ok(CompactOutcome::Ran(run))) => {
+            Ok(CompactOutcome::Ran(run)) => {
                 // Adoption telemetry: every completed compaction counts into
                 // the active run.
                 {
@@ -361,7 +352,7 @@ impl AgentSessionEngine {
             }
             // A skipped overflow recovery does not re-issue (TS excludes
             // overflow from `resumeAfterFailure`).
-            Ok(Ok(CompactOutcome::Skipped(message))) => {
+            Ok(CompactOutcome::Skipped(message)) => {
                 if !self.emit_unsuccessful_compaction(
                     CompactionOutcomeReason::Overflow,
                     CompactionOutcomeKind::Skipped,
@@ -373,10 +364,9 @@ impl AgentSessionEngine {
                 }
                 OverflowAttempt::Finished
             }
-            // An abort from either layer — the race dropped the in-flight
-            // summarizer request, or the pre-commit signal check fired:
-            // the cancelled recovery does not re-issue.
-            Ok(Err(error)) | Err(error) if pa_agent::abort::is_abort_error(&error) => {
+            // An abort before the commit — the dropped summarizer request or
+            // the pre-commit signal check: the cancelled recovery does not re-issue.
+            Err(error) if pa_agent::abort::is_abort_error(&error) => {
                 if !self.emit_unsuccessful_compaction(
                     CompactionOutcomeReason::Overflow,
                     CompactionOutcomeKind::Cancelled,
@@ -388,7 +378,7 @@ impl AgentSessionEngine {
                 }
                 OverflowAttempt::Finished
             }
-            Ok(Err(error)) | Err(error) => {
+            Err(error) => {
                 if !self.emit_unsuccessful_compaction(
                     CompactionOutcomeReason::Overflow,
                     CompactionOutcomeKind::Failed,
