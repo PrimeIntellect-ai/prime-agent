@@ -216,6 +216,9 @@ pub fn convert_messages(
                             crate::types::UserBlockPayload::Image { data, mime_type } => {
                                 json!({ "image": create_image_block(mime_type, data) })
                             }
+                            crate::types::UserBlockPayload::Video { .. } => {
+                                json!({ "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER })
+                            }
                             crate::types::UserBlockPayload::Opaque(json) => {
                                 json!({ "text": sanitize_surrogates(&json) })
                             }
@@ -324,6 +327,9 @@ pub fn convert_messages(
                                 }
                                 crate::types::UserBlockPayload::Image { data, mime_type } => {
                                     json!({ "image": create_image_block(mime_type, data) })
+                                }
+                                crate::types::UserBlockPayload::Video { .. } => {
+                                    json!({ "text": crate::types::UNSUPPORTED_VIDEO_PLACEHOLDER })
                                 }
                                 crate::types::UserBlockPayload::Opaque(json) => {
                                     json!({ "text": sanitize_surrogates(&json) })

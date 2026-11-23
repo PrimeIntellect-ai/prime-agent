@@ -334,6 +334,50 @@ struct RunClaim {
     model_override: Option<AgentModelOverride>,
 }
 
+impl Shared {
+    fn end_stream(&mut self) {
+        self.state.is_streaming = false;
+        self.state.streaming_message = None;
+        self.state.pending_tool_calls.clear();
+    }
+}
+
+/// Ends a started run on every exit path: the normal end settles it, and a
+/// dropped or panicking run future settles it on drop, so a lost run never
+/// leaves the slot taken and `is_streaming` set. The stream state clears
+/// before the slot frees, the order the busy checks rely on.
+struct RunEndGuard(Option<Arc<AgentInner>>);
+
+impl RunEndGuard {
+    async fn settle(mut self) {
+        // Stays armed across the lock wait: a cancelled settle ends the run on drop.
+        let inner = self.0.as_ref().expect("a run ends once");
+        inner.shared.lock().await.end_stream();
+        self.0.take().expect("a run ends once").release_run();
+    }
+}
+
+impl Drop for RunEndGuard {
+    fn drop(&mut self) {
+        let Some(inner) = self.0.take() else {
+            return;
+        };
+        let ended = match inner.shared.try_lock() {
+            Ok(mut shared) => {
+                shared.end_stream();
+                true
+            }
+            Err(_) => false,
+        };
+        if ended {
+            inner.release_run();
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // Another task holds the state for a moment: settle once it lets go.
+            runtime.spawn(Self(Some(inner)).settle());
+        }
+    }
+}
+
 struct AgentInner {
     /// Serializes state reduction and listener delivery without holding the
     /// state lock across callbacks that may read or restore that state.
@@ -653,6 +697,7 @@ impl AgentInner {
         F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
+        let run_end = RunEndGuard(Some(Arc::clone(self)));
         {
             let mut shared = self.shared.lock().await;
             shared.state.is_streaming = true;
@@ -668,13 +713,7 @@ impl AgentInner {
             self.handle_run_failure(error, aborted).await;
         }
 
-        {
-            let mut shared = self.shared.lock().await;
-            shared.state.is_streaming = false;
-            shared.state.streaming_message = None;
-            shared.state.pending_tool_calls.clear();
-        }
-        self.release_run();
+        run_end.settle().await;
         result
     }
 
@@ -1731,5 +1770,105 @@ mod tests {
             agent.has_queued_messages(),
             "a continue_run that loses the run slot must leave the queued steer queued"
         );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_or_dropped_run_frees_the_slot_for_the_next_prompt() {
+        type StreamFuture =
+            crate::BoxFut<'static, anyhow::Result<Box<dyn crate::stream::ModelStream>>>;
+        async fn assert_idle(agent: &Agent) {
+            assert!(!agent.has_active_run(), "the lost run left the slot taken");
+            assert!(
+                !agent.state().await.is_streaming,
+                "the lost run left is_streaming set"
+            );
+        }
+
+        // Call 1 panics inside the run, call 2 never answers (its run future
+        // is dropped), call 3 answers.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stream_fn: crate::stream::StreamFn = {
+            let calls = Arc::clone(&calls);
+            Arc::new(
+                move |requested: Model,
+                      _context: crate::stream::LlmContext,
+                      _options: crate::stream::StreamRequestOptions|
+                      -> StreamFuture {
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => panic!("provider panicked mid-run"),
+                        1 => Box::pin(std::future::pending()),
+                        _ => {
+                            let message = crate::types::AssistantMessage {
+                                content: vec![crate::types::AssistantContent::Text(
+                                    crate::types::TextContent {
+                                        text: "ok".to_string(),
+                                        text_signature: None,
+                                    },
+                                )],
+                                api: requested.api,
+                                provider: requested.provider,
+                                model: requested.id,
+                                response_model: None,
+                                response_id: None,
+                                diagnostics: None,
+                                usage: Usage::zero(),
+                                stop_reason: crate::types::StopReason::Stop,
+                                error_message: None,
+                                stop_reason_raw: None,
+                                timestamp: 0,
+                            };
+                            Box::pin(async move {
+                                let (handle, consumer) = crate::stream::event_stream();
+                                handle.push(crate::stream::AssistantMessageEvent::Done {
+                                    reason: crate::types::StopReason::Stop,
+                                    message: message.clone(),
+                                });
+                                handle.end(Some(message));
+                                Ok(Box::new(consumer) as Box<dyn crate::stream::ModelStream>)
+                            })
+                        }
+                    }
+                },
+            )
+        };
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(Model {
+                    id: "m".to_string(),
+                    name: "m".to_string(),
+                    api: "anthropic-messages".to_string(),
+                    provider: "anthropic".to_string(),
+                    base_url: String::new(),
+                    reasoning: false,
+                    cost: crate::types::UsageCost::default(),
+                    context_window: 200_000,
+                    max_tokens: 8_192,
+                    max_tokens_explicit: false,
+                }),
+                ..Default::default()
+            },
+            stream_fn: Some(stream_fn),
+            ..Default::default()
+        });
+
+        let panicked = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.prompt(AgentPromptInput::text("panics")).await })
+        };
+        assert!(panicked.await.unwrap_err().is_panic());
+        assert_idle(&agent).await;
+
+        let mut dropped = Box::pin(agent.prompt(AgentPromptInput::text("dropped")));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(dropped.as_mut(), &mut cx).is_pending());
+        assert!(agent.has_active_run() && agent.state().await.is_streaming);
+        drop(dropped);
+        assert_idle(&agent).await;
+
+        agent
+            .prompt(AgentPromptInput::text("runs"))
+            .await
+            .expect("the next prompt runs");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

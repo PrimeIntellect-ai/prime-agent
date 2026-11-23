@@ -5,8 +5,8 @@
 use super::click::{
     self, PickerClickSurface, PickerKind, CHOICE_PICKER_CHROME_ROWS, MODEL_PICKER_CHROME_ROWS,
 };
-use super::AgentView;
 use super::FULLSCREEN_MIN_TRANSCRIPT_ROWS;
+use super::{AgentView, Overlay};
 use crate::chrome::{render_prompt_context, render_top_bar};
 use crate::width::str_width;
 use crate::{Line, Span};
@@ -31,123 +31,120 @@ impl AgentView {
         // The click surface records this frame's geometry as the compose
         // computes it.
         self.click.clear();
-        // The onboarding splash covers the pane (TS `showOverlay` 100%); its rows select, so
-        // the frame-selection regions span the whole frame.
-        if let Some(screen) = self.onboarding.as_mut() {
-            let kb = self.editor.keybindings();
-            let mut frame = screen.render(&self.theme, width, height, kb);
-            self.frame_rows = frame.len();
-            self.apply_frame_selection(&mut frame, 0, width);
-            return frame;
-        }
-        // The `/model` and `/effort` pickers mount in the editor dock
-        // (TS `showConfigurationMenu`); the prompt context stays above.
-        let prompt_context = render_prompt_context(&self.detail_label(), &self.theme, width);
-        // The info panel's CURRENT row budget (a resize re-budgets every
-        // frame): read before the borrow.
+        // An open overlay replaces the editor part of the dock (TS `showConfigurationMenu` /
+        // `showSelector`); the prompt context stays above it. The onboarding splash covers the
+        // whole pane instead (TS `showOverlay` 100%).
+        let mut dock = render_prompt_context(&self.detail_label(), &self.theme, width);
+        // The info panel's CURRENT row budget (a resize re-budgets every frame).
         let info_viewport_rows = crate::session_ui::picker_viewport_rows(self.terminal_rows());
-        let pane_row = prompt_context.len();
-        let picker_dock: Option<Vec<Line>> = if let Some(picker) = self.model_picker.as_mut() {
-            let mut dock = prompt_context;
-            dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
-            // The pane's item rows are clickable: the recorded span
-            // covers the filtered window the render drew.
-            self.click.record_picker(PickerClickSurface {
-                dock_row: pane_row,
-                chrome_rows: MODEL_PICKER_CHROME_ROWS,
-                items: picker.filtered_window(),
-                kind: PickerKind::Model,
-            });
-            Some(dock)
-        } else if let Some(picker) = &self.choice_picker {
-            let mut dock = prompt_context;
-            dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
-            self.click.record_picker(PickerClickSurface {
-                dock_row: pane_row,
-                chrome_rows: CHOICE_PICKER_CHROME_ROWS,
-                items: picker.visible_window(),
-                kind: PickerKind::Choice,
-            });
-            Some(dock)
-        } else if let Some(mcp_view) = self.mcp_view.as_mut() {
-            let mut dock = prompt_context;
-            dock.extend(mcp_view.render(&self.theme, width, self.editor.keybindings()));
-            Some(dock)
-        } else if let Some(factory_view) = self.factory_view.as_ref() {
-            let mut dock = prompt_context;
-            dock.extend(factory_view.render(&self.theme, width, self.editor.keybindings()));
-            Some(dock)
-        } else if let Some(picker) = &self.heartbeats_picker {
-            let mut dock = prompt_context;
-            dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
-            Some(dock)
-        } else if let Some(panel) = &self.goal_panel {
-            let mut dock = prompt_context;
-            dock.extend(crate::goal_surface::render_goal_panel(
-                panel,
-                &self.theme,
-                width,
-                self.editor.keybindings(),
-            ));
-            Some(dock)
-        } else if let Some(view) = self.bash_view.as_ref() {
-            let mut dock = prompt_context;
-            dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
-            Some(dock)
-        } else if let Some(panel) = self.info_panel.as_mut() {
-            let mut dock = prompt_context;
-            dock.extend(panel.render(
-                &self.theme,
-                width,
-                self.editor.keybindings(),
-                &self.code_block_indent,
-                info_viewport_rows,
-            ));
-            Some(dock)
-        } else {
-            None
-        };
-        // The tree and fork selectors mount in the editor container
-        // (TS `showSelector`): an auto-height pane over the dock's rows.
-        let selector_dock: Option<Vec<Line>> = if self.tree_selector.is_some()
-            || self.fork_selector.is_some()
-            || self.share_loader.is_some()
-            || self.confirm.is_some()
-            || self.provider_auth.is_some()
-            || self.auth_panel.is_some()
-            || self.reload_box.is_some()
-            || self.settings_menu.is_some()
-        {
-            // TS's editor container holds the prompt context and the
-            // editor; `showSelector` replaces the editor part.
-            let mut dock = render_prompt_context(&self.detail_label(), &self.theme, width);
-            if let Some(selector) = self.tree_selector.as_ref() {
-                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
-            } else if let Some(selector) = self.fork_selector.as_ref() {
-                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
-            } else if let Some(loader) = self.share_loader.as_ref() {
-                dock.extend(self.render_share_loader(loader, width));
-            } else if let Some(confirm) = self.confirm.as_ref() {
-                dock.extend(confirm.render(&self.theme, width, self.editor.keybindings()));
-            } else if let Some(selector) = self.provider_auth.as_mut() {
-                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
-            } else if let Some(panel) = self.auth_panel.as_mut() {
-                let kb = self.editor.keybindings();
-                dock.extend(panel.render(&self.theme, width, kb));
-            } else if let Some(message) = self.reload_box.as_ref() {
-                dock.extend(self.render_reload_box(message, width));
-            } else if let Some(menu) = self.settings_menu.as_ref() {
-                dock.extend(menu.render(&self.theme, width, self.editor.keybindings()));
+        let pane_row = dock.len();
+        let kb = self.editor.keybindings();
+        let overlay_dock: Option<Vec<Line>> = match self.overlay.as_mut() {
+            None => None,
+            Some(Overlay::Onboarding(screen)) => {
+                // Its rows select, so the frame-selection regions span the whole frame.
+                let mut frame = screen.render(&self.theme, width, height, kb);
+                self.frame_rows = frame.len();
+                self.apply_frame_selection(&mut frame, 0, width);
+                return frame;
             }
-            Some(dock)
-        } else {
-            picker_dock
+            Some(Overlay::ModelPicker(picker)) => {
+                dock.extend(picker.render(&self.theme, width, kb));
+                // The pane's item rows are clickable: the recorded span
+                // covers the filtered window the render drew.
+                self.click.record_picker(PickerClickSurface {
+                    dock_row: pane_row,
+                    chrome_rows: MODEL_PICKER_CHROME_ROWS,
+                    items: picker.filtered_window(),
+                    kind: PickerKind::Model,
+                });
+                Some(dock)
+            }
+            Some(Overlay::ChoicePicker(picker)) => {
+                dock.extend(picker.render(&self.theme, width, kb));
+                self.click.record_picker(PickerClickSurface {
+                    dock_row: pane_row,
+                    chrome_rows: CHOICE_PICKER_CHROME_ROWS,
+                    items: picker.visible_window(),
+                    kind: PickerKind::Choice,
+                });
+                Some(dock)
+            }
+            Some(Overlay::Mcp(mcp_view)) => {
+                dock.extend(mcp_view.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::Factory(factory_view)) => {
+                dock.extend(factory_view.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::Heartbeats(picker)) => {
+                dock.extend(picker.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::Goal(panel)) => {
+                dock.extend(crate::goal_surface::render_goal_panel(
+                    panel,
+                    &self.theme,
+                    width,
+                    kb,
+                ));
+                Some(dock)
+            }
+            Some(Overlay::Bash(view)) => {
+                dock.extend(view.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::Info(panel)) => {
+                dock.extend(panel.render(
+                    &self.theme,
+                    width,
+                    kb,
+                    &self.code_block_indent,
+                    info_viewport_rows,
+                ));
+                Some(dock)
+            }
+            Some(Overlay::Tree(selector)) => {
+                dock.extend(selector.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::Fork(selector)) => {
+                dock.extend(selector.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::ShareLoader(loader)) => {
+                let loader = loader.clone();
+                dock.extend(self.render_share_loader(&loader, width));
+                Some(dock)
+            }
+            Some(Overlay::Confirm { panel, .. }) => {
+                dock.extend(panel.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::ProviderAuth(selector)) => {
+                dock.extend(selector.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::AuthPanel(panel)) => {
+                dock.extend(panel.render(&self.theme, width, kb));
+                Some(dock)
+            }
+            Some(Overlay::Reload(message)) => {
+                let message = message.clone();
+                dock.extend(self.render_reload_box(&message, width));
+                Some(dock)
+            }
+            Some(Overlay::Settings(menu)) => {
+                dock.extend(menu.render(&self.theme, width, kb));
+                Some(dock)
+            }
         };
         // The top bar always renders: the surface is fullscreen-only
         // (operator ruling 2026-09-28 — the bar has no gate left).
         let top = render_top_bar(&self.chrome, &self.theme, width);
         let top_rows = 1;
-        let dock = match selector_dock {
+        let dock = match overlay_dock {
             // The replacement surfaces swap only the editor part; the `/speed` footer stays
             // the dock's last row (TS `footerSlot`).
             Some(mut dock) => {
@@ -278,22 +275,11 @@ impl AgentView {
     /// Hardware cursor position within the last composed frame, when the
     /// editor surface drew the cursor.
     pub fn frame_cursor(&self) -> Option<(usize, usize)> {
-        if self.onboarding.is_some()
-            || self.model_picker.is_some()
-            || self.choice_picker.is_some()
-            || self.heartbeats_picker.is_some()
-            || self.goal_panel.is_some()
-            || self.bash_view.is_some()
-            || self.info_panel.is_some()
-            || self.tree_selector.is_some()
-            || self.fork_selector.is_some()
-            || self.share_loader.is_some()
-            || self.confirm.is_some()
-            || self.provider_auth.is_some()
-            || self.auth_panel.is_some()
-            || self.reload_box.is_some()
-            || self.settings_menu.is_some()
-            || self.factory_view.is_some()
+        // Every overlay but the `/mcp` view hides the editor's cursor.
+        if self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| !matches!(overlay, Overlay::Mcp(_)))
         {
             return None;
         }

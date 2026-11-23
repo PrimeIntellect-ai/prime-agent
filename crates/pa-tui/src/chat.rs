@@ -123,6 +123,22 @@ pub enum ChatEntry {
     CustomPanel(Box<crate::custom_message::CustomPanelRow>),
 }
 
+impl ChatEntry {
+    /// The envelope rows (agent messages, inbox notices, shell
+    /// completions, tool cards): their leading blank follows the
+    /// conversation spacing of the rows before them.
+    #[must_use]
+    pub fn is_envelope_row(&self) -> bool {
+        matches!(
+            self,
+            ChatEntry::AgentMessage(_)
+                | ChatEntry::InboxNotice(_)
+                | ChatEntry::ShellCompletion(_)
+                | ChatEntry::Tool(_)
+        )
+    }
+}
+
 // The card types live in `tool_card`; re-exported here because the
 // transcript vocabulary (`ChatEntry`) is this module's.
 pub use crate::tool_card::{render_tool_card, ToolCallCard, ToolResultView};

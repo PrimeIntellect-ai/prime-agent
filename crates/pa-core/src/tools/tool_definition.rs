@@ -27,6 +27,11 @@ pub enum ToolContentBlock {
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
+    Video {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
 }
 
 impl ToolContentBlock {
@@ -34,12 +39,12 @@ impl ToolContentBlock {
         ToolContentBlock::Text { text: text.into() }
     }
 
-    /// The text of a text block, or `None` for images.
+    /// The text of a text block, or `None` for images and videos.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
             ToolContentBlock::Text { text } => Some(text),
-            ToolContentBlock::Image { .. } => None,
+            ToolContentBlock::Image { .. } | ToolContentBlock::Video { .. } => None,
         }
     }
 }
