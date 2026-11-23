@@ -2411,6 +2411,53 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     drop(supervisor);
 }
 
+/// A `WaitIdle` barrier held by a running turn parks the loop. The plan's input sender closes
+/// once its last step is queued; a loop that kept polling the closed channel never parked,
+/// starving the daemon reader on this current-thread runtime, so under CPU load the turn end
+/// reached the barrier minutes late. The spin shows as the loop thread's CPU time.
+#[tokio::test]
+async fn tui_wait_idle_barrier_parks_while_the_turn_runs() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session_dir = dir.path().join("agent").join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "responses": [{ "text": "held reply", "delayMs": 4_000 }] });
+    std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
+    let options = base_options(&supervisor, dir.path(), &session_dir);
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hold".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 45_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let thread_cpu = || {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) },
+            0
+        );
+        Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    };
+    let cpu_before = thread_cpu();
+    let started = Instant::now();
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let cpu = thread_cpu().saturating_sub(cpu_before);
+    let wall = started.elapsed();
+    assert_eq!(outcome.last_assistant_text.as_deref(), Some("held reply"));
+    assert!(
+        cpu < wall / 5,
+        "the loop thread burned {cpu:?} of CPU over a {wall:?} run: the barrier spun instead of parking"
+    );
+    drop(supervisor);
+}
+
 /// A settings fixture rebinding `app.tools.expand` to `ctrl+alt+x` drives the surface.
 #[tokio::test]
 async fn tui_renders_and_fires_user_keybindings_from_settings() {
