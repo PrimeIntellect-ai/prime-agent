@@ -1,1 +1,0 @@
-- Fixed leftover staging directories from interrupted kernel setups: the bootstrap now removes a venv candidate or old-venv copy whose process is gone (or that is more than an hour old) when it takes the setup lock.

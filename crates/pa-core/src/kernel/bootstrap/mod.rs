@@ -9,7 +9,7 @@ mod runtime_code;
 pub(crate) mod venv;
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
@@ -20,7 +20,7 @@ pub use runtime_code::{
     PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
 };
 use venv::{
-    bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
+    bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime, home_kernel_venv_dir,
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
     resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill, UvCommand,
 };
@@ -233,7 +233,52 @@ async fn ensure_kernel_python_uncached(
     }
 
     let venv = resolve_writable_kernel_venv_dir()?;
-    ensure_kernel_venv(options, python_skills, venv, project).await
+    let account_home = crate::kernel::python_env::account_home();
+    ensure_kernel_venv(
+        options,
+        python_skills,
+        venv,
+        project,
+        account_home.as_deref(),
+    )
+    .await
+}
+
+/// Set to `1` for every cargo-launched process (tests and `cargo run`) by the
+/// workspace's `.cargo/config.toml`, so a test binary, and any worker it spawns,
+/// inherits it. `0` turns the refusal off: cargo's `[env]` never overrides a
+/// variable that is already set, so unsetting it would not.
+const REFUSE_ACCOUNT_KERNEL_VENV_ENV: &str = "PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV";
+
+/// A test must never build into the account's own kernel venv: that venv serves
+/// the user's live sessions, and a test binary's runtime identity differs from
+/// the installed one. `account_home` comes from the user database, so a test
+/// that points `HOME` at a temp dir still bootstraps there.
+fn refuse_account_venv_under_test(venv: &Path, account_home: Option<&Path>) -> anyhow::Result<()> {
+    let under_test = cfg!(test)
+        || std::env::var_os(REFUSE_ACCOUNT_KERNEL_VENV_ENV).is_some_and(|value| value != "0");
+    // Compare resolved locations: a `..` or symlinked spelling of the account
+    // venv is still the account venv.
+    let resolved = |path: &Path| {
+        path.canonicalize()
+            .or_else(|_| {
+                let parent = path.parent().unwrap_or(Path::new("/")).canonicalize()?;
+                Ok::<_, std::io::Error>(parent.join(path.file_name().unwrap_or_default()))
+            })
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    if under_test
+        && account_home.is_some_and(|home| resolved(&home_kernel_venv_dir(home)) == resolved(venv))
+    {
+        return Err(anyhow!(
+            "refusing to bootstrap the account's kernel venv ({}) from a cargo-launched build: \
+             it serves your live sessions. Set PRIME_AGENT_KERNEL_VENV to a scratch dir, or set \
+             {REFUSE_ACCOUNT_KERNEL_VENV_ENV}=0 to use the account venv deliberately (it will be \
+             renamed to kernel-venv.stale-<timestamp> and rebuilt).",
+            venv.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Replace the live venv with a freshly built candidate.
@@ -261,7 +306,8 @@ async fn ensure_kernel_venv(
     options: &EnsureKernelPythonOptions,
     python_skills: &[BootstrapPythonSkill],
     venv: PathBuf,
-    project: Option<&std::path::Path>,
+    project: Option<&Path>,
+    account_home: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
     let python = kernel_venv_python(&venv);
     let python_str = python.to_string_lossy().to_string();
@@ -274,6 +320,7 @@ async fn ensure_kernel_venv(
     if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
         return Ok(python);
     }
+    refuse_account_venv_under_test(&venv, account_home)?;
 
     let venv_ready = || kernel_ready(&python_str, &venv, &runtime_identity, python_skills);
     let release_lock = match acquire_bootstrap_lock(&venv, &venv_ready).await {
@@ -377,31 +424,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_failed_swap_restores_the_live_venv() {
-        let root = tempfile::tempdir().unwrap();
-        let venv = root.path().join("kernel-venv");
-        let live_python = venv.join("bin/python");
-        std::fs::create_dir_all(live_python.parent().unwrap()).unwrap();
-        std::fs::write(&live_python, "old").unwrap();
-        // The build never produced its candidate: the swap must fail with the
-        // old venv back in place, not with the live path missing.
-        let candidate = venv::venv_candidate_path(&venv);
-        let error = venv::swap_venv_into_place(&candidate, &venv).unwrap_err();
-        assert!(format!("{error:#}").contains("moving"), "{error:#}");
-        assert_eq!(std::fs::read_to_string(&live_python).unwrap(), "old");
-        let leftovers: Vec<String> = std::fs::read_dir(root.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .filter(|name| name.contains(".old-"))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "the restore consumes the aside: {leftovers:?}"
-        );
-    }
-
-    #[test]
     fn recovery_restores_a_complete_venv_aside_before_a_partial_live_tree() {
         let root = tempfile::tempdir().unwrap();
         let venv = root.path().join("kernel-venv");
@@ -409,10 +431,7 @@ mod tests {
         std::fs::create_dir_all(python.parent().unwrap()).unwrap();
         std::fs::write(&python, "old interpreter").unwrap();
         std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
-        let aside = root.path().join(format!(
-            "kernel-venv.old-{}-interrupted",
-            std::process::id()
-        ));
+        let aside = root.path().join("kernel-venv.stale-1");
         std::fs::rename(&venv, &aside).unwrap();
 
         // Simulate death after the new candidate was renamed to the live path
@@ -457,15 +476,12 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&live_python).unwrap(), "new");
         assert!(!candidate.exists(), "the candidate is consumed by the swap");
-        let leftovers: Vec<String> = std::fs::read_dir(root.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .filter(|name| name.contains(".old-"))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "the swap leaves no old venv: {leftovers:?}"
+        let retired = venv::retired_venvs(&venv);
+        assert_eq!(retired.len(), 1, "{retired:?}");
+        assert_eq!(
+            std::fs::read_to_string(kernel_venv_python(&retired[0].1)).unwrap(),
+            "old",
+            "the swap renames the old venv aside instead of deleting it"
         );
     }
 
@@ -518,7 +534,7 @@ mod tests {
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(121),
-            ensure_kernel_venv(&options, &[], venv, None),
+            ensure_kernel_venv(&options, &[], venv, None, /*account_home*/ None),
         )
         .await
         .expect("lock acquisition must have a bounded wait")
@@ -531,5 +547,196 @@ mod tests {
         );
         assert!(root.path().join("kernel-venv.bootstrap.lock").exists());
         drop(owner);
+    }
+
+    fn sibling_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The interpreter and `pyvenv.cfg` that `uv venv` writes.
+    fn write_complete_venv(venv: &Path, interpreter: &str) {
+        let python = kernel_venv_python(venv);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(python, interpreter).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    }
+
+    /// A retired copy's name, stamped `age` before now.
+    fn retired_name(age: std::time::Duration) -> String {
+        let stamp = std::time::SystemTime::now()
+            .checked_sub(age)
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        format!("kernel-venv.stale-{stamp}")
+    }
+
+    /// Three earlier retired copies stamped `age` (plus a few ms apart), oldest
+    /// first.
+    fn three_retired_copies(root: &Path, age: std::time::Duration) -> Vec<String> {
+        let names: Vec<String> = [3, 2, 1]
+            .into_iter()
+            .map(|ms| retired_name(age + std::time::Duration::from_millis(ms)))
+            .collect();
+        for name in &names {
+            write_complete_venv(&root.join(name), name);
+        }
+        names
+    }
+
+    fn aged_past_retention() -> std::time::Duration {
+        venv::STALE_VENV_RETENTION + std::time::Duration::from_secs(60)
+    }
+
+    /// The ordering guarantee: nothing is pruned unless the old venv was
+    /// renamed aside and the new one took its place. A failed swap restores the
+    /// old venv and leaves even a prunable copy on disk.
+    #[test]
+    fn a_failed_swap_restores_the_old_venv_and_prunes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let earlier = three_retired_copies(root.path(), aged_past_retention());
+        let venv = root.path().join("kernel-venv");
+        write_complete_venv(&venv, "old");
+        let before = sibling_names(root.path());
+
+        // The build never produced its candidate, so the second rename fails.
+        let candidate = venv::venv_candidate_path(&venv);
+        venv::swap_venv_into_place(&candidate, &venv).unwrap_err();
+
+        assert_eq!(
+            std::fs::read_to_string(kernel_venv_python(&venv)).unwrap(),
+            "old"
+        );
+        assert_eq!(sibling_names(root.path()), before);
+        assert!(root.path().join(&earlier[0]).exists());
+    }
+
+    /// The old venv is renamed, never deleted. The just-retired copy and the
+    /// two newest earlier ones stay even past seven days; the third earlier
+    /// copy, past seven days, is pruned.
+    #[test]
+    fn a_swap_keeps_the_retired_venv_and_the_two_newest_earlier_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let earlier = three_retired_copies(root.path(), aged_past_retention());
+        let venv = root.path().join("kernel-venv");
+        write_complete_venv(&venv, "old");
+        let candidate = venv::venv_candidate_path(&venv);
+        write_complete_venv(&candidate, "new");
+
+        venv::swap_venv_into_place(&candidate, &venv).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(kernel_venv_python(&venv)).unwrap(),
+            "new"
+        );
+        let retired = venv::retired_venvs(&venv);
+        assert_eq!(retired.len(), 1 + venv::STALE_VENV_KEEP, "{retired:?}");
+        assert_eq!(
+            std::fs::read_to_string(kernel_venv_python(&retired[0].1)).unwrap(),
+            "old",
+            "the newest retired copy is the venv the swap replaced"
+        );
+        let mut want = vec![
+            "kernel-venv".to_string(),
+            retired[0]
+                .1
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            earlier[1].clone(),
+            earlier[2].clone(),
+        ];
+        want.sort();
+        assert_eq!(sibling_names(root.path()), want);
+    }
+
+    #[test]
+    fn a_retired_copy_younger_than_seven_days_is_never_pruned() {
+        let root = tempfile::tempdir().unwrap();
+        let young = venv::STALE_VENV_RETENTION
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap();
+        let earlier = three_retired_copies(root.path(), young);
+        let venv = root.path().join("kernel-venv");
+        write_complete_venv(&venv, "old");
+        let candidate = venv::venv_candidate_path(&venv);
+        write_complete_venv(&candidate, "new");
+
+        venv::swap_venv_into_place(&candidate, &venv).unwrap();
+
+        let names = sibling_names(root.path());
+        for name in &earlier {
+            assert!(names.contains(name), "{name} survives: {names:?}");
+        }
+        assert_eq!(venv::retired_venvs(&venv).len(), 4);
+    }
+
+    #[test]
+    fn a_pruning_failure_never_fails_the_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let earlier = three_retired_copies(root.path(), aged_past_retention());
+        // `remove_dir_all` cannot remove a file, even as root.
+        std::fs::remove_dir_all(root.path().join(&earlier[0])).unwrap();
+        std::fs::write(root.path().join(&earlier[0]), "x").unwrap();
+        let venv = root.path().join("kernel-venv");
+        write_complete_venv(&venv, "old");
+        let candidate = venv::venv_candidate_path(&venv);
+        write_complete_venv(&candidate, "new");
+
+        venv::swap_venv_into_place(&candidate, &venv).expect("a pruning failure is not fatal");
+
+        assert_eq!(
+            std::fs::read_to_string(kernel_venv_python(&venv)).unwrap(),
+            "new"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_account_venv_is_never_bootstrapped_from_a_test() {
+        let account_home = tempfile::tempdir().unwrap();
+        let venv = home_kernel_venv_dir(account_home.path());
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("marker"), "live").unwrap();
+        let options = EnsureKernelPythonOptions {
+            on_progress: Some(Arc::new(|message| {
+                panic!("the guard must stop the bootstrap first, got progress: {message}");
+            })),
+            ..Default::default()
+        };
+
+        let error =
+            ensure_kernel_venv(&options, &[], venv.clone(), None, Some(account_home.path()))
+                .await
+                .expect_err("a test must not bootstrap the account's venv");
+
+        // The refusal names both ways forward: a scratch venv, or the marker off.
+        let message = error.to_string();
+        assert!(
+            message.contains("Set PRIME_AGENT_KERNEL_VENV to a scratch dir"),
+            "{message}"
+        );
+        assert!(
+            message.contains("set PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV=0"),
+            "{message}"
+        );
+        assert_eq!(sibling_names(&venv), vec!["marker".to_string()]);
+        let alias = account_home
+            .path()
+            .join(".prime/agent/../agent/kernel-venv");
+        assert!(
+            refuse_account_venv_under_test(&alias, Some(account_home.path())).is_err(),
+            "a `..` spelling of the account venv is refused too"
+        );
+        assert_eq!(
+            sibling_names(venv.parent().unwrap()),
+            vec!["kernel-venv".to_string()]
+        );
     }
 }

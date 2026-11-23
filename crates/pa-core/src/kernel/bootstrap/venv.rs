@@ -25,8 +25,12 @@ mod uv;
 mod version;
 
 use layout::home_dir;
-pub(crate) use layout::{expand_home, resolve_writable_kernel_venv_dir};
+pub(crate) use layout::retired_venvs;
+pub(crate) use layout::{expand_home, home_kernel_venv_dir, resolve_writable_kernel_venv_dir};
 pub use layout::{kernel_venv_dir, kernel_venv_python};
+use layout::{prune_retired_venvs, retire_venv};
+#[cfg(test)]
+pub(crate) use layout::{STALE_VENV_KEEP, STALE_VENV_RETENTION};
 pub use probe::invalidate_runtime_probe_cache;
 #[cfg(test)]
 use probe::{installed_rlm_dir, lock_probe_memo, runtime_probe_key};
@@ -132,33 +136,21 @@ fn venv_structure_complete(venv: &Path) -> bool {
     kernel_venv_python(venv).exists() && venv.join("pyvenv.cfg").is_file()
 }
 
-/// Restore a complete aside left by a process killed during the two-rename swap.
-/// The caller holds the bootstrap lock, so no live rebuild owns the aside.
+/// Restore the newest complete retired copy when the live venv is missing or
+/// incomplete, for example after a process was killed during the two-rename
+/// swap. The caller holds the bootstrap lock, so no live rebuild owns a copy.
 pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
-    let parent = venv.parent().unwrap_or(Path::new("/"));
-    let name = venv.file_name().unwrap_or_default().to_string_lossy();
-    let prefix = format!("{name}.old-");
-    let mut asides: Vec<_> = std::fs::read_dir(parent)?
-        .flatten()
-        .filter(|entry| {
-            entry.file_name().to_string_lossy().starts_with(&prefix)
-                && venv_structure_complete(&entry.path())
-        })
-        .collect();
-    asides.sort_by_key(|entry| {
-        entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok()
-    });
-    let Some(aside) = asides.pop() else {
+    if venv_structure_complete(venv) {
+        return Ok(());
+    }
+    let Some((_, retired)) = retired_venvs(venv)
+        .into_iter()
+        .find(|(_, path)| venv_structure_complete(path))
+    else {
         return Ok(());
     };
-    let aside = aside.path();
     if venv.exists() {
-        if venv_structure_complete(venv) {
-            return Ok(());
-        }
+        let name = venv.file_name().unwrap_or_default().to_string_lossy();
         let partial = venv.with_file_name(format!(
             "{name}.partial-{}-{}",
             std::process::id(),
@@ -167,18 +159,18 @@ pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
         crate::platform::rename_onto(venv, &partial)
             .with_context(|| format!("moving incomplete {} aside", venv.display()))?;
     }
-    crate::platform::rename_onto(&aside, venv)
-        .with_context(|| format!("restoring {} from {}", venv.display(), aside.display()))?;
+    crate::platform::rename_onto(&retired, venv)
+        .with_context(|| format!("restoring {} from {}", venv.display(), retired.display()))?;
     Ok(())
 }
 
 /// Move a fully built `candidate` onto the live `venv` path.
 ///
-/// The live path is absent only between the two renames. A killed process can
-/// leave the old venv aside in that window; the next lock holder restores it
-/// before sweeping staging paths. A failed candidate move restores the old venv
-/// immediately, and cleanup never removes the aside until the replacement is
-/// structurally complete.
+/// The old venv is renamed to `<venv>.stale-<unix-ms>` first and is never
+/// deleted here. The live path is absent only between the two renames; a
+/// killed process can leave it so, and the next lock holder restores the
+/// retired copy. A failed candidate move restores the old venv at once. Only
+/// after a complete replacement are old retired copies pruned.
 pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Result<()> {
     if candidate.exists() && !venv_structure_complete(candidate) {
         anyhow::bail!("candidate venv {} is incomplete", candidate.display());
@@ -187,26 +179,19 @@ pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Res
         return crate::platform::rename_onto(candidate, venv)
             .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
     }
-    let name = venv.file_name().unwrap_or_default().to_string_lossy();
-    let aside = venv.with_file_name(format!(
-        "{name}.old-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    crate::platform::rename_onto(venv, &aside)
-        .with_context(|| format!("moving {} aside", venv.display()))?;
+    let retired = retire_venv(venv)?;
     if let Err(error) = crate::platform::rename_onto(candidate, venv) {
         // Put the working venv back before reporting the failure. A failed
         // restore must not hide behind the first error: the caller has to know
-        // that the live path is now the aside directory, not the old venv.
-        if let Err(restore) = crate::platform::rename_onto(&aside, venv) {
+        // that the live path is gone and the old venv sits at the retired path.
+        if let Err(restore) = crate::platform::rename_onto(&retired, venv) {
             return Err(anyhow::anyhow!(
                 "moving {} into {} failed ({error:#}), and restoring {} from {} failed too \
                  ({restore:#})",
                 candidate.display(),
                 venv.display(),
                 venv.display(),
-                aside.display()
+                retired.display()
             ));
         }
         return Err(error)
@@ -215,16 +200,16 @@ pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Res
     if !venv_structure_complete(venv) {
         std::fs::remove_dir_all(venv)
             .with_context(|| format!("removing incomplete replacement venv {}", venv.display()))?;
-        crate::platform::rename_onto(&aside, venv).with_context(|| {
+        crate::platform::rename_onto(&retired, venv).with_context(|| {
             format!(
                 "restoring {} from {} after incomplete replacement",
                 venv.display(),
-                aside.display()
+                retired.display()
             )
         })?;
         anyhow::bail!("replacement venv {} is incomplete", venv.display());
     }
-    let _ = std::fs::remove_dir_all(&aside);
+    prune_retired_venvs(venv, &retired);
     Ok(())
 }
 
