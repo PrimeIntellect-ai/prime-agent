@@ -20,7 +20,8 @@ use pa_sandbox::transport::{
     ResponseChunks, SandboxTransport, StreamedResponse, TransportRequest, TransportResponse,
 };
 use pa_sandbox::{
-    ClientOptions, PrimeSandboxClient, SandboxStatus, VmCreateRequest, NO_TIMEOUT_MINUTES,
+    ClientOptions, PrimeSandboxClient, SandboxError, SandboxErrorCode, SandboxStatus,
+    VmCreateRequest, NO_TIMEOUT_MINUTES,
 };
 use serde_json::json;
 
@@ -309,6 +310,23 @@ async fn wait_for_checkpoint_polls_until_durable() {
         .unwrap();
     assert!(checkpoint.is_durable());
     assert_eq!(transport.recorded().len(), 3);
+}
+
+#[tokio::test]
+async fn wait_for_checkpoint_reports_the_redacted_terminal_error() {
+    let mut failed = checkpoint_wire("FAILED");
+    failed["error"] = json!("upload rejected for test-key");
+    let transport = ScriptedTransport::new(vec![ok(failed)]);
+    let client = test_client(&transport);
+    let error = client
+        .wait_for_checkpoint("ckpt-1", Duration::from_secs(5), Duration::from_millis(1))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::TerminalStatus);
+    assert_eq!(
+        error.details(),
+        Some(SandboxError::redact_secrets("upload rejected for test-key", &["test-key"]).as_str())
+    );
 }
 
 #[tokio::test]

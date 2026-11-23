@@ -25,8 +25,8 @@ pub use transport::{
     MAX_JSON_BODY_BYTES,
 };
 pub use types::{
-    unix_now_secs, HeaderRule, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxCheckpointState,
-    SandboxStatus, StartCommand, VmCreateRequest, WaitOptions, DEFAULT_REQUEST_TIMEOUT,
+    HeaderRule, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxCheckpointState, SandboxStatus,
+    StartCommand, VmCreateRequest, WaitOptions, DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_WAIT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT, NO_TIMEOUT_MINUTES,
     PRIME_SANDBOX_CREATE_MAX_ATTEMPTS,
 };

@@ -544,9 +544,9 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::SandboxErrorCode::TerminalStatus`] with the checkpoint's
-    /// terminal state in `details`, or [`crate::SandboxErrorCode::Timeout`] with
-    /// the last observed state in `details`.
+    /// Returns [`crate::SandboxErrorCode::TerminalStatus`] with the terminal
+    /// state in the message and the redacted checkpoint error in `details`, or
+    /// [`crate::SandboxErrorCode::Timeout`] with the last state in the message.
     pub async fn wait_for_checkpoint(
         &self,
         checkpoint_id: &str,
@@ -567,7 +567,15 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             // The platform freezes the sandbox's disk while snapshotting;
             // FROZEN is an in-flight state on the way to DURABLE.
             if checkpoint.state != "PENDING" && checkpoint.state != "FROZEN" {
-                return Err(SandboxError::terminal_status(checkpoint.state.clone()));
+                let details = checkpoint
+                    .error
+                    .as_deref()
+                    .map(|error| SandboxError::redact_secrets(error, &[self.api_key.as_str()]));
+                return Err(SandboxError::terminal_status(format!(
+                    "checkpoint {checkpoint_id} reached terminal state {}",
+                    checkpoint.state
+                ))
+                .with_details(details));
             }
             if Instant::now() >= deadline {
                 return Err(SandboxError::timeout(format!(

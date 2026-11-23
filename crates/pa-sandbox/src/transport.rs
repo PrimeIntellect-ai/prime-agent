@@ -52,26 +52,6 @@ pub struct TransportRequest {
     pub timeout: Option<Duration>,
 }
 
-impl TransportRequest {
-    /// Build a request with the transport-default body cap.
-    #[must_use]
-    pub fn new(
-        method: Method,
-        url: String,
-        headers: Vec<(String, String)>,
-        body: Option<Vec<u8>>,
-    ) -> Self {
-        Self {
-            method,
-            url,
-            headers,
-            body,
-            max_response_bytes: None,
-            timeout: Some(crate::types::DEFAULT_REQUEST_TIMEOUT),
-        }
-    }
-}
-
 impl std::fmt::Debug for TransportRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let header_names: Vec<_> = self.headers.iter().map(|(name, _)| name).collect();
