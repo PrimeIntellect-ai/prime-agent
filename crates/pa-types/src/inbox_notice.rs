@@ -18,6 +18,15 @@ pub const INBOX_CLASS_CHILD_EXITED: &str = "child-exited";
 pub const INBOX_CLASS_CHILD_FAILED: &str = "child-failed";
 /// The heartbeat class label: one fired scheduled heartbeat's prompt.
 pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
+/// Every inbox message class.
+pub const INBOX_CLASSES: [&str; 6] = [
+    INBOX_CLASS_BASH_DONE,
+    INBOX_CLASS_FACTORY_PROGRESS,
+    INBOX_CLASS_AGENT_MESSAGE,
+    INBOX_CLASS_CHILD_EXITED,
+    INBOX_CLASS_CHILD_FAILED,
+    INBOX_CLASS_HEARTBEAT,
+];
 
 /// The `customType` of the inbox notice rows (`arrival` and `reminder`).
 pub const INBOX_NOTICE_CUSTOM_TYPE: &str = "inbox_notice";

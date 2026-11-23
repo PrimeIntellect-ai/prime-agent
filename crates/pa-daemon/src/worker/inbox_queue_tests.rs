@@ -693,3 +693,33 @@ async fn a_message_sent_during_a_replacement_reaches_the_new_session() {
         "{rows:?}"
     );
 }
+
+/// Mail admitted just before a replacement moves to the new session: it
+/// leaves the outgoing inbox, keeps its arrival time, and the new
+/// session's open announces it.
+#[tokio::test]
+async fn mail_waiting_at_a_replacement_moves_to_the_new_session() {
+    let fx = fixture();
+    assert!(
+        deliver_agent_message(&fx.worker, "just before")
+            .await
+            .success
+    );
+    let arrived_at = fx.inbox.waiting_messages()[0].arrived_at_ms;
+    let successor = fx.dir.join("sessions").join("successor.jsonl");
+    fx.worker
+        .teardown_for_replacement(&successor)
+        .await
+        .expect("the teardown");
+    assert_eq!(fx.inbox.count().0, 0, "the outgoing inbox gave it up");
+    fx.engine().set_session_file(successor);
+    fx.worker.refresh_replaced_session_state().await;
+    let inbox = fx.engine().inbox().expect("the successor's inbox");
+    let waiting = inbox.waiting_messages();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].arrived_at_ms, arrived_at);
+    assert_eq!(waiting[0].meta["movedFrom"], json!("inbox-session/inbox-1"));
+    let rows = rows(&fx.worker);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].covers, waiting_ids(&inbox));
+}

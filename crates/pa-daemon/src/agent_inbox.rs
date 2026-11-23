@@ -239,6 +239,55 @@ impl InboxRouter {
     }
 }
 
+/// Move every waiting message from the outgoing session's inbox into the
+/// successor's (a replacement: the outgoing session never reopens through
+/// this worker). The successor's copies are written first and the
+/// outgoing records removed after, so a crash in between leaves a message
+/// in both inboxes, never in neither. Each copy keeps its arrival time
+/// and carries `meta.movedFrom` (`<session id>/<inbox id>`), so a repeated
+/// move after such a crash never adds a second copy.
+pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from_session: &str) {
+    let already_moved: Vec<String> = to
+        .waiting_messages()
+        .into_iter()
+        .filter_map(|message| {
+            message
+                .meta
+                .get("movedFrom")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let mut moved = std::collections::BTreeSet::new();
+    for message in from.waiting_messages() {
+        let Some(class) = pa_types::inbox_notice::INBOX_CLASSES
+            .into_iter()
+            .find(|class| *class == message.class)
+        else {
+            continue;
+        };
+        let origin = format!("{from_session}/{}", message.id);
+        if !already_moved.contains(&origin) {
+            let mut meta = message.meta;
+            if !meta.is_object() {
+                meta = serde_json::json!({});
+            }
+            meta["movedFrom"] = serde_json::json!(origin);
+            to.push(
+                InboxNotice {
+                    class,
+                    sender: message.sender,
+                    text: message.text,
+                    meta,
+                },
+                message.arrived_at_ms,
+            );
+        }
+        moved.insert(message.id);
+    }
+    from.withdraw_ids(&moved);
+}
+
 /// `agentInbox.enabled` (default on): the kill switch that restores
 /// direct notice-row steering.
 pub(crate) fn inbox_enabled(cwd: &Path, agent_dir: &Path) -> bool {
