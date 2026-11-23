@@ -293,10 +293,7 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
             assert!(core.lock().unwrap().steering.is_empty());
             tokio::time::advance(std::time::Duration::from_secs(2)).await;
             tokio::task::yield_now().await;
-            if !queues {
-                assert!(core.lock().unwrap().steering.is_empty());
-                assert!(futures::FutureExt::now_or_never(work_notify.notified()).is_none());
-            } else {
+            if queues {
                 let (release_tx, blocker) = checkpoint_blocker.unwrap();
                 while core.lock().unwrap().steering.is_empty() {
                     assert!(
@@ -320,6 +317,9 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
                 let row = core.steering[0].custom_message.as_ref().unwrap();
                 assert_eq!(row["customType"], "turn_held_notice");
                 core.steering.clear();
+            } else {
+                assert!(core.lock().unwrap().steering.is_empty());
+                assert!(futures::FutureExt::now_or_never(work_notify.notified()).is_none());
             }
         }
         finish_tx.send(()).unwrap();
