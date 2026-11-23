@@ -7,7 +7,9 @@ use anyhow::Result;
 use pa_types::daemon::DaemonCommand;
 use serde_json::{json, Value};
 
-use super::{follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, PAUSE_GRACE};
+use super::{
+    follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, PAUSE_GRACE,
+};
 use crate::bots::ledger::{recover_all, BotLedger, DeliveryState};
 
 /// The guest's bot session: its transcript rows and its owner outbox.
