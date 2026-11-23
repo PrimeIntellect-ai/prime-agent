@@ -166,11 +166,11 @@ pub fn read_active_orphan_processes(
 /// ([`LiveBackgroundShellJournal`]); the liveness filter runs on every
 /// read, never on the cache (a record alive at one boundary may die before
 /// the next).
-fn read_active_shell_records(path: &Path, owner_pid: i64) -> Vec<ActiveOrphanProcess> {
-    let Ok(orphans) = read_active_orphan_processes(path, owner_pid) else {
-        return Vec::new();
-    };
-    orphans
+fn read_active_shell_records(
+    path: &Path,
+    owner_pid: i64,
+) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
+    Ok(read_active_orphan_processes(path, owner_pid)?
         .into_iter()
         .filter(|orphan| {
             let Some(kernel_pid) = orphan.kernel_pid else {
@@ -178,7 +178,7 @@ fn read_active_shell_records(path: &Path, owner_pid: i64) -> Vec<ActiveOrphanPro
             };
             orphan.pid > 0 && orphan.pid != kernel_pid
         })
-        .collect()
+        .collect())
 }
 
 /// Whether an active shell record's pid still names the same live process
@@ -250,7 +250,15 @@ impl LiveBackgroundShellJournal {
                         .collect();
                 }
             }
-            let records = read_active_shell_records(&self.path, self.owner_pid);
+            // A failed read is not memoized: the next consult retries it
+            // even when the journal stamp is unchanged.
+            let records = match read_active_shell_records(&self.path, self.owner_pid) {
+                Ok(records) => records,
+                Err(error) => {
+                    tracing::warn!(%error, "orphan journal read failed");
+                    return Vec::new();
+                }
+            };
             *cached = Some((stamp, records.clone()));
             records
         };
@@ -535,5 +543,44 @@ mod tests {
         );
         let _ = live_shell.kill();
         let _ = live_shell.wait();
+    }
+
+    /// A failed journal read is not memoized: one unreadable parse (here
+    /// invalid UTF-8) must not pin "no live shells" while the journal
+    /// stamp stays the same, or the continuation gates would treat a live
+    /// orphaned shell as settled.
+    #[test]
+    fn a_failed_journal_read_is_retried_at_the_same_stamp() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("w.orphans.jsonl");
+        let owner = i64::from(std::process::id());
+        let record = json!({
+            "version": 1, "pid": owner, "ownerPid": owner,
+            "kernelPid": 999_999, "active": true, "recordedAt": iso8601_now(),
+        })
+        .to_string()
+            + "\n";
+        let mut unreadable = record.clone().into_bytes();
+        unreadable[0] = 0xff;
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let write_at_fixed_stamp = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).expect("write journal");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open journal")
+                .set_modified(mtime)
+                .expect("pin the journal mtime");
+        };
+        let journal = LiveBackgroundShellJournal::new(&path, owner);
+        write_at_fixed_stamp(&unreadable);
+        assert_eq!(journal.live_shells(), Vec::new());
+        write_at_fixed_stamp(record.as_bytes());
+        let live = journal.live_shells();
+        assert_eq!(
+            live.iter().map(|orphan| orphan.pid).collect::<Vec<_>>(),
+            vec![std::process::id() as i32],
+            "the readable journal at the same stamp must be re-parsed"
+        );
     }
 }
