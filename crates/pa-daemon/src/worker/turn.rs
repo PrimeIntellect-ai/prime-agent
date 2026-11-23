@@ -417,6 +417,11 @@ impl TurnRunner {
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         let batch_len = items.len();
+        // A plain prompt's accepted rows are the core's admitted user rows, so
+        // a notice row emitted before admission must not take a slot. An
+        // injected row or a session command's echo row is a host custom row.
+        let custom_accepted_row = request.custom_message.is_some()
+            || crate::session_commands::parse_prompt_session_command(&request.message).is_some();
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepted_prefix_seen = Arc::clone(&accepted_prefix);
@@ -676,10 +681,8 @@ impl TurnRunner {
                 let mut action_frame: Option<SessionActionSnapshot> = None;
                 if !emitting_prefix_rows.get()
                     && accepted_rows < batch_len
-                    && matches!(
-                        event,
-                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
-                    )
+                    && (matches!(event, EngineEvent::UserMessage(_))
+                        || (custom_accepted_row && matches!(event, EngineEvent::CustomMessage(_))))
                 {
                     accepted_rows += 1;
                     accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);

@@ -636,6 +636,79 @@ async fn an_abort_after_admission_keeps_the_admitted_user_row() {
     }
 }
 
+/// A shutdown that lands before admission returns a plain prompt to its lane:
+/// a notice row emitted before admission is not the prompt's row. An injected
+/// row or a session command's echo row is the delivery's own row, so that
+/// delivery stays consumed.
+#[tokio::test]
+async fn a_shutdown_before_admission_requeues_a_prompt_behind_a_notice() {
+    let notice = json!({
+        "role": "custom",
+        "customType": "notice",
+        "content": "notice",
+        "display": true,
+        "timestamp": 1,
+    });
+    for (message, custom_message, requeued) in [
+        ("prompt", None, true),
+        ("/compact", None, false),
+        ("injected", Some(notice.clone()), false),
+    ] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![
+                EngineEvent::CustomMessage(notice.clone()),
+                EngineEvent::DoneAborted,
+            ],
+            ..GateProbeEngine::default()
+        });
+        let runner = burst_runner(engine.clone());
+        let core = Arc::clone(&runner.core);
+        let delivered = std::sync::atomic::AtomicUsize::new(0);
+        *engine.before_delivery.lock().unwrap() = Some(Box::new(move || {
+            // The shutdown lands after the first row, before the settle.
+            if delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                let mut core = core.lock().unwrap();
+                core.shutdown_requested = true;
+                core.abort_requested = true;
+            }
+        }));
+        runner
+            .run_turn(
+                engine,
+                Lane::Steering,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: message.to_string(),
+                    custom_message,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        let lane: Vec<String> = runner
+            .core
+            .lock()
+            .unwrap()
+            .steering
+            .iter()
+            .map(|item| item.message.clone())
+            .collect();
+        let expected = if requeued {
+            vec![message.to_string()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(lane, expected, "{message}");
+    }
+}
+
 /// A turn aborted under row suppression (a manual compaction or tree move)
 /// still reaches the engine's turn boundary at its swallowed `Done`, so
 /// child prompts held for that turn are released.
