@@ -443,7 +443,11 @@ impl BotManager {
             );
             retry(|| self.platform.delete(&extra.id)).await?;
         }
-        Ok(live.into_iter().next())
+        let found = live.into_iter().next();
+        if let Some(sandbox) = &found {
+            record.sandbox_id = Some(sandbox.id.clone());
+        }
+        Ok(found)
     }
 
     /// Bring an existing sandbox to `Running`; `None` when it died.

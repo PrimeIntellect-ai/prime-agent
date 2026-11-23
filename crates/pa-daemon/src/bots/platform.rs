@@ -218,7 +218,7 @@ impl PrimePlatform {
         while let Some(event) = stream.next_event().await {
             let event = match event {
                 Ok(event) => event,
-                Err(error) if !attached && error.is_recoverable_stream_fault() => {
+                Err(error) if error.is_recoverable_stream_fault() => {
                     stream = sessions
                         .connect(&session_uuid, StreamOptions::default())
                         .await
