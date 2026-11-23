@@ -361,6 +361,12 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
+    /// The session's inbox store, when the engine keeps one: the turn
+    /// runner delivers and consumes the inbox arrival row through it.
+    fn inbox_store(&self) -> Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>> {
+        None
+    }
+
     /// Clears the stored note at the run boundary; engines without a note
     /// store do nothing.
     fn clear_progress_note(&self) {}

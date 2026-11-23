@@ -95,6 +95,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                         meta: json!({ "pid": 4321, "command": "fixture command", "exitCode": 0 }),
                     },
                     Lane::Steering,
+                    Duration::ZERO,
                 );
                 assert_eq!(
                     inbox.drain().len(),

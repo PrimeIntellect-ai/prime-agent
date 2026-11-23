@@ -1210,6 +1210,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.05; printf detached",
                 "exitCode": 0,
+                "outputTail": "detached",
             },
         )
         reply_ok(self.repl, request)
@@ -1240,6 +1241,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
+                "outputTail": "degraded",
             },
         )
         reply_ok(self.repl, request)
@@ -1276,6 +1278,7 @@ class ReplTest(unittest.TestCase):
                 "pid": int(pid),
                 "command": "sleep 1.5; printf persisted",
                 "exitCode": 0,
+                "outputTail": "persisted",
             },
         )
         reply_ok(repl, request)
@@ -1394,7 +1397,13 @@ class ReplTest(unittest.TestCase):
         )
         self.assertEqual(
             notice,
-            {"type": "bash.completed", "pid": notice["pid"], "command": "sleep 0.05; exit 3", "exitCode": 3},
+            {
+                "type": "bash.completed",
+                "pid": notice["pid"],
+                "command": "sleep 0.05; exit 3",
+                "exitCode": 3,
+                "outputTail": "",
+            },
         )
         probe = self.repl.execute("failed-probe", "await asyncio.sleep(0.05)")
         self.assertIsNone(one(probe, "host_request"))

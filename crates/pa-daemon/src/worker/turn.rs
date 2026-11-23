@@ -1,12 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    checkpoint_queue_recovery, compact_action_label, consume_shown_inbox_items_locked,
+    create_daemon_event_meta, deliver_inbox_arrival_row_locked, emit_refinement_event_for_session,
+    emit_refinement_row, gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot,
+    DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest,
+    QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine,
+    TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
 use std::sync::{Arc, Mutex};
@@ -45,6 +45,9 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
+            // The live inbox store: a picked arrival row consumes from it.
+            let inbox = engine.inbox_store();
+            let mut inbox_hold = None;
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
@@ -59,28 +62,20 @@ impl TurnRunner {
                 if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     None
+                } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
+                    core.busy = false;
+                    inbox_hold = Some(due);
+                    None
                 } else if core.steering.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::Steering);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::Steering, items))
+                    Some((
+                        Lane::Steering,
+                        Self::pick(&mut core, Lane::Steering, inbox.as_ref()),
+                    ))
                 } else if core.follow_up.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::FollowUp, items))
+                    Some((
+                        Lane::FollowUp,
+                        Self::pick(&mut core, Lane::FollowUp, inbox.as_ref()),
+                    ))
                 } else {
                     core.busy = false;
                     None
@@ -112,6 +107,16 @@ impl TurnRunner {
                 self.run_turn(engine, lane, items).await;
             } else {
                 self.idle_notify.notify_waiters();
+                // A held inbox row (`SessionCore::inbox_wake_hold`) is not
+                // idle: no activity stamp, no kernel release. It wakes the
+                // runner at its due time; any queued work wakes it sooner.
+                if let Some(due) = inbox_hold {
+                    tokio::select! {
+                        () = self.work_notify.notified() => {}
+                        () = tokio::time::sleep_until(due) => {}
+                    }
+                    continue;
+                }
                 // Every park re-stamps the activity end: the idle-eviction
                 // window measures from the TRUE last activity.
                 {
@@ -142,6 +147,36 @@ impl TurnRunner {
                 }
             }
         }
+    }
+
+    /// Take the next delivery from `lane` and mark the session busy with
+    /// it. An inbox arrival row delivers through
+    /// [`deliver_inbox_arrival_row_locked`]; its accepted row consumes what
+    /// it shows.
+    fn pick(
+        core: &mut SessionCore,
+        lane: Lane,
+        inbox: Option<&std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>,
+    ) -> Vec<QueuedItem> {
+        let mut items = gather_delivery_batch(core, lane);
+        if let Some(inbox) = inbox {
+            for item in items
+                .iter_mut()
+                .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+            {
+                deliver_inbox_arrival_row_locked(core, item, inbox);
+            }
+        }
+        core.running_admission_ids = items
+            .iter()
+            .filter_map(|item| item.admission_id.clone())
+            .collect();
+        core.busy = true;
+        core.abort_requested = false;
+        core.retry_abort_requested = false;
+        core.run_cut_at_tool_boundary = false;
+        core.running_tool_calls.clear();
+        items
     }
 
     /// Release a parked parent-owned child's kernel; the engine owns the
@@ -417,6 +452,11 @@ impl TurnRunner {
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         let batch_len = items.len();
+        // The arrival row's accepted transcript row consumes what it shows.
+        let arrival_row = items
+            .iter()
+            .position(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        let inbox = self.engine.inbox_store();
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepted_prefix_seen = Arc::clone(&accepted_prefix);
@@ -438,6 +478,8 @@ impl TurnRunner {
             let mut last_retry_error: Option<String> = None;
             // A failed run's `agent_end` frame, held for the frame after it.
             let mut held_run_end: Option<Value> = None;
+            // Whether the run's latest `turn_end` ran tools.
+            let mut last_turn_ran_tools = false;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
@@ -489,7 +531,16 @@ impl TurnRunner {
                 // completion that cut this run) keeps the note for the work
                 // continuing in the next delivery. Clear before the frame:
                 // its roster flush must not publish the stale note.
+                if let EngineEvent::TurnEnd { tool_results, .. } = &event {
+                    last_turn_ran_tools = !tool_results.is_empty();
+                }
                 let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
+                // A queued steer cuts a run only at a tool boundary, and the
+                // row that cut it stays queued until the runner takes it.
+                if agent_end {
+                    core.run_cut_at_tool_boundary =
+                        last_turn_ran_tools && !core.steering.is_empty();
+                }
                 let more_queued =
                     agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
                 if agent_end && !more_queued {
@@ -678,6 +729,12 @@ impl TurnRunner {
                 {
                     accepted_rows += 1;
                     accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(inbox) = inbox
+                        .as_ref()
+                        .filter(|_| arrival_row == Some(accepted_rows - 1))
+                    {
+                        consume_shown_inbox_items_locked(&mut core, inbox);
+                    }
                     if accepted_rows == 1 {
                         if let Some(active) = core.active_action.as_mut() {
                             active.phase = "committing".to_string();
@@ -1117,6 +1174,8 @@ impl TurnRunner {
                     lane_items.push_front(item);
                 }
             }
+            // An arrival row the turn never accepted leaves its shown items waiting.
+            core.inbox_shown_unaccepted.clear();
             let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
             // Publish the note clear and idle transition atomically to
             // roster readers, which capture core then the engine note.

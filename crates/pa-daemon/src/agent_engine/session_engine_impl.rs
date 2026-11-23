@@ -353,6 +353,10 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    fn inbox_store(&self) -> Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>> {
+        self.inbox()
+    }
+
     fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {
         *self.service_tier.write().expect("service tier lock") = tier;
         if let Some(target) = self

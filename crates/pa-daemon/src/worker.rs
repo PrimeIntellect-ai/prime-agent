@@ -21,16 +21,19 @@ mod connection;
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
 pub(crate) use summary::emit_action_update_fresh;
 
+mod inbox_wake_row;
 mod queue;
 
+pub(crate) use inbox_wake_row::wake_delay;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_reminder, admit_kernel_notice,
     announce_waiting_inbox, checkpoint_queue_recovery, clear_withdrawn_progress_note,
-    enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
-    queue_lanes, queued_arrival_covers, queued_bash_completion_notices, refresh_inbox_wake_rows,
-    remove_keyed, restore_queue_snapshot, restored_turn_policy, store_and_announce,
+    consume_shown_inbox_items_locked, deliver_inbox_arrival_row_locked, enqueue_priority,
+    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
+    queued_arrival_covers, queued_bash_completion_notices, refresh_inbox_wake_rows, remove_keyed,
+    restore_queue_snapshot, restored_turn_policy, store_and_announce,
     withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
     TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY,
     PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
@@ -334,6 +337,9 @@ impl Worker {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
+            inbox_wake_due: None,
+            inbox_shown_unaccepted: std::collections::BTreeSet::new(),
+            run_cut_at_tool_boundary: false,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
             tool_use_count: 0,
@@ -1300,6 +1306,8 @@ mod prompt_image_tests;
 mod compaction_admission_tests;
 #[cfg(test)]
 mod inbox_queue_tests;
+#[cfg(test)]
+mod inbox_wake_policy_tests;
 #[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
+use super::inbox_wake_row::{delivered_notice_text, notice_text, shown_items};
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
     SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
@@ -657,7 +658,7 @@ fn arrival_rendering(
     if batch.is_empty() {
         return None;
     }
-    let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, waiting.len());
+    let (preview, text) = notice_text(&batch, waiting.len());
     Some((preview, inbox.with_persistence_error_clause(text), batch))
 }
 
@@ -669,26 +670,28 @@ fn covered_ids(batch: &[pa_core::session_engine::inbox::InboxMessage]) -> Value 
 }
 
 /// Store one notice in the session's inbox and announce it on the queued
-/// arrival row. A closing session only stores it: the next session open
-/// announces it ([`announce_waiting_inbox`]). Returns whether the
-/// announcement waits behind a running turn (the receipt's `queued`).
+/// arrival row, due after `wake_delay` (`inbox_wake_row::wake_delay`). A
+/// closing session only stores it: the next session open announces it
+/// ([`announce_waiting_inbox`]). Returns whether the announcement waits
+/// behind a running turn (the receipt's `queued`).
 pub(crate) fn store_and_announce(
     core: &mut SessionCore,
     inbox: &pa_core::session_engine::inbox::SessionInbox,
     session_is_closed: bool,
     notice: pa_core::session_engine::inbox::InboxNotice,
     lane: Lane,
+    wake_delay: Duration,
 ) -> bool {
     let message = inbox.push(notice, pa_core::autonomous::now_millis());
     if session_is_closed {
         return true;
     }
-    announce_inbox_arrivals(core, inbox, vec![message.id], lane)
+    announce_inbox_arrivals(core, inbox, vec![message.id], lane, wake_delay)
 }
 
 /// Queue one arrival row for the waiting messages no queued arrival row
-/// covers yet (a session opened over unread mail). Returns whether a row
-/// changed.
+/// covers yet (a session opened over unread mail), due at once. Returns
+/// whether a row changed.
 pub(crate) fn announce_waiting_inbox(
     core: &mut SessionCore,
     inbox: &pa_core::session_engine::inbox::SessionInbox,
@@ -703,23 +706,31 @@ pub(crate) fn announce_waiting_inbox(
     if uncovered.is_empty() {
         return false;
     }
-    announce_inbox_arrivals(core, inbox, uncovered, Lane::Steering);
+    announce_inbox_arrivals(core, inbox, uncovered, Lane::Steering, Duration::ZERO);
     true
 }
 
 /// Add `ids` to the queued arrival row, or queue a fresh row on `lane`.
 /// The row keeps its place; a follow-up row moves to steering when a
 /// steering arrival joins it, so one row carries the most urgent lane of
-/// its batch. Returns whether the row waits behind a running turn.
+/// its batch. The row is due at the earliest of its arrivals' due times
+/// (now plus `wake_delay`), so a waking arrival flushes held successes.
+/// Returns whether the row waits behind a running turn.
 fn announce_inbox_arrivals(
     core: &mut SessionCore,
     inbox: &pa_core::session_engine::inbox::SessionInbox,
     ids: Vec<String>,
     lane: Lane,
+    wake_delay: Duration,
 ) -> bool {
     let queued = core.busy;
     let existing = keyed_row_mut(core, INBOX_ARRIVAL_QUEUE_KEY)
         .map(|(row_lane, item)| (row_lane, covers_of(item)));
+    let due = tokio::time::Instant::now() + wake_delay;
+    core.inbox_wake_due = Some(match core.inbox_wake_due {
+        Some(earlier) if existing.is_some() => earlier.min(due),
+        _ => due,
+    });
     let mut covers = existing
         .as_ref()
         .map(|(_, covers)| covers.clone())
@@ -813,6 +824,57 @@ pub(crate) fn refresh_inbox_wake_rows(
         changed |= rerender_inbox_notice(item, &reminder, count);
     }
     changed
+}
+
+/// Deliver the inbox arrival row the runner just picked: it re-renders
+/// over the covered messages still waiting, counting the items it shows
+/// (`inbox_wake_row::shown_items`) as read, so the model is never told to
+/// read what it was just shown. The shown items stay in the inbox until
+/// the row's transcript row is accepted
+/// ([`consume_shown_inbox_items_locked`]); an abort or crash before that
+/// leaves them waiting. Items the row only counts wait for a read.
+pub(crate) fn deliver_inbox_arrival_row_locked(
+    core: &mut SessionCore,
+    item: &mut QueuedItem,
+    inbox: &pa_core::session_engine::inbox::SessionInbox,
+) {
+    core.inbox_wake_due = None;
+    let covers = covers_of(item);
+    let waiting = inbox.waiting_messages();
+    let batch: Vec<_> = waiting
+        .iter()
+        .filter(|message| covers.contains(&message.id))
+        .cloned()
+        .collect();
+    if batch.is_empty() {
+        return;
+    }
+    let shown: std::collections::BTreeSet<String> = shown_items(&batch)
+        .into_iter()
+        .map(|message| message.id.clone())
+        .collect();
+    let (preview, text) = delivered_notice_text(&batch, waiting.len() - shown.len());
+    rerender_inbox_notice(
+        item,
+        &inbox.with_persistence_error_clause(text),
+        batch.len(),
+    );
+    item.preview = Some(preview);
+    core.inbox_shown_unaccepted = shown;
+}
+
+/// Withdraw the items the delivered arrival row showed, once its
+/// transcript row is accepted; a queued reminder follows the drained count.
+pub(crate) fn consume_shown_inbox_items_locked(
+    core: &mut SessionCore,
+    inbox: &pa_core::session_engine::inbox::SessionInbox,
+) {
+    let shown = std::mem::take(&mut core.inbox_shown_unaccepted);
+    if shown.is_empty() {
+        return;
+    }
+    inbox.withdraw_ids(&shown);
+    refresh_inbox_wake_rows(core, inbox);
 }
 
 /// Queue one periodic unread reminder on the steering lane while the

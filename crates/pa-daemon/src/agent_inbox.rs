@@ -15,8 +15,8 @@ use crate::agent_engine::AgentSessionEngine;
 use crate::journal::WorkerRecoveryJournal;
 use crate::worker::{
     admit_inbox_reminder, announce_waiting_inbox, checkpoint_queue_recovery,
-    clear_withdrawn_progress_note, refresh_inbox_wake_rows, store_and_announce, EventPump, Lane,
-    QueueCheckpoint, SessionCore,
+    clear_withdrawn_progress_note, refresh_inbox_wake_rows, store_and_announce, wake_delay,
+    EventPump, Lane, QueueCheckpoint, SessionCore,
 };
 
 /// The poll period while the reminder is disabled (`reminderIntervalMs`
@@ -153,8 +153,13 @@ impl InboxRouter {
     /// waits behind a running turn, or `None` when the caller delivers
     /// the notice directly (`agentInbox.enabled` is off).
     pub(crate) fn route(&self, notice: InboxNotice, lane: Lane) -> Option<bool> {
+        // Read before the lock: the settings lookup touches the disk.
+        let wake_delay = wake_delay(&notice, self.engine.upgrade().as_deref());
         self.admission(|core, inbox, closed| {
-            (store_and_announce(core, inbox, closed, notice, lane), true)
+            (
+                store_and_announce(core, inbox, closed, notice, lane, wake_delay),
+                true,
+            )
         })
     }
 

@@ -138,7 +138,9 @@ impl QueueHooks {
             } else {
                 Lane::Steering
             };
-            store_and_announce(core, inbox, closed, fields, lane);
+            // A fired heartbeat is a scheduled turn: `wake_delay` lets it wake at once.
+            let wake_delay = crate::worker::wake_delay(&fields, None);
+            store_and_announce(core, inbox, closed, fields, lane, wake_delay);
             (Some(RoutedFire::Ran), true)
         })?
     }

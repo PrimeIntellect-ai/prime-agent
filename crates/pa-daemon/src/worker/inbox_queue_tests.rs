@@ -498,7 +498,15 @@ async fn a_session_opened_over_waiting_mail_gets_one_notice() {
     .await;
     assert_eq!(announced, Ok(true), "one notice covers the waiting mail");
     assert!(deliver_agent_message(&worker, "after open").await.success);
-    assert_eq!(inbox.count().0, 3, "the delivery routed into the inbox");
+    // The open-time notice may have delivered (and consumed what it
+    // showed) already; the new message waits out its debounce.
+    assert!(
+        inbox
+            .waiting_messages()
+            .iter()
+            .any(|message| message.text.contains("after open")),
+        "the delivery routed into the inbox"
+    );
     let _ = worker.dispatch("kill", &json!({})).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
