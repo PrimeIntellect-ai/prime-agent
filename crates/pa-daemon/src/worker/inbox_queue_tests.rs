@@ -307,7 +307,6 @@ async fn reads_and_withdrawals_trim_the_wake_rows() {
     withdraw_bash_completion_notice(
         &fx.worker.recovery,
         &fx.worker.core,
-        Some(&fx.inbox),
         &crate::engine::BashConsumedNotice {
             pid: 7,
             command: "make".to_string(),

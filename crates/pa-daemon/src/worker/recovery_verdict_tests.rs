@@ -182,8 +182,6 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
-        /*inbox*/
-        None, // The direct steering lane carries no inbox store.
         &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "another command".to_string(),
@@ -201,8 +199,6 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
-        /*inbox*/
-        None, // The direct steering lane carries no inbox store.
         &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "sleep 12; echo RW_WAKE_DONE".to_string(),

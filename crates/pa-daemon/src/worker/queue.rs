@@ -950,11 +950,14 @@ fn rerender_inbox_notice(item: &mut QueuedItem, text: &str, count: usize) -> boo
 pub(crate) fn withdraw_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    inbox: Option<&pa_core::session_engine::inbox::SessionInbox>,
     notice: &crate::engine::BashConsumedNotice,
     engine: Option<&dyn crate::engine::SessionEngine>,
 ) {
     let mut core_guard = core.lock().unwrap();
+    // Looked up under the core lock: a replacement swaps the store inside
+    // the same lock, so the withdrawal and the wake rows it edits belong to
+    // one session.
+    let inbox = engine.and_then(crate::engine::SessionEngine::inbox_store);
     // The direct-lane full-row withdrawal (the kill-switch lane): the
     // front-most match across the two lanes, never the whole set.
     let mut removed = false;
@@ -968,7 +971,7 @@ pub(crate) fn withdraw_bash_completion_notice(
     };
     core_guard.steering.retain(&mut withdraw_one);
     core_guard.follow_up.retain(withdraw_one);
-    let inbox_rows_changed = inbox.is_some_and(|inbox| {
+    let inbox_rows_changed = inbox.as_deref().is_some_and(|inbox| {
         inbox
             .withdraw_bash_completion(notice.pid, &notice.command)
             .is_some()

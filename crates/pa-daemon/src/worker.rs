@@ -715,11 +715,9 @@ impl Worker {
                     // The collection removes the inbox message too: a
                     // handle collected through its result leaves no
                     // waiting bash-done.
-                    let inbox = engine.as_ref().and_then(|engine| engine.inbox());
                     withdraw_bash_completion_notice(
                         &withdraw_recovery,
                         &withdraw_core,
-                        inbox.as_deref(),
                         &notice,
                         engine.as_deref().map(|engine| engine as &dyn SessionEngine),
                     );
