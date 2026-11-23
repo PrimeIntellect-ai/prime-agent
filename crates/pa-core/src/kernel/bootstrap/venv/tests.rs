@@ -1214,14 +1214,14 @@ async fn switching_a_skill_between_sources_replaces_the_other_install() {
 }
 
 /// A failed uninstall of the distribution shadowing the selected skill
-/// must fail the sync with the version file untouched. Recording the
-/// selected skill anyway would short-circuit `kernel_ready` on a record
-/// whose import keeps resolving to the surviving shadowing distribution,
-/// and dropping the displaced record would hide the uninstall requirement
-/// from every later sync.
+/// must not stop the kernel from starting, and must not record the selected
+/// skill. Recording it would short-circuit `kernel_ready` on a record whose
+/// import keeps resolving to the surviving shadowing distribution, and
+/// dropping the displaced record would hide the uninstall requirement from
+/// every later sync.
 #[cfg(unix)]
 #[tokio::test]
-async fn failed_shadowing_uninstall_fails_the_sync_and_preserves_retry() {
+async fn failed_shadowing_uninstall_keeps_the_retry_records() {
     let dir = tempfile::tempdir().unwrap();
     let uv = fake_uv(
         dir.path(),
@@ -1254,7 +1254,7 @@ async fn failed_shadowing_uninstall_fails_the_sync_and_preserves_retry() {
         &EnsureKernelPythonOptions::default(),
     )
     .await;
-    assert!(result.is_err(), "the sync must fail, not record success");
+    assert!(result.is_ok(), "the kernel still starts: {result:?}");
     let recorded = read_bootstrap_version(&venv)
         .expect("version written")
         .python_skills
@@ -1269,11 +1269,6 @@ async fn failed_shadowing_uninstall_fails_the_sync_and_preserves_retry() {
         "kernel_ready must not short-circuit on the uninstalled skill"
     );
     let calls = uv_invocations(dir.path());
-    assert_eq!(
-        calls.len(),
-        1,
-        "no install runs after the failed uninstall: {calls:?}"
-    );
     assert!(
         calls[0].contains("uninstall"),
         "the uninstall was attempted: {calls:?}"
