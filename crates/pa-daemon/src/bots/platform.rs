@@ -548,9 +548,17 @@ impl BotPlatform for PrimePlatform {
         async move {
             let provisioned = credentials::provision(&self.client, &self.agent_dir, provider).await;
             let auth_json = provisioned.guest_auth();
-            let network_rules = provisioned
-                .rules_for(provider)
-                .map_err(|error| PlatformError::Other(format!("{error:#}")))?;
+            let network_rules = provisioned.rules_for(provider).map_err(|error| {
+                let message = format!("{error:#}");
+                // A platform blip while confirming the secret is retried.
+                match error.downcast_ref::<SandboxError>().map(map_error) {
+                    Some(PlatformError::Transient(_)) => PlatformError::Transient(message),
+                    Some(PlatformError::Conflict(_)) => PlatformError::Conflict(message),
+                    Some(PlatformError::NotFound(_) | PlatformError::Other(_)) | None => {
+                        PlatformError::Other(message)
+                    }
+                }
+            })?;
             Ok(GuestCredentials {
                 network_rules,
                 auth_json,

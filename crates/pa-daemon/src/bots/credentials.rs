@@ -202,6 +202,10 @@ impl Provisioned {
             Some(error) => Err(error.context(format!(
                 "the platform secret for the {provider} key could not be provisioned"
             ))),
+            None if provider_rules(provider, "").is_empty() => Err(anyhow::anyhow!(
+                "A bot cannot run on {provider}: its requests do not carry an API key \
+                 the platform can inject. Choose another provider for the bot."
+            )),
             None if !self.providers.iter().any(|confirmed| confirmed == provider) => {
                 Err(anyhow::anyhow!(
                     "A bot on {provider} needs a {provider} API key. \

@@ -28,6 +28,8 @@ pub(crate) struct FakeState {
     pub installs: usize,
     /// The next create commits, then answers with a transport error.
     pub lose_next_create_reply: bool,
+    /// The next credential provisioning fails with a transport error.
+    pub fail_next_credentials: bool,
     pub refuse_pause: bool,
     /// New pause checkpoints stay pending (not durable).
     pub pause_checkpoints_pending: bool,
@@ -302,7 +304,13 @@ impl BotPlatform for FakePlatform {
         &'a self,
         _provider: &'a str,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
-        async move { Ok(GuestCredentials::default()) }.boxed()
+        async move {
+            if std::mem::take(&mut self.state().fail_next_credentials) {
+                return Err(PlatformError::Transient("connection reset".into()));
+            }
+            Ok(GuestCredentials::default())
+        }
+        .boxed()
     }
 }
 
@@ -391,6 +399,16 @@ async fn create_retry_reuses_the_idempotency_key() {
     );
     assert_eq!(spawned.sandbox_id.as_deref(), Some(live[0].id.as_str()));
     assert_eq!(platform.state().keys.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn credential_provisioning_retries_a_transport_error() {
+    let (_dir, platform, manager) = setup();
+    platform.state().fail_next_credentials = true;
+
+    manager.spawn(&spec("bot-a")).await.unwrap();
+
+    assert_eq!(platform.live().len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

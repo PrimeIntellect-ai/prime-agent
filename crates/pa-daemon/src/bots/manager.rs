@@ -601,7 +601,8 @@ impl BotManager {
             Some(checkpoint) => format!("ckpt:disk:{checkpoint}"),
             None => format!("img:{}", self.image),
         };
-        let credentials = self.platform.credentials(guest_provider(record)).await?;
+        let provider = guest_provider(record);
+        let credentials = retry(|| self.platform.credentials(provider)).await?;
         let request = BotCreate {
             name: record.name.clone(),
             image: self.image.clone(),
