@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use pa_types::daemon::DaemonCommand;
 
-use super::{picker_viewport_rows, AgentView, Overlay, SessionUi, UI_REQUEST_TIMEOUT_MS};
+use super::{AgentView, Overlay, SessionUi, UI_REQUEST_TIMEOUT_MS};
 
 use crate::bots_view::{parse_bots, BotsAction, BotsView};
 use crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS;
@@ -18,7 +18,10 @@ use crate::interactive::{BotAttach, SelectionOrigin, SessionPanel, SessionSelect
 /// One background `/bots` delivery: a fetched `list_bots` answer, or an attach outcome.
 pub(crate) enum BotsUpdate {
     Catalog(Result<Value, String>),
-    Attached(Result<BotAttach, String>),
+    Attached {
+        bot_id: String,
+        result: Result<BotAttach, String>,
+    },
 }
 
 /// The page's error line: a daemon refusal shows its own message (a version mismatch's
@@ -55,6 +58,7 @@ const LOCAL_ONLY_COMMANDS: &[&str] = &[
     "bots",
     "clone",
     "export",
+    "factory",
     "fork",
     "import",
     "login",
@@ -73,9 +77,7 @@ const LOCAL_ONLY_COMMANDS: &[&str] = &[
 impl SessionUi {
     /// Open the `/bots` page and fetch its rows in the background.
     pub(crate) fn open_bots_page(&mut self, view: &mut AgentView) {
-        view.overlay = Some(Overlay::Bots(BotsView::new(picker_viewport_rows(
-            view.terminal_rows(),
-        ))));
+        view.overlay = Some(Overlay::Bots(BotsView::default()));
         self.dirty = true;
         self.spawn_bots_refresh();
     }
@@ -103,6 +105,7 @@ impl SessionUi {
     fn spawn_bot_attach(&self, bot_id: String, name: String) {
         let client = self.client.clone();
         let tx = self.bots_updates.clone();
+        let attached_id = bot_id.clone();
         tokio::spawn(async move {
             let result = client
                 .request_ok_with_timeout(
@@ -130,7 +133,10 @@ impl SessionUi {
                         guest_session_id: field("guestSessionId")?,
                     })
                 });
-            let _ = tx.send(BotsUpdate::Attached(result));
+            let _ = tx.send(BotsUpdate::Attached {
+                bot_id: attached_id,
+                result,
+            });
         });
     }
 
@@ -145,7 +151,12 @@ impl SessionUi {
                 Ok(catalog) => page.apply_catalog(catalog),
                 Err(error) => page.set_fetch_error(Some(error)),
             },
-            BotsUpdate::Attached(Ok(bot)) => {
+            // A result for an attach this page did not start (a closed and reopened page)
+            // drops.
+            BotsUpdate::Attached { bot_id, .. } if !page.is_attaching(&bot_id) => return,
+            BotsUpdate::Attached {
+                result: Ok(bot), ..
+            } => {
                 self.pending_selection = Some(SessionSelection::Bot(bot));
                 self.pending_selection_origin = Some(SelectionOrigin {
                     panel: SessionPanel::Bots,
@@ -153,7 +164,9 @@ impl SessionUi {
                 });
                 self.exit_requested = true;
             }
-            BotsUpdate::Attached(Err(error)) => {
+            BotsUpdate::Attached {
+                result: Err(error), ..
+            } => {
                 page.set_attaching(None);
                 page.set_fetch_error(Some(error));
             }
@@ -178,7 +191,7 @@ impl SessionUi {
             BotsAction::Refresh => self.spawn_bots_refresh(),
             BotsAction::Attach { bot_id, name } => {
                 page.set_fetch_error(None);
-                page.set_attaching(Some(name.clone()));
+                page.set_attaching(Some((bot_id.clone(), name.clone())));
                 self.spawn_bot_attach(bot_id, name);
             }
             BotsAction::Close => {

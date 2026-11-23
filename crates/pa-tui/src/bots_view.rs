@@ -212,16 +212,15 @@ pub enum BotsAction {
 }
 
 /// The `/bots` list view.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BotsView {
     rows: Vec<BotRow>,
     skipped: usize,
     selected: usize,
     detail_open: bool,
     fetch_error: Option<String>,
-    /// The bot an attach request is in flight for.
-    attaching: Option<String>,
-    viewport_rows: usize,
+    /// The bot an attach request is in flight for: `(bot_id, name)`.
+    attaching: Option<(String, String)>,
 }
 
 /// The name column's fixed width.
@@ -257,20 +256,6 @@ impl DisplayItem {
 }
 
 impl BotsView {
-    /// An empty view waiting for its first fetch.
-    #[must_use]
-    pub fn new(viewport_rows: usize) -> Self {
-        Self {
-            rows: Vec::new(),
-            skipped: 0,
-            selected: 0,
-            detail_open: false,
-            fetch_error: None,
-            attaching: None,
-            viewport_rows,
-        }
-    }
-
     /// A landed fetch: replace the rows, clear the fetch error, keep the selection when the
     /// row survived.
     pub fn apply_catalog(&mut self, catalog: BotsCatalog) {
@@ -294,9 +279,15 @@ impl BotsView {
         self.fetch_error = error;
     }
 
-    /// The attach in flight (`Some(name)`), or none.
-    pub fn set_attaching(&mut self, name: Option<String>) {
-        self.attaching = name;
+    /// The attach in flight (`Some((bot_id, name))`), or none.
+    pub fn set_attaching(&mut self, bot: Option<(String, String)>) {
+        self.attaching = bot;
+    }
+
+    /// Whether this page is waiting for the attach of `bot_id`.
+    #[must_use]
+    pub fn is_attaching(&self, bot_id: &str) -> bool {
+        self.attaching.as_ref().is_some_and(|(id, _)| id == bot_id)
     }
 
     /// One key press.
@@ -336,9 +327,15 @@ impl BotsView {
         BotsAction::None
     }
 
-    /// The view's frame.
+    /// The view's frame, windowed to the current `viewport_rows`.
     #[must_use]
-    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+    pub fn render(
+        &self,
+        theme: &Theme,
+        width: usize,
+        kb: &KeybindingsManager,
+        viewport_rows: usize,
+    ) -> Vec<Line> {
         let mut lines =
             vec![vec![theme.fg_span(
                 ThemeColor::BorderMuted,
@@ -383,7 +380,7 @@ impl BotsView {
             ];
             lines.push(truncate_line(&line, width, ""));
         }
-        if let Some(name) = &self.attaching {
+        if let Some((_, name)) = &self.attaching {
             let line = vec![
                 Span::raw("  "),
                 theme.fg_span(
@@ -438,7 +435,7 @@ impl BotsView {
         // extends backward from the selection to the budget's edge,
         // then forward with whatever remains.
         let visible = menu_list_layout(
-            Some(self.viewport_rows),
+            Some(viewport_rows),
             PREFERRED_VISIBLE * ROW_HEIGHT,
             display.iter().map(DisplayItem::lines).sum::<usize>(),
             LIST_FRAME_ROWS

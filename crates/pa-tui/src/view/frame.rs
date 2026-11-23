@@ -79,7 +79,7 @@ impl AgentView {
                 Some(dock)
             }
             Some(Overlay::Bots(bots_view)) => {
-                dock.extend(bots_view.render(&self.theme, width, kb));
+                dock.extend(bots_view.render(&self.theme, width, kb, info_viewport_rows));
                 Some(dock)
             }
             Some(Overlay::Heartbeats(picker)) => {
