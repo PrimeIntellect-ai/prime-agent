@@ -30,6 +30,7 @@ fn search_fields(model: &Model) -> (String, Vec<String>, Vec<String>) {
     all.extend(full_ids.iter().cloned());
     all.push(model.name.clone());
     all.push(model.provider.clone());
+    all.push(super::provider_label(model).to_string());
     (short_id, full_ids, all)
 }
 
