@@ -638,3 +638,25 @@ async fn a_journal_failure_marks_the_notice_memory_only() {
         );
     }
 }
+
+/// The inbox store follows the session file: the same session keeps its
+/// store, even a memory-only one whose journal could not be read, and
+/// another session file opens its own.
+#[tokio::test]
+async fn the_inbox_store_follows_the_session_file() {
+    let fx = fixture();
+    assert!(Arc::ptr_eq(&fx.engine().open_inbox(), &fx.inbox));
+    let broken = fx.dir.join("sessions").join("broken.jsonl");
+    let journal = pa_core::session_engine::harness_digest::session_artifact_dir_for_log(&broken)
+        .unwrap()
+        .join(pa_core::session_engine::inbox::INBOX_JOURNAL_FILE);
+    // A directory in the journal's place cannot be read.
+    std::fs::create_dir_all(&journal).unwrap();
+    fx.engine().set_session_file(broken);
+    let memory_only = fx.engine().open_inbox();
+    assert!(!Arc::ptr_eq(&memory_only, &fx.inbox));
+    assert!(memory_only.journal_path().is_none());
+    memory_only.push(notice(INBOX_CLASS_BASH_DONE, "kept"), 1_000);
+    assert!(Arc::ptr_eq(&fx.engine().open_inbox(), &memory_only));
+    assert_eq!(fx.engine().inbox().unwrap().count().0, 1);
+}

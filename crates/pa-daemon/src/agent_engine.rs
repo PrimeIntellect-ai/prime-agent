@@ -154,10 +154,14 @@ pub struct AgentSessionEngine {
     /// row. `None` outside a daemon worker.
     pub(crate) kernel_notice_sink: std::sync::Mutex<Option<crate::engine::KernelNoticeSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
-    /// The current session's agent inbox store, opened when the session
-    /// opens (see `open_inbox`).
-    pub(crate) inbox:
-        std::sync::Mutex<Option<std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>>,
+    /// The current session's agent inbox store and the session artifact
+    /// dir it was opened for (see `open_inbox`).
+    pub(crate) inbox: std::sync::Mutex<
+        Option<(
+            Option<std::path::PathBuf>,
+            std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+        )>,
+    >,
     /// The worker's post-drain inbox seam (see `set_inbox_read_hook`).
     pub(crate) inbox_read_hook:
         std::sync::Mutex<Option<pa_core::session_engine::inbox::InboxReadHook>>,
