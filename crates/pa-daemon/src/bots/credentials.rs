@@ -175,14 +175,6 @@ pub struct Provisioned {
 }
 
 impl Provisioned {
-    /// The providers whose secret provision confirmed — the set the
-    /// sandbox's header rules were built from, so the guest catalog
-    /// serves exactly these providers' models.
-    #[must_use]
-    pub fn confirmed_providers(&self) -> Vec<String> {
-        self.providers.clone()
-    }
-
     /// The guest's `auth.json` for the confirmed providers.
     #[must_use]
     pub fn guest_auth(&self) -> Option<serde_json::Value> {
@@ -233,13 +225,14 @@ pub async fn provision(
     let mut auth = AuthStorage::create(agent_dir);
     let injections = injections(&mut auth, provider);
     let mut provisioned = provision_injections(client, injections).await;
-    provisioned.prime_team = effective_prime_team(&auth);
+    provisioned.prime_team = effective_prime_team(&mut auth);
     provisioned
 }
 
 /// The team the Prime Inference key bills to: `PRIME_TEAM_ID` first, then
-/// the stored selection (the auth storage's order).
-fn effective_prime_team(auth: &AuthStorage) -> Option<PrimeTeamCredential> {
+/// the stored selection, but only for the stored key. An environment key
+/// never borrows the login's team.
+fn effective_prime_team(auth: &mut AuthStorage) -> Option<PrimeTeamCredential> {
     if let Some(team_id) = std::env::var("PRIME_TEAM_ID")
         .ok()
         .map(|team| team.trim().to_string())
@@ -252,6 +245,13 @@ fn effective_prime_team(auth: &AuthStorage) -> Option<PrimeTeamCredential> {
             role: None,
             created_at: None,
         });
+    }
+    let stored_key = match auth.get_all().credential(PRIME_INFERENCE_PROVIDER_ID) {
+        Some(AuthCredential::ApiKey { key, .. }) => Some(key),
+        _ => None,
+    };
+    if stored_key.is_none() || auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID) != stored_key {
+        return None;
     }
     match auth.get_prime_inference_team_selection() {
         StoredPrimeTeam::Team(team) => Some(team),

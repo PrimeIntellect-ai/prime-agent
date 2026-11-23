@@ -37,7 +37,7 @@ export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 cd "$HOME"
 mkdir -p "$(dirname "$PRIME_AGENT_DAEMON_SOCKET")"
-if [ -n "${BOT_AUTH_JSON:-}" ]; then
+if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
 if ! python3 -c "$BOT_CLIENT" probe; then
@@ -672,8 +672,22 @@ impl BotManager {
         }
         record.version = local.to_string();
         let mut env = bootstrap_env(record);
-        // Only a sandbox created here gets auth: its header rules match it.
-        let auth = lock(&self.guest_auth).get(&sandbox_id).cloned();
+        // A sandbox created by this process gets the auth that matches its
+        // header rules. Any other sandbox keeps its auth.json, and gets one
+        // only when it has none (its create ran before a restart).
+        let created_here = lock(&self.guest_auth).get(&sandbox_id).cloned();
+        let auth = match created_here {
+            Some(auth) => {
+                env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
+                Some(auth)
+            }
+            None => {
+                self.platform
+                    .credentials(guest_provider(record))
+                    .await?
+                    .auth_json
+            }
+        };
         if let Some(auth) = auth {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
         }
