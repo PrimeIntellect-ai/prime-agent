@@ -1046,6 +1046,31 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         panic!("the claimed wake's fire must leave exactly one wake: {after_fire:?}");
     };
     assert_ne!(next_wake.id, rewake_id);
+    // A CLAIMED BACKOFF WAKE: the background-skip arming keeps only its own
+    // kind. A claimed backoff marker would run the goal through the live
+    // shell, so the arming retires it.
+    let backoff_id = engine
+        .runtime
+        .block_on(engine.schedule_goal_wake(
+            crate::agent_engine::GoalWakeKind::Backoff,
+            crate::util::now_ms() + 1_000,
+        ))
+        .expect("the backoff wake arms");
+    let claimed = store
+        .claim_due(crate::util::now_ms() + 5_000, crate::util::now_ms())
+        .expect("the scheduler claims the backoff wake");
+    let [backoff_fire] = claimed.as_slice() else {
+        panic!("the scheduler claims exactly the backoff wake: {claimed:?}");
+    };
+    engine.runtime.block_on(engine.schedule_goal_wake(
+        crate::agent_engine::GoalWakeKind::BackgroundSkip,
+        crate::util::now_ms() + window,
+    ));
+    assert!(
+        store.get_claimed_job(&backoff_id).is_none(),
+        "the background-skip arming must retire a claimed backoff wake"
+    );
+    complete_dispatch(backoff_fire);
     // SELF-HEAL: a fire that completed without running (withdrawn or
     // cleared) strands the owed deferral with no wake; the next settle
     // consult behind the still-live shell re-arms it.

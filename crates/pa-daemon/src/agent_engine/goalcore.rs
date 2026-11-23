@@ -22,7 +22,9 @@ pub(crate) enum GoalWakeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimedGoalWake {
     Retire,
-    Keep,
+    /// Keep a claimed background-skip wake; a claimed backoff wake still
+    /// retires, since its marker would run the goal through a live shell.
+    KeepBackgroundSkip,
 }
 
 impl AgentSessionEngine {
@@ -140,13 +142,13 @@ impl AgentSessionEngine {
     ) -> Option<pa_core::cron::AgentCronJob> {
         // Exactly one wake per window: the prior job retires before the
         // replacement arms — repeated boundaries must never stack marker
-        // turns. A background-skip arming keeps a claimed wake: the
+        // turns. A background-skip arming keeps a claimed background-skip wake: the
         // scheduler claims before the per-session dispatch lane, so the
         // claim may still wait behind another turn, and retiring it would
         // push the bound a full window out.
         self.retire_goal_wakes(match kind {
             GoalWakeKind::Backoff => ClaimedGoalWake::Retire,
-            GoalWakeKind::BackgroundSkip => ClaimedGoalWake::Keep,
+            GoalWakeKind::BackgroundSkip => ClaimedGoalWake::KeepBackgroundSkip,
         });
         let wiring = self.cron_wiring()?;
         let binding = self.kernel_cron_binding()?;
@@ -255,7 +257,13 @@ impl AgentSessionEngine {
             {
                 continue;
             }
-            if claimed == ClaimedGoalWake::Keep && wiring.store.get_claimed_job(&job.id).is_some() {
+            if claimed == ClaimedGoalWake::KeepBackgroundSkip
+                && job.label.as_deref()
+                    == Some(
+                        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
+                    )
+                && wiring.store.get_claimed_job(&job.id).is_some()
+            {
                 continue;
             }
             if let Err(error) = wiring.store.cancel(&job.id, crate::util::now_ms()) {
