@@ -28,8 +28,9 @@ const OPERATION_BUDGET: Duration = Duration::from_mins(15);
 /// Attempts for one platform call that answers 409, 5xx, or a network error.
 const RETRY_ATTEMPTS: u32 = 6;
 
-/// Starts the guest daemon when it is not up, then opens the bot session
-/// (reopening `BOT_SESSION_FILE` when it exists). Prints the session ids as JSON.
+/// Starts the guest daemon when it is not up, then opens the bot session. It
+/// reopens `BOT_SESSION_FILE`, or the file a marker on the guest disk names, so
+/// a registry rebuilt from labels still finds the session. Prints the session ids as JSON.
 const BOOTSTRAP_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -65,7 +66,10 @@ if sys.argv[1] == "probe":
 stream, frames, hello = connect()
 command = {"type": "create", "id": "bot-bootstrap", "name": os.environ["BOT_NAME"],
            "lifecycle": "resident", "config": json.loads(os.environ["BOT_CONFIG"])}
+marker = os.path.join(os.environ["HOME"], ".prime-agent-bot-session")
 session_file = os.environ.get("BOT_SESSION_FILE")
+if not session_file and os.path.exists(marker):
+    session_file = open(marker).read().strip()
 if session_file and os.path.exists(session_file):
     command["sessionPath"] = session_file
 envelope = {"type": "command", "id": "bot-bootstrap", "protocol": hello["protocol"],
@@ -76,6 +80,9 @@ reply = next(f for f in frames if f.get("type") == "response" and f.get("id") ==
 if not reply.get("success"):
     sys.exit("create failed: %s" % reply.get("error"))
 data = reply.get("data") or {}
+if data.get("sessionFile"):
+    with open(marker, "w") as out:
+        out.write(data["sessionFile"])
 print(json.dumps({"activeSessionId": data.get("activeSessionId") or data.get("id"),
                   "sessionFile": data.get("sessionFile")}))
 "#;
@@ -245,17 +252,16 @@ impl BotManager {
             match retry(|| self.platform.pause(&sandbox.id)).await {
                 Ok(checkpoint) => {
                     if let Some(checkpoint) = checkpoint {
-                        self.replace_checkpoint(&mut record, checkpoint).await;
+                        self.replace_checkpoint(&mut record, checkpoint).await?;
                     }
                     self.poll_until_paused(&sandbox, deadline).await?;
                 }
                 Err(PlatformError::Other(reason)) => {
                     eprintln!("pa-daemon: bot {bot_id}: pause refused ({reason}); checkpointing and deleting");
                     let checkpoint = self.platform.checkpoint(&sandbox.id).await?;
-                    self.replace_checkpoint(&mut record, checkpoint).await;
+                    self.replace_checkpoint(&mut record, checkpoint).await?;
                     retry(|| self.platform.delete(&sandbox.id)).await?;
-                    record.sandbox_id = None;
-                    record.status = BotStatus::Stopped;
+                    lose_sandbox(&mut record);
                     self.save(record.clone())?;
                     return Ok(record);
                 }
@@ -274,11 +280,8 @@ impl BotManager {
     /// Returns an error when a sandbox delete fails.
     pub async fn delete(&self, bot_id: &str) -> Result<()> {
         let bot_lock = self.lock_for(bot_id);
-        let held = bot_lock.lock().await;
-        self.delete_locked(bot_id).await?;
-        drop(held);
-        lock(&self.locks).remove(bot_id);
-        Ok(())
+        let _held = bot_lock.lock().await;
+        self.delete_locked(bot_id).await
     }
 
     /// Rebuild the cache from labels: newest live sandbox per bot wins, the
@@ -340,8 +343,14 @@ impl BotManager {
             .ok_or_else(|| anyhow!("unknown bot {bot_id}"))
     }
 
-    fn save(&self, record: BotRecord) -> Result<()> {
-        lock(&self.registry).put(record)
+    /// Persist `record`. A lifecycle operation saves a snapshot taken before
+    /// its awaits, so a newer settled-turn time from [`Self::record_turn`] wins.
+    fn save(&self, mut record: BotRecord) -> Result<()> {
+        let mut registry = lock(&self.registry);
+        if let Some(current) = registry.get(&record.bot_id) {
+            record.last_turn_at = record.last_turn_at.max(current.last_turn_at);
+        }
+        registry.put(record)
     }
 
     async fn ensure_running_locked(&self, bot_id: &str) -> Result<BotRecord> {
@@ -497,23 +506,19 @@ impl BotManager {
         }
     }
 
-    /// A new sandbox: restored from the recorded durable checkpoint, else booted from the image.
+    /// A new sandbox: restored from the recorded durable checkpoint, else
+    /// booted from the image. A restore that may still be booting keeps the
+    /// checkpoint and fails, so the next wake finds that sandbox.
     async fn acquire_new(&self, record: &mut BotRecord, deadline: Instant) -> Result<BotSandbox> {
         if let Some(checkpoint) = record.checkpoint_id.clone() {
-            if self
-                .platform
-                .checkpoint_durable(&checkpoint)
-                .await
-                .unwrap_or(false)
-            {
+            if self.platform.checkpoint_durable(&checkpoint).await? {
                 match self.create(record, Some(&checkpoint), deadline).await {
                     Ok(sandbox) => return Ok(sandbox),
-                    Err(error) => {
-                        eprintln!(
-                            "pa-daemon: bot {}: checkpoint restore failed: {error:#}",
-                            record.bot_id
-                        );
-                    }
+                    Err(error) if record.sandbox_id.is_some() => return Err(error),
+                    Err(error) => eprintln!(
+                        "pa-daemon: bot {}: checkpoint restore failed: {error:#}",
+                        record.bot_id
+                    ),
                 }
             }
             record.checkpoint_id = None;
@@ -653,14 +658,16 @@ impl BotManager {
         }
     }
 
-    async fn replace_checkpoint(&self, record: &mut BotRecord, checkpoint: String) {
-        if let Some(old) = record.checkpoint_id.replace(checkpoint) {
-            if Some(&old) != record.checkpoint_id.as_ref() {
-                if let Err(error) = retry(|| self.platform.delete_checkpoint(&old)).await {
-                    eprintln!("pa-daemon: could not delete old bot checkpoint {old}: {error}");
-                }
+    /// Record `checkpoint` durably, then delete the checkpoint it replaces.
+    async fn replace_checkpoint(&self, record: &mut BotRecord, checkpoint: String) -> Result<()> {
+        let old = record.checkpoint_id.replace(checkpoint);
+        self.save(record.clone())?;
+        if let Some(old) = old.filter(|old| Some(old) != record.checkpoint_id.as_ref()) {
+            if let Err(error) = retry(|| self.platform.delete_checkpoint(&old)).await {
+                eprintln!("pa-daemon: could not delete old bot checkpoint {old}: {error}");
             }
         }
+        Ok(())
     }
 
     async fn delete_locked(&self, bot_id: &str) -> Result<()> {
@@ -685,9 +692,7 @@ impl BotManager {
                 eprintln!("pa-daemon: could not delete bot checkpoint {checkpoint}: {error}");
             }
         }
-        lock(&self.registry).remove(bot_id)?;
-        lock(&self.attached).remove(bot_id);
-        Ok(())
+        lock(&self.registry).remove(bot_id)
     }
 }
 

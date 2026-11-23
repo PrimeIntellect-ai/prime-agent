@@ -373,6 +373,11 @@ async fn refused_pause_checkpoints_and_restores() {
     assert_eq!(stopped.status, BotStatus::Stopped);
     assert!(platform.live().is_empty());
     let checkpoint = stopped.checkpoint_id.clone().unwrap();
+    assert_eq!(
+        stopped.generation,
+        spawned.generation + 1,
+        "the next cold boot gets a new key"
+    );
 
     let restored = manager.ensure_running("bot-a").await.unwrap();
     assert_ne!(restored.sandbox_id, spawned.sandbox_id);

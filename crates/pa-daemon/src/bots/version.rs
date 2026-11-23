@@ -1,6 +1,6 @@
 //! The bot runs the exact prime-agent version of the Mac that owns it.
 //!
-//! [`install_script`] installs that release in the guest from the GitHub release
+//! [`INSTALL_SCRIPT`] installs that release in the guest from the GitHub release
 //! Linux tarball, verified against the release `SHA256SUMS`. A build with no
 //! published release (a dev build) cannot spawn bots unless
 //! [`TARBALL_OVERRIDE_ENV`] names a local Linux tarball, which the manager
@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 /// A local Linux release tarball to install instead of the published release.
 pub const TARBALL_OVERRIDE_ENV: &str = "PRIME_AGENT_BOT_TARBALL";
 
-/// The exit code [`install_script`] returns when the release is not published.
+/// The exit code [`INSTALL_SCRIPT`] returns when the release is not published.
 pub const UNPUBLISHED_EXIT_CODE: i32 = 3;
 
 /// The version of this binary.
@@ -84,12 +84,13 @@ pub const GUEST_VERSION_SCRIPT: &str = r#"export PATH="$HOME/.local/bin:$PATH"
 command -v prime-agent >/dev/null 2>&1 && prime-agent --version || true
 "#;
 
-/// Installs `$PA_VERSION` into the managed layout `pa-core::update::install`
-/// resolves, installs uv when missing, and stops a daemon that runs another version.
+/// Fetches the `$PA_VERSION` linux-x64 release tarball (or reads it from
+/// stdin), verifies it, and installs it with the release's own `install.sh
+/// --archive`. That installer writes the managed layout the self-update reads,
+/// installs uv, and stops a daemon that runs another version.
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
-root="$HOME/.local/share/prime-agent"
 asset="prime-agent-${PA_VERSION}-linux-x64.tar.gz"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -107,17 +108,10 @@ else
   test -s expected
   sha256sum -c expected >/dev/null
 fi
-sha="$(sha256sum "$asset" | cut -d' ' -f1)"
-release="${PA_VERSION}-linux-x64-${sha}"
 if command -v prime-agent >/dev/null 2>&1; then
   prime-agent shutdown --force >/dev/null 2>&1 || true
 fi
-mkdir -p "$root/releases/$release" "$root/bin" "$HOME/.local/bin"
-tar -xzf "$asset" -C "$root/releases/$release"
-chmod 0755 "$root/releases/$release/prime-agent"
-printf 'prime-agent-native-v1\n' > "$root/.managed"
-ln -sfn "../releases/$release/prime-agent" "$root/bin/prime-agent"
-ln -sfn "$root/bin/prime-agent" "$HOME/.local/bin/prime-agent"
-command -v uv >/dev/null 2>&1 || python3 -m pip install --quiet --root-user-action=ignore --disable-pip-version-check uv
+tar -xzf "$asset" install.sh
+sh ./install.sh --archive "$work/$asset" --force
 test "$(prime-agent --version)" = "$PA_VERSION"
 "#;

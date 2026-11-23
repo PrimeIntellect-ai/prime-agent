@@ -172,20 +172,22 @@ impl PrimePlatform {
                 .await
                 .map_err(|error| PlatformError::Transient(error.to_string()))?;
         }
-        let mut output = ExecOutput::default();
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         while let Some(event) = stream.next_event().await {
             match event.map_err(|error| PlatformError::Transient(error.to_string()))? {
                 CommandSessionEvent::Data { channel, data } => {
-                    let text = String::from_utf8_lossy(&data);
                     if channel == OutputChannel::Stderr {
-                        output.stderr.push_str(&text);
+                        stderr.extend_from_slice(&data);
                     } else {
-                        output.stdout.push_str(&text);
+                        stdout.extend_from_slice(&data);
                     }
                 }
                 CommandSessionEvent::End(end) => {
-                    output.exit_code = end.exit_code.unwrap_or(-1);
-                    return Ok(output);
+                    return Ok(ExecOutput {
+                        exit_code: end.exit_code.unwrap_or(-1),
+                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    });
                 }
                 CommandSessionEvent::Start { .. } | CommandSessionEvent::Keepalive => {}
             }

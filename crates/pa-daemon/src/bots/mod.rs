@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Result};
-use pa_core::auth::{AuthStorage, StoredPrimeTeam};
+use pa_core::auth::AuthStorage;
 use pa_sandbox::{ClientOptions, PrimeSandboxClient, DEFAULT_BASE_URL};
 use sha2::{Digest, Sha256};
 
@@ -79,10 +79,10 @@ pub fn manager_for(agent_dir: &Path) -> Result<Arc<BotManager>> {
     let api_key = auth.get_api_key("prime-inference").ok_or_else(|| {
         anyhow!("Bots need a Prime API key. Log in to Prime Inference or set PRIME_API_KEY.")
     })?;
-    let team_id = match auth.get_prime_inference_team_selection() {
-        StoredPrimeTeam::Team(team) => Some(team.team_id),
-        StoredPrimeTeam::NotSelected | StoredPrimeTeam::PersonalAccount => None,
-    };
+    // The team that pairs with the effective key (`PRIME_TEAM_ID` or the stored team).
+    let team_id = auth
+        .get_provider_headers("prime-inference")
+        .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
     let client = PrimeSandboxClient::new(
         &api_key,
         ClientOptions {
