@@ -5,12 +5,32 @@ use super::*;
 
 use super::super::rename::RenameTarget;
 
+/// The key-map check: every default `app.agents.*` key reaches exactly one command. A key two
+/// commands share leaves the later dispatch arm unreachable.
+#[test]
+fn every_default_agents_key_reaches_one_command() {
+    let mut claims: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (id, keys) in crate::keybindings::KeybindingsManager::new().get_effective_config() {
+        if id.starts_with("app.agents.") {
+            for key in keys {
+                claims.entry(key).or_default().push(id.clone());
+            }
+        }
+    }
+    let shared: Vec<_> = claims
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .collect();
+    assert_eq!(shared, Vec::new());
+}
+
 #[test]
 fn open_key_override_fires_and_the_default_is_inert() {
-    let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+g")]);
+    let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+t")]);
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
-    mode.handle_key("ctrl+g");
+    mode.handle_key("ctrl+t");
     assert_eq!(mode.rows.len(), 3);
     assert!(mode.rows[1].expanded);
     mode.handle_key("right");

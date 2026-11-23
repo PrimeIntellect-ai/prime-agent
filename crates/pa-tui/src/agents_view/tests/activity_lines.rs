@@ -117,11 +117,6 @@ fn child_lines_sit_one_indent_step_past_their_row() {
 #[test]
 fn the_factory_key_opens_the_factory_page_through_the_root_session() {
     let mut mode = mode_with_parent_and_child();
-    // The released message search owns the shared ctrl+f default and dispatches first; unbinding
-    // it hands ctrl+f to the factory key.
-    let mut cfg = crate::keybindings::KeybindingsConfig::new();
-    cfg.insert("app.agents.searchContent".to_string(), Vec::new());
-    mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(cfg);
     mode.handle_key("ctrl+f");
     assert!(mode.opened.is_none());
     assert_eq!(

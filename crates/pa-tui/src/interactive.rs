@@ -288,7 +288,7 @@ pub trait InteractionTelemetry: Send + Sync {
         scoped: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// An agents-view action ran. Actions include `program_shown`, `renamed`, and
-    /// `content_search` (ctrl+f switched the search to message text). Only adoption counts are
+    /// `content_search` (ctrl+g switched the search to message text). Only adoption counts are
     /// recorded.
     fn agents_view_action(
         &self,

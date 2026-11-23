@@ -400,7 +400,7 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "app.agents.searchContent",
-        def!(&["ctrl+f"], "Toggle searching session message text"),
+        def!(&["ctrl+g"], "Toggle searching session message text"),
     ),
     (
         "app.agents.expand",

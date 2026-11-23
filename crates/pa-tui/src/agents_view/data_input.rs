@@ -550,7 +550,7 @@ impl AgentsViewMode {
         {
             return;
         }
-        // `app.agents.searchContent` (default ctrl+f): switch the search between titles and
+        // `app.agents.searchContent` (default ctrl+g): switch the search between titles and
         // message text; the typed query stays.
         if self.keybindings.matches(key, "app.agents.searchContent") {
             self.toggle_content_search();
