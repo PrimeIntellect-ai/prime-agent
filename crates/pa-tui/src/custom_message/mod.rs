@@ -1023,7 +1023,13 @@ mod tests {
             ),
             (
                 Some((
-                    injected_prompt::render_injected_prompt(&goal, Detail::Overview, &theme, 60, true),
+                    injected_prompt::render_injected_prompt(
+                        &goal,
+                        Detail::Overview,
+                        &theme,
+                        60,
+                        true,
+                    ),
                     vec!["", " Goal continuation \u{b7} Ship."],
                 )),
                 injected_prompt::render_injected_prompt(&goal, Detail::All, &theme, 60, true),
