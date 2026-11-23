@@ -364,7 +364,7 @@ impl SeededRosterEntry {
             .parent()
             .map(|dir| dir.to_string_lossy().to_string())
             .unwrap_or_default();
-        let summary = json!({
+        let mut summary = json!({
             "id": persisted_session_id,
             "lifecycle": "live",
             "activity": "idle",
@@ -382,6 +382,11 @@ impl SeededRosterEntry {
             "parentSessionPath": edge.parent,
             "rlmChildId": edge.child_id,
         });
+        // The worker summary's flag (the agents view hides decision
+        // children), carried before any worker wakes.
+        if edge.decision_child {
+            summary["decisionChild"] = json!(true);
+        }
         Self {
             agent_id: roster_agent_id_for_summary(&summary),
             child_file: canonical_session_path(child).to_string_lossy().to_string(),
@@ -478,6 +483,7 @@ pub(crate) mod tests {
             deleted_usage: None,
             deleted_usage_by_model: None,
             factory: None,
+            decision_child: false,
         }
     }
 
@@ -584,16 +590,20 @@ pub(crate) mod tests {
             child.canonicalize().unwrap().to_string_lossy().to_string()
         );
 
-        // An unreadable child file: dirname fallback plus seededCwd.
-        let missing = SeededRosterEntry::edge_only(&edge(
+        assert!(candidate.summary.get("decisionChild").is_none());
+
+        // An unreadable child file: dirname fallback plus seededCwd; a
+        // decision edge seeds the flag the agents view hides the row by.
+        let mut decision_edge = edge(
             "sub-x",
             "/live/root.jsonl",
             "/artifacts/gone/sub-x.jsonl",
             2,
             "w",
-        ))
-        .hydrate()
-        .await;
+        );
+        decision_edge.decision_child = true;
+        let missing = SeededRosterEntry::edge_only(&decision_edge).hydrate().await;
+        assert_eq!(missing.summary["decisionChild"], true);
         assert!(missing.seeded_cwd);
         assert_eq!(missing.summary["cwd"], "/artifacts/gone");
         assert_eq!(missing.summary["sessionId"], "sub-x");
@@ -653,6 +663,7 @@ pub(crate) mod tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .expect("append spawn");
     }
@@ -959,6 +970,7 @@ pub(crate) mod tests {
                     deleted_usage: None,
                     deleted_usage_by_model: None,
                     factory: None,
+                    decision_child: false,
                 },
             );
             roster.write_seeded(candidate.summary, candidate.seeded_cwd)
@@ -1110,6 +1122,7 @@ pub(crate) mod tests {
                 depth: 1,
                 name: "gone".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .expect("append spawn");
         ledger
