@@ -3,9 +3,9 @@
 
 use super::{
     key_event_to_id, mpsc, paused_heartbeat_count, picker_viewport_rows, tray_goal_label,
-    AgentView, BashActivityUpdate, CommandCatalogUpdate, DaemonCommand, DockFocusSource,
-    FactoryUpdate, GoalPanel, HeartbeatsUpdate, InfoContent, InfoPanelAction, KeyEvent, Map,
-    Overlay, Result, SessionUi, Value,
+    AgentView, BashActivityUpdate, BotsUpdate, CommandCatalogUpdate, DaemonCommand,
+    DockFocusSource, FactoryUpdate, GoalPanel, HeartbeatsUpdate, InfoContent, InfoPanelAction,
+    KeyEvent, Map, Overlay, Result, SessionUi, Value,
 };
 
 pub(crate) struct ActivityUpdates {
@@ -13,6 +13,7 @@ pub(crate) struct ActivityUpdates {
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
     pub factory: mpsc::UnboundedSender<FactoryUpdate>,
     pub commands: mpsc::UnboundedSender<CommandCatalogUpdate>,
+    pub bots: mpsc::UnboundedSender<BotsUpdate>,
 }
 
 impl SessionUi {
@@ -270,9 +271,13 @@ impl SessionUi {
                     self.sync_factory_selection(view);
                 }
             }
+            crate::interactive::SessionPanel::Bots => self.open_bots_page(view),
         }
         self.panel_returns_to_agents_view = closes_to_agents_view
-            && matches!(view.overlay, Some(Overlay::Bash(_) | Overlay::Factory(_)));
+            && matches!(
+                view.overlay,
+                Some(Overlay::Bash(_) | Overlay::Factory(_) | Overlay::Bots(_))
+            );
     }
 
     /// The close of a panel the agents view requested hands the pane back to it; returns whether

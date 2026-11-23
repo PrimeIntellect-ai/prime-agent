@@ -1,0 +1,328 @@
+//! Headless e2e for the `/bots` page: the rows the daemon answered, the error a malformed
+//! answer shows, the attach refusal, and the attach into the bot's own session view.
+#![cfg(unix)]
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use pa_tui::interactive::{
+    run_interactive, BotAttach, HeadlessPlan, HeadlessStep, InteractiveOptions, InteractiveOutcome,
+    ModelSelection, SessionSelection, UiMode,
+};
+use serde_json::{json, Value};
+
+const MISMATCH: &str =
+    "The bot runs prime-agent 0.10.4, but this Mac runs 0.10.5. Pause the bot and resume it: its sandbox then installs prime-agent 0.10.5.";
+
+/// One scripted daemon: the session it attaches, and the `list_bots`/`attach_bot` answers
+/// (`Err` answers as a refusal).
+struct Mock {
+    session: &'static str,
+    list_bots: Value,
+    attach_bot: Result<Value, &'static str>,
+}
+
+fn serve(listener: &UnixListener, mock: &Mock) {
+    let (stream, _) = listener.accept().expect("accept");
+    let mut writer = stream.try_clone().expect("clone mock socket");
+    let mut reader = BufReader::new(stream);
+    write_json(
+        &mut writer,
+        &json!({
+            "type": "daemon_hello",
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "serverCapabilities": [],
+        }),
+    );
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
+        let command = envelope
+            .pointer("/command/type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let session = mock.session;
+        let answer = match command {
+            "create" => Ok(json!({"activeSessionId": session, "sessionId": session})),
+            "attach" => Ok(json!({
+                "activeSessionId": session,
+                "snapshot": {
+                    "activeSessionId": session,
+                    "summary": { "id": session, "cwd": "/work" },
+                    "state": {
+                        "activeSessionId": session,
+                        "cwd": "/work",
+                        "sessionId": session,
+                        "sessionName": session,
+                        "model": null,
+                        "isStreaming": false,
+                        "isCompacting": false,
+                        "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
+                    },
+                    "messages": [],
+                    "lastEventSequence": 0,
+                    "lastEventCursor": null,
+                },
+            })),
+            "get_commands" => Ok(json!({ "commands": [] })),
+            "list_bots" => Ok(mock.list_bots.clone()),
+            "attach_bot" => mock.attach_bot.clone(),
+            _ => Ok(json!({})),
+        };
+        let response = match answer {
+            Ok(data) => {
+                json!({"type": "response", "id": id, "command": command, "success": true, "data": data})
+            }
+            Err(error) => {
+                json!({"type": "response", "id": id, "command": command, "success": false, "error": error})
+            }
+        };
+        write_json(&mut writer, &response);
+    }
+}
+
+fn write_json(writer: &mut UnixStream, value: &Value) {
+    writeln!(writer, "{value}").expect("write mock response");
+    writer.flush().expect("flush mock response");
+}
+
+/// A row like the daemon's: stamps in Unix milliseconds.
+fn bot(bot_id: &str, name: &str, status: &str, last_turn: Option<i64>) -> Value {
+    json!({
+        "botId": bot_id,
+        "name": name,
+        "ownerSessionId": "owner",
+        "sandboxId": format!("sbx-{bot_id}"),
+        "status": status,
+        "model": "anthropic/claude-haiku-4.5",
+        "version": "0.10.5",
+        "checkpointId": null,
+        "createdAt": 1_795_406_400_000_i64,
+        "lastTurnAt": last_turn,
+        "guestSessionId": format!("guest-{bot_id}"),
+        "attached": false,
+    })
+}
+
+fn options(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
+    InteractiveOptions {
+        models: None,
+        socket_path: socket,
+        cwd: PathBuf::from("/work"),
+        session_dir: None,
+        script_path: None,
+        model_selection: ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session,
+        initial_message: None,
+        show_images: true,
+        fullscreen_mouse: true,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+        client_settings: None,
+    }
+}
+
+/// Run one headless plan against `mock` listening on `socket`.
+fn run(
+    socket: &Path,
+    session: SessionSelection,
+    mock: Mock,
+    steps: Vec<HeadlessStep>,
+) -> InteractiveOutcome {
+    std::env::remove_var("TMUX");
+    let listener = UnixListener::bind(socket).expect("bind mock socket");
+    let server = std::thread::spawn(move || serve(&listener, &mock));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps,
+        width: 100,
+        height: 30,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(
+            options(socket.to_path_buf(), session),
+            UiMode::Headless(plan),
+        ))
+        .expect("interactive run");
+    server.join().expect("mock daemon finished");
+    outcome
+}
+
+fn wait(needle: &str) -> HeadlessStep {
+    HeadlessStep::WaitRender {
+        needle: needle.to_string(),
+        timeout_ms: 10_000,
+    }
+}
+
+fn last_frame_with<'a>(outcome: &'a InteractiveOutcome, needle: &str) -> &'a str {
+    outcome
+        .frames
+        .iter()
+        .rev()
+        .find(|frame| frame.contains(needle))
+        .unwrap_or_else(|| panic!("no frame contains {needle}: {:#?}", outcome.frames.last()))
+}
+
+fn local_mock(list_bots: Value, attach_bot: Result<Value, &'static str>) -> Mock {
+    Mock {
+        session: "owner",
+        list_bots,
+        attach_bot,
+    }
+}
+
+#[test]
+fn the_page_lists_the_bots_and_counts_the_bad_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = json!({"bots": [
+        bot("b1", "nightly-digest", "paused", Some(1_795_410_642_000)),
+        bot("b2", "triage", "running", None),
+        {"botId": "b3", "status": "running"},
+    ]});
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(list, Err("unused")),
+        vec![HeadlessStep::Submit("/bots".into()), wait("nightly-digest")],
+    );
+    let frame = last_frame_with(&outcome, "nightly-digest");
+    let rows: Vec<&str> = frame.lines().collect();
+    let at = |needle: &str| rows.iter().position(|row| row.contains(needle)).unwrap();
+    assert!(at("Running (1)") < at("triage"), "{frame}");
+    assert!(at("triage") < at("Idle (1)"), "{frame}");
+    assert!(at("Idle (1)") < at("nightly-digest"), "{frame}");
+    assert!(
+        rows[at("nightly-digest") + 1].contains("last turn 11-23 05:10"),
+        "{frame}"
+    );
+    assert!(rows[at("triage")].contains("v0.10.5"), "{frame}");
+    assert!(frame.contains("1 malformed bot rows skipped"), "{frame}");
+}
+
+#[test]
+fn an_answer_without_a_bots_list_is_an_error_on_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(json!({"sessions": []}), Err("unused")),
+        vec![HeadlessStep::Submit("/bots".into()), wait("Error:")],
+    );
+    let frame = last_frame_with(&outcome, "Error:");
+    assert!(
+        frame.contains(pa_tui::bots_view::MALFORMED_BOTS_REPLY),
+        "{frame}"
+    );
+    assert!(
+        !frame.contains("No bots."),
+        "a malformed answer never reads as empty: {frame}"
+    );
+}
+
+#[test]
+fn a_version_mismatch_refuses_the_attach_on_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(
+            json!({"bots": [bot("b1", "triage", "paused", None)]}),
+            Err(MISMATCH),
+        ),
+        vec![
+            HeadlessStep::Submit("/bots".into()),
+            wait("triage"),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            wait("this Mac runs 0.10.5"),
+        ],
+    );
+    assert!(
+        outcome.selection_request.is_none(),
+        "a refused attach stays on the page"
+    );
+    assert!(last_frame_with(&outcome, "this Mac runs 0.10.5").contains("triage"));
+}
+
+#[test]
+fn enter_attaches_the_bot_session_and_refuses_local_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let endpoint = dir.path().join("bot.sock");
+    let attach = json!({"botId": "b1", "endpoint": endpoint, "guestSessionId": "guest-b1"});
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(
+            json!({"bots": [bot("b1", "triage", "paused", None)]}),
+            Ok(attach),
+        ),
+        vec![
+            HeadlessStep::Submit("/bots".into()),
+            wait("triage"),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            HeadlessStep::WaitMs(2_000),
+        ],
+    );
+    let expected = BotAttach {
+        bot_id: "b1".into(),
+        name: "triage".into(),
+        endpoint: endpoint.clone(),
+        guest_session_id: "guest-b1".into(),
+    };
+    assert_eq!(
+        outcome.selection_request,
+        Some(SessionSelection::Bot(expected.clone()))
+    );
+
+    // The handoff opens the bot's session over the endpoint, in the normal session view.
+    let guest = Mock {
+        session: "guest-b1",
+        list_bots: json!({}),
+        attach_bot: Err("unused"),
+    };
+    let outcome = run(
+        &endpoint,
+        SessionSelection::Bot(expected),
+        guest,
+        vec![
+            wait("guest-b1"),
+            HeadlessStep::Submit("/login".into()),
+            wait("runs on this Mac"),
+        ],
+    );
+    assert_eq!(outcome.active_session_id, "guest-b1");
+    assert!(last_frame_with(&outcome, "runs on this Mac").contains("Leave the bot view"));
+}

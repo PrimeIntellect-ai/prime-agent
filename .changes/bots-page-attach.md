@@ -1,0 +1,1 @@
+feat: the `/bots` page lists the sandbox bots this Mac owns (status, model, version, last turn) and Enter attaches to one in the normal session view over the bot's link; a bot on another prime-agent version refuses the attach with an upgrade message, a malformed daemon answer shows as an error on the page, and Mac-only commands are refused inside a bot view

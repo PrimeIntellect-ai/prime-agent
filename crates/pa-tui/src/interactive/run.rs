@@ -197,9 +197,12 @@ async fn run_interactive_surface(
     crossterm::style::force_color_output(true);
     // The first open attempt uses this connection (a fresh-pane connect failure must stay a
     // pre-mount failure); a wait retry reconnects against the successor daemon.
-    let (client, events) = DaemonClient::connect_with_retry(&options.socket_path)
-        .await
-        .with_context(|| "the interactive UI could not attach to the daemon")?;
+    let (client, events) = match &options.session {
+        SessionSelection::Bot(bot) => crate::session_ui::connect_bot(bot).await?,
+        _ => DaemonClient::connect_with_retry(&options.socket_path)
+            .await
+            .with_context(|| "the interactive UI could not attach to the daemon")?,
+    };
     let (notes_tx, mut notes_rx) = mpsc::unbounded_channel::<String>();
     let (compaction_abort_tx, mut compaction_abort_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
@@ -222,6 +225,7 @@ async fn run_interactive_surface(
     // into the session — the open page's panels and the dock's count.
     let (factory_tx, mut factory_rx) =
         mpsc::unbounded_channel::<crate::session_ui::FactoryUpdate>();
+    let (bots_tx, mut bots_rx) = mpsc::unbounded_channel::<crate::session_ui::BotsUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
     // here; the loop folds the session's skill commands into the
     // autocomplete provider.
@@ -334,6 +338,7 @@ async fn run_interactive_surface(
         let heartbeats_tx = heartbeats_tx.clone();
         let bash_tx = bash_tx.clone();
         let factory_tx = factory_tx.clone();
+        let bots_tx = bots_tx.clone();
         let commands_tx = commands_tx.clone();
         let page_tx = page_tx.clone();
         let waits_through_update_restart = !matches!(route, SessionOpenRoute::Cli);
@@ -362,6 +367,7 @@ async fn run_interactive_surface(
                     let heartbeats_tx = heartbeats_tx.clone();
                     let bash_tx = bash_tx.clone();
                     let factory_tx = factory_tx.clone();
+                    let bots_tx = bots_tx.clone();
                     let commands_tx = commands_tx.clone();
                     let page_tx = page_tx.clone();
                     async move {
@@ -390,6 +396,7 @@ async fn run_interactive_surface(
                                 bash: bash_tx,
                                 factory: factory_tx,
                                 commands: commands_tx,
+                                bots: bots_tx,
                             },
                             page_tx,
                         )
@@ -1390,7 +1397,11 @@ async fn run_interactive_surface(
                     // The closed stream parks its arm; a recovery already in flight owns the run,
                     // otherwise the loss is a daemon hiccup.
                     events = None;
-                    session.connection_event(ConnectionEvent::ConnectionLost, &mut view);
+                    if session.is_bot() {
+                        session.bot_link_closed(&mut view);
+                    } else {
+                        session.connection_event(ConnectionEvent::ConnectionLost, &mut view);
+                    }
                 }
             }
             reader_death = async {
@@ -1408,6 +1419,10 @@ async fn run_interactive_surface(
                         session.apply_client_event(event, &mut view);
                     }
                     let direct_alive = session.client.direct_session_id().is_some();
+                    if session.is_bot() {
+                        session.bot_link_closed(&mut view);
+                        continue;
+                    }
                     session.connection_event(
                         ConnectionEvent::SupervisorDied { direct_alive },
                         &mut view,
@@ -1494,6 +1509,11 @@ async fn run_interactive_surface(
             maybe_factory = factory_rx.recv() => {
                 if let Some(update) = maybe_factory {
                     session.apply_factory_update(update, &mut view);
+                }
+            }
+            maybe_bots = bots_rx.recv() => {
+                if let Some(update) = maybe_bots {
+                    session.apply_bots_update(update, &mut view);
                 }
             }
             maybe_commands = commands_rx.recv() => {

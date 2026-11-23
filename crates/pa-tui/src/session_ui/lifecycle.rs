@@ -46,6 +46,7 @@ impl SessionUi {
                 id
             }
             SessionSelection::Attach(id) => id.clone(),
+            SessionSelection::Bot(bot) => bot.guest_session_id.clone(),
             SessionSelection::Resume(_) => {
                 create_session(&client, options, Some(&options.session)).await?
             }
@@ -155,6 +156,11 @@ impl SessionUi {
             factory_list_epoch: 0,
             factory_updates: activity_updates.factory,
             factory_selected_run: None,
+            bots_updates: activity_updates.bots,
+            bot: match &options.session {
+                SessionSelection::Bot(bot) => Some(bot.clone()),
+                _ => None,
+            },
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),
@@ -807,6 +813,10 @@ impl SessionUi {
     /// Fetch the exit resume hint, bounded best-effort: a wedged worker or a
     /// dead connection yields no hint instead of holding the exit open.
     pub(crate) async fn exit_resume_hint(&self) -> Option<String> {
+        // A bot's session lives in its guest daemon: a local resume hint would name nothing.
+        if self.bot.is_some() {
+            return None;
+        }
         let stats = tokio::time::timeout(
             Duration::from_millis(EXIT_STATS_TIMEOUT_MS),
             self.client.request_ok(DaemonCommand::GetSessionStats {
@@ -885,6 +895,7 @@ mod backfill_tests {
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
+                bots: mpsc::unbounded_channel().0,
             },
             backfill_tx,
         )
@@ -1107,6 +1118,7 @@ mod backfill_tests {
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
+                bots: mpsc::unbounded_channel().0,
             },
             mpsc::unbounded_channel().0,
         )

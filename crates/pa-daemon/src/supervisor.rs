@@ -5,6 +5,7 @@
 
 mod accept_loop;
 mod adoption;
+mod bot_attach;
 mod clients;
 mod launch_budget;
 mod notes;

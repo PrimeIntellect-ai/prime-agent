@@ -496,7 +496,10 @@ pub(super) async fn create_session(
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         Some(
-            SessionSelection::New | SessionSelection::NewChild { .. } | SessionSelection::Attach(_),
+            SessionSelection::New
+            | SessionSelection::NewChild { .. }
+            | SessionSelection::Attach(_)
+            | SessionSelection::Bot(_),
         )
         | None => None,
     };

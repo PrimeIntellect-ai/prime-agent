@@ -35,6 +35,7 @@ mod autolink;
 pub mod bash_bang;
 pub mod bash_card;
 pub mod bash_view;
+pub mod bots_view;
 pub(crate) mod branch;
 pub(crate) mod browser;
 pub mod chat;

@@ -76,6 +76,18 @@ pub enum SessionSelection {
     /// Attach an existing live session by active session id.
     Attach(String),
     Resume(PathBuf),
+    /// Attach a bot's session in its guest daemon, over the link the local daemon opened.
+    Bot(BotAttach),
+}
+
+/// A bot attach the local daemon prepared (`attach_bot`): the single-use endpoint that pipes
+/// the guest daemon connection, and the bot's session in that daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotAttach {
+    pub bot_id: String,
+    pub name: String,
+    pub endpoint: PathBuf,
+    pub guest_session_id: String,
 }
 
 impl SessionSelection {
@@ -105,6 +117,8 @@ pub enum SessionPanel {
     FactoryRuns {
         row: Option<crate::factory_view::FactoryRow>,
     },
+    /// The `/bots` page (the return from an attached bot).
+    Bots,
 }
 
 /// The page that requested a session (the factory page's state open): leaving the requested

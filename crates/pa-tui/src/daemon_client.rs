@@ -319,6 +319,9 @@ pub struct DaemonClient {
     direct: std::sync::Arc<crate::direct_transport::DirectState>,
     /// The supervisor reader's death watch (see `reader_dead`).
     reader_dead_rx: tokio::sync::watch::Receiver<bool>,
+    /// A socket client may upgrade to a direct worker link; a stream client's worker sockets
+    /// live on another host.
+    direct_capable: bool,
 }
 
 impl DaemonClient {
@@ -349,7 +352,35 @@ impl DaemonClient {
                 socket_path.display()
             )
         })?;
+        let label = format!("Socket: {}", socket_path.display());
+        let (mut client, events) = Self::handshake(connect, &label).await?;
+        client.socket_path = socket_path.to_path_buf();
+        Ok((client, events))
+    }
 
+    /// Complete the hello handshake over an already connected stream (a bot's relayed guest
+    /// daemon connection), and return the client plus the event receiver like [`Self::connect`].
+    /// The stream is used once: a stream client never reconnects.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on a hello failure, timeout, or unknown protocol.
+    pub async fn connect_stream(
+        stream: Box<dyn pa_types::platform::transport::TransportStream>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
+        let (mut client, events) = Self::handshake(stream, "Endpoint: bot link").await?;
+        // Messages name the endpoint by its socket path; a stream has none.
+        client.socket_path = PathBuf::from("bot link");
+        client.direct_capable = false;
+        Ok((client, events))
+    }
+
+    /// The shared connect tail: the reader and writer tasks plus the hello handshake. `label`
+    /// names the endpoint in error messages.
+    async fn handshake(
+        connect: Box<dyn pa_types::platform::transport::TransportStream>,
+        label: &str,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
         let (reader_half, writer_half) = connect.split();
         let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<DaemonClientEvent>();
@@ -427,8 +458,7 @@ impl DaemonClient {
             .map_err(|_| {
                 reader_task.abort();
                 anyhow!(
-                    "Timed out after {HELLO_TIMEOUT_MS}ms waiting for the Prime Agent daemon handshake. Socket: {}.",
-                    socket_path.display()
+                    "Timed out after {HELLO_TIMEOUT_MS}ms waiting for the Prime Agent daemon handshake. {label}."
                 )
             })?
             .map_err(|_| {
@@ -446,8 +476,7 @@ impl DaemonClient {
         if protocol.name != DAEMON_PROTOCOL_NAME {
             reader_task.abort();
             return Err(anyhow!(
-                "the daemon on {} speaks an unknown protocol \"{}\"",
-                socket_path.display(),
+                "the daemon ({label}) speaks an unknown protocol \"{}\"",
                 protocol.name
             ));
         }
@@ -456,7 +485,7 @@ impl DaemonClient {
 
         Ok((
             DaemonClient {
-                socket_path: socket_path.to_path_buf(),
+                socket_path: PathBuf::new(),
                 client_id: format!("daemon-tui:{}", std::process::id()),
                 protocol: DaemonProtocolInfo {
                     name: DAEMON_PROTOCOL_NAME.to_string(),
@@ -470,6 +499,7 @@ impl DaemonClient {
                     retained_event_tx,
                 )),
                 reader_dead_rx,
+                direct_capable: true,
             },
             event_rx,
         ))
@@ -815,7 +845,7 @@ impl DaemonClient {
     ///
     /// Never returns `Err`: every failure path returns `Ok(false)`.
     pub async fn upgrade_direct(&self, active_session_id: &str) -> Result<bool> {
-        if !supervisor_supports_direct(&self.hello) {
+        if !self.direct_capable || !supervisor_supports_direct(&self.hello) {
             return Ok(false);
         }
         if self.direct_session_id().as_deref() == Some(active_session_id) {

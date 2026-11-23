@@ -63,6 +63,8 @@ pub(crate) enum Overlay {
     Mcp(crate::mcp_view::McpView),
     /// The factory page: the activity dock's factory group's destination.
     Factory(crate::factory_view::FactoryView),
+    /// The `/bots` page.
+    Bots(crate::bots_view::BotsView),
     /// The `/heartbeats` inline management view (TS `HeartbeatManagerComponent`).
     Heartbeats(crate::heartbeats_picker::HeartbeatsPicker),
     Goal(crate::goal_surface::GoalPanel),
@@ -275,6 +277,7 @@ impl AgentView {
             Some(
                 Overlay::Onboarding(_)
                 | Overlay::Factory(_)
+                | Overlay::Bots(_)
                 | Overlay::Heartbeats(_)
                 | Overlay::Bash(_)
                 | Overlay::Goal(_)
