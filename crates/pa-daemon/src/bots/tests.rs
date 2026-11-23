@@ -31,6 +31,9 @@ pub(crate) struct FakeState {
     /// The next credential provisioning fails with a transport error.
     pub fail_next_credentials: bool,
     pub refuse_pause: bool,
+    /// Pauses answer that the team's checkpoint storage is full.
+    pub checkpoint_storage_full: bool,
+    pub pauses: usize,
     /// New pause checkpoints stay pending (not durable).
     pub pause_checkpoints_pending: bool,
     /// Checkpoints that exist but are not durable yet.
@@ -152,6 +155,10 @@ impl BotPlatform for FakePlatform {
     fn pause<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<Option<String>>> {
         async move {
             let mut state = self.state();
+            state.pauses += 1;
+            if state.checkpoint_storage_full {
+                return Err(PlatformError::CheckpointQuota("HTTP 429".into()));
+            }
             if state.refuse_pause {
                 return Err(PlatformError::Other("VM cannot be paused".into()));
             }
@@ -548,6 +555,23 @@ async fn a_failed_install_fails_spawn_and_cleans_up() {
         assert!(platform.live().is_empty());
         assert!(manager.list().is_empty());
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_full_checkpoint_storage_keeps_the_bot_running() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    platform.state().checkpoint_storage_full = true;
+
+    let error = manager.pause("bot-a").await.expect_err("refused");
+
+    assert!(matches!(
+        error.downcast_ref::<PlatformError>(),
+        Some(PlatformError::CheckpointQuota(_))
+    ));
+    assert_eq!(platform.state().pauses, 1);
+    assert_eq!(platform.live().len(), 1);
+    assert_eq!(manager.get("bot-a").unwrap().status, BotStatus::Running);
 }
 
 #[test]

@@ -18,6 +18,7 @@ use serde_json::{json, Map, Value};
 
 use super::guest::GuestClient;
 use super::ledger::{BotLedger, DeliveryState};
+use super::platform::PlatformError;
 use super::registry::BotRegistry;
 use super::remote_parent::RemoteParentEntry;
 use super::{manager_for, BotRecord, BotStatus};
@@ -393,6 +394,8 @@ impl Supervisor {
                 let round_again = loop {
                     match this.pause_step(&bot_id).await {
                         Ok(again) => break again,
+                        // The next settled turn tries the pause again.
+                        Err(error) if this.storage_full(&bot_id, &error) => break false,
                         // An unreachable guest is tried again soon; after that
                         // the bot is paused anyway, so it does not run unwatched.
                         Err(error) if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS => {
@@ -408,6 +411,9 @@ impl Supervisor {
                             );
                             // An attached TUI or a failed pause keeps watching.
                             break this.pause_unwatched(&bot_id).await.unwrap_or_else(|error| {
+                                if this.storage_full(&bot_id, &error) {
+                                    return false;
+                                }
                                 eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
                                 true
                             });
@@ -430,6 +436,25 @@ impl Supervisor {
                 return;
             }
         });
+    }
+
+    /// Whether `error` is a pause refused because the team's checkpoint
+    /// storage is full. The bot then stays running, with one warning.
+    fn storage_full(&self, bot_id: &str, error: &anyhow::Error) -> bool {
+        if !matches!(
+            error.downcast_ref::<PlatformError>(),
+            Some(PlatformError::CheckpointQuota(_))
+        ) {
+            return false;
+        }
+        let name = manager_for(&self.options.agent_dir)
+            .ok()
+            .and_then(|manager| manager.get(bot_id))
+            .map_or_else(|| bot_id.to_string(), |record| record.name);
+        eprintln!(
+            "pa-daemon: bots: bot {name} stays running: the team's checkpoint storage is full; delete old checkpoints to allow pause"
+        );
+        true
     }
 
     /// A failed sync (a dropped link) is tried again before the pause step,

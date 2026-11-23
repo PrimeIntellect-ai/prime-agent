@@ -71,9 +71,12 @@ pub enum PlatformError {
     /// HTTP 409; retried with backoff.
     #[error("conflict: {0}")]
     Conflict(String),
-    /// Network, timeout, or 5xx; retried with backoff.
+    /// Network, timeout, 429, or 5xx; retried with backoff.
     #[error("{0}")]
     Transient(String),
+    /// HTTP 429 because the team's checkpoint storage is full; not retried.
+    #[error("the team's checkpoint storage is full: {0}")]
+    CheckpointQuota(String),
     /// Anything else; not retried.
     #[error("{0}")]
     Other(String),
@@ -303,6 +306,13 @@ fn map_error(error: &SandboxError) -> PlatformError {
             _,
         ) => PlatformError::Transient(message),
         // A rate limit passes: the caller retries with backoff.
+        (_, Some(429))
+            if error
+                .details()
+                .is_some_and(|details| details.contains("Checkpoint storage limit")) =>
+        {
+            PlatformError::CheckpointQuota(message)
+        }
         (_, Some(status)) if status >= 500 || status == 429 => PlatformError::Transient(message),
         _ => PlatformError::Other(message),
     }
@@ -561,7 +571,12 @@ impl BotPlatform for PrimePlatform {
                 match error.downcast_ref::<SandboxError>().map(map_error) {
                     Some(PlatformError::Transient(_)) => PlatformError::Transient(message),
                     Some(PlatformError::Conflict(_)) => PlatformError::Conflict(message),
-                    Some(PlatformError::NotFound(_) | PlatformError::Other(_)) | None => {
+                    Some(
+                        PlatformError::NotFound(_)
+                        | PlatformError::CheckpointQuota(_)
+                        | PlatformError::Other(_),
+                    )
+                    | None => {
                         PlatformError::Other(message)
                     }
                 }
@@ -591,5 +606,16 @@ mod tests {
             None,
         );
         assert!(matches!(map_error(&error), PlatformError::Transient(_)));
+    }
+
+    #[test]
+    fn a_full_checkpoint_storage_is_not_retried() {
+        let error = SandboxError::http("Sandbox pause failed with HTTP 429").with_http_context(
+            Method::Post,
+            "https://api.test/sandbox/sb-1/pause",
+            Some(429),
+            Some("Checkpoint storage limit reached: 27376.7GiB used of 20480GiB allowed.".into()),
+        );
+        assert!(matches!(map_error(&error), PlatformError::CheckpointQuota(_)));
     }
 }

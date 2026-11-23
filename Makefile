@@ -160,14 +160,15 @@ package:
 
 # A linux-x64 release tarball of this checkout for bots (docs/bots-page.md).
 # It lands next to target/{debug,release}/prime-agent, where the daemon finds it.
-# Linux hosts only; an arm64 host cross-builds. Needs the x86_64 cross gcc
-# and binutils (Debian: gcc-x86-64-linux-gnu) and cargo-about on PATH.
+# Linux hosts only; an arm64 host cross-builds. Needs the x86_64 cross gcc,
+# binutils, and libc headers (Debian: gcc-x86-64-linux-gnu
+# libc6-dev-amd64-cross) and cargo-about on PATH.
 BOT_TARGET = x86_64-unknown-linux-gnu
 BOT_DIST = target/$(BOT_TARGET)/dist
 BOT_TOOLS = $(CURDIR)/$(BOT_DIST)/tools
 
 bot-tarball:
-	@command -v x86_64-linux-gnu-gcc >/dev/null 2>&1 || { echo "x86_64-linux-gnu-gcc not installed (apt-get install gcc-x86-64-linux-gnu)"; exit 1; }
+	@command -v x86_64-linux-gnu-gcc >/dev/null 2>&1 || { echo "x86_64-linux-gnu-gcc not installed (apt-get install gcc-x86-64-linux-gnu libc6-dev-amd64-cross)"; exit 1; }
 	@command -v cargo-about >/dev/null 2>&1 || { echo "cargo-about not installed (cargo install --locked cargo-about --version 0.9.3 --features cli)"; exit 1; }
 	rustup target add $(BOT_TARGET)
 	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc cargo build --release --locked -p pa-cli --target $(BOT_TARGET)
