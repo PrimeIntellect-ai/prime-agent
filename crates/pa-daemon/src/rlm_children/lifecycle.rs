@@ -92,8 +92,8 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
-        // The decision flag's one durable home: the create key, from which
-        // descriptor.rs derives the worker's launch env.
+        // The create key: descriptor.rs derives the worker's launch env
+        // from it, and the admission projects it onto the ledger edge.
         if decision_child {
             config["decisionChild"] = json!(true);
         }

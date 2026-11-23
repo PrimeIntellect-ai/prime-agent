@@ -995,12 +995,13 @@ impl Supervisor {
         // the revived child never re-passivates), the runtime kind gates the
         // subagent identity the create arm extracts (a child row must present
         // `kind: "subagent"` or the child id and the parent edge are dropped),
-        // and the parent path restores the parent edge a revived decision
-        // child's replies route by.
-        let (depth, child_id, parent_session_id, parent_session_path, is_child) = {
+        // the parent path restores the parent edge a revived decision
+        // child's replies route by, and the decision flag must replay or the
+        // revived decision child boots the agent engine.
+        let (depth, child_id, parent_session_id, parent_session_path, is_child, decision_child) = {
             let roster = self.roster.lock().unwrap();
             roster.by_active_session_id(selector).map_or(
-                (0, String::new(), String::new(), String::new(), false),
+                (0, String::new(), String::new(), String::new(), false, false),
                 |row| {
                     let parent_session_path = row
                         .summary
@@ -1028,19 +1029,13 @@ impl Supervisor {
                             .get("runtimeKind")
                             .and_then(Value::as_str)
                             .is_some_and(|kind| kind == "subagent"),
+                        row.summary.get("decisionChild").and_then(Value::as_bool) == Some(true),
                     )
                 },
             )
         };
         let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
             .map_or_else(|| "/".to_string(), |info| info.cwd);
-        // The child's display entry carries the decision flag: the fresh
-        // wake create replays it (the same replay the ledger wake makes),
-        // or the revived decision child boots the agent engine.
-        let decision_child = std::path::Path::new(&session_file)
-            .parent()
-            .and_then(crate::rlm_ledger::read_rlm_subagent_display)
-            .is_some_and(|display| display.decision_child);
         // The identity rides `config.rlmDepth` + `runtime_metadata.rlmChildId` —
         // the keys launch_worker copies into the DURABLE create command's rest.
         let mut config = json!({ "cwd": cwd, "rlmDepth": depth });

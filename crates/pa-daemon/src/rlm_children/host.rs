@@ -172,8 +172,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
                 // Every spawned child — a decision child included —
                 // presents the subagent runtime identity; the decision
-                // flag's one durable home is the create command's
-                // `decisionChild` key.
+                // flag rides the create command's `decisionChild` key
+                // (the admission projects it onto the ledger edge).
                 let mut runtime_metadata = json!({
                     "kind": "subagent",
                     "rlmChildId": child_id,
@@ -261,7 +261,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // "[task from parent]" label.
             let prompt = request.prompt.as_str();
             let kickoff_content = format!("[task from parent]\n\n{prompt}");
-            let kickoff_row_id = format!("spawn:{child_id}");
+            let kickoff_row_id = format!(
+                "{}{child_id}",
+                pa_core::session_engine::agent_messaging::SPAWN_KICKOFF_ID_PREFIX
+            );
             let mut parent_endpoint = json!({
                 "activeSessionId": this.parent_active_session_id,
             });

@@ -20,9 +20,14 @@ use crate::engine::{
     CompactionRequest, EngineEvent, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
 };
-use pa_core::session_engine::agent_messaging::{AgentFamilyRelationship, AgentMessageSendInput};
-use pa_core::session_engine::decision_api::{RefusedDecisionReply, ResolvedDecisionModel};
+use pa_core::session_engine::agent_messaging::{
+    AgentFamilyRelationship, AgentMessageSendInput, SPAWN_KICKOFF_ID_PREFIX,
+};
+use pa_core::session_engine::decision_api::{
+    RefusedDecisionReply, ResolvedDecisionModel, ServedDecision,
+};
 use pa_core::session_engine::side_question::SideQuestionSink;
+use tokio_util::sync::CancellationToken;
 
 /// The decision child's engine.
 pub struct DecisionEngine {
@@ -37,6 +42,9 @@ pub struct DecisionEngine {
     /// async, `run_prompt` is not — a current-thread runtime serves every
     /// `block_on` (the engine spawns nothing).
     runtime: AsyncSafeRuntime,
+    /// The running turn's cancellation: replaced at the start of every
+    /// `run_prompt`, cancelled by `abort_in_flight_turn`.
+    turn_cancel: Mutex<CancellationToken>,
 }
 
 impl DecisionEngine {
@@ -74,6 +82,7 @@ impl DecisionEngine {
             own_summary,
             sender,
             runtime: AsyncSafeRuntime::new_current_thread().expect("decision engine runtime"),
+            turn_cancel: Mutex::new(CancellationToken::new()),
         }
     }
 
@@ -138,29 +147,28 @@ impl DecisionEngine {
     /// Serve one decision request message: run the shared decision path
     /// (one provider completion) with the engine-resolved model. The
     /// request's `state` carries the parent's guidance verbatim — the
-    /// engine keeps no channel of its own.
-    fn serve(&self, request: Value, aborted: &dyn Fn() -> bool) -> anyhow::Result<Value> {
+    /// engine keeps no channel of its own. The call races the turn's
+    /// cancellation, so an abort lands mid-call instead of after the
+    /// whole decision bound.
+    fn serve(
+        &self,
+        request: Value,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<(&ResolvedDecisionModel, ServedDecision)> {
         let resolved = match self.model.as_ref() {
             Ok(resolved) => resolved,
             Err(refusal) => return Err(anyhow!(refusal.clone())),
         };
-        self.runtime.block_on(async {
-            // The worker's cancel flag is a plain sync probe with no async
-            // wake, so the bounded decision call races a short-interval
-            // poll of it: an abort lands mid-call instead of after the
-            // whole 30 s (the retry sleep's abort-aware wait).
+        let served = self.runtime.block_on(async {
             tokio::select! {
                 result = pa_core::session_engine::decision_api::serve_decision_request(
                     request,
                     resolved,
                 ) => result,
-                () = async {
-                    while !aborted() {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                } => Err(anyhow!("the decision call was aborted")),
+                () = cancel.cancelled() => Err(anyhow!("the decision call was aborted")),
             }
-        })
+        })?;
+        Ok((resolved, served))
     }
 
     /// The event pair for an answer: the streaming update and the final
@@ -239,6 +247,16 @@ impl SessionEngine for DecisionEngine {
         Box::pin(std::future::ready(true))
     }
 
+    /// Every abort path sets the worker's cancel flag before this hook, so
+    /// an abort that lands before `run_prompt` replaces the token is still
+    /// caught by the run's `aborted()` checks.
+    fn abort_in_flight_turn(&self) {
+        self.turn_cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cancel();
+    }
+
     fn run_side_question(
         &self,
         _request: SideQuestionRequest,
@@ -287,6 +305,11 @@ impl SessionEngine for DecisionEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         let cancelled = || EngineEvent::Done(Err("prompt cancelled".to_string()));
+        let cancel = CancellationToken::new();
+        *self
+            .turn_cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = cancel.clone();
         // The accepted row: the injected agent-message row, or the plain prompt.
         let accepted_row = match &request.custom_message {
             Some(custom) => custom.clone(),
@@ -308,14 +331,16 @@ impl SessionEngine for DecisionEngine {
             emit(cancelled());
             return;
         }
-        // A decision request carries "questions"; anything else is the
-        // spawn prompt — the engine keeps no prompt state, so it settles
-        // with the ready answer below.
-        let parsed: Option<Value> = serde_json::from_str(Self::raw_message(&request)).ok();
-        let is_request = parsed
+        // The spawn kickoff (the task row `rlm.spawn` delivers) readies the
+        // child; every other message is a decision request, and one that
+        // does not parse answers with an error reply.
+        let kickoff = request
+            .custom_message
             .as_ref()
-            .is_some_and(|value| value.get("questions").is_some());
-        if !is_request {
+            .and_then(|row| row.pointer("/details/id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with(SPAWN_KICKOFF_ID_PREFIX));
+        if kickoff {
             // The ready row is typed like the answer rows (the exit capture
             // and the revived context read it the same way) but reports no
             // model call: the readiness label, a zero usage, and no api.
@@ -354,16 +379,25 @@ impl SessionEngine for DecisionEngine {
             emit(EngineEvent::Done(Ok(())));
             return;
         }
-        let mut body = parsed.expect("checked above");
         // The reply echoes whatever `seq` the request carried — including
         // none: a request without a `seq` still answers (a silent Done(Err)
         // here would leave the parent waiting on a turn that already
-        // ended), so the branch that refused it is gone.
-        let seq = body
-            .as_object_mut()
-            .and_then(|body| body.remove("seq"))
-            .unwrap_or(Value::Null);
-        let result = self.serve(body, aborted);
+        // ended).
+        let (seq, result) = match serde_json::from_str::<Value>(Self::raw_message(&request)) {
+            Ok(mut body) => {
+                let seq = body
+                    .as_object_mut()
+                    .and_then(|body| body.remove("seq"))
+                    .unwrap_or(Value::Null);
+                (seq, self.serve(body, &cancel))
+            }
+            Err(error) => (
+                Value::Null,
+                Err(anyhow!(
+                    "a decision request must be a JSON object; the message is not JSON ({error})"
+                )),
+            ),
+        };
         // Cancellation can arrive while the bounded decision call runs:
         // either reply - the decision or its failure - must not reach the
         // parent once the turn is cancelled.
@@ -372,23 +406,15 @@ impl SessionEngine for DecisionEngine {
             return;
         }
         match result {
-            Ok(envelope) => {
+            Ok((resolved, served)) => {
                 // The answer rows persist first: the completed decision and
                 // its usage reach the transcript and the cost ledger even
                 // when the reply delivery below fails, and the rows exist
                 // before the run's closing frames either way.
-                let text = envelope["answers"].to_string();
-                let usage =
-                    serde_json::from_value::<pa_types::ai::Usage>(envelope["usage"].clone())
-                        .unwrap_or_default();
-                // A served decision implies the engine-start resolution;
-                // its identity labels the transcript rows.
-                let Some(resolved) = self.model.as_ref().ok() else {
-                    unreachable!("a served decision implies the engine resolved its model");
-                };
+                let text = json!({ "action": served.action }).to_string();
                 let (provider, model) = resolved.provider_and_id();
                 let (update, final_message) =
-                    Self::answer_rows(resolved.api(), provider, model, &text, usage);
+                    Self::answer_rows(resolved.api(), provider, model, &text, served.usage);
                 for event in [update, final_message.clone()] {
                     if !emit(event) {
                         emit(cancelled());
@@ -401,8 +427,8 @@ impl SessionEngine for DecisionEngine {
                 let reply = json!({
                     "type": "decision_api.decision",
                     "seq": seq,
-                    "model": envelope["model"].clone(),
-                    "decision": envelope["answers"]["action"].clone(),
+                    "model": resolved.label(),
+                    "decision": served.action,
                 });
                 if let Err(error) = self.send_reply(&reply, aborted) {
                     if aborted() {
@@ -481,6 +507,30 @@ impl SessionEngine for DecisionEngine {
 mod tests {
     use super::*;
 
+    /// The `rlm.spawn` task delivery: the agent-message row the spawn
+    /// host builds, keyed by the spawn kickoff id.
+    fn kickoff_request(task: &str) -> PromptRequest {
+        let row = pa_core::session_engine::agent_messaging::create_agent_session_message_row(
+            &pa_core::session_engine::agent_messaging::AgentSessionMessageRowPayload {
+                id: &format!("{SPAWN_KICKOFF_ID_PREFIX}decision-child"),
+                prompt: &format!("[task from parent]\n\n{task}"),
+                message: task,
+                from: &json!({ "activeSessionId": "parent-live-1" }),
+                from_relationship: Some(AgentFamilyRelationship::Parent),
+                target: None,
+                timestamp: 0,
+            },
+        );
+        PromptRequest {
+            message: format!("[task from parent]\n\n{task}"),
+            images: Vec::new(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: Some(row),
+            batch: Vec::new(),
+        }
+    }
+
     fn engine(dir: &std::path::Path) -> DecisionEngine {
         let link = Arc::new(crate::supervisor_link::SupervisorLink::new(
             std::path::PathBuf::new(),
@@ -515,7 +565,6 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
-            streaming_behavior: None,
         };
         // Cancellation arrives while the decision call runs: the check
         // before the call passes, the flag flips for every later one.
@@ -607,7 +656,6 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
-            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(
@@ -642,7 +690,7 @@ mod tests {
     }
 
     /// The abort interrupt, pinned: the bounded decision call races the
-    /// worker's cancel flag, so an abort landing mid-call frees the turn
+    /// turn's cancellation, so an abort landing mid-call frees the turn
     /// without waiting out the decision bound, cancels the in-flight
     /// provider request, and settles cancelled with no reply to the
     /// parent.
@@ -683,15 +731,16 @@ mod tests {
         .unwrap();
         let socket = dir.path().join("supervisor.sock");
         let commands = stub_supervisor(&socket, 2);
-        let engine = DecisionEngine::new(
+        let engine = Arc::new(DecisionEngine::new(
             dir.path(),
             dir.path(),
             Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
             "decision-child".to_string(),
             "token".to_string(),
-        );
+        ));
         engine.set_session_summary(json!({ "parentActiveSessionId": "parent-live-1" }));
-        // The abort flips from inside the provider request: the factory
+        // The abort lands from inside the provider request, the way the
+        // worker aborts: the flag first, then the engine hook. The factory
         // runs once the call has begun — past the pre-call check — while
         // the pacing holds the answer past every bound.
         let flip = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -700,6 +749,7 @@ mod tests {
         ));
         let flip_writer = Arc::clone(&flip);
         let capture_writer = Arc::clone(&captured);
+        let abort_engine = Arc::clone(&engine);
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
             std::sync::Arc::new(
                 move |_context: &pa_ai::types::Context,
@@ -709,6 +759,7 @@ mod tests {
                     *capture_writer.lock().unwrap() =
                         options.and_then(|options| options.signal.clone());
                     flip_writer.store(true, std::sync::atomic::Ordering::SeqCst);
+                    abort_engine.abort_in_flight_turn();
                     Ok(pa_ai::faux::faux_assistant_text_message(
                         r#"{"action": {"choice": "left"}}"#,
                         pa_ai::faux::FauxAssistantMessageOptions::default(),
@@ -730,7 +781,6 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
-            streaming_behavior: None,
         };
         let started = std::time::Instant::now();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -773,23 +823,15 @@ mod tests {
         );
     }
 
-    /// The spawn prompt's path, pinned: a message that is not a decision
-    /// request never reaches the decision call — the turn settles with
-    /// the ready answer alone, and the engine keeps no prompt state to
-    /// store it in.
+    /// The spawn prompt's path, pinned: the spawn task never reaches the
+    /// decision call — the turn settles with the ready answer alone, and
+    /// the engine keeps no prompt state to store it in.
     #[test]
     fn a_spawn_prompt_settles_with_the_ready_answer() {
         let dir = tempfile::tempdir().unwrap();
         let engine = engine(dir.path());
-        let request = PromptRequest {
-            message: "You are the decision child: answer requests with the action tag.".to_string(),
-            images: Vec::new(),
-            source: "user".to_string(),
-            agent_message_id: None,
-            custom_message: None,
-            batch: Vec::new(),
-            streaming_behavior: None,
-        };
+        let request =
+            kickoff_request("You are the decision child: answer requests with the action tag.");
         let aborted = || false;
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &aborted, &mut |event| {
@@ -1000,9 +1042,10 @@ mod tests {
         )
         .unwrap();
         let socket = dir.path().join("supervisor.sock");
-        // The kickoff's ready reply and the request's decision reply: one
-        // transport probe leg and one send leg each.
-        let commands = stub_supervisor(&socket, 4);
+        // The kickoff's ready reply, the request's decision reply, and the
+        // malformed request's error reply: one transport probe leg and one
+        // send leg each.
+        let commands = stub_supervisor(&socket, 6);
         let engine = DecisionEngine::new(
             dir.path(),
             dir.path(),
@@ -1019,7 +1062,6 @@ mod tests {
                 agent_message_id: None,
                 custom_message: None,
                 batch: Vec::new(),
-                streaming_behavior: None,
             };
             let mut events: Vec<EngineEvent> = Vec::new();
             engine.run_prompt(0, request, &|| false, &mut |event| {
@@ -1028,9 +1070,18 @@ mod tests {
             });
             events
         };
-        // The kickoff (a non-request message) readies the child and sends
-        // the ready answer as its first tagged reply.
-        let kickoff = run("You are System 1, the decision child.".to_string());
+        // The kickoff (the spawn task) readies the child and sends the
+        // ready answer as its first tagged reply.
+        let mut kickoff = Vec::new();
+        engine.run_prompt(
+            0,
+            kickoff_request("You are System 1, the decision child."),
+            &|| false,
+            &mut |event| {
+                kickoff.push(event);
+                true
+            },
+        );
         assert!(
             matches!(kickoff.last(), Some(EngineEvent::Done(Ok(())))),
             "the kickoff must settle ready: {kickoff:?}"
@@ -1089,6 +1140,29 @@ mod tests {
         assert_eq!(
             sent[1]["decision"]["choice"], "left",
             "the seqless request's decision still answers: {sent:?}"
+        );
+        // A request that is not JSON (a Python dict's repr) answers with an
+        // error reply instead of readying the child again.
+        let malformed = run("{'state': {}, 'questions': {}}".to_string());
+        assert!(
+            matches!(malformed.last(), Some(EngineEvent::Done(Err(_)))),
+            "a malformed request must fail its turn: {malformed:?}"
+        );
+        let sent: Vec<Value> = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| command["type"].as_str() == Some("send_message"))
+            .filter_map(|command| {
+                serde_json::from_str(command["message"].as_str().unwrap_or_default()).ok()
+            })
+            .collect();
+        assert_eq!(sent.len(), 3, "the malformed request replied: {sent:?}");
+        assert!(
+            sent[2]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("not JSON")),
+            "the malformed request's reply names the error: {sent:?}"
         );
     }
 
@@ -1222,7 +1296,6 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
-            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &|| false, &mut |event| {
@@ -1357,7 +1430,6 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
-            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &|| false, &mut |event| {
@@ -1445,7 +1517,6 @@ mod tests {
             agent_message_id: None,
             custom_message: None,
             batch: Vec::new(),
-            streaming_behavior: None,
         };
         let mut events: Vec<EngineEvent> = Vec::new();
         engine.run_prompt(0, request, &|| false, &mut |event| {

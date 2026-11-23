@@ -816,10 +816,11 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
         "the edge names the parent session file for recovery"
     );
     assert_eq!(edge.name, "system-1", "the edge carries the spawn name");
+    assert!(edge.decision_child, "the edge carries the decision kind");
 
-    // The decision flag has exactly one durable home — the persisted create
-    // command's `decisionChild` key — while the runtime metadata carries the
-    // ordinary subagent identity every lifecycle gate accepts.
+    // The persisted create command's `decisionChild` key feeds the worker
+    // launch, while the runtime metadata carries the ordinary subagent
+    // identity every lifecycle gate accepts.
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
     let create = std::fs::read_dir(&descriptor_dir)
         .expect("the worker descriptor dir")
@@ -917,8 +918,8 @@ async fn a_decision_child_spawn_runs_the_decision_engine_end_to_end() {
 }
 
 /// A passivated Decision API child revives as a decision child: the fresh
-/// wake create replays the child's durable identity — the display entry's
-/// decision flag and the ledger edge's parent session id — or the revived
+/// wake create replays the child's durable identity — the ledger edge's
+/// decision flag and parent session id — or the revived
 /// worker boots the agent engine and the parent never hears a decision.
 #[tokio::test]
 async fn a_passivated_decision_child_revives_as_a_decision_child_and_answers() {

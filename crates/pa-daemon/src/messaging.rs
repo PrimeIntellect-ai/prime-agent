@@ -355,6 +355,7 @@ impl Supervisor {
                         cwd,
                         &edge.child_id,
                         depth,
+                        edge.decision_child,
                     )
                     .await,
                 )
@@ -368,9 +369,9 @@ impl Supervisor {
     /// Spawn one worker over a ledger child's session file, with the same
     /// concurrent-wake protections as the saved-session wake.
     ///
-    /// The fresh create replays the child's durable identity: the display
-    /// entry's `decisionChild` flag (a dropped flag revives a decision
-    /// child as an agent session) and the ledger edge's parent session id
+    /// The fresh create replays the child's durable identity: the ledger
+    /// edge's `decisionChild` flag (a dropped flag revives a decision
+    /// child as an agent session) and its parent session id
     /// (the parent edge a revived decision child's replies route by — the
     /// live parent id is not durable, so the child targets the parent's
     /// durable session id, which resolves a live parent directly and a
@@ -382,19 +383,12 @@ impl Supervisor {
         cwd: String,
         child_id: &str,
         depth: u32,
+        decision_child: bool,
     ) -> WakeOutcome {
         // Reuse before spawning: a concurrent revival may already host the file.
         if let Some(resident) = self.registry.find_by_session_file(session_file).await {
             return WakeOutcome::Woken(resident);
         }
-        // The child's display entry carries the decision flag: the create
-        // key's `decisionChild` homes it durably, and the fresh wake
-        // create must replay it or the revived worker boots the agent
-        // engine instead of serving decisions.
-        let decision_child = std::path::Path::new(session_file)
-            .parent()
-            .and_then(crate::rlm_ledger::read_rlm_subagent_display)
-            .is_some_and(|display| display.decision_child);
         let parent_session_id = std::path::Path::new(parent_file)
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
@@ -716,6 +710,7 @@ mod tests {
             deleted_usage: None,
             deleted_usage_by_model: None,
             factory: None,
+            decision_child: false,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

@@ -244,19 +244,13 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     let child_three = file_at(agent.join("session-artifacts/P/sub-c/sess-c.jsonl"));
     let child_four = file_at(agent.join("session-artifacts/Q/sub-d/sess-d.jsonl"));
     let child_five = file_at(agent.join("session-artifacts/P/sub-e/sess-e.jsonl"));
-    for (child_id, session_file, status, prompt, decision_child) in [
-        (
-            "sub-a",
-            &child_one,
-            "completed",
-            Some("finished task"),
-            false,
-        ),
-        ("sub-b", &child_two, "running", None, false),
+    for (child_id, session_file, status, prompt) in [
+        ("sub-a", &child_one, "completed", Some("finished task")),
+        ("sub-b", &child_two, "running", None),
         // A decision child's display legitimately stays running (the
         // settle tail withholds the completed flip), so its reseed must
         // read the serving state, not a crash.
-        ("sub-e", &child_five, "running", None, true),
+        ("sub-e", &child_five, "running", None),
     ] {
         crate::rlm_ledger::write_rlm_subagent_display(
             &crate::rlm_ledger::RlmSubagentDisplayEntry {
@@ -274,7 +268,6 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
                 spawn_code: None,
                 model: None,
                 status: status.to_string(),
-                decision_child,
                 created_at: 1234,
             },
         )
@@ -295,7 +288,10 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
             r#"{"v":1,"op":"spawn","at":"#,
             spawn("sub-b", &parent_one, &child_two).as_str(),
             spawn("sub-legacy", &parent_one, &child_legacy).as_str(),
-            spawn("sub-e", &parent_one, &child_five).as_str(),
+            // The decision flag rides the spawn edge.
+            spawn("sub-e", &parent_one, &child_five)
+                .replace('}', r#","decisionChild":true}"#)
+                .as_str(),
             spawn("sub-c", &parent_one, &child_three).as_str(),
             format!(
                 r#"{{"v":1,"op":"delete","at":"2026-09-30T00:00:01Z","childId":"sub-c","child":"{child_three}","reason":"user"}}"#

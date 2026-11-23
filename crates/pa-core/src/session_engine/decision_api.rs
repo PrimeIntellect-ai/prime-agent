@@ -12,12 +12,12 @@
 //! message naming the setting.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{anyhow, bail};
 use pa_types::ai::{ModelInput, StopReason};
 use serde_json::{json, Value};
 
-use super::provider_adapter::LiveAuthResolver;
 use crate::models::{find_exact_model_reference_match, ModelRegistry};
 
 /// The default decision instructions (the choice question's default).
@@ -181,17 +181,19 @@ fn unusable_message(reference: &str) -> String {
 }
 
 /// The resolved decision model: the settings reference resolved through
-/// the registry exactly like `imageModel` routing. The model selection is
-/// cached for the engine's lifetime; the request auth is not — every
-/// decision re-resolves it through the live seam's per-request resolver.
+/// the registry exactly like `imageModel` routing. The model selection and
+/// the registry that resolved it live for the engine's lifetime; the
+/// request auth does not — every decision reloads the registry's auth
+/// store and resolves the credential again.
 pub struct ResolvedDecisionModel {
     model: pa_types::ai::Model,
-    request_auth: LiveAuthResolver,
+    registry: Arc<Mutex<ModelRegistry>>,
 }
 
 impl ResolvedDecisionModel {
-    /// The model's full selector, for prompts and status rows.
-    fn label(&self) -> String {
+    /// The model's full selector, for prompts, status rows, and replies.
+    #[must_use]
+    pub fn label(&self) -> String {
         format!("{}/{}", self.model.provider, self.model.id)
     }
 
@@ -208,28 +210,26 @@ impl ResolvedDecisionModel {
         &self.model.api
     }
 
-    /// One decision call's request auth, resolved fresh through the
-    /// per-request seam: an expired OAuth credential refreshes and a
-    /// rotated key serves, instead of replaying the engine-start key. A
-    /// failed OAuth refresh refuses with the registry's own sentence; a
-    /// credential removed between decisions simply serves none, and the
-    /// provider's rejection reports it — the same arm the live stream
-    /// serves.
-    ///
-    /// The fresh store per call is the tradeoff that makes rotation
-    /// visible: the chat path keeps one registry and reloads it, so a
-    /// failed read keeps its last-read data, while the decision path
-    /// has no last-read data to keep. The blocking auth reads (and any
-    /// refresh) run off the executor; `deadline` bounds the wait, not
-    /// the work — a timed-out resolution keeps running on the blocking
+    /// One decision call's request auth, resolved fresh the way the chat
+    /// path resolves each provider call: the registry reloads its auth
+    /// store, so a key rotated by another process or an OAuth token
+    /// refreshed at expiry serves instead of the engine-start key, and a
+    /// failed read keeps the last read's data. A failed OAuth refresh
+    /// refuses with the registry's own sentence. The blocking auth reads
+    /// (and any refresh) run off the executor; `deadline` bounds the wait,
+    /// not the work — a timed-out resolution keeps running on the blocking
     /// pool.
     async fn resolve_request_auth(
         &self,
         deadline: tokio::time::Instant,
     ) -> anyhow::Result<crate::models::ResolvedRequestAuth> {
-        let resolver = std::sync::Arc::clone(&self.request_auth);
+        let registry = Arc::clone(&self.registry);
         let model = self.model.clone();
-        let resolution = tokio::task::spawn_blocking(move || resolver(&model));
+        let resolution = tokio::task::spawn_blocking(move || {
+            let mut registry = registry.lock().unwrap_or_else(PoisonError::into_inner);
+            registry.auth.reload();
+            registry.get_api_key_and_headers(&model, None)
+        });
         let auth = tokio::time::timeout(
             deadline.saturating_duration_since(tokio::time::Instant::now()),
             resolution,
@@ -252,7 +252,8 @@ impl ResolvedDecisionModel {
 /// the reference must match an available (authenticated) model, and its
 /// request auth comes from the registry's merged resolution. The decision
 /// engine calls this once at engine start and keeps the model selection
-/// for every decision; the request auth is re-resolved per decision.
+/// and the registry for every decision; the request auth is re-resolved
+/// per decision.
 ///
 /// # Errors
 ///
@@ -282,19 +283,9 @@ pub fn resolve_decision_model(
     if !resolved.ok {
         return Err(unusable_message(&reference));
     }
-    // The per-request seam: every decision rebuilds the auth store and
-    // the registry and runs the same resolution the live stream runs
-    // per call, so an expired OAuth credential refreshes instead of
-    // replaying the engine-start key.
-    let auth_dir = agent_dir.to_path_buf();
-    let request_auth: LiveAuthResolver = std::sync::Arc::new(move |model: &pa_types::ai::Model| {
-        let auth = crate::auth::AuthStorage::create(&auth_dir);
-        let mut registry = ModelRegistry::create(auth, auth_dir.join("models.json"));
-        registry.get_api_key_and_headers(model, None)
-    });
     Ok(ResolvedDecisionModel {
         model,
-        request_auth,
+        registry: Arc::new(Mutex::new(registry)),
     })
 }
 
@@ -474,14 +465,23 @@ impl std::fmt::Display for RefusedDecisionReply {
 
 impl std::error::Error for RefusedDecisionReply {}
 
+/// One served decision: the validated `answers.action` object and the
+/// call's usage, which the decision child's answer rows carry so the cost
+/// ledger bills the call.
+#[derive(Debug)]
+pub struct ServedDecision {
+    pub action: Value,
+    pub usage: pa_types::ai::Usage,
+}
+
 /// Serve one decision request with the resolved model: one non-streaming
-/// completion, parsed into the decision envelope. Structured-decision
+/// completion, parsed into the served decision. Structured-decision
 /// (`api: "systemone"`) models speak the native protocol; every other model
 /// answers the decision prompt over the ordinary chat transports.
 async fn serve_decision(
     resolved: &ResolvedDecisionModel,
     request: &DecisionRequest,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<ServedDecision> {
     // One wall-clock budget for the whole call: the auth resolution and
     // the completion share this deadline, so a slow credential phase
     // leaves the completion only what remains.
@@ -551,7 +551,7 @@ async fn serve_decision(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let answer = if reply.trim().is_empty() {
+    let action = if reply.trim().is_empty() {
         Err(anyhow!("the decision model returned an empty reply"))
     } else {
         parse_decision_answer(&reply, &request.criteria)
@@ -561,13 +561,10 @@ async fn serve_decision(
         usage: response.usage,
         refusal,
     })?;
-    Ok(json!({
-        "model": resolved.label(),
-        // The completion's usage rides the envelope so the decision child's
-        // answer rows bill in the cost ledger, like the chat path's rows.
-        "usage": response.usage,
-        "answers": { "action": answer },
-    }))
+    Ok(ServedDecision {
+        action,
+        usage: response.usage,
+    })
 }
 
 /// Serve one decision over the System One structured-decision protocol: the
@@ -583,7 +580,7 @@ async fn serve_systemone(
     auth: &crate::models::ResolvedRequestAuth,
     deadline: tokio::time::Instant,
     request: &DecisionRequest,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<ServedDecision> {
     let mut criteria = serde_json::Map::new();
     for (name, applies) in &request.criteria {
         criteria.insert(name.clone(), json!(applies));
@@ -649,8 +646,7 @@ async fn serve_systemone(
     }
     let raw = reply.trim();
     let parsed = parse_reply_json(raw)?;
-    // The envelope reports the resolved model's label, never the
-    // endpoint's bare id. The endpoint's usage — clef's two token counts
+    // The endpoint's usage — clef's two token counts
     // — maps into the typed `Usage` the cost ledger bills: the raw
     // `{"input_tokens", "output_tokens"}` shape deserializes as no
     // usage at all, so every clef decision would read as a free call.
@@ -676,7 +672,7 @@ async fn serve_systemone(
         pa_ai::models::calculate_cost(&resolved.model, &mut usage, None);
         usage
     };
-    let answer = parsed
+    let action = parsed
         .get("answers")
         .ok_or_else(|| anyhow!("the decision model's reply has no \"answers\" object: {raw}"))
         .and_then(|answers| decision_answer(answers, &request.criteria))
@@ -685,11 +681,7 @@ async fn serve_systemone(
             usage,
             refusal,
         })?;
-    Ok(json!({
-        "model": resolved.label(),
-        "usage": usage,
-        "answers": { "action": answer },
-    }))
+    Ok(ServedDecision { action, usage })
 }
 
 /// The settings decision model's resolved selector (`"provider/id"`):
@@ -716,7 +708,7 @@ pub fn decision_model_selector(cwd: &Path, agent_dir: &Path) -> Result<String, S
 pub async fn serve_decision_request(
     request: Value,
     resolved: &ResolvedDecisionModel,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<ServedDecision> {
     let Value::Object(request) = request else {
         bail!("a decision request needs a request object");
     };
@@ -738,7 +730,7 @@ mod tests {
     use std::path::Path;
 
     /// Serve one decision synchronously over the fixture dirs.
-    async fn decide(request: Value, dir: &Path) -> anyhow::Result<Value> {
+    async fn decide(request: Value, dir: &Path) -> anyhow::Result<ServedDecision> {
         let resolved = resolve_decision_model(dir, dir).map_err(anyhow::Error::msg)?;
         serve_decision_request(request, &resolved).await
     }
@@ -917,9 +909,9 @@ mod tests {
     }
 
     /// Each decision resolves its request credential at serve time: a
-    /// credential that changes on disk after the engine resolved the
-    /// model (a rotated key, the visible half of the refresh the
-    /// auth-store tests pin) serves the new value instead of replaying
+    /// credential another process writes to auth.json after the engine
+    /// resolved the model (a rotated key, the visible half of the refresh
+    /// the auth-store tests pin) serves the new value instead of replaying
     /// the engine-start key.
     #[tokio::test]
     async fn each_decision_serves_the_credential_resolved_at_request_time() {
@@ -967,10 +959,12 @@ mod tests {
         serve_decision_request(request.clone(), &resolved)
             .await
             .unwrap();
-        // The credential rotates on disk between the two decisions.
+        // Another process stores a key for the provider between the two
+        // decisions; the stored credential outranks the models.json key.
         std::fs::write(
-            dir.path().join("models.json"),
-            models_json("fixture-key-rotated"),
+            dir.path().join("auth.json"),
+            json!({ "fixture-decisions": { "type": "api_key", "key": "fixture-key-rotated" } })
+                .to_string(),
         )
         .unwrap();
         serve_decision_request(request, &resolved).await.unwrap();
@@ -1155,15 +1149,12 @@ mod tests {
             "criteria": { "left": "go left", "right": "go right" }
         } }, "images": [ "data:image/png;base64,AA==" ] });
         let answer = decide(request, dir.path()).await.unwrap();
-        assert_eq!(answer["model"], "fixture-decisions/decision-model");
         assert_eq!(
-            answer["answers"],
+            answer.action,
             json!({
-                "action": {
-                    "choice": "left",
-                    "confidence": 1.0,
-                    "probabilities": { "left": 0.75, "right": 0.25 }
-                }
+                "choice": "left",
+                "confidence": 1.0,
+                "probabilities": { "left": 0.75, "right": 0.25 }
             })
         );
         let seen = seen.lock().unwrap().clone();
@@ -1335,22 +1326,19 @@ mod tests {
             "type": "choice", "criteria": {"left": "go left", "right": "go right"}
         } }, "images": ["data:image/png;base64,AA=="] });
         let answer = decide(request, dir.path()).await.unwrap();
-        assert_eq!(answer["model"], "fixture-decisions/systemone-model");
-        assert_eq!(answer["answers"]["action"]["choice"], "left", "{answer}");
+        assert_eq!(answer.action["choice"], "left", "{answer:?}");
         // The endpoint's two token counts map into the typed Usage the
         // cost ledger bills (the raw shape parses as no usage, so every
         // clef decision would read as a free call), priced through the
         // resolved model.
-        assert_eq!(answer["usage"]["input"], 11, "{answer}");
-        assert_eq!(answer["usage"]["output"], 0, "{answer}");
-        let cost = answer["usage"]["cost"]["total"].as_f64();
+        assert_eq!((answer.usage.input, answer.usage.output), (11, 0));
         assert!(
-            cost.is_some_and(|cost| (0.003..0.004).contains(&cost)),
-            "the mapped usage must carry the resolved model's cost: {answer}"
+            (0.003..0.004).contains(&answer.usage.cost.total.as_f64()),
+            "the mapped usage must carry the resolved model's cost: {answer:?}"
         );
         assert_eq!(
-            answer["answers"]["action"]["probabilities"]["left"], 0.9,
-            "the per-option probabilities ride the envelope: {answer}"
+            answer.action["probabilities"]["left"], 0.9,
+            "the per-option probabilities ride the answer: {answer:?}"
         );
         let requests = seen.lock().unwrap();
         assert_eq!(requests.len(), 1);

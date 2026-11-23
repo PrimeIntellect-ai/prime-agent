@@ -589,9 +589,7 @@ fn ledger_child_records(
                 },
                 |display| display.created_at,
             ),
-            decision_child: display
-                .as_ref()
-                .is_some_and(|display| display.decision_child),
+            decision_child: edge.decision_child,
             // A decision child's display legitimately stays `running`
             // (its spawn task is a readiness handshake, never its whole
             // run, so the settle tail withholds the completed flip): a
@@ -601,7 +599,7 @@ fn ledger_child_records(
             run: RunState::reseeded(
                 if display
                     .as_ref()
-                    .is_some_and(|display| display.status == "running" && !display.decision_child)
+                    .is_some_and(|display| display.status == "running" && !edge.decision_child)
                 {
                     RunVerdict::Error(None)
                 } else {
