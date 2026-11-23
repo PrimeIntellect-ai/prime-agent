@@ -489,7 +489,7 @@ impl SessionUi {
     /// run is in flight, including a pending provider retry, or while a
     /// compaction runs; else the remembered outcome or idle.
     pub(crate) fn program_status(&self, view: &AgentView) -> crate::program_status::Status {
-        if self.run_state.is_busy() || view.retry.is_some() || view.compaction.is_some() {
+        if self.run_busy() || view.retry.is_some() || view.compaction.is_some() {
             crate::program_status::Status::Working
         } else {
             self.settled.unwrap_or(crate::program_status::Status::Idle)
