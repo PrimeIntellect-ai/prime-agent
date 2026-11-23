@@ -1,0 +1,1 @@
+- Reading a finished `bash()` result from any cell, or with no live cell, now drops its `[bash-done]` notice instead of waking the agent later.

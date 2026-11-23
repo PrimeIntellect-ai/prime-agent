@@ -8,27 +8,21 @@ from rlm.inbox_lifecycle import (
     advance,
 )
 
-Q, C, W, F, D, X, E = (
+Q, S, C, X = (
     NoticeLifecycle.QUEUED,
+    NoticeLifecycle.SENT,
     NoticeLifecycle.CONSUMED,
-    NoticeLifecycle.WOKEN,
-    NoticeLifecycle.FOLDED,
-    NoticeLifecycle.DELIVERED,
     NoticeLifecycle.WITHDRAWN,
-    NoticeLifecycle.EXPIRED,
 )
 
 
 class NoticeLifecycleTest(unittest.TestCase):
-    def test_only_the_design_note_transitions_are_legal(self):
+    def test_only_the_kernel_transitions_are_legal(self):
         legal = {
-            Q: {C, W, F, X, E},
-            W: {D},
-            F: {D, X, E},
+            Q: {C, S},
+            S: {X},
             C: set(),
-            D: set(),
             X: set(),
-            E: set(),
         }
         for current in NoticeLifecycle:
             for target in NoticeLifecycle:

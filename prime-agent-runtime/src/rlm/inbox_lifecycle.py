@@ -1,9 +1,9 @@
 """The bash-done notice lifecycle of one finished command.
 
-One state per finished bash command's notice. The kernel drives
-``QUEUED -> CONSUMED | WITHDRAWN`` (a read of the finished result); the
-daemon's queue admission does the wake, fold, and delivery moves.
-Every other move is an error that names the legal set.
+One state per finished bash command's notice, driven by the kernel: a
+read before the notice leaves the kernel consumes it, and a read after
+it left withdraws it. Every other move is an error that names the legal
+set.
 """
 
 from __future__ import annotations
@@ -13,32 +13,16 @@ import enum
 
 class NoticeLifecycle(enum.Enum):
     QUEUED = "queued"  # the command finished; its notice waits
+    SENT = "sent"  # the notice left the kernel for the host
     CONSUMED = "consumed"  # read before the notice left the kernel
-    WOKEN = "woken"  # the wake policy admitted it
-    FOLDED = "folded"  # combined into a summary line
-    DELIVERED = "delivered"  # reached the model (wake or fold)
-    WITHDRAWN = "withdrawn"  # read after the notice was sent, before delivery
-    EXPIRED = "expired"  # a durability cap passed
+    WITHDRAWN = "withdrawn"  # read after the notice was sent
 
 
 _LEGAL: dict[NoticeLifecycle, frozenset[NoticeLifecycle]] = {
-    NoticeLifecycle.QUEUED: frozenset(
-        {
-            NoticeLifecycle.CONSUMED,
-            NoticeLifecycle.WOKEN,
-            NoticeLifecycle.FOLDED,
-            NoticeLifecycle.WITHDRAWN,
-            NoticeLifecycle.EXPIRED,
-        }
-    ),
-    NoticeLifecycle.WOKEN: frozenset({NoticeLifecycle.DELIVERED}),
-    NoticeLifecycle.FOLDED: frozenset(
-        {NoticeLifecycle.DELIVERED, NoticeLifecycle.WITHDRAWN, NoticeLifecycle.EXPIRED}
-    ),
+    NoticeLifecycle.QUEUED: frozenset({NoticeLifecycle.CONSUMED, NoticeLifecycle.SENT}),
+    NoticeLifecycle.SENT: frozenset({NoticeLifecycle.WITHDRAWN}),
     NoticeLifecycle.CONSUMED: frozenset(),
-    NoticeLifecycle.DELIVERED: frozenset(),
     NoticeLifecycle.WITHDRAWN: frozenset(),
-    NoticeLifecycle.EXPIRED: frozenset(),
 }
 
 

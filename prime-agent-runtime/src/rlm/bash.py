@@ -380,7 +380,6 @@ class BashHandle:
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
         self._notice_state = NoticeLifecycle.QUEUED
-        self._notice_sent = False
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
@@ -790,9 +789,12 @@ class BashHandle:
         if not self._done.is_set():
             return
         with self._callback_lock:
-            if self._notice_state is not NoticeLifecycle.QUEUED:
+            if self._notice_state is NoticeLifecycle.QUEUED:
+                target = NoticeLifecycle.CONSUMED
+            elif self._notice_state is NoticeLifecycle.SENT:
+                target = NoticeLifecycle.WITHDRAWN
+            else:
                 return
-            target = NoticeLifecycle.WITHDRAWN if self._notice_sent else NoticeLifecycle.CONSUMED
             self._notice_state = advance(self._notice_state, target)
             notice, self._consumed_notice = self._consumed_notice, None
         if notice is not None:
@@ -803,7 +805,7 @@ class BashHandle:
         with self._callback_lock:
             if self._notice_state is not NoticeLifecycle.QUEUED:
                 return False
-            self._notice_sent = True
+            self._notice_state = advance(self._notice_state, NoticeLifecycle.SENT)
             return True
 
     def _schedule_background_completion_notice(self) -> None:
@@ -872,7 +874,7 @@ class BashHandle:
         dispatch = functools.partial(self._notify_result_consumed, command)
 
         with self._callback_lock:
-            if self._notice_state is NoticeLifecycle.QUEUED:
+            if self._notice_state is NoticeLifecycle.SENT:
                 self._consumed_notice = dispatch
                 return
         dispatch()
@@ -1176,7 +1178,6 @@ class PersistentBashHandle(BashHandle):
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
         self._notice_state = NoticeLifecycle.QUEUED
-        self._notice_sent = False
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         self._reaped = False
