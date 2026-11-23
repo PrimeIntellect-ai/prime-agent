@@ -180,8 +180,8 @@ impl Worker {
                         message.class == pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE
                     })
                     .map(|message| message.id.clone())
-                    .collect();
-                let withdrawn = inbox.withdraw_ids(&ids);
+                    .collect::<std::collections::BTreeSet<_>>();
+                let withdrawn = inbox.remove_where(|message| ids.contains(&message.id));
                 if !withdrawn.is_empty() {
                     withdrawn_texts = withdrawn.into_iter().map(|message| message.text).collect();
                     crate::worker::refresh_inbox_wake_rows_locked(

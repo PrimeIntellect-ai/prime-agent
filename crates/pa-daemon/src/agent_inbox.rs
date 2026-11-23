@@ -158,7 +158,7 @@ impl AgentSessionEngine {
         {
             return None;
         }
-        Some(inbox.withdraw_heartbeat(job_id))
+        Some(inbox.remove_where(|message| message.is_heartbeat_fire(job_id)))
     }
 }
 

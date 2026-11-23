@@ -698,8 +698,8 @@ pub(crate) fn admit_inbox_notice_locked(
             arrivals.clear();
         }
         arrivals.push(message);
-        let (count, _, _) = inbox.count();
-        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&arrivals, count);
+        let (preview, text) =
+            pa_core::session_engine::inbox::arrival_notice(&arrivals, inbox.len());
         // A follow-up arrival never demotes a queued steering notice: the
         // batch keeps the most urgent lane it has already ridden.
         let queued_steering = core_guard
@@ -776,15 +776,14 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
 ) -> bool {
-    let waiting = inbox.waiting_ids();
     let mut batch = arrivals.lock().unwrap();
     // An arrived-empty batch is UNKNOWN (a recovered row after a restart
     // arrives without its batch); a batch emptied by the retain below was
     // live and its covered messages are gone — older unread mail keeps
     // its reminder only.
     let recovered = batch.is_empty();
-    batch.retain(|message| waiting.contains(&message.id));
-    let (count, _, _) = inbox.count();
+    batch.retain(|message| inbox.is_waiting(&message.id));
+    let count = inbox.len();
     if recovered && count > 0 {
         batch.extend(inbox.waiting_messages());
     }
@@ -878,7 +877,7 @@ pub(crate) fn admit_inbox_reminder(
     // The count re-samples under the core lock: a concurrent drain and
     // its wake-row refresh may have emptied the store since the cycle
     // sampled it, and a reminder for nothing must not queue.
-    let (count, _, _) = inbox.count();
+    let count = inbox.len();
     // The test-only scheduler gate INSIDE the critical section, after
     // the count: a probe pauses the reminder thread here — its count
     // snapshotted, the core lock held — across a concurrent drain, to
@@ -1019,9 +1018,9 @@ pub(crate) fn withdraw_bash_completion_notice(
     // never strands a surviving unread message's wake.
     let mut inbox_rows_changed = false;
     if let Some((inbox, arrivals)) = inbox {
-        if inbox
-            .withdraw_bash_completion(notice.pid, &notice.command)
-            .is_some()
+        if !inbox
+            .remove_where(|message| message.is_bash_completion(notice.pid, &notice.command))
+            .is_empty()
         {
             inbox_rows_changed = refresh_inbox_wake_rows_locked(&mut core_guard, arrivals, inbox);
         }

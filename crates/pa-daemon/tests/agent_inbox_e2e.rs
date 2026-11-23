@@ -796,8 +796,8 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
         "the journal holds both message records: {journal}"
     );
     assert!(
-        journal.contains("\"kind\":\"drained\""),
-        "the read appended its drain marker: {journal}"
+        journal.contains("\"kind\":\"removed\""),
+        "the read journaled its removal: {journal}"
     );
 
     // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
@@ -1183,8 +1183,8 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
         "the delivered message journaled with its class: {journal}"
     );
     assert!(
-        journal.contains("\"kind\":\"drained\""),
-        "the read appended its drain marker: {journal}"
+        journal.contains("\"kind\":\"removed\""),
+        "the read journaled its removal: {journal}"
     );
 
     // THE KILL SWITCH: `agentInbox.enabled: false` restores the direct
@@ -1288,9 +1288,9 @@ print('CHILD_SPAWNED ' + h.rlm_child_id)"
                         "type": "function",
                         "function": python_cell(
                             "from rlm import inbox
-msgs = await inbox.read()
+msgs = await inbox.read(inbox_class='child-exited', key='f20-worker')
 after = await inbox.count()
-entry = [(m.inbox_class, m.sender, m.meta.get('kind', '')) for m in msgs]
+entry = [(m.inbox_class, m.key, m.meta.get('kind', '')) for m in msgs]
 print(('CHILD_NOTICE_READ', entry, after.count, msgs[0].text.split(chr(10))[0]))"
                         )
                     }]
@@ -1312,7 +1312,7 @@ print(('CHILD_NOTICE_READ', entry, after.count, msgs[0].text.split(chr(10))[0]))
 }
 
 /// The agent-lifecycle class: a settled child's terminal notice lands in
-/// the parent's durable inbox (class `child-exited`, sender = the child
+/// the parent's durable inbox (class `child-exited`, key = the child
 /// name, status in the metadata), ONE coalesced short notice wakes the
 /// parent, the read drains it, no full `rlm_child_terminal_notice` row
 /// steers, and the journal keeps the record.
@@ -1402,7 +1402,7 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     );
     assert!(
         after_read.contains("('child-exited', 'f20-worker', 'completed_without_reply')"),
-        "the read returned the lifecycle entry (class, sender, kind): {after_read}"
+        "the read returned the lifecycle entry (class, key, kind): {after_read}"
     );
     assert!(
         after_read.contains("[child-exited: no-reply child:f20-worker]"),

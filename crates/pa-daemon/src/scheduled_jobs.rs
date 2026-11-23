@@ -149,7 +149,7 @@ impl QueueHooks {
                 &live,
                 crate::util::now_ms(),
             );
-            let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&live.id, &row)?;
+            let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&row)?;
             // One waiting fire per job: the newest replaces the older, and
             // the arrival batch drops it so the notice never counts it. A
             // store retired since the capture skips the fire: its waiting

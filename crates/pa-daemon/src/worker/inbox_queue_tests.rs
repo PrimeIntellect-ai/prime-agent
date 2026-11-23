@@ -31,7 +31,7 @@ fn inbox_notice(class: &'static str, text: &str) -> pa_core::session_engine::inb
         class,
         sender: Some(format!("sender-{class}")),
         text: text.to_string(),
-        meta: serde_json::json!({ "text": text }),
+        meta: serde_json::from_value(serde_json::json!({ "text": text })).unwrap(),
     }
 }
 
@@ -40,9 +40,12 @@ fn inbox_notice(class: &'static str, text: &str) -> pa_core::session_engine::inb
 fn bash_done_notice(pid: u32, command: &str) -> pa_core::session_engine::inbox::InboxNotice {
     pa_core::session_engine::inbox::InboxNotice {
         class: pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
-        sender: Some(command.to_string()),
+        sender: None,
         text: format!("[bash-done pid:{pid} exit:0]"),
-        meta: serde_json::json!({ "pid": pid, "command": command, "exitCode": 0 }),
+        meta: serde_json::from_value(
+            serde_json::json!({ "pid": pid, "command": command, "exitCode": 0 }),
+        )
+        .unwrap(),
     }
 }
 
@@ -392,7 +395,7 @@ async fn a_drained_read_withdraws_its_queued_wake_rows() {
     );
     // The turn's cell called rlm.inbox.read(): the store drains and the
     // drain seam (the kernel host handler) fires the sweep.
-    let drained = inbox.drain();
+    let drained = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter::default());
     assert_eq!(drained.len(), 1, "the read drained the waiting message");
     withdraw_drained_inbox_notice(
         &worker.recovery,
@@ -500,7 +503,7 @@ async fn a_refill_inside_the_drain_window_rerenders_the_queued_reminder() {
     );
     // The busy cell's read drained the store; the queued reminder still
     // promises its pre-read count of two.
-    let drained = inbox.drain();
+    let drained = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter::default());
     assert_eq!(drained.len(), 2, "the read drained both waiting messages");
     // A third completion lands inside the drain window — after the
     // drain, before the sweep — refilling the store.
@@ -742,7 +745,8 @@ async fn a_reminder_racing_a_drained_read_never_queues_a_dead_count() {
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("the read finished once the admission released the lock");
     assert_eq!(
-        reply["drainedCount"], 1,
+        reply["messages"].as_array().map(Vec::len),
+        Some(1),
         "the read drained the waiting message"
     );
     read_thread.join().expect("the read thread finished");
@@ -902,7 +906,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
     );
     assert_eq!(inbox.count().0, 1, "the factory milestone still waits");
     let milestone = inbox
-        .drain()
+        .read(&pa_core::session_engine::inbox::InboxReadFilter::default())
         .pop()
         .expect("the milestone survived the withdrawal");
     let rows = steering_rows(&worker);
@@ -1027,9 +1031,9 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
             id: "inbox-ghost".to_string(),
             class: pa_types::inbox_notice::INBOX_CLASS_FACTORY_PROGRESS.to_string(),
             arrived_at_ms: 5,
-            sender: Some("gone".to_string()),
+            sender: None,
             text: "drained elsewhere".to_string(),
-            meta: serde_json::Value::Null,
+            meta: serde_json::Map::new(),
         });
     withdraw_bash_completion_notice(
         &worker.recovery,
@@ -1213,9 +1217,8 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
         !batch_ids.is_empty(),
         "the successor's batch kept its entries: {batch_ids:?}"
     );
-    let waiting = successor.waiting_ids();
     assert!(
-        batch_ids.iter().all(|id| waiting.contains(id)),
+        batch_ids.iter().all(|id| successor.is_waiting(id)),
         "the successor's batch still covers its waiting ids: {batch_ids:?}"
     );
     assert_eq!(
@@ -1473,7 +1476,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         None,
     );
     let milestone = inbox
-        .drain()
+        .read(&pa_core::session_engine::inbox::InboxReadFilter::default())
         .pop()
         .expect("the milestone survived the withdrawal");
     let rows = steering_rows(&worker);
@@ -1977,8 +1980,8 @@ async fn a_minted_child_notice_routes_into_the_inbox() {
     let (count, _, classes) = inbox.count();
     assert_eq!(count, 1, "the message waits in the durable store");
     assert_eq!(classes["child-failed"], 1);
-    let messages = inbox.drain();
-    assert_eq!(messages[0].sender.as_deref(), Some("lane"));
+    let messages = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter::default());
+    assert_eq!(messages[0].key(), Some("lane"));
     assert!(messages[0].text.contains("[child-failed child:lane]"));
     assert_eq!(messages[0].meta["error"], "boom");
     // The loud full row never parked: one short coalesced wake rides the
@@ -2535,7 +2538,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     };
     // A targeted read takes the bash-done message: the batch trims and
     // both rows re-render over what is left.
-    let taken = inbox.drain_matching(&pa_core::session_engine::inbox::InboxReadFilter {
+    let taken = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter {
         class: Some(pa_types::inbox_notice::INBOX_CLASS_BASH_DONE.to_string()),
         ..Default::default()
     });
@@ -2605,7 +2608,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         );
     }
     // The final drain empties the store: both rows retract.
-    let rest = inbox.drain();
+    let rest = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter::default());
     assert_eq!(rest.len(), 1);
     refresh_inbox_wake_rows(&worker.core, &arrivals, &inbox);
     let rows = steering_rows(&worker);
@@ -2665,7 +2668,7 @@ async fn the_read_hook_refreshes_the_wake_rows_and_their_action_events() {
         "the delivery refreshed the strip: {delivery_frames:?}"
     );
     // The agent reads: the store drains, then the installed seam runs.
-    let drained = inbox.drain();
+    let drained = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter::default());
     assert_eq!(drained.len(), 1);
     let hook = worker
         .agent_engine
@@ -2732,7 +2735,7 @@ async fn a_drained_live_batch_drops_its_row_without_rebuilding() {
     );
     // The read takes the covered arrival only; the live batch trims to
     // nothing while the older message stays.
-    let taken = inbox.drain_matching(&pa_core::session_engine::inbox::InboxReadFilter {
+    let taken = inbox.read(&pa_core::session_engine::inbox::InboxReadFilter {
         since_ms: Some(1_000),
         ..Default::default()
     });
@@ -2849,10 +2852,7 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
 
     let remaining = inbox.waiting_messages();
     assert_eq!(remaining, vec![initial_waiting[1].clone()]);
-    assert_eq!(
-        remaining[0].meta,
-        json!({ "text": "recovery survivor full body" })
-    );
+    assert_eq!(remaining[0].meta["text"], "recovery survivor full body");
     assert_eq!(arrivals.lock().unwrap().as_slice(), remaining.as_slice());
     let (expected_preview, expected_text) =
         pa_core::session_engine::inbox::arrival_notice(&remaining, 1);
