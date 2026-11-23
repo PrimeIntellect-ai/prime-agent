@@ -1,7 +1,7 @@
 //! Client-side MCP auth commands: the interactive surface behind
-//! `/mcp login <name>` and `/mcp logout <name>` (the TS interactive
-//! client's MCP login/logout branches, which run the OAuth flow in the
-//! client process and persist through the shared auth store) plus the
+//! the `/mcp` view's connect flows (the TS interactive client's MCP
+//! login branch, which runs the OAuth flow in the client process and
+//! persists through the shared auth store) plus the
 //! `/mcp` view's api-key credential flow (`key <id>`, the view's stored
 //! keys such as the web-search one). The TUI owns the command UX and the
 //! inline auth panel; the composition root runs the flow against it
@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// contract the pa-core login UI uses for dyn dispatch across crates).
 pub type AuthFuture = Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>>;
 
-/// `/mcp login` and `/mcp logout`, implemented by the composition root.
+/// MCP connect flows, implemented by the composition root and opened from `/mcp`.
 pub trait ClientAuthCommands: Send + Sync {
     /// Run one interactive MCP OAuth login against the inline auth panel
     /// (the flow's progress, URL block, and prompts render there).
@@ -29,9 +29,6 @@ pub trait ClientAuthCommands: Send + Sync {
     /// it in the credential's auth slot — the slot the runtime reads.
     /// Resolves with the status line to show.
     fn api_key(&self, credential: &str, panel: crate::auth_panel::AuthPanelHandle) -> AuthFuture;
-    /// Remove a stored MCP credential. Resolves with the status line
-    /// (TS: `<name> is not connected.` / `Disconnected <name>.`).
-    fn logout(&self, server: &str) -> AuthFuture;
 }
 
 /// The handle the interactive options carry (a manual `Debug`: the hook
@@ -45,10 +42,10 @@ impl std::fmt::Debug for ClientAuthCommandsHandle {
     }
 }
 
-/// Run `/mcp login` / `/mcp key` / `/mcp logout` against the hook and
+/// Run MCP connect or key flows against the hook and
 /// return the note line to show (status, surfaced error, or the TS usage
 /// wording). Argument shapes and wording follow the TS interactive
-/// client's `handleMcpCommand` login/logout branches. The login, paste,
+/// client's `handleMcpCommand` login branch. The login, paste,
 /// and key flows drive the inline auth `panel` (the TUI mounts it before
 /// spawning the flow).
 pub async fn run_mcp_auth_command(
@@ -72,10 +69,6 @@ pub async fn run_mcp_auth_command(
             Ok(status) => status,
             Err(error) => format!("{error:#}"),
         },
-        (Some("logout"), Some(server), true) => match auth.logout(server).await {
-            Ok(status) => status,
-            Err(error) => format!("{error:#}"),
-        },
         (Some("login"), _, false) | (Some("login"), None, true) => {
             "Usage: /mcp login <name> (e.g. /mcp login linear)".to_string()
         }
@@ -85,11 +78,7 @@ pub async fn run_mcp_auth_command(
         (Some("key"), _, false) | (Some("key"), None, true) => {
             "Usage: /mcp key <name> (an api-key credential)".to_string()
         }
-        (Some("logout"), _, false) | (Some("logout"), None, true) => {
-            "Usage: /mcp logout <name>".to_string()
-        }
-        _ => "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name> | /mcp logout <name>"
-            .to_string(),
+        _ => "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name>".to_string(),
     }
 }
 
@@ -145,15 +134,6 @@ mod tests {
             let answer = format!("Saved API key for {credential}.");
             Box::pin(async move { Ok(answer) })
         }
-
-        fn logout(&self, server: &str) -> AuthFuture {
-            self.log
-                .lock()
-                .unwrap()
-                .push(("logout".to_string(), server.to_string()));
-            let answer = format!("Disconnected {server}.");
-            Box::pin(async move { Ok(answer) })
-        }
     }
 
     /// A hook that fails, to cover the error surfacing.
@@ -182,14 +162,10 @@ mod tests {
             let error = anyhow::anyhow!("Unknown api-key credential: {credential}");
             Box::pin(async move { Err(error) })
         }
-
-        fn logout(&self, _server: &str) -> AuthFuture {
-            Box::pin(async move { Err(anyhow::anyhow!("boom")) })
-        }
     }
 
     #[tokio::test]
-    async fn login_and_logout_dispatch_with_ts_wording() {
+    async fn login_dispatches_with_ts_wording() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let auth = ScriptedAuth {
             log: Arc::clone(&log),
@@ -199,15 +175,8 @@ mod tests {
             "Connected linear."
         );
         assert_eq!(
-            run_mcp_auth_command(&auth, "logout notion", panel()).await,
-            "Disconnected notion."
-        );
-        assert_eq!(
             log.lock().unwrap().clone(),
-            vec![
-                ("login".to_string(), "linear".to_string()),
-                ("logout".to_string(), "notion".to_string()),
-            ]
+            vec![("login".to_string(), "linear".to_string())]
         );
         // The api-key credential dispatch (the `/mcp` view's key rows).
         assert_eq!(
@@ -232,16 +201,12 @@ mod tests {
             "Usage: /mcp login <name> (e.g. /mcp login linear)"
         );
         assert_eq!(
-            run_mcp_auth_command(&auth, "logout", panel()).await,
-            "Usage: /mcp logout <name>"
-        );
-        assert_eq!(
             run_mcp_auth_command(&auth, "", panel()).await,
-            "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name> | /mcp logout <name>"
+            "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name>"
         );
         assert_eq!(
             run_mcp_auth_command(&auth, "add http://x", panel()).await,
-            "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name> | /mcp logout <name>"
+            "Usage: /mcp login <name> | /mcp paste <name> | /mcp key <name>"
         );
         // Errors surface with their chain.
         assert_eq!(

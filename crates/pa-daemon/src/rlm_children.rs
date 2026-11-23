@@ -74,8 +74,8 @@ const STATE_TIMEOUT_MS: u64 = 30_000;
 const KILL_TIMEOUT_MS: u64 = 30_000;
 /// Budget for one session rename over the supervisor route (TS uses 30s).
 const RENAME_TIMEOUT_MS: u64 = 30_000;
-/// Grace over a collect budget passed to the worker `wait_for_idle`.
-const IDLE_WAIT_GRACE_MS: u64 = 5_000;
+/// Grace added to explicit `wait_for_idle` budgets at the caller link and supervisor route.
+pub(crate) const IDLE_WAIT_GRACE_MS: u64 = 5_000;
 const NOTICE_DELIVERY_TIMEOUT_MS: u64 = 30_000;
 /// Prompts longer than this are not mirrored into create runtime metadata.
 const RUNTIME_METADATA_PROMPT_MAX: usize = 4096;
@@ -190,9 +190,6 @@ struct ChildRecord {
     /// A factory state's child: the factory reads its settle through
     /// collect, so no terminal notice reaches the parent conversation.
     factory: bool,
-    /// The task prompt was admitted; never settle a pre-prompt child (it
-    /// is idle with an empty queue by construction).
-    prompt_admitted: bool,
     /// The delete or close of this child, kept apart from `run` so a live run
     /// is never faked settled during a delete's kill.
     retirement: Retirement,
@@ -217,7 +214,7 @@ struct ChildRecord {
     /// Serializes usage emissions for this child without holding the record lock across them.
     emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_emitted_status: Option<&'static str>,
-    /// Serializes parent-directed rename and delete for this child.
+    /// Serializes kickoff admission, rename, and retirement for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -370,8 +367,8 @@ struct SupervisorChildSessionsInner {
     /// Delete-receipt tombstones: a deleted child's identity stays behind
     /// the registry so `collect` answers a just-deleted selector.
     deleted_children: std::sync::Mutex<std::collections::HashMap<String, DeletedChild>>,
-    /// The parent worker's turn boundary: prompt tasks spawned mid-turn wait for that turn to
-    /// complete (the continuation is in flight before the child's first model turn).
+    /// The parent worker's turn boundary: prompts spawned mid-turn wait for
+    /// this boundary unless a positive collect releases that selected child.
     parent_turn: tokio::sync::watch::Sender<ParentTurn>,
     /// The parent engine's child-settle hook (goal continuation resume).
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -474,14 +471,14 @@ impl SupervisorChildSessions {
     }
 
     /// The worker started a parent turn: spawns admitted from here on hold
-    /// their task prompt until the turn completes.
+    /// their task prompt until the boundary, unless a positive collect releases it.
     pub fn notify_turn_started(&self) {
         self.inner
             .parent_turn
             .send_modify(|turn| turn.running = true);
     }
 
-    /// The worker saw the parent's turn end: release prompt tasks waiting
+    /// The worker saw the parent's turn end: release prompts still waiting
     /// on the boundary (called once per `EngineEvent::Done`).
     pub fn notify_turn_done(&self) {
         self.inner.parent_turn.send_modify(|turn| {
@@ -729,7 +726,7 @@ impl SupervisorChildSessions {
                 model: String::new(),
                 label: String::new(),
                 started_at_ms: 0,
-                run: RunState::running(),
+                run: RunState::admitted(),
                 answer_preview: None,
                 answer_text: None,
                 answer_captured: false,
@@ -740,7 +737,6 @@ impl SupervisorChildSessions {
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 factory: false,
-                prompt_admitted: true,
                 retirement: Retirement::live(),
                 usage_registration_forgotten: false,
                 session_file: None,

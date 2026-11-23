@@ -118,19 +118,6 @@ def wait_for_host_request(repl: ReplProcess, events: list[dict]) -> dict:
     return request
 
 
-def host_request_within(repl: ReplProcess, timeout: float) -> dict | None:
-    """The next host request, or None when none arrives within timeout."""
-    deadline = time.monotonic() + timeout
-    while (left := deadline - time.monotonic()) > 0:
-        try:
-            event = repl.read_event(timeout=left)
-        except TimeoutError:
-            return None
-        if event.get("event") == "host_request":
-            return event
-    return None
-
-
 def reply_ok(repl: ReplProcess, request: dict) -> None:
     repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
 
@@ -1366,39 +1353,23 @@ class ReplTest(unittest.TestCase):
                 )
 
     def test_poll_before_completion_keeps_the_notice_and_a_later_poll_withdraws_it(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        gate = os.path.join(temp.name, "gate")
         command = "sleep 0.1; printf polled"
-        notice, events = self.accepted_notice(
-            "poll-early",
-            "\n".join(
-                [
-                    f"handle = bash({command!r})",
-                    "async def watch():",
-                    f"    while not os.path.exists({gate!r}):",
-                    "        await asyncio.sleep(0.01)",
-                    "    globals()['late'] = handle.poll().output",
-                    "watcher = asyncio.create_task(watch())",
-                    "handle.poll()",
-                ]
-            ),
-        )
+        notice, events = self.accepted_notice("poll-early", f"handle = bash({command!r})\nhandle.poll()")
         self.assertIsNone(one(events, "result"))
-        open(gate, "w").close()
-        withdrawal = host_request_within(self.repl, 5)
-        self.assertEqual(
-            withdrawal and withdrawal["data"],
-            {"type": "bash.consumed", "pid": notice["pid"], "command": command},
-        )
-        self.assertEqual(one(self.repl.execute("poll-late", "late"), "result")["text"], "'polled'")
+        read = self.repl.execute("poll-late", "handle.poll().output")
+        self.assertEqual(one(read, "result")["text"], "'polled'")
+        requests = [e["data"] for e in read if e.get("event") == "host_request"]
+        self.assertEqual(requests, [{"type": "bash.consumed", "pid": notice["pid"], "command": command}])
 
-    def test_read_with_no_live_cell_withdraws_the_notice(self):
+    def test_read_with_no_live_cell_keeps_the_notice(self):
+        # A watcher reading the handle with no cell running reaches nobody: the
+        # notice is the only wake-up an idle session gets, so it must survive.
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         gate = os.path.join(temp.name, "gate")
+        read = os.path.join(temp.name, "read")
         command = "sleep 0.05; printf no-cell"
-        notice, _ = self.accepted_notice(
+        self.accepted_notice(
             "no-cell",
             "\n".join(
                 [
@@ -1407,17 +1378,18 @@ class ReplTest(unittest.TestCase):
                     f"    while not os.path.exists({gate!r}):",
                     "        await asyncio.sleep(0.01)",
                     "    globals()['seen'] = (await handle).output",
+                    f"    open({read!r}, 'w').close()",
                     "asyncio.create_task(watch())",
                 ]
             ),
         )
         open(gate, "w").close()
-        withdrawal = host_request_within(self.repl, 5)
-        self.assertEqual(
-            withdrawal and withdrawal["data"],
-            {"type": "bash.consumed", "pid": notice["pid"], "command": command},
-        )
-        self.assertEqual(one(self.repl.execute("no-cell-seen", "seen"), "result")["text"], "'no-cell'")
+        deadline = time.monotonic() + 5
+        while not os.path.exists(read) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        probe = self.repl.execute("no-cell-seen", "seen")
+        self.assertIsNone(one(probe, "host_request"))
+        self.assertEqual(one(probe, "result")["text"], "'no-cell'")
 
     def test_unread_failed_command_still_notifies(self):
         notice, _ = self.accepted_notice(
