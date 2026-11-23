@@ -822,11 +822,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 loop {
                     let fresh = owned_bots(&this, &identity).await;
                     for bot in &mut bots {
-                        if let Some(row) = fresh
+                        match fresh
                             .iter()
                             .find(|row| row.get("botId") == bot.get("botId"))
                         {
-                            bot.clone_from(row);
+                            Some(row) => bot.clone_from(row),
+                            // A bot deleted meanwhile settles from its tombstone.
+                            None => bot["status"] = json!("deleted"),
                         }
                     }
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -839,7 +841,21 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // Live entries first, the deleted generations' envelopes after,
             // the bots' snapshots last.
             results.extend(deleted_results);
-            results.extend(bots.iter().map(bot_result));
+            let deleted_children = this
+                .deleted_children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            results.extend(bots.iter().map(|bot| {
+                let bot_id = bot.get("botId").and_then(Value::as_str).unwrap_or_default();
+                match deleted_children
+                    .values()
+                    .find(|deleted| deleted.matches(bot_id))
+                {
+                    Some(deleted) => SupervisorChildSessions::deleted_collect_result(deleted),
+                    None => bot_result(bot),
+                }
+            }));
+            drop(deleted_children);
             Ok(results)
         })
     }

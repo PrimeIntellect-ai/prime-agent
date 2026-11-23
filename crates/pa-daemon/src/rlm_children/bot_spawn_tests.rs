@@ -176,7 +176,18 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         .expect_err("the bot holds the name");
     assert!(refused.to_string().contains("scout"), "{refused}");
 
-    let deleted = sessions.delete_subagent("scout".to_string()).await.unwrap();
+    // A collect that waits on a running bot settles from the tombstone
+    // when the bot is deleted meanwhile.
+    *running_reads.lock().unwrap() = None;
+    let (collected, deleted) = tokio::join!(
+        sessions.collect(
+            vec![bot_row()["botId"].as_str().unwrap().to_string()],
+            60_000
+        ),
+        sessions.delete_subagent("scout".to_string()),
+    );
+    assert!(collected.unwrap()[0].settled);
+    let deleted = deleted.unwrap();
     assert_eq!(deleted.outcome, Some("deleted"));
     assert!(commands.lock().unwrap().iter().any(
         |command| command["type"] == "delete_bot" && command["ownerSessionId"] == "parent-file"
