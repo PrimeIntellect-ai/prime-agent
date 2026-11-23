@@ -354,14 +354,14 @@ pub async fn mcp_refresh_token(
     } = credentials
     else {
         bail!(
-            "Stored credentials for {} are not OAuth; re-run /mcp login {}",
+            "Stored credentials for {} are not OAuth; re-run /mcp and select {}",
             config.label,
             config.server
         );
     };
     if endpoint.as_deref() != Some(config.url.as_str()) {
         bail!(
-            "Stored OAuth credentials are not bound to {}; re-run /mcp login {}",
+            "Stored OAuth credentials are not bound to {}; re-run /mcp and select {}",
             config.url,
             config.server
         );
@@ -385,7 +385,7 @@ pub async fn mcp_refresh_token(
         if stored_audience != allowed_audience {
             bail!(
                 "Stored OAuth credentials are not bound to {allowed_audience}; re-run /mcp \
-                 login {}",
+                 and select {}",
                 config.server
             );
         }
@@ -394,7 +394,7 @@ pub async fn mcp_refresh_token(
         (true, true) | (false, false) => {}
         _ => bail!(
             "Stored OAuth credentials for {} have incomplete resource binding; re-run /mcp \
-             login {}",
+             and select {}",
             config.label,
             config.server
         ),
@@ -408,7 +408,7 @@ pub async fn mcp_refresh_token(
     {
         bail!(
             "Stored OAuth credentials for {} have an unknown audience mode; re-run /mcp \
-             login {}",
+             and select {}",
             config.label,
             config.server
         );
@@ -422,7 +422,7 @@ pub async fn mcp_refresh_token(
     }
     let Some(refresh_token) = refresh.as_deref().filter(|token| !token.is_empty()) else {
         bail!(
-            "No refresh token stored for {}; re-run /mcp login {}",
+            "No refresh token stored for {}; re-run /mcp and select {}",
             config.label,
             config.server
         );
@@ -431,7 +431,7 @@ pub async fn mcp_refresh_token(
     let discovery = discover(http, &config.url).await?;
     if resource.is_some() != discovery.resource.is_some() {
         bail!(
-            "OAuth discovery mode changed for {}; re-run /mcp login {}",
+            "OAuth discovery mode changed for {}; re-run /mcp and select {}",
             config.url,
             config.server
         );
@@ -452,7 +452,7 @@ pub async fn mcp_refresh_token(
         if legacy_audience && current_mode != Some(AudienceMode::Exact) {
             bail!(
                 "Stored OAuth credentials for {} predate origin-level resource audiences and \
-                 may not be refreshed against them; re-run /mcp login {}",
+                 may not be refreshed against them; re-run /mcp and select {}",
                 config.label,
                 config.server
             );
@@ -460,7 +460,7 @@ pub async fn mcp_refresh_token(
         if !legacy_audience && current_mode.map(AudienceMode::as_str) != audience_mode.as_deref() {
             bail!(
                 "Stored OAuth credentials do not match current resource audience for {}; \
-                 re-run /mcp login {}",
+                 re-run /mcp and select {}",
                 config.url,
                 config.server
             );
@@ -485,7 +485,7 @@ pub async fn mcp_refresh_token(
         .unwrap_or_default();
     if token_endpoint.is_empty() {
         bail!(
-            "No token endpoint stored for {}; re-run /mcp login {}",
+            "No token endpoint stored for {}; re-run /mcp and select {}",
             config.label,
             config.server
         );
@@ -786,7 +786,7 @@ mod tests {
                 r#"{"access_token":"browser-access"}"#,
             ),
         ]);
-        let client = reqwest::Client::new();
+        let client = pa_ai::utils::tls::http_client_builder().build().unwrap();
         for input in [
             None,
             Some("http://localhost/callback?code=paste&state=wrong".to_string()),

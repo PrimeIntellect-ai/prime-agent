@@ -153,7 +153,7 @@ async fn poll_prime_challenge_result(
     http: &dyn PrimeHttp,
     base_url: &str,
     challenge: &PrimeChallenge,
-    private_key: &rsa::RsaPrivateKey,
+    private_key: &rsa::PrivateKey,
     timeout_ms: u64,
     poll_interval_ms: u64,
 ) -> Result<String, String> {
@@ -193,13 +193,13 @@ async fn poll_prime_challenge_result(
 }
 
 fn decrypt_prime_challenge_result(
-    private_key: &rsa::RsaPrivateKey,
+    private_key: &rsa::PrivateKey,
     encrypted_result: &str,
 ) -> Result<String, String> {
     let ciphertext = base64::engine::general_purpose::STANDARD
         .decode(encrypted_result.as_bytes())
         .map_err(|_| "Prime login challenge result could not be decoded".to_string())?;
-    let padding = rsa::Oaep::new::<sha2::Sha256>();
+    let padding = rsa::Oaep::<sha2::Sha256>::new();
     let decrypted = private_key
         .decrypt(padding, &ciphertext)
         .map_err(|_| "Prime login challenge result could not be decrypted".to_string())?;
@@ -230,8 +230,8 @@ pub(super) async fn run_prime_browser_login(
     timeout_ms: u64,
     poll_interval_ms: u64,
 ) -> Result<String, String> {
-    let mut rng = rsa::rand_core::OsRng;
-    let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).map_err(|error| error.to_string())?;
+    let private_key =
+        rsa::PrivateKey::new(&mut getrandom::SysRng, 2048).map_err(|error| error.to_string())?;
     let public_key = private_key
         .to_public_key()
         .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
@@ -435,15 +435,10 @@ mod tests {
                         .and_then(Value::as_str)
                         .expect("public key")
                         .to_string();
-                    let mut rng = rsa::rand_core::OsRng;
                     let public_key =
-                        rsa::RsaPublicKey::from_public_key_pem(&public_pem).expect("public pem");
+                        rsa::PublicKey::from_public_key_pem(&public_pem).expect("public pem");
                     let cipher = public_key
-                        .encrypt(
-                            &mut rng,
-                            rsa::Oaep::new::<sha2::Sha256>(),
-                            b"fixture-browser-key",
-                        )
+                        .oaep_encrypt::<sha2::Sha256>(b"fixture-browser-key")
                         .expect("encrypt");
                     let encoded = base64::engine::general_purpose::STANDARD.encode(cipher);
                     *self.dynamic_status.lock().unwrap() = Some(encoded);

@@ -274,6 +274,7 @@ fn at_prefix_lists_nested_fuzzy_matches() {
     std::fs::write(base.join(".hidden/partial"), "x").expect("write");
     std::fs::write(base.join(".git/partial"), "x").expect("write");
     std::fs::write(base.join("other.md"), "x").expect("write");
+    std::fs::write(base.join("shot\u{202F}AM.png"), "x").expect("write");
     let provider = provider(base.to_str().unwrap());
     let values = |text: &str| -> Vec<String> {
         at_suggestions(&provider, text)
@@ -291,6 +292,8 @@ fn at_prefix_lists_nested_fuzzy_matches() {
     );
     assert_eq!(values("@src/par"), ["@src/deep/partial_match.rs"]);
     assert_eq!(values("cfg=@src/par"), ["@src/deep/partial_match.rs"]);
+    // Any whitespace in a name quotes it (macOS screenshots carry U+202F).
+    assert_eq!(values("@shot"), ["@\"shot\u{202F}AM.png\""]);
     let item = CompletionItem {
         value: "@src/deep/partial_match.rs".to_string(),
         label: "partial_match.rs".to_string(),

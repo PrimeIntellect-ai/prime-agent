@@ -76,7 +76,7 @@ pub(in crate::kernel::bootstrap) fn hash_runtime_source(
         hasher.update(&std::fs::read(file)?);
         hasher.update([0]);
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 pub(super) fn collect_python_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {

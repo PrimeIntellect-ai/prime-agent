@@ -1515,3 +1515,26 @@ async fn unwritable_stale_venv_names_the_venv_and_both_env_overrides() {
         "no raw lock-candidate path: {message}"
     );
 }
+
+/// The persisted sha256 witnesses keep their lowercase-hex format. The expected digests were
+/// computed independently with Python's hashlib.
+#[test]
+fn sha256_witnesses_are_lowercase_hex() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("pyproject.toml");
+    std::fs::write(&file, "[project]\nname = 'prime-agent-runtime'\n").unwrap();
+    std::fs::create_dir_all(temp.path().join("src").join("rlm")).unwrap();
+    assert_eq!(
+        hash_runtime_source(temp.path()).unwrap(),
+        "sha256:eceff75b2c14143a336e6e86e5bf5b0a3a2ae360055a28312533eedf44cad128"
+    );
+    std::fs::write(&file, "abc").unwrap();
+    assert_eq!(
+        file_content_hash(&file),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        runtime_probe_key("py", "rt", "3.11.9", "inst"),
+        "py\u{0}rt\u{0}inst\u{0}sha256:8f5d262b3bf12072437206a54a16f89e7ffac61876b9b22b78c71d2966887916"
+    );
+}

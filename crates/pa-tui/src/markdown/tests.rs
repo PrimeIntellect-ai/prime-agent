@@ -810,6 +810,63 @@ fn python_fence_multiline_string_carries_across_rows() {
 }
 
 #[test]
+fn shell_fences_render_the_token_colors() {
+    use crate::theme::ThemeColor as C;
+    let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+    let style = MarkdownStyle::from_theme(&theme);
+    let color = |c| theme.fg_style(c);
+    for fence in ["bash", "sh", "shell", "ZSH"] {
+        let lines = render_markdown(
+            &format!("```{fence}\nif true; then echo 'hi' # greet\nfi\n```"),
+            60,
+            &style,
+        );
+        let styled: Vec<(&str, Style)> = lines[0]
+            .iter()
+            .map(|span| (span.content.as_str(), span.style))
+            .collect();
+        for (text, expected) in [
+            ("if", C::SyntaxKeyword),
+            ("echo", C::SyntaxType),
+            ("'hi'", C::SyntaxString),
+            ("# greet", C::SyntaxComment),
+        ] {
+            assert!(
+                styled.contains(&(text, color(expected))),
+                "{fence}: {styled:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_fence_string_carries_across_rows() {
+    let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+    let style = MarkdownStyle::from_theme(&theme);
+    let string = theme.fg_style(crate::theme::ThemeColor::SyntaxString);
+    let lines = render_markdown("```bash\necho 'a\nb'\n```", 40, &style);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1][1].content, "b'");
+    assert_eq!(lines[1][1].style, string);
+}
+
+#[test]
+fn unknown_or_quiet_shell_fences_stay_uniform() {
+    let quiet = MarkdownStyle {
+        syntax: None,
+        ..MarkdownStyle::default()
+    };
+    for (doc, style) in [
+        ("```console\necho 'hi'\n```", MarkdownStyle::default()),
+        ("```bash\necho 'hi'\n```", quiet),
+    ] {
+        let lines = render_markdown(doc, 40, &style);
+        assert_eq!(lines[0][1].content, "echo 'hi'", "{doc}");
+        assert_eq!(lines[0][1].style, style.code_block, "{doc}");
+    }
+}
+
+#[test]
 fn long_code_rows_wrap_at_the_width() {
     // TS renderBlock wraps every code row (wrapTextWithAnsi): the indent
     // leads the first row only and no code text is lost.

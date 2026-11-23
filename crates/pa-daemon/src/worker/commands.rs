@@ -597,9 +597,19 @@ impl Worker {
         // The dropped agent-message rows bounce to their senders: a queued
         // row's sender otherwise never learns its message will not deliver.
         let mut dropped_agent_rows = Vec::new();
+        // The inbox arrival row stays: it covers mail that is still
+        // waiting unannounced, and nothing else would wake the agent for
+        // it.
+        let is_arrival_row = |item: &QueuedItem| {
+            item.queue_key.as_deref() == Some(crate::worker::INBOX_ARRIVAL_QUEUE_KEY)
+        };
         let drain_lane =
             |lane: &mut VecDeque<QueuedItem>, dropped_agent_rows: &mut Vec<Value>| -> Vec<String> {
-                lane.drain(..)
+                let (kept, cleared): (VecDeque<_>, VecDeque<_>) =
+                    lane.drain(..).partition(is_arrival_row);
+                *lane = kept;
+                cleared
+                    .into_iter()
                     .map(|item| {
                         if let Some(id) = item.admission_id.as_deref() {
                             self.prompt_admissions.clear(id);

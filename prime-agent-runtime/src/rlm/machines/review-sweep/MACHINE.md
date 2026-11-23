@@ -9,27 +9,17 @@ author: Prime Agent
 
 ## What this machine does
 
-Sweeps the current branch for review findings. One source child lists the
-changed files, a reviewer child reviews each file in parallel (up to eight
-at a time), and one aggregator child merges the per-file verdicts into a
-single issue list.
+Sweeps the current branch for review findings. One source child lists the changed files, a reviewer child reviews each file in parallel (up to eight at a time), and one aggregator child merges the per-file verdicts into a single issue list.
 
-The review state is a `foreach`: the `files` input (a JSON list) expands to
-one reviewer instance per changed file (the `foreach.max` cap of 256 only
-bounds pathological diffs; `run.max_parallel: 8` is what bounds how many
-reviewers run at once), and every reviewer's one-line verdict joins into
-the `found` text port the aggregator reads.
+The review state is a `foreach`: the `files` input (a JSON list) expands to one reviewer instance per changed file (the `foreach.max` cap of 256 only bounds pathological diffs; `run.max_parallel: 8` is what bounds how many reviewers run at once), and every reviewer's one-line verdict joins into the `found` text port the aggregator reads.
 
 ## How to run it
 
-Store a copy of this machine as a runtime instance and run it, or run the
-template directly from the library:
+Store a copy of this machine as a runtime instance and run it, or run the template directly from the library:
 
     result = await rlm.factory.run("review-sweep")
 
-Then watch progress with `await rlm.factory.status(result["run_id"])`. The
-run finishes at quiescence; the aggregator's `issues` JSON is the latest
-settle answer of the `report` state.
+Then watch progress with `await rlm.factory.status(result["run_id"])`. The run finishes at quiescence; the aggregator's `issues` JSON is the latest settle answer of the `report` state.
 
 ```machine-spec
 {

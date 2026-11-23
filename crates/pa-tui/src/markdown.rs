@@ -11,6 +11,7 @@ mod tests;
 
 pub use inline::render_inline;
 
+use crate::tool_card::highlight::{highlight_bash, highlight_python, SyntaxPalette};
 use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
@@ -39,7 +40,7 @@ pub struct MarkdownStyle {
     /// The `syntax*` palette for fenced-code token colors (TS `highlightCode`, cli-highlight
     /// over the highlight.js grammar). `None` renders every code line uniform in `code_block`
     /// — the TS no-valid-language fallback, and the quiet thinking theme.
-    pub(crate) syntax: Option<crate::tool_card::highlight::SyntaxPalette>,
+    pub(crate) syntax: Option<SyntaxPalette>,
     pub(crate) link_base_url: Option<url::Url>,
 }
 
@@ -75,9 +76,7 @@ impl MarkdownStyle {
             italic: Modifier::ITALIC,
             strikethrough: Modifier::CROSSED_OUT,
             code_block_indent: "  ".to_string(),
-            syntax: Some(crate::tool_card::highlight::SyntaxPalette::from_theme(
-                theme,
-            )),
+            syntax: Some(SyntaxPalette::from_theme(theme)),
             link_base_url: None,
         }
     }
@@ -631,15 +630,17 @@ fn parse_list_level(
     }
 }
 
-/// The fence languages the port highlights. TS `highlightCode` validates through highlight.js
+/// The fence language's highlighter. TS `highlightCode` validates through highlight.js
 /// `getLanguage(name)`, which lowercases and matches the grammar's registered names and aliases
-/// (python registers `python` with `py`, `gyp`, `ipython`). `lang` here is marked's whole trimmed
-/// info string, so ```` ```python foo=1 ```` stays uniform; only these exact spellings highlight.
-fn is_highlighted_lang(lang: &str) -> bool {
-    matches!(
-        lang.to_ascii_lowercase().as_str(),
-        "python" | "py" | "gyp" | "ipython"
-    )
+/// (python registers `python` with `py`, `gyp`, `ipython`; bash registers `bash` with `sh`,
+/// `zsh`; `shell` maps to bash here too). `lang` here is marked's whole trimmed info string, so
+/// ```` ```python foo=1 ```` stays uniform; only these exact spellings highlight.
+fn highlighter(lang: &str) -> Option<fn(&str, &SyntaxPalette) -> Vec<Line>> {
+    match lang.to_ascii_lowercase().as_str() {
+        "python" | "py" | "gyp" | "ipython" => Some(highlight_python),
+        "bash" | "sh" | "shell" | "zsh" => Some(highlight_bash),
+        _ => None,
+    }
 }
 
 /// The block's highlighted lines (TS `theme.highlightCode(text, lang)`: one highlight.js
@@ -652,17 +653,12 @@ fn highlighted_code_lines(
     style: &MarkdownStyle,
 ) -> Option<Vec<Line>> {
     let palette = style.syntax.as_ref()?;
-    if !lang.is_some_and(is_highlighted_lang) {
-        return None;
-    }
+    let highlight = lang.and_then(highlighter)?;
     if block.lines.is_empty() {
         // An empty block renders through the uniform empty-row path.
         return None;
     }
-    Some(crate::tool_card::highlight::highlight_python(
-        &block.lines.join("\n"),
-        palette,
-    ))
+    Some(highlight(&block.lines.join("\n"), palette))
 }
 
 /// The block's unwrapped rows (TS `renderCodeBlock`): the indent outside

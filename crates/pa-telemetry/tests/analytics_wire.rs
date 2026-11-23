@@ -54,7 +54,10 @@ async fn batch_posts_the_exact_ts_request() {
         Some(&json!("0.9.9-beta.3"))
     );
     let (base, rx) = spawn_stub(vec![(202, json!({ "accepted": 2 }))]);
-    let sink = AnalyticsSink::new(format!("{base}/api/v1/agent-analytics/events"));
+    let sink = AnalyticsSink::new(
+        format!("{base}/api/v1/agent-analytics/events"),
+        http_builder(),
+    );
     let events = vec![event("agent started"), event("agent run completed")];
     let outcome = sink.send_batch(INSTALL_ID, events.clone()).await;
     assert_eq!(outcome, SinkOutcome::Sent);
@@ -87,7 +90,8 @@ async fn the_client_batches_through_the_sink() {
     let (base, rx) = spawn_stub(vec![(202, json!({ "accepted": 2 }))]);
     let mut config = TelemetryClientConfig::new(INSTALL_ID);
     config.flush_interval = Duration::from_mins(1);
-    config.sinks = vec![Arc::new(AnalyticsSink::new(base)) as Arc<dyn TelemetrySink>];
+    config.sinks =
+        vec![Arc::new(AnalyticsSink::new(base, http_builder())) as Arc<dyn TelemetrySink>];
     let client = TelemetryClient::spawn(config).unwrap();
     client.track("agent command used", properties("command_name", "model"));
     client.track("agent command used", properties("command_name", "resume"));
@@ -111,7 +115,7 @@ async fn failures_drop_the_batch() {
         // The backend's answer when its PostHog delivery failed.
         (202, json!({ "accepted": 0 })),
     ]);
-    let sink = AnalyticsSink::new(base);
+    let sink = AnalyticsSink::new(base, http_builder());
     assert_eq!(
         sink.send_batch(INSTALL_ID, vec![event("agent started")])
             .await,
@@ -129,9 +133,9 @@ async fn failures_drop_the_batch() {
 async fn an_unreachable_endpoint_times_out_as_a_drop() {
     // A listener that never answers: the request timeout bounds the send.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let sink = AnalyticsSink::with_timeout(
+    let sink = AnalyticsSink::new(
         format!("http://{}", listener.local_addr().unwrap()),
-        Duration::from_millis(200),
+        http_builder(),
     );
     let started = std::time::Instant::now();
     let outcome = sink
@@ -139,6 +143,19 @@ async fn an_unreachable_endpoint_times_out_as_a_drop() {
         .await;
     assert_eq!(outcome, SinkOutcome::Dropped);
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// The stubs speak plain HTTP, but reqwest builds no client without a TLS
+/// configuration.
+fn http_builder() -> reqwest::ClientBuilder {
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(rustls::RootCertStore::empty())
+    .with_no_client_auth();
+    reqwest::Client::builder().tls_backend_preconfigured(tls)
 }
 
 fn properties(key: &str, value: &str) -> Properties {

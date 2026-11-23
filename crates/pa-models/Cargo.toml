@@ -13,12 +13,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { version = "0.1", features = ["attributes"] }
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls-native-roots",
-    "rustls-tls-webpki-roots",
-] }
-hmac = "0.12"
-sha2 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 
 [dev-dependencies]

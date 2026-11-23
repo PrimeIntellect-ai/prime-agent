@@ -153,7 +153,8 @@ async fn tool_result_texts(engine: &pa_core::session_engine::engine::SessionEngi
                     .iter()
                     .filter_map(|block| match block {
                         pa_agent::types::ToolResultContent::Text(text) => Some(text.text.clone()),
-                        pa_agent::types::ToolResultContent::Image(_) => None,
+                        pa_agent::types::ToolResultContent::Image(_)
+                        | pa_agent::types::ToolResultContent::Video(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

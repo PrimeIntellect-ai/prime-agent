@@ -14,14 +14,6 @@ unsound = "all"
 # Triaged exceptions — every entry must carry a reason and a review date;
 # a landed fix upstream means the entry is removed instead of silenced.
 ignore = [
-  # Marvin Attack timing sidechannel in rsa; no patch exists upstream
-  # (RustCrypto/RSA#626 tracks it). The Prime browser login
-  # (pa-core/src/auth/prime_traces.rs, run_prime_browser_login) generates a
-  # fresh 2048-bit key per login and OAEP-decrypts exactly one challenge
-  # result with it, locally. The attack needs many timed decryptions under one
-  # key, so no oracle exists. pa-ai declares rsa without using it; pa-cli uses
-  # it only in tests. Reviewed 2026-11-11; re-triage when rsa publishes a fix.
-  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; pa-core decrypts one local OAEP login result per fresh key, no repeated-decryption oracle (reviewed 2026-11-11)" },
   # `paste` proc-macro is unmaintained; pulled by ratatui (build-time only,
   # no vulnerable code path). Reviewed 2026-09-17; revisit when ratatui
   # drops the dep.
@@ -47,7 +39,6 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "MIT",
   "ISC",
-  "BSD-2-Clause",
   "BSD-3-Clause",
   "0BSD",
   "Zlib",

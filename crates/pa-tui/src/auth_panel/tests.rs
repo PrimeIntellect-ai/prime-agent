@@ -819,7 +819,7 @@ fn wrapped_session_auth_url_keeps_the_link_and_controls_visible() {
         oneshot::channel().0,
     );
     let mut view = crate::view::AgentView::new(theme());
-    view.auth_panel = Some(panel);
+    view.overlay = Some(crate::view::Overlay::AuthPanel(panel));
     let rows = view.render_frame(40, 24);
     let text = rows.iter().map(visible_auth_row).collect::<Vec<_>>();
     let joined = text.iter().map(|row| row.trim()).collect::<String>();

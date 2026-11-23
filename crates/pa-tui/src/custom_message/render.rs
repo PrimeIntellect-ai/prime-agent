@@ -10,6 +10,7 @@ use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{pad_line, str_width, truncate_line, wrap_line, wrap_text};
 use crate::{Line, Span};
+use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_REMINDER, INBOX_NOTICE_SENDER};
 use ratatui::style::Style;
 
 pub(crate) fn spacer() -> Line {
@@ -95,16 +96,29 @@ pub(crate) fn render_agent_message(
 }
 
 /// The inbox-notice summary line: the agent-message envelope geometry
-/// (envelope + sender label + dim class word) — the sender rides where
-/// the counterpart rides, the notice class where the direction word
-/// rides.
-pub(crate) fn inbox_notice_summary_line(sender: &str, class: &str, theme: &Theme) -> Line {
+/// (envelope + `Agent inbox` label + dim message count) — `3 new
+/// messages` for an arrival, `3 unread messages` for a reminder, the bare
+/// noun when the row carries no count.
+pub(crate) fn inbox_notice_summary_line(row: &InboxNoticeRow, theme: &Theme) -> Line {
+    let state = if row.class == INBOX_NOTICE_CLASS_REMINDER {
+        "unread"
+    } else {
+        "new"
+    };
+    let messages = match row.count {
+        Some(1) => format!("1 {state} message"),
+        Some(count) => format!("{count} {state} messages"),
+        None => format!("{state} messages"),
+    };
     vec![
         Span::styled("\u{2709}".to_string(), theme.fg_style(ThemeColor::Success)),
         Span::raw(" "),
-        Span::styled(sender.to_string(), theme.fg_style(ThemeColor::Muted)),
+        Span::styled(
+            INBOX_NOTICE_SENDER.to_string(),
+            theme.fg_style(ThemeColor::Muted),
+        ),
         Span::styled(" \u{b7} ".to_string(), theme.fg_style(ThemeColor::Dim)),
-        Span::styled(class.to_string(), theme.fg_style(ThemeColor::Dim)),
+        Span::styled(messages, theme.fg_style(ThemeColor::Dim)),
     ]
 }
 
@@ -122,7 +136,7 @@ pub(crate) fn render_inbox_notice(
     if leading {
         out.push(spacer());
     }
-    let header = inbox_notice_summary_line(&row.sender, &row.class, theme);
+    let header = inbox_notice_summary_line(row, theme);
     out.extend(text_rows(&header, width));
     out.extend(agent_message_body(&row.text, theme, width));
     out
@@ -417,22 +431,25 @@ mod tests {
         );
     }
 
-    /// The inbox-notice header: the envelope geometry with the sender as
-    /// the label and the class word in the counterpart position.
+    /// The inbox-notice header: the envelope geometry with the inbox as
+    /// the label and the announced message count beside it.
     #[test]
     fn inbox_notice_header_shape() {
-        let row = InboxNoticeRow {
-            sender: "Agent inbox".to_string(),
-            class: "arrival".to_string(),
-            text: "[inbox 19:14 UTC] 1 new message".to_string(),
+        let row = |class: &str, count: Option<u64>| InboxNoticeRow {
+            class: class.to_string(),
+            count,
+            text: "[inbox 19:14 UTC] 3 new messages".to_string(),
         };
-        let rows = render_inbox_notice(&row, &theme(), 60, true);
+        let rows = render_inbox_notice(&row("arrival", Some(3)), &theme(), 60, true);
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert!(rows[0].is_empty());
         let header = flat(&rows[1]);
-        assert_eq!(header.trim_end(), " \u{2709} Agent inbox \u{b7} arrival");
-        // Colors: green envelope, muted sender label, dim separator and
-        // class word (the agent-message envelope styling).
+        assert_eq!(
+            header.trim_end(),
+            " \u{2709} Agent inbox \u{b7} 3 new messages"
+        );
+        // Colors: green envelope, muted inbox label, dim separator and
+        // count (the agent-message envelope styling).
         assert_eq!(
             rows[1][1],
             Span::styled(
@@ -453,8 +470,22 @@ mod tests {
         );
         assert_eq!(
             rows[1][5],
-            Span::styled("arrival".to_string(), theme().fg_style(ThemeColor::Dim))
+            Span::styled(
+                "3 new messages".to_string(),
+                theme().fg_style(ThemeColor::Dim)
+            )
         );
+        for (row, expected) in [
+            (row("reminder", Some(2)), "2 unread messages"),
+            (row("arrival", Some(1)), "1 new message"),
+            (row("reminder", None), "unread messages"),
+        ] {
+            let header = flat(&render_inbox_notice(&row, &theme(), 60, false)[0]);
+            assert_eq!(
+                header.trim_end(),
+                format!(" \u{2709} Agent inbox \u{b7} {expected}")
+            );
+        }
         // The body's always-visible shape is pinned by the mod.rs gutter
         // table and the headless frame test (render_inbox_notice takes no
         // detail gate).

@@ -21,7 +21,7 @@ use crate::utils_inner::diagnostics::now_ms;
 use crate::utils_inner::stream_failure::{
     record_stream_failure, ProviderError, StreamFailureError, StreamFailureInfo, StreamFailureKind,
 };
-use rand::Rng;
+use rand::RngExt;
 
 const DEFAULT_API: &str = "faux";
 const DEFAULT_PROVIDER: &str = "faux";
@@ -285,8 +285,8 @@ fn estimate_tokens(text: &str) -> u64 {
 
 #[must_use]
 pub fn random_id(prefix: &str) -> String {
-    let mut rng = rand::thread_rng();
-    let random: u32 = rng.gen();
+    let mut rng = rand::rng();
+    let random: u32 = rng.random();
     format!("{prefix}:{}:{random:x}", now_ms())
 }
 
@@ -299,6 +299,9 @@ fn content_to_text(content: &UserMessageContent) -> String {
                 crate::types::UserBlockPayload::Text(text) => text.to_string(),
                 crate::types::UserBlockPayload::Image { data, mime_type } => {
                     format!("[image:{}:{}]", mime_type, data.len())
+                }
+                crate::types::UserBlockPayload::Video { data, mime_type } => {
+                    format!("[video:{mime_type}:{}]", data.len())
                 }
                 crate::types::UserBlockPayload::Opaque(json) => json,
             })
@@ -332,6 +335,9 @@ fn tool_result_to_text(message: &ToolResultMessage) -> String {
             crate::types::UserBlockPayload::Text(text) => text.to_string(),
             crate::types::UserBlockPayload::Image { data, mime_type } => {
                 format!("[image:{}:{}]", mime_type, data.len())
+            }
+            crate::types::UserBlockPayload::Video { data, mime_type } => {
+                format!("[video:{mime_type}:{}]", data.len())
             }
             crate::types::UserBlockPayload::Opaque(json) => json,
         }
@@ -430,12 +436,12 @@ fn split_string_by_token_size(
     min_token_size: usize,
     max_token_size: usize,
 ) -> Vec<String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let chars: Vec<char> = text.chars().collect();
     let mut chunks: Vec<String> = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
-        let token_size = rng.gen_range(min_token_size..=max_token_size);
+        let token_size = rng.random_range(min_token_size..=max_token_size);
         let char_size = (token_size * 4).max(1);
         let end = (index + char_size).min(chars.len());
         chunks.push(chars[index..end].iter().collect());
