@@ -360,11 +360,11 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ("app.session.resume", def!(&[], "Resume a session")),
     (
         "app.agents.back",
-        def!(&["left"], "Return to parent agent scope"),
+        def!(&["left"], "Return to parent agent scope", scope "agents"),
     ),
     (
         "app.agents.open",
-        def!(&["right"], "Drill into selected agent"),
+        def!(&["right"], "Drill into selected agent", scope "agents"),
     ),
     (
         "app.modal.back",
@@ -373,40 +373,42 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ("app.modal.open", def!(&["right"], "Open the selected row")),
     (
         "app.agents.reply",
-        def!(&["space"], "Reply to selected agent"),
+        def!(&["space"], "Reply to selected agent", scope "agents"),
     ),
     (
         "app.agents.new",
-        def!(&["ctrl+n"], "Start a new session from the agents view"),
+        def!(&["ctrl+n"], "Start a new session from the agents view", scope "agents"),
     ),
     (
         "app.agents.delete",
-        def!(&["ctrl+x"], "Stop or delete selected agent"),
+        def!(&["ctrl+x"], "Stop or delete selected agent", scope "agents"),
     ),
     (
         "app.agents.program",
-        def!(&["ctrl+o"], "Show the program that spawned subagents"),
+        def!(&["ctrl+o"], "Show the program that spawned subagents", scope "agents"),
     ),
     (
         "app.agents.factory",
         def!(
             &["ctrl+f"],
-            "Open the machines page through the selected session"
+            "Open the machines page through the selected session",
+            scope "agents"
         ),
     ),
     (
         "app.agents.rename",
-        def!(&["ctrl+r"], "Rename selected agent session"),
+        def!(&["ctrl+r"], "Rename selected agent session", scope "agents"),
     ),
     (
         "app.agents.searchContent",
-        def!(&["ctrl+g"], "Toggle searching session message text"),
+        def!(&["ctrl+g"], "Toggle searching session message text", scope "agents"),
     ),
     (
         "app.agents.expand",
         def!(
             &["alt+right"],
-            "Expand or collapse selected agent subagents"
+            "Expand or collapse selected agent subagents",
+            scope "agents"
         ),
     ),
     (

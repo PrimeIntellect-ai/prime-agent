@@ -25,12 +25,14 @@ fn every_default_agents_key_reaches_one_command() {
     assert_eq!(shared, Vec::new());
 }
 
+/// The override takes ctrl+g from the message search default: a user binding claims its key from
+/// every other agents-view default.
 #[test]
 fn open_key_override_fires_and_the_default_is_inert() {
-    let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+t")]);
+    let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+g")]);
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
-    mode.handle_key("ctrl+t");
+    mode.handle_key("ctrl+g");
     assert_eq!(mode.rows.len(), 3);
     assert!(mode.rows[1].expanded);
     mode.handle_key("right");
