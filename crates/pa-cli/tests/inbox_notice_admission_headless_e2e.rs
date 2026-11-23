@@ -185,7 +185,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                         "id": "call-inbox-admission-1",
                         "type": "function",
                         "function": python_cell(
-                            "from rlm import bash\nh = bash('sleep 1; echo INBOX_ADMISSION_E2E')\nprint('handle started')"
+                            "from rlm import bash\nhs = [bash(f'sleep 1; echo INBOX_ADMISSION_E2E_{n}; exit 1') for n in range(3)]\nprint('handles started')"
                         )
                     }]
                 }),
@@ -494,10 +494,11 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
         .expect("active session id")
         .to_string();
 
-    // THE REAL ADMISSION: the turn starts a detached handle and ends;
-    // the handle completes while the session idles, so the arrival
-    // notice admits and wakes a turn, and the reminder cycle admits its
-    // notice and wakes the turn that reads and drains the store.
+    // THE REAL ADMISSION: the turn starts three detached handles that fail
+    // and ends; they complete while the session idles, so the arrival
+    // notice admits and wakes a turn. The row only counts three failures,
+    // so they stay unread, the reminder cycle admits its notice and wakes
+    // the turn that reads and drains the store.
     let turn = client.request(
         "p1",
         &json!({
@@ -569,11 +570,11 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
     // The envelope summary lines: the inbox system's own row class, both
     // notice classes delivered by the real admission, each with its count.
     assert!(
-        last.contains("\u{2709} Agent inbox \u{b7} 1 new message"),
+        last.contains("\u{2709} Agent inbox \u{b7} 3 new messages"),
         "the arrival summary line renders: {last}"
     );
     assert!(
-        last.contains("\u{2709} Agent inbox \u{b7} 1 unread message"),
+        last.contains("\u{2709} Agent inbox \u{b7} 3 unread messages"),
         "the reminder summary line renders: {last}"
     );
     // The bodies stay visible under the gutter: the counts and the read
