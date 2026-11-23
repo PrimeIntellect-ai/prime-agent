@@ -54,7 +54,14 @@ async fn fake_supervisor(commands: Arc<std::sync::Mutex<Vec<Value>>>) -> std::pa
                             response_success(Some(&id), &kind, Some(bot_row()))
                         }
                         "list_bots" => {
-                            response_success(Some(&id), &kind, Some(json!({ "bots": [bot_row()] })))
+                            // A deleted bot leaves the supervisor's list.
+                            let deleted = commands
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .any(|command| command["type"] == "delete_bot");
+                            let bots = if deleted { vec![] } else { vec![bot_row()] };
+                            response_success(Some(&id), &kind, Some(json!({ "bots": bots })))
                         }
                         other => response_failure(Some(&id), other, "unexpected command", None),
                     };
@@ -115,6 +122,7 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     assert_eq!(spawn["type"], "spawn_bot");
     assert_eq!(spawn["ownerSessionId"], "parent-file");
     assert_eq!(spawn["prompt"], "scout the repo");
+    assert_eq!(spawn["rlmMaxDepth"], DEFAULT_RLM_MAX_DEPTH - 1);
     assert!(!sessions.spawn_name_reserved("scout"));
 
     // The bot shows on the roster and in collect, and deletes through
@@ -129,16 +137,25 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         .unwrap();
     assert_eq!(collected.len(), 1);
     assert!(!collected[0].settled);
-    let deleted = sessions.delete_subagent("scout".to_string()).await.unwrap();
-    assert_eq!(deleted.outcome, Some("deleted"));
-    assert!(commands.lock().unwrap().iter().any(
-        |command| command["type"] == "delete_bot" && command["ownerSessionId"] == "parent-file"
-    ));
-
     // A local child cannot take the bot's name.
     let refused = sessions
         .spawn(request("scout", RlmSpawnTarget::Local))
         .await
         .expect_err("the bot holds the name");
     assert!(refused.to_string().contains("scout"), "{refused}");
+
+    let deleted = sessions.delete_subagent("scout".to_string()).await.unwrap();
+    assert_eq!(deleted.outcome, Some("deleted"));
+    assert!(commands.lock().unwrap().iter().any(
+        |command| command["type"] == "delete_bot" && command["ownerSessionId"] == "parent-file"
+    ));
+    // The supervisor forgot the bot; a repeated delete and a collect
+    // still answer from the tombstone.
+    let again = sessions.delete_subagent("scout".to_string()).await.unwrap();
+    assert_eq!(again.subagent.status, "cancelled");
+    let collected = sessions
+        .collect(vec!["scout".to_string()], 0)
+        .await
+        .unwrap();
+    assert!(collected[0].settled);
 }

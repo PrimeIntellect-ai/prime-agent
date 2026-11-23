@@ -1028,6 +1028,9 @@ async fn spawn_bot(
                 "model": model,
                 "thinking": thinking,
                 "prompt": request.prompt,
+                // The bot is a root in its own daemon: its subtree gets
+                // only the depth left below it.
+                "rlmMaxDepth": identity.rlm_max_depth.saturating_sub(identity.rlm_depth + 1),
             }),
             SPAWN_BOT_TIMEOUT,
         )
@@ -1103,6 +1106,26 @@ async fn delete_bot(
         .await?;
     let mut subagent = bot_entry(&deleted);
     subagent.status = "cancelled";
+    // The supervisor forgets the bot: a repeated delete or collect
+    // answers from this tombstone, like a deleted local child.
+    let deleted = super::DeletedChild {
+        rlm_child_id: subagent.rlm_child_id.clone(),
+        active_session_id: subagent.rlm_child_id.clone(),
+        session_id: subagent.session_id.clone(),
+        session_name: subagent.session_name.clone(),
+        session_dir: subagent.session_dir.clone(),
+        started_at_ms: deleted
+            .get("createdAt")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        status: subagent.status,
+        answer_preview: None,
+        error: "Deleted by parent orchestrator".to_string(),
+    };
+    this.deleted_children
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(deleted.rlm_child_id.clone(), deleted);
     Ok(RlmDeleteSubagentResult {
         subagent,
         outcome: Some("deleted"),

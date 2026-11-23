@@ -428,7 +428,7 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
     ),
     (
         "spawn_bot",
-        r#"{"type": "spawn_bot", "name": "b", "ownerSessionId": "o", "prompt": "p"}"#,
+        r#"{"type": "spawn_bot", "name": "b", "ownerSessionId": "o", "prompt": "p", "rlmMaxDepth": 1}"#,
     ),
     (
         "delete_bot",

@@ -610,6 +610,9 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking: Option<String>,
         prompt: String,
+        /// The RLM depth the bot's own subtree may use: the owner's max
+        /// depth minus the bot's depth.
+        rlm_max_depth: u64,
         #[serde(flatten)]
         rest: JsonMap,
     },

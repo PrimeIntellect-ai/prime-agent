@@ -106,6 +106,7 @@ impl Supervisor {
             model,
             thinking,
             prompt,
+            rlm_max_depth,
             ..
         } = command
         else {
@@ -119,7 +120,7 @@ impl Supervisor {
             thinking: thinking.clone(),
             prompt: prompt.clone(),
         };
-        match self.spawn_bot(&spec).await {
+        match self.spawn_bot(&spec, *rlm_max_depth).await {
             Ok(record) => {
                 response_success(Some(command_id), "spawn_bot", Some(bot_row(&record, false)))
             }
@@ -129,7 +130,7 @@ impl Supervisor {
         }
     }
 
-    async fn spawn_bot(&self, spec: &BotSpec) -> Result<BotRecord> {
+    async fn spawn_bot(&self, spec: &BotSpec, rlm_max_depth: u64) -> Result<BotRecord> {
         let agent_dir = &self.options.agent_dir;
         admit_bot_spawn(agent_dir).await?;
         let manager = super::manager_for(agent_dir)?;
@@ -149,6 +150,19 @@ impl Supervisor {
             let mut client = super::guest::GuestClient::connect(&manager, &record)
                 .await
                 .context("the bot did not get its task")?;
+            // The owner's depth limit holds inside the bot's own daemon.
+            client
+                .command(&DaemonCommand::SetRlmMaxDepth {
+                    id: None,
+                    active_session_id: record.guest_session_id.clone(),
+                    max_depth: rlm_max_depth,
+                    global: None,
+                    rest: serde_json::Map::default(),
+                })
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("the bot did not take its depth limit: {error}")
+                })?;
             super::send::send_message(
                 &super::ledger::BotLedger::new(agent_dir, &record.bot_id),
                 &mut client,
