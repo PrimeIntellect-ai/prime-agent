@@ -1566,6 +1566,12 @@ fn a_complex_machine_renders_its_whole_shape() {
         joined.contains("┌◐"),
         "a never-entered box carries the pending glyph: {joined}"
     );
+    for glyph in ['✓', '●', '◐'] {
+        assert!(
+            !joined.contains(&format!("└{glyph}")),
+            "the bottom border carries no {glyph} glyph: {joined}"
+        );
+    }
     // The fired markers sit on the fired edges (both of triage's).
     let spans = frame_spans(&mut view);
     let success = theme().fg_style(ThemeColor::Success);

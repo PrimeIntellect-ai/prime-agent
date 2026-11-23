@@ -592,25 +592,24 @@ pub(crate) fn block_diagram(
                     (Role::Border, ['┌', '┐', '└', '┘', '─', '│'])
                 };
             let inner = width[item] - 2;
-            let mut stroke: String = std::iter::repeat_n(rule_char, inner).collect();
-            // The status glyph rides the top border's first inner cell.
-            if let Some(node) = live {
-                let mut glyphs: Vec<char> = stroke.chars().collect();
-                if let Some(first) = glyphs.first_mut() {
-                    *first = node.glyph;
-                }
-                stroke = glyphs.into_iter().collect();
+            let bottom_rule: String = std::iter::repeat_n(rule_char, inner).collect();
+            // The status glyph rides the top border's first inner cell; the bottom border stays a
+            // plain rule.
+            let mut top_rule: Vec<char> = bottom_rule.chars().collect();
+            if let (Some(node), Some(first)) = (live, top_rule.first_mut()) {
+                *first = node.glyph;
             }
+            let top_rule: String = top_rule.into_iter().collect();
             canvas.put(
                 x[item],
                 top,
-                &format!("{top_left}{stroke}{top_right}"),
+                &format!("{top_left}{top_rule}{top_right}"),
                 role,
             );
             canvas.put(
                 x[item],
                 top + 3,
-                &format!("{bottom_left}{stroke}{bottom_right}"),
+                &format!("{bottom_left}{bottom_rule}{bottom_right}"),
                 role,
             );
             let mut detail_text = details[item].clone();
