@@ -11,7 +11,7 @@ use pa_sandbox::{
     CommandSessionClient, CommandSessionErrorCode, CommandSessionEvent, CommandSessionOptions,
     CommandSpec, InputChannel, OutputChannel, PlatformGatewayAuthSource, PrimeSandboxClient,
     SandboxError, SandboxErrorCode, SandboxStatus, SendInputOptions, StartOptions, StartRequest,
-    VmCreateRequest, MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
+    StreamOptions, VmCreateRequest, MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
 use super::BotStatus;
@@ -118,6 +118,8 @@ const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 /// A bootstrap or install command gets this long before sandboxd kills it.
 const EXEC_DEADLINE_MS: u64 = 10 * 60 * 1000;
+/// The daemon keeps this much of each guest output channel; the rest is dropped.
+const MAX_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// [`BotPlatform`] over the Prime Sandboxes REST client and the VM command session.
 pub struct PrimePlatform {
@@ -159,18 +161,29 @@ impl PrimePlatform {
             connect_timeout_ms: Some(EXEC_DEADLINE_MS),
             ..StartOptions::default()
         };
-        // A start that failed on the link, or before the guest gateway
-        // knows the sandbox, retries. Once the command runs, a failure is
-        // final: a retry would run the script twice.
-        let mut stream = sessions.start(&request, options).await.map_err(|error| {
-            if error.is_recoverable_stream_fault()
-                || error.code() == CommandSessionErrorCode::SandboxNotFound
+        // A definitive answer fails now. Any other start fault may have
+        // reached sandboxd, so attach to the session if it exists: a retry
+        // with a fresh session would run the script twice. When the
+        // gateway cannot confirm the session, the guest is not up yet.
+        let mut stream = match sessions.start(&request, options).await {
+            Ok(stream) => stream,
+            Err(error)
+                if matches!(
+                    error.code(),
+                    CommandSessionErrorCode::InvalidRequest
+                        | CommandSessionErrorCode::InvalidArgument
+                        | CommandSessionErrorCode::TooLarge
+                        | CommandSessionErrorCode::PermissionDenied
+                        | CommandSessionErrorCode::Unauthenticated
+                ) =>
             {
-                PlatformError::Transient(error.to_string())
-            } else {
-                PlatformError::Other(error.to_string())
+                return Err(PlatformError::Other(error.to_string()));
             }
-        })?;
+            Err(error) => sessions
+                .connect(&session_uuid, StreamOptions::default())
+                .await
+                .map_err(|_| PlatformError::Transient(error.to_string()))?,
+        };
         for chunk in stdin.unwrap_or_default().chunks(MAX_PROCESS_INPUT_BYTES) {
             sessions
                 .send_input(
@@ -186,11 +199,13 @@ impl PrimePlatform {
         while let Some(event) = stream.next_event().await {
             match event.map_err(|error| PlatformError::Other(error.to_string()))? {
                 CommandSessionEvent::Data { channel, data } => {
-                    if channel == OutputChannel::Stderr {
-                        stderr.extend_from_slice(&data);
+                    let buffer = if channel == OutputChannel::Stderr {
+                        &mut stderr
                     } else {
-                        stdout.extend_from_slice(&data);
-                    }
+                        &mut stdout
+                    };
+                    let room = MAX_EXEC_OUTPUT_BYTES.saturating_sub(buffer.len());
+                    buffer.extend_from_slice(&data[..data.len().min(room)]);
                 }
                 CommandSessionEvent::End(end) => {
                     return Ok(ExecOutput {
