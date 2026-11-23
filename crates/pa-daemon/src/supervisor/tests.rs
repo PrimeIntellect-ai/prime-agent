@@ -918,7 +918,7 @@ async fn a_saved_session_listing_reads_each_sessions_harness_store_once() {
     std::fs::create_dir_all(root.join("agent")).unwrap();
     std::fs::write(
         root.join("agent/settings.json"),
-        json!({ "factory": { "enabled": true } }).to_string(),
+        json!({ "machine": { "enabled": true } }).to_string(),
     )
     .unwrap();
     let supervisor = Arc::new(

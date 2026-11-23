@@ -109,13 +109,13 @@ impl Supervisor {
         // (metadata plus a locked read on a cache miss) — off the
         // executor thread, the same spawn_blocking posture as the daemon's
         // other settings reads. The read stays fresh per connection, so a
-        // `/factory on` toggle surfaces on the next client start.
+        // `/machine on` toggle surfaces on the next client start.
         let agent_dir = self.options.agent_dir.clone();
         let factory_capabilities = tokio::task::spawn_blocking(move || {
             crate::factory_activity::advertised_server_capabilities(&agent_dir)
         })
         .await
-        .map_err(|error| anyhow::anyhow!("the factory settings read failed: {error:#}"))?;
+        .map_err(|error| anyhow::anyhow!("the machine settings read failed: {error:#}"))?;
         let hello = DaemonOutbound::DaemonHello {
             socket_path: self.options.socket_path.to_string_lossy().to_string(),
             protocol: current_protocol_info(),
@@ -1163,7 +1163,7 @@ impl Supervisor {
                 // hides the capability, so a stale client that connected
                 // while enabled — and a hand-written request — must meet
                 // the same refusal the kernel-side lane raises while
-                // `factory.enabled` is off, before any catalog scan or
+                // `machine.enabled` is off, before any catalog scan or
                 // live peek read. The settings read stays fresh per
                 // request (the same spawn_blocking posture as the hello
                 // gate) and a failed read refuses.

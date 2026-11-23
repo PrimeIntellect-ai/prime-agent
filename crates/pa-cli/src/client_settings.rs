@@ -397,7 +397,7 @@ mod tests {
         settings.set_update_channel("nightly").expect("channel");
         assert_eq!(settings.update_channel().as_deref(), Some("nightly"));
 
-        // The factory's opt-in gate (`/factory on|off|status`): unset reads
+        // The factory's opt-in gate (`/machine on|off|status`): unset reads
         // as disabled (the default off), and the write persists the exact
         // nested-camelCase key the kernel's gate and the daemon's lane
         // advertisement read -- over the same document, leaving the other
@@ -408,7 +408,7 @@ mod tests {
         let content =
             std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
-        assert_eq!(value["factory"]["enabled"], true);
+        assert_eq!(value["machine"]["enabled"], true);
         assert_eq!(value["theme"], "dark", "the write leaves the other keys");
         settings
             .set_factory_enabled(false)
@@ -417,6 +417,6 @@ mod tests {
         let content =
             std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
-        assert_eq!(value["factory"]["enabled"], false);
+        assert_eq!(value["machine"]["enabled"], false);
     }
 }

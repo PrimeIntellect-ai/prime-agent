@@ -605,7 +605,7 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// The `/factory` view's bridge lane over the session kernel's factory
+    /// The `/machine` view's bridge lane over the session kernel's factory
     /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`, and the
     /// arming-free `peek` the all-session overview's live reads ride),
     /// plus the supervisor-owned read-only `overview` action: every

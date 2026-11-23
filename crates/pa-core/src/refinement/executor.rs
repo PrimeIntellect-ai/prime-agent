@@ -295,7 +295,7 @@ fn reply_text(reply: &AssistantMessage, max_tokens: u64, failure: &str) -> anyho
 }
 
 /// Apply a plan to the (re-read) harness state. `factory_enabled` is the
-/// `factory.enabled` opt-in (default off), resolved by the caller
+/// `machine.enabled` opt-in (default off), resolved by the caller
 /// immediately before this call — after the planning request — so the
 /// synchronous apply always decides on the current setting, never a
 /// pre-request snapshot: while it is off, factory create/update edits

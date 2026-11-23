@@ -1184,13 +1184,13 @@ mod tests {
         );
     }
 
-    /// `factory.enabled` reads the GLOBAL scope only (the agent-dir
+    /// `machine.enabled` reads the GLOBAL scope only (the agent-dir
     /// document the kernel's factory gate and `set_factory_enabled` use):
     /// a project-scope override can never flip the gate out from under the
     /// kernel — a project `.prime/agent/settings.json` with `enabled: true`
     /// leaves the factory disabled while the global setting says nothing
     /// (Macroscope review finding: the merged read could diverge the
-    /// daemon's lane advertisement and the client's `/factory status`
+    /// daemon's lane advertisement and the client's `/machine status`
     /// from what the kernel would do).
     #[test]
     fn factory_enabled_reads_the_global_scope_only() {
@@ -1201,7 +1201,7 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             cwd.join(".prime/agent/settings.json"),
-            r#"{ "factory": { "enabled": true } }"#,
+            r#"{ "machine": { "enabled": true } }"#,
         )
         .unwrap();
 

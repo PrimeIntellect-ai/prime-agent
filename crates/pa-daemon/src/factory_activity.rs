@@ -1,4 +1,4 @@
-//! The `factory_activity` worker arm: the `/factory` view's daemon lane.
+//! The `factory_activity` worker arm: the `/machine` view's daemon lane.
 
 //! One session-addressed command reaches this session's kernel factory
 //! executor (the bridge registered by the pa-core session engine): the
@@ -17,7 +17,7 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
 /// The `factory_activity` capability's advertisement gate: the factory is
-/// opt-in (`factory.enabled` in the shared settings file, default off),
+/// opt-in (`machine.enabled` in the shared settings file, default off),
 /// so a disabled factory never surfaces its lane — no capability, no
 /// dock group, no page. Both hello surfaces (the supervisor's and the
 /// worker's) advertise the lane only while the setting reads enabled.
@@ -25,7 +25,7 @@ use crate::worker::Worker;
 /// The read is the kernel's strict gate, `factory_enabled` in
 /// `pa_core::refinement` (the mirror of the runtime's
 /// `rlm.factory.factory_enabled`): a malformed `factory` block — an
-/// array like `{"factory":[true]}` — reads as the fail-closed disabled
+/// array like `{"machine":[true]}` — reads as the fail-closed disabled
 /// default, never as a positional misparse of `enabled`, so every
 /// daemon gate surface (the overview arm, both hellos, the
 /// saved-session listing) refuses exactly what the kernel refuses.
@@ -46,7 +46,7 @@ pub(crate) fn stored_factory_spec_count(session_artifact_dir: &Path) -> usize {
 
 /// The capabilities a hello advertises: the default set, minus the
 /// `factory_activity` lane while the factory stays disabled (the opt-in
-/// gate; the settings read is fresh per connection, so a `/factory on`
+/// gate; the settings read is fresh per connection, so a `/machine on`
 /// toggle surfaces on the next client start).
 pub(crate) fn advertised_server_capabilities(agent_dir: &Path) -> Vec<String> {
     let mut capabilities = crate::protocol::default_server_capabilities();
@@ -357,9 +357,9 @@ mod tests {
             "the default factory gate stays off: {disabled:?}"
         );
 
-        // `/factory on` persists `factory.enabled` in the settings file —
+        // `/machine on` persists `machine.enabled` in the settings file —
         // the exact shared key the lane advertisement reads.
-        let settings = serde_json::json!({ "factory": { "enabled": true } });
+        let settings = serde_json::json!({ "machine": { "enabled": true } });
         std::fs::write(
             agent_dir.join("settings.json"),
             serde_json::to_string(&settings).expect("serialize"),
@@ -373,9 +373,9 @@ mod tests {
             "the enabled factory advertises its lane: {enabled:?}"
         );
 
-        // `/factory off` re-reads as disabled: the lane leaves the
+        // `/machine off` re-reads as disabled: the lane leaves the
         // advertisement again.
-        let off = serde_json::json!({ "factory": { "enabled": false } });
+        let off = serde_json::json!({ "machine": { "enabled": false } });
         std::fs::write(
             agent_dir.join("settings.json"),
             serde_json::to_string(&off).expect("serialize"),
@@ -392,7 +392,7 @@ mod tests {
 
     /// The malformed opt-in shapes: a typed settings read parses a
     /// positional array into the nested `factory` object
-    /// (`{"factory":[true]}` reads as `enabled`), but the kernel's
+    /// (`{"machine":[true]}` reads as `enabled`), but the kernel's
     /// strict gate requires the `factory` block to be an object and
     /// refuses every shape here. The lane reads that same strict gate,
     /// so no malformed document ever surfaces it.
@@ -415,10 +415,10 @@ mod tests {
             ("array-true", r#"{"factory": [true]}"#),
             ("array-string", r#"{"factory": ["true"]}"#),
             ("array-extra", r#"{"factory": [true, false]}"#),
-            ("enabled-string", r#"{"factory": {"enabled": "true"}}"#),
-            ("enabled-integer", r#"{"factory": {"enabled": 1}}"#),
-            ("enabled-null", r#"{"factory": {"enabled": null}}"#),
-            ("corrupt", r#"{"factory": {"enabled": tru"#),
+            ("enabled-string", r#"{"machine": {"enabled": "true"}}"#),
+            ("enabled-integer", r#"{"machine": {"enabled": 1}}"#),
+            ("enabled-null", r#"{"machine": {"enabled": null}}"#),
+            ("corrupt", r#"{"machine": {"enabled": tru"#),
             ("empty", "{}"),
         ];
         for (shape, content) in shapes {

@@ -32,8 +32,8 @@ for a source worker's kernel `agent_message.send`, direct
 `worker_deliver_message` on the target worker's socket with the supervisor
 routed `send_message` as the never-retried fallback),
 the supervisor-owned
-`factory_activity` `overview` action (the factory page's all-session read:
-every daemon-known session's active factory runs, assembled read-only by
+`factory_activity` `overview` action (the machines page's all-session read:
+every daemon-known session's active machine runs, assembled read-only by
 the supervisor from the live owners' arming-free `peek` lane (the unscoped
 graph without the rehydration re-arm) and the durable run records under each
 owner's artifact dir — the `overview` request itself is never forwarded to

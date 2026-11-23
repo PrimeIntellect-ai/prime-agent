@@ -787,7 +787,7 @@ pub(super) fn active_session_id_of(payload: &[u8]) -> String {
 
 pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<String> {
     // The factory lane advertises only while its opt-in gate reads
-    // enabled (`factory.enabled`, default off).
+    // enabled (`machine.enabled`, default off).
     crate::factory_activity::advertised_server_capabilities(agent_dir)
 }
 

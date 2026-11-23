@@ -365,7 +365,7 @@ impl Supervisor {
                 return response_failure(
                     Some(command_id),
                     type_name,
-                    &format!("the factory overview catalog scan failed: {error}"),
+                    &format!("the machine overview catalog scan failed: {error}"),
                     None,
                 )
             }
@@ -591,7 +591,7 @@ impl Supervisor {
                 LiveRead::Failed(reason) => {
                     cache.warnings.insert(
                         owner.to_string(),
-                        format!("session {owner}: live factory graph unavailable: {reason}"),
+                        format!("session {owner}: live machine graph unavailable: {reason}"),
                     );
                 }
             },
@@ -755,7 +755,7 @@ fn catalog_and_records(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 warnings.push(format!(
-                    "session {}: factory run records unreadable: {error}",
+                    "session {}: machine run records unreadable: {error}",
                     owner.id
                 ));
                 continue;
@@ -921,7 +921,7 @@ enum LiveRead {
 fn live_read_outcome(reply: &anyhow::Result<DaemonResponse>) -> LiveRead {
     match reply {
         Ok(response) if response.success => live_rows_from_snapshot(response.data.as_ref()).map_or(
-            LiveRead::Failed("live factory graph reply malformed".to_string()),
+            LiveRead::Failed("live machine graph reply malformed".to_string()),
             LiveRead::Rows,
         ),
         Ok(response) => LiveRead::Failed(
@@ -1507,7 +1507,7 @@ mod tests {
             assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
             assert_eq!(
                 cache.warnings["busy"],
-                "session busy: live factory graph unavailable: Kernel is not running"
+                "session busy: live machine graph unavailable: Kernel is not running"
             );
         }
         // A skipped (booting) owner keeps its rows through the boot

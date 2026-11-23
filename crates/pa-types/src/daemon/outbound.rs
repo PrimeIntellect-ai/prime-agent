@@ -37,7 +37,7 @@ pub const UPDATE_RESTART_PREPARING_MESSAGE: &str = "Daemon is preparing an updat
 /// booting an idle kernel). A definitive answer, not a transient failure —
 /// the kernel owns its run registry in memory, so a session without a
 /// kernel carries no live runs; clients read it as such (the TUI's
-/// `/factory off` guard counts zero instead of an unreadable count).
+/// `/machine off` guard counts zero instead of an unreadable count).
 pub const KERNEL_NOT_RUNNING_MESSAGE: &str = "Kernel is not running";
 
 /// Structured failure info carried on error responses, tagged by `code`.

@@ -265,13 +265,13 @@ pub struct AgentTracesSettings {
     pub enabled: Option<bool>,
 }
 
-/// `factory` (the agent factory's opt-in gate): `factory.enabled` is
-/// unset/false by default, and the `/factory on` client command persists
+/// `machine` (the machines opt-in gate): `machine.enabled` is
+/// unset/false by default, and the `/machine on` client command persists
 /// it. Both the daemon's `factory_activity` lane advertisement and the
-/// kernel's factory gate read the same shared settings key.
+/// kernel's machine gate read the same shared settings key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FactorySettings {
+pub struct MachineSettings {
     pub enabled: Option<bool>,
 }
 
@@ -328,7 +328,7 @@ pub struct Settings {
     /// Master switch for harness creation and context loading; unset preserves enabled behavior.
     pub harness_refinements: Option<bool>,
     pub agent_traces: Option<AgentTracesSettings>,
-    pub factory: Option<FactorySettings>,
+    pub machine: Option<MachineSettings>,
     pub agent_inbox: Option<AgentInboxSettings>,
     pub telemetry: Option<TelemetrySettings>,
     pub branch_summary: Option<BranchSummarySettings>,

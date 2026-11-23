@@ -383,24 +383,24 @@ impl SettingsManager {
         self.save_global_scope(&["chatDetail"])
     }
 
-    /// `factory.enabled` (the agent factory's opt-in gate): unset reads
+    /// `machine.enabled` (the agent factory's opt-in gate): unset reads
     /// as disabled — the factory stays off until the user runs
-    /// `/factory on`. The read is GLOBAL SCOPE ONLY, exactly the agent-dir
+    /// `/machine on`. The read is GLOBAL SCOPE ONLY, exactly the agent-dir
     /// document `set_factory_enabled` writes and the kernel's factory gate
     /// reads, so no project-scope override can flip the gate out from
     /// under the kernel (a project `.prime/agent/settings.json` with
-    /// `factory.enabled` never diverges the daemon's lane advertisement
-    /// or the client's `/factory status` from what the kernel will do).
+    /// `machine.enabled` never diverges the daemon's lane advertisement
+    /// or the client's `/machine status` from what the kernel will do).
     #[must_use]
     pub fn get_factory_enabled(&self) -> bool {
         self.global_settings()
-            .factory
+            .machine
             .as_ref()
-            .and_then(|factory| factory.enabled)
+            .and_then(|machine| machine.enabled)
             .unwrap_or(false)
     }
 
-    /// `factory.enabled` setter: persists the opt-in gate to the global
+    /// `machine.enabled` setter: persists the opt-in gate to the global
     /// scope (the same shared settings key the daemon's lane advertisement
     /// and the kernel's factory gate read).
     ///
@@ -409,10 +409,10 @@ impl SettingsManager {
     /// Returns an error when the global settings scope cannot be saved.
     pub fn set_factory_enabled(&mut self, enabled: bool) -> Result<()> {
         self.global_mut()
-            .factory
+            .machine
             .get_or_insert_with(Default::default)
             .enabled = Some(enabled);
-        self.save_global_scope(&["factory.enabled"])
+        self.save_global_scope(&["machine.enabled"])
     }
 
     /// `enabledModels` (TS `getEnabledModels`/`setEnabledModels`): the

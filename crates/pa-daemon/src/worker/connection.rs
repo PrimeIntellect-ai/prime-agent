@@ -331,7 +331,7 @@ impl Worker {
         let factory_capabilities =
             tokio::task::spawn_blocking(move || worker_server_capabilities(&agent_dir))
                 .await
-                .map_err(|error| anyhow::anyhow!("the factory settings read failed: {error:#}"))?;
+                .map_err(|error| anyhow::anyhow!("the machine settings read failed: {error:#}"))?;
         let hello = DaemonOutbound::DaemonHello {
             socket_path: self.config.socket_path.to_string_lossy().to_string(),
             protocol: current_protocol_info(),

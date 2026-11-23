@@ -172,9 +172,9 @@ pub const FACTORY_SETTINGS_FILE_NAME: &str = "settings.json";
 /// off. Byte-identical to the kernel's `FACTORY_DISABLED_MESSAGE`
 /// (`prime-agent-runtime/src/rlm/factory.py`), so one exact message pins
 /// both sides of the gate.
-pub const FACTORY_DISABLED_MESSAGE: &str = "the factory is disabled; run /factory on to enable it";
+pub const FACTORY_DISABLED_MESSAGE: &str = "machines are disabled; run /machine on to enable them";
 
-/// The `factory.enabled` opt-in setting (default off), read leniently from
+/// The `machine.enabled` opt-in setting (default off), read leniently from
 /// the agent dir's settings.json exactly like the kernel-side
 /// `rlm.factory.factory_enabled()`: a missing file or key, a wrong-typed
 /// value, or a corrupt document all read as the fail-closed disabled
@@ -189,8 +189,8 @@ pub fn factory_enabled(agent_dir: &Path) -> bool {
         return false;
     };
     document
-        .get("factory")
-        .and_then(|factory| factory.get("enabled"))
+        .get("machine")
+        .and_then(|machine| machine.get("enabled"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
 }
@@ -656,21 +656,21 @@ mod tests {
         // The enabled shape the settings surface writes.
         std::fs::write(
             tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
-            r#"{"factory": {"enabled": true}, "compaction": {"enabled": true}}"#,
+            r#"{"machine": {"enabled": true}, "compaction": {"enabled": true}}"#,
         )
         .unwrap();
         assert!(factory_enabled(tmp.path()));
         // An explicit false stays disabled.
         std::fs::write(
             tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
-            r#"{"factory": {"enabled": false}}"#,
+            r#"{"machine": {"enabled": false}}"#,
         )
         .unwrap();
         assert!(!factory_enabled(tmp.path()));
         // A wrong-typed value reads as unset, which means disabled.
         std::fs::write(
             tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
-            r#"{"factory": {"enabled": "yes"}, "factory.enabled": true}"#,
+            r#"{"machine": {"enabled": "yes"}, "machine.enabled": true}"#,
         )
         .unwrap();
         assert!(!factory_enabled(tmp.path()));
@@ -688,7 +688,7 @@ mod tests {
         // kernel-side FACTORY_DISABLED_MESSAGE (rlm/factory.py).
         assert_eq!(
             FACTORY_DISABLED_MESSAGE,
-            "the factory is disabled; run /factory on to enable it"
+            "machines are disabled; run /machine on to enable them"
         );
     }
 

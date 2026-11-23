@@ -183,10 +183,10 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when the tier name is not a known service tier or
     /// the settings store fails.
     fn set_default_service_tier(&self, tier: &str) -> Result<()>;
-    /// `factory.enabled` (the agent factory's opt-in gate; unset reads
+    /// `machine.enabled` (the agent factory's opt-in gate; unset reads
     /// as disabled).
     fn factory_enabled(&self) -> bool;
-    /// Persists `factory.enabled` to the global scope — the same shared
+    /// Persists `machine.enabled` to the global scope — the same shared
     /// settings key the daemon's `factory_activity` lane advertisement
     /// and the kernel's factory gate read.
     ///
