@@ -344,11 +344,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     drop(guard);
                     wake.await;
                 };
-                watcher_record
-                    .lock()
-                    .await
-                    .run
-                    .apply(RunEvent::ReleasePrompt);
                 if let Err(error) = watcher_this
                     .prompt_child(
                         &child_active_session_id,
