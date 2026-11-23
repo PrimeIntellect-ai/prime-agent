@@ -102,3 +102,125 @@ fn a_join_fans_in_and_a_long_edge_runs_through_the_skipped_layers() {
     };
     assert_eq!(row_of("b"), row_of("c"));
 }
+
+#[test]
+fn dense_diagrams_do_not_allocate_an_unbounded_canvas() {
+    let states: Vec<_> = (0..40).map(|i| state(&format!("s{i}"), i == 0)).collect();
+    let transitions: Vec<_> = (0..states.len())
+        .flat_map(|from| (from + 1..states.len()).map(move |to| (from, to)))
+        .map(|(from, to)| transition(&[&states[from].id], &states[to].id, None))
+        .collect();
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+        None,
+        None,
+    );
+    assert_eq!(diagram.lines.len(), 1);
+    assert!(diagram.node_rows.is_empty());
+    assert!(plain(&diagram).contains("40 states, 780 transitions"));
+}
+
+#[test]
+fn long_back_edge_guards_stay_complete_before_the_gutter() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    for label in [
+        "0123456789abcdefghijklmnopqrstuvwxyz",
+        "review all the inputs before trying again",
+    ] {
+        let transitions = vec![
+            transition(&["a"], "b", None),
+            transition(
+                &["b"],
+                "a",
+                Some(json!({"output": "route", "op": "eq", "value": label})),
+            ),
+        ];
+        let text = plain(&block_diagram(
+            &theme,
+            &[state("a", true), state("b", false)],
+            &transitions,
+            None,
+            None,
+        ));
+        let departure = text
+            .lines()
+            .find(|row| row.contains(label))
+            .unwrap_or_else(|| panic!("missing full label {label:?}:\n{text}"));
+        let after_label = departure.split_once(label).unwrap().1;
+        assert!(
+            after_label.contains('┘'),
+            "gutter bend must follow the full label:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn back_edge_guards_clear_forward_wires_on_their_departure_row() {
+    let states = vec![
+        state("a", true),
+        state("b", false),
+        state("c", false),
+        state("e", false),
+        state("d", false),
+    ];
+    let label = "rework after every inspection pass";
+    let transitions = vec![
+        transition(&["a"], "b", None),
+        transition(&["a"], "c", None),
+        transition(&["a"], "e", None),
+        transition(&["b"], "d", None),
+        transition(&["c"], "d", None),
+        transition(&["e"], "d", None),
+        transition(
+            &["c"],
+            "a",
+            Some(json!({"output": "route", "op": "eq", "value": label})),
+        ),
+    ];
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+        None,
+        None,
+    );
+    let text = plain(&diagram);
+    let departure = text
+        .lines()
+        .find(|row| row.contains(&format!(" {label} ")))
+        .unwrap_or_else(|| panic!("the full back-edge guard must survive its row:\n{text}"));
+    assert!(
+        departure.contains(&format!(" {label} ")),
+        "a crossing replaced a guard character:\n{text}"
+    );
+}
+
+#[test]
+fn many_back_edges_fail_the_size_guard() {
+    let states: Vec<_> = (0..300).map(|i| state(&format!("s{i}"), i == 0)).collect();
+    let mut transitions: Vec<_> = (0..299)
+        .map(|i| transition(&[&states[i].id], &states[i + 1].id, None))
+        .collect();
+    transitions.extend((1..300).map(|i| {
+        transition(
+            &[&states[i].id],
+            &states[0].id,
+            Some(json!({"output": "route", "op": "eq", "value": "again"})),
+        )
+    }));
+    let diagram = block_diagram(
+        &Theme::builtin("prime", ColorMode::TrueColor),
+        &states,
+        &transitions,
+        None,
+        None,
+    );
+    assert_eq!(diagram.lines.len(), 1);
+    assert!(
+        plain(&diagram).contains("300 states"),
+        "{}",
+        plain(&diagram)
+    );
+}

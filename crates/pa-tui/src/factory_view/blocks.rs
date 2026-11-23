@@ -16,6 +16,9 @@ use crate::{Line, Span};
 const TEXT_MAX: usize = 26;
 const GAP: usize = 3;
 const MARGIN: usize = 2;
+/// The canvas bound: a dense graph renders a one-line notice instead of
+/// allocating an unbounded grid.
+const MAX_DIAGRAM_CELLS: usize = 250_000;
 pub(crate) const BOX_ROWS: usize = 4;
 
 const UP: u8 = 1;
@@ -456,7 +459,77 @@ pub(crate) fn block_diagram(
 
     // Back edges take gutter columns, the shortest span innermost.
     backs.sort_by_key(|back| layer[back.from] - layer[back.to]);
-    let gutter = |k: usize| MARGIN + widest + 2 + 2 * k;
+    let too_large = || BlockDiagram {
+        lines: vec![vec![theme.fg_span(
+            ThemeColor::Muted,
+            format!(
+                "[diagram too large to render: {} states, {} transitions]",
+                states.len(),
+                transitions.len()
+            ),
+        )]],
+        node_rows: Vec::new(),
+    };
+    // Each back edge costs at least a departure row, an arrival row, and
+    // two gutter columns, so 4 * backs^2 cells is a floor. Reject before
+    // the label pass when that floor alone exceeds the canvas bound.
+    if 4usize
+        .saturating_mul(backs.len())
+        .saturating_mul(backs.len())
+        > MAX_DIAGRAM_CELLS
+    {
+        return too_large();
+    }
+    // A back-edge label shares its departure row with the source layer's
+    // forward wires and with the drops of the other back edges that leave
+    // that layer; a crossing cell would replace a label character. Start
+    // each label past the last wire it would cross, and put the gutter
+    // beyond the shifted labels.
+    let crossing_columns = |source_layer: usize| -> Vec<usize> {
+        let mut columns: Vec<usize> = layers[source_layer]
+            .iter()
+            .filter(|&&item| segments.iter().any(|segment| segment.from == item))
+            .map(|&item| center(item))
+            .collect();
+        columns.extend(
+            backs
+                .iter()
+                .filter(|back| layer[back.from] == source_layer)
+                .map(|back| center(back.from)),
+        );
+        columns
+    };
+    let label_starts: Vec<Option<usize>> = backs
+        .iter()
+        .map(|back| {
+            back.label.as_ref().map(|label| {
+                let text_width = label.chars().count() + 2;
+                let columns = crossing_columns(layer[back.from]);
+                let mut start = center(back.from) + 2;
+                while let Some(column) = columns
+                    .iter()
+                    .copied()
+                    .filter(|column| *column >= start && *column < start + text_width)
+                    .max()
+                {
+                    start = column + 1;
+                }
+                start
+            })
+        })
+        .collect();
+    let gutter_start = backs
+        .iter()
+        .zip(&label_starts)
+        .filter_map(|(back, start)| {
+            start.map(|start| {
+                start + back.label.as_ref().map_or(0, |label| label.chars().count()) + 2
+            })
+        })
+        .max()
+        .unwrap_or(0)
+        .max(MARGIN + widest + 2);
+    let gutter = |k: usize| gutter_start + 2 * k;
 
     // Rows: band b sits above layer b (band `depth` below the last).
     let mut bands: Vec<Band> = Vec::with_capacity(depth + 1);
@@ -557,6 +630,9 @@ pub(crate) fn block_diagram(
             .unwrap_or(0);
         widest.max(x[item] + 2 + children)
     }));
+    if canvas_width.saturating_mul(height) > MAX_DIAGRAM_CELLS {
+        return too_large();
+    }
     let mut canvas = Canvas(vec![vec![Cell::Empty; canvas_width]; height]);
 
     // Boxes and dummy columns.
@@ -796,12 +872,8 @@ pub(crate) fn block_diagram(
         );
         if let Some(label) = &back.label {
             let role = if fired { Role::Fired } else { Role::Label };
-            canvas.label_role(
-                center(back.from) + 2,
-                departure,
-                &format!(" {label} "),
-                role,
-            );
+            let start = label_starts[k].unwrap_or_else(|| center(back.from) + 2);
+            canvas.label_role(start, departure, &format!(" {label} "), role);
         }
     }
 
