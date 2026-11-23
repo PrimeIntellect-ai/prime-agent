@@ -39,9 +39,18 @@ pub(super) async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_
 /// TS daemon-supervisor.ts:204 `WORKER_REQUEST_TIMEOUT_MS`.
 pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The route budget of a client command: turn-long waits ride TS's 24 h
-/// worker-request budget; everything else is a short control route.
+/// Explicit `wait_for_idle` slices use their budget plus grace. Other
+/// turn-long waits use TS's 24 h worker-request budget; controls use a short route.
 pub(crate) fn client_route_timeout(command: &DaemonCommand) -> u64 {
+    if let DaemonCommand::WaitForIdle {
+        timeout_ms: Some(timeout_ms),
+        ..
+    } = command
+    {
+        return timeout_ms
+            .saturating_add(crate::rlm_children::IDLE_WAIT_GRACE_MS)
+            .min(WORKER_REQUEST_TIMEOUT_MS);
+    }
     if matches!(
         command,
         DaemonCommand::PromptAndWait { .. }
