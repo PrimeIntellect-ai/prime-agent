@@ -2,8 +2,9 @@
 //! state a labelled box, every transition a labelled edge), with one node
 //! selected, and the selected node's files (the prompt Markdown, the
 //! shared context, the rubric, or the python module) one Enter away. The
-//! machine's mermaid and any mermaid fence in a node's Markdown render as
-//! diagrams (the same block-diagram renderer), never as source text.
+//! block diagram is the machine's one rendering, so the reply's own
+//! mermaid is not drawn again. A mermaid fence in a node's Markdown renders
+//! as a diagram (the same block-diagram renderer), never as source text.
 
 use serde_json::Value;
 
@@ -24,8 +25,7 @@ const PINNED_ROWS: usize = 2;
 const MEASURE_WIDTH: usize = 100;
 
 /// One drilled-in machine: the graph payload in the run page's snapshot
-/// shape, the description, the declared params, each state's files, and
-/// the mermaid rendering.
+/// shape, the description, the declared params, and each state's files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryDetail {
     pub name: String,
@@ -36,9 +36,6 @@ pub struct LibraryDetail {
     pub files: Vec<(String, String)>,
     /// Each state's files, by path.
     pub state_files: Vec<(String, Vec<String>)>,
-    /// The machine's own mermaid (`spec_to_mermaid`), rendered as a
-    /// diagram below the block diagram.
-    pub mermaid: String,
 }
 
 impl LibraryDetail {
@@ -99,7 +96,6 @@ impl LibraryDetail {
             params: list("params").iter().filter_map(param_label).collect(),
             files,
             state_files,
-            mermaid: text("mermaid"),
         })
     }
 

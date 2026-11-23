@@ -1539,9 +1539,9 @@ fn the_title_and_badge_count_only_backed_live_rows() {
 }
 
 /// The drill-in draws the machine as labelled boxes with the first node
-/// selected; the machine's own mermaid renders as a diagram below them
-/// (the `spec_to_mermaid` shape: aliased state declarations, a `[*]`
-/// entry edge, and guarded transitions), never as source text; ↓ walks
+/// selected; the reply's own mermaid (the `spec_to_mermaid` shape:
+/// aliased state declarations, a `[*]` entry edge, and guarded
+/// transitions) is not drawn a second time; ↓ walks
 /// to the next node, Enter opens its files (Markdown rendered), and Esc
 /// steps back to the diagram, then the list, then out.
 #[test]
