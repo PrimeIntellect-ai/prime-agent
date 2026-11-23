@@ -585,14 +585,56 @@ fn attach_guard_counts_attaches() {
     assert!(!manager.attached("bot-a"));
 }
 
+/// Send `task` to a live bot and wait up to 3 minutes for its reply.
+async fn live_ask(
+    manager: &BotManager,
+    agent_dir: &std::path::Path,
+    bot: &super::BotRecord,
+    msg_id: &str,
+    task: &str,
+) -> anyhow::Result<String> {
+    let ledger = super::ledger::BotLedger::new(agent_dir, &bot.bot_id);
+    let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
+    super::send::send_message(
+        &ledger,
+        &mut guest,
+        &bot.guest_session_id,
+        msg_id,
+        task,
+        None,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut reply = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+    while reply.is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::timeout_at(
+            deadline,
+            super::replies::sync_deliveries(
+                &mut guest,
+                &ledger,
+                &bot.guest_session_id,
+                |text| {
+                    reply = text;
+                    async { anyhow::Ok(()) }
+                },
+            ),
+        )
+        .await??;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    Ok(reply)
+}
+
 /// Live: one real bot on this build through spawn, a task and its reply,
-/// and delete. Run in a linux-x64 checkout after `make bot-tarball`, with
+/// pause, a second task that resumes it in the same session, and delete.
+/// Run in a linux-x64 checkout after `make bot-tarball`, with
 /// `PRIME_API_KEY` (and `PRIME_TEAM_ID`) set and
 /// `PRIME_AGENT_BOT_TARBALL=target/release/prime-agent-<version>-linux-x64.tar.gz`:
-/// `cargo test -p pa-daemon --lib bots::tests::live -- --ignored`.
+/// `cargo test -p pa-daemon --lib bots::tests::live -- --ignored --nocapture`.
 #[tokio::test]
 #[ignore = "creates a real Prime sandbox"]
-async fn live_spawn_reply_delete() {
+async fn live_spawn_reply_pause_resume_delete() {
     let client = pa_sandbox::PrimeSandboxClient::new(
         &std::env::var("PRIME_API_KEY").expect("PRIME_API_KEY"),
         pa_sandbox::ClientOptions {
@@ -620,50 +662,42 @@ async fn live_spawn_reply_delete() {
         model: Some("prime-inference/anthropic/claude-haiku-4.5".to_string()),
         ..spec(&bot_id)
     };
+    let started = std::time::Instant::now();
+    let step = |name: &str| eprintln!("live: {name} at {}s", started.elapsed().as_secs());
 
     let run = async {
         let spawned = manager.spawn(&spec).await?;
-        let ledger = super::ledger::BotLedger::new(dir.path(), &bot_id);
-        let mut guest = super::guest::GuestClient::connect(&manager, &spawned).await?;
+        step("spawned");
         let task = "Reply with the single word pong and nothing else.";
-        super::send::send_message(
-            &ledger,
-            &mut guest,
-            &spawned.guest_session_id,
-            "m1",
-            task,
-            None,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let mut reply = String::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
-        while reply.is_empty() && tokio::time::Instant::now() < deadline {
-            tokio::time::timeout_at(
-                deadline,
-                super::replies::sync_deliveries(
-                    &mut guest,
-                    &ledger,
-                    &spawned.guest_session_id,
-                    |text| {
-                        reply = text;
-                        async { anyhow::Ok(()) }
-                    },
-                ),
-            )
-            .await??;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-        anyhow::Ok((spawned, reply))
+        let first = live_ask(&manager, dir.path(), &spawned, "m1", task).await?;
+        step("first reply");
+        let paused = manager.pause(&bot_id).await?;
+        step("paused");
+        let resumed = manager.ensure_running(&bot_id).await?;
+        step("resumed");
+        let task = "Repeat the word you replied with before, in capital letters only.";
+        let second = live_ask(&manager, dir.path(), &resumed, "m2", task).await?;
+        step("second reply");
+        anyhow::Ok((spawned, first, paused, resumed, second))
     }
     .await;
     manager.delete(&bot_id).await.unwrap();
-    let (spawned, reply) = run.unwrap();
+    step("deleted");
+    let (spawned, first, paused, resumed, second) = run.unwrap();
     let left = platform.list(&bot_label(&bot_id)).await.unwrap();
 
-    eprintln!("live: spawned={spawned:?}\nreply={reply:?}\nleft={left:?}");
+    eprintln!("live: spawned={spawned:?}\npaused={paused:?}");
+    eprintln!("live: first={first:?} second={second:?} left={left:?}");
     assert_eq!(spawned.version, version::local_version());
-    assert!(reply.to_lowercase().contains("pong"), "reply: {reply:?}");
+    assert!(first.to_lowercase().contains("pong"), "first: {first:?}");
+    assert!(matches!(
+        paused.status,
+        BotStatus::Paused | BotStatus::Stopped
+    ));
+    assert!(paused.checkpoint_id.is_some());
+    assert_eq!(resumed.guest_session_file, spawned.guest_session_file);
+    assert!(second.contains("PONG"), "second: {second:?}");
     assert!(left.iter().all(|sandbox| sandbox.status.is_terminal()));
-    assert!(manager.list().is_empty());
+    let checkpoint = paused.checkpoint_id.as_deref().unwrap();
+    assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
 }

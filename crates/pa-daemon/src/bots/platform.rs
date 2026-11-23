@@ -576,9 +576,7 @@ impl BotPlatform for PrimePlatform {
                         | PlatformError::CheckpointQuota(_)
                         | PlatformError::Other(_),
                     )
-                    | None => {
-                        PlatformError::Other(message)
-                    }
+                    | None => PlatformError::Other(message),
                 }
             })?;
             Ok(GuestCredentials {
@@ -616,6 +614,9 @@ mod tests {
             Some(429),
             Some("Checkpoint storage limit reached: 27376.7GiB used of 20480GiB allowed.".into()),
         );
-        assert!(matches!(map_error(&error), PlatformError::CheckpointQuota(_)));
+        assert!(matches!(
+            map_error(&error),
+            PlatformError::CheckpointQuota(_)
+        ));
     }
 }
