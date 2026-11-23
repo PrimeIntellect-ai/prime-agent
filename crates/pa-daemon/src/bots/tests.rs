@@ -31,11 +31,17 @@ pub(crate) struct FakeState {
     /// The next credential provisioning fails with a transport error.
     pub fail_next_credentials: bool,
     pub refuse_pause: bool,
+    /// Pauses answer that the team's checkpoint storage is full.
+    pub checkpoint_storage_full: bool,
+    pub pauses: usize,
     /// New pause checkpoints stay pending (not durable).
     pub pause_checkpoints_pending: bool,
     /// Checkpoints that exist but are not durable yet.
     pub pending_checkpoints: std::collections::HashSet<String>,
-    pub unpublished: bool,
+    /// The exit code of the next guest installs (0 = they succeed).
+    pub install_exit_code: i32,
+    /// A relay that ends with this before its hello (exit code and stderr).
+    pub relay_end: Option<String>,
     /// The version a linked guest says hello with; `None` = this build's.
     pub guest_app_version: Option<String>,
     /// The guest ends of open links: (its stdout, its stdin).
@@ -149,6 +155,10 @@ impl BotPlatform for FakePlatform {
     fn pause<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<Option<String>>> {
         async move {
             let mut state = self.state();
+            state.pauses += 1;
+            if state.checkpoint_storage_full {
+                return Err(PlatformError::CheckpointQuota("HTTP 429".into()));
+            }
             if state.refuse_pause {
                 return Err(PlatformError::Other("VM cannot be paused".into()));
             }
@@ -246,9 +256,8 @@ impl BotPlatform for FakePlatform {
                     .unwrap_or_default();
             } else if script == INSTALL_SCRIPT {
                 state.installs += 1;
-                if state.unpublished {
-                    output.exit_code = version::UNPUBLISHED_EXIT_CODE;
-                } else {
+                output.exit_code = state.install_exit_code;
+                if output.exit_code == 0 {
                     state
                         .guest_versions
                         .insert(sandbox_id.to_string(), env["PA_VERSION"].clone());
@@ -289,13 +298,18 @@ impl BotPlatform for FakePlatform {
             };
             let (read, mut guest_stdout) = tokio::io::duplex(4096);
             let (guest_stdin, write) = tokio::io::duplex(4096);
+            let (ended_send, ended) = tokio::sync::oneshot::channel();
+            if let Some(end) = self.state().relay_end.clone() {
+                let _ = ended_send.send(end);
+                return Ok(ExecStreamHalves { read, write, ended });
+            }
             let hello = serde_json::json!({ "type": "daemon_hello", "appVersion": version });
             guest_stdout
                 .write_all(format!("{hello}\n").as_bytes())
                 .await
                 .unwrap();
             self.state().links.push((guest_stdout, guest_stdin));
-            Ok(ExecStreamHalves { read, write })
+            Ok(ExecStreamHalves { read, write, ended })
         }
         .boxed()
     }
@@ -527,14 +541,37 @@ async fn restore_falls_back_to_the_newest_durable_checkpoint() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn unpublished_version_fails_spawn_and_cleans_up() {
+async fn a_failed_install_fails_spawn_and_cleans_up() {
+    for exit_code in [version::UNPUBLISHED_EXIT_CODE, version::NO_GUEST_EXIT_CODE] {
+        let (_dir, platform, manager) = setup();
+        platform.state().install_exit_code = exit_code;
+
+        let error = manager.spawn(&spec("bot-a")).await.expect_err("refused");
+
+        assert_eq!(
+            error.to_string(),
+            version::install_failure(exit_code, version::local_version()).unwrap()
+        );
+        assert!(platform.live().is_empty());
+        assert!(manager.list().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_full_checkpoint_storage_keeps_the_bot_running() {
     let (_dir, platform, manager) = setup();
-    platform.state().unpublished = true;
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    platform.state().checkpoint_storage_full = true;
 
-    assert!(manager.spawn(&spec("bot-a")).await.is_err());
+    let error = manager.pause("bot-a").await.expect_err("refused");
 
-    assert!(platform.live().is_empty());
-    assert!(manager.list().is_empty());
+    assert!(matches!(
+        error.downcast_ref::<PlatformError>(),
+        Some(PlatformError::CheckpointQuota(_))
+    ));
+    assert_eq!(platform.state().pauses, 1);
+    assert_eq!(platform.live().len(), 1);
+    assert_eq!(manager.get("bot-a").unwrap().status, BotStatus::Running);
 }
 
 #[test]
@@ -548,12 +585,51 @@ fn attach_guard_counts_attaches() {
     assert!(!manager.attached("bot-a"));
 }
 
-/// Live: one real sandbox through spawn, pause, resume, and delete.
-/// Run with `PRIME_API_KEY` (and `PRIME_TEAM_ID`) set:
-/// `cargo test -p pa-daemon --lib bots::tests::live -- --ignored`.
+/// Send `task` to a live bot and wait up to 3 minutes for its reply.
+async fn live_ask(
+    manager: &BotManager,
+    agent_dir: &std::path::Path,
+    bot: &super::BotRecord,
+    msg_id: &str,
+    task: &str,
+) -> anyhow::Result<String> {
+    let ledger = super::ledger::BotLedger::new(agent_dir, &bot.bot_id);
+    let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
+    super::send::send_message(
+        &ledger,
+        &mut guest,
+        &bot.guest_session_id,
+        msg_id,
+        task,
+        None,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut reply = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+    while reply.is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::timeout_at(
+            deadline,
+            super::replies::sync_deliveries(&mut guest, &ledger, &bot.guest_session_id, |text| {
+                reply = text;
+                async { anyhow::Ok(()) }
+            }),
+        )
+        .await??;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    Ok(reply)
+}
+
+/// Live: one real bot on this build through spawn, a task and its reply,
+/// pause, a second task that resumes it in the same session, and delete.
+/// Run in a linux-x64 checkout after `make bot-tarball`, with
+/// `PRIME_API_KEY` (and `PRIME_TEAM_ID`) set and
+/// `PRIME_AGENT_BOT_TARBALL=target/release/prime-agent-<version>-linux-x64.tar.gz`:
+/// `cargo test -p pa-daemon --lib bots::tests::live -- --ignored --nocapture`.
 #[tokio::test]
 #[ignore = "creates a real Prime sandbox"]
-async fn live_spawn_pause_resume_delete() {
+async fn live_spawn_reply_pause_resume_delete() {
     let client = pa_sandbox::PrimeSandboxClient::new(
         &std::env::var("PRIME_API_KEY").expect("PRIME_API_KEY"),
         pa_sandbox::ClientOptions {
@@ -564,33 +640,59 @@ async fn live_spawn_pause_resume_delete() {
         },
     )
     .unwrap();
+    assert!(
+        matches!(
+            version::ReleaseSource::resolve(),
+            version::ReleaseSource::LocalTarball(_)
+        ),
+        "set {} to a tarball of this build",
+        version::TARBALL_OVERRIDE_ENV
+    );
     let dir = tempfile::tempdir().unwrap();
-    let manager = BotManager::new(
-        dir.path(),
-        Arc::new(super::platform::PrimePlatform::new(client, dir.path())),
-    )
-    .unwrap();
+    let platform = Arc::new(super::platform::PrimePlatform::new(client, dir.path()));
+    let manager =
+        BotManager::new(dir.path(), Arc::clone(&platform) as Arc<dyn BotPlatform>).unwrap();
     let bot_id = format!("live-{}", uuid::Uuid::new_v4());
+    let spec = BotSpec {
+        model: Some("prime-inference/anthropic/claude-haiku-4.5".to_string()),
+        ..spec(&bot_id)
+    };
+    let started = std::time::Instant::now();
+    let step = |name: &str| eprintln!("live: {name} at {}s", started.elapsed().as_secs());
 
     let run = async {
-        let spawned = manager.spawn(&spec(&bot_id)).await?;
-        // The guest daemon says hello over the relay, on this version.
-        drop(manager.open_link(&spawned).await?);
+        let spawned = manager.spawn(&spec).await?;
+        step("spawned");
+        let task = "Reply with the single word pong and nothing else.";
+        let first = live_ask(&manager, dir.path(), &spawned, "m1", task).await?;
+        step("first reply");
         let paused = manager.pause(&bot_id).await?;
+        step("paused");
         let resumed = manager.ensure_running(&bot_id).await?;
-        anyhow::Ok((spawned, paused, resumed))
+        step("resumed");
+        let task = "Repeat the word you replied with before, in capital letters only.";
+        let second = live_ask(&manager, dir.path(), &resumed, "m2", task).await?;
+        step("second reply");
+        anyhow::Ok((spawned, first, paused, resumed, second))
     }
     .await;
     manager.delete(&bot_id).await.unwrap();
-    let (spawned, paused, resumed) = run.unwrap();
+    step("deleted");
+    let (spawned, first, paused, resumed, second) = run.unwrap();
+    let left = platform.list(&bot_label(&bot_id)).await.unwrap();
 
-    assert!(!spawned.guest_session_id.is_empty());
+    eprintln!("live: spawned={spawned:?}\npaused={paused:?}");
+    eprintln!("live: first={first:?} second={second:?} left={left:?}");
     assert_eq!(spawned.version, version::local_version());
+    assert!(first.to_lowercase().contains("pong"), "first: {first:?}");
     assert!(matches!(
         paused.status,
         BotStatus::Paused | BotStatus::Stopped
     ));
-    assert_eq!(resumed.status, BotStatus::Running);
+    assert!(paused.checkpoint_id.is_some());
     assert_eq!(resumed.guest_session_file, spawned.guest_session_file);
-    eprintln!("live: spawned={spawned:?}\npaused={paused:?}\nresumed={resumed:?}");
+    assert!(second.contains("PONG"), "second: {second:?}");
+    assert!(left.iter().all(|sandbox| sandbox.status.is_terminal()));
+    let checkpoint = paused.checkpoint_id.as_deref().unwrap();
+    assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
 }

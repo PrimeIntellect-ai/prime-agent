@@ -110,21 +110,31 @@ impl BotManager {
         };
         let halves = self.platform.open_stream(sandbox_id, &command).await?;
         // Dropping the halves on a timeout ends the relay.
-        tokio::time::timeout(HELLO_TIMEOUT, handshake(halves.read, halves.write))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "the bot {} did not say hello within {}s",
-                    bot.name,
-                    HELLO_TIMEOUT.as_secs()
-                )
-            })?
+        tokio::time::timeout(
+            HELLO_TIMEOUT,
+            handshake(halves.read, halves.write, halves.ended),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the bot {} did not say hello within {}s",
+                bot.name,
+                HELLO_TIMEOUT.as_secs()
+            )
+        })?
     }
 }
 
+/// How long a link that closed before the hello waits to learn how the relay ended.
+const RELAY_END_WAIT: Duration = Duration::from_secs(5);
+
 /// Read the hello line, check the version, and put the line back in front
-/// of the read half.
-async fn handshake<R, W>(read: R, write: W) -> anyhow::Result<Box<dyn TransportStream>>
+/// of the read half. A relay that ends first names its exit code and stderr.
+async fn handshake<R, W>(
+    read: R,
+    write: W,
+    ended: tokio::sync::oneshot::Receiver<String>,
+) -> anyhow::Result<Box<dyn TransportStream>>
 where
     R: AsyncRead + Unpin + Send + Sync + 'static,
     W: AsyncWrite + Unpin + Send + Sync + 'static,
@@ -139,7 +149,11 @@ where
         anyhow::bail!("the bot's daemon hello is longer than {MAX_HELLO_BYTES} bytes");
     }
     if read == 0 {
-        anyhow::bail!("the bot closed the link before its daemon said hello");
+        let relay = match tokio::time::timeout(RELAY_END_WAIT, ended).await {
+            Ok(Ok(relay)) => relay,
+            Ok(Err(_)) | Err(_) => "its end is unknown".to_string(),
+        };
+        anyhow::bail!("the bot closed the link before its daemon said hello (relay: {relay})");
     }
     let hello: Value = serde_json::from_str(&line)
         .map_err(|error| anyhow::anyhow!("the bot's daemon sent no hello: {error}"))?;
@@ -196,6 +210,19 @@ mod tests {
         let hello: Value = serde_json::from_str(&replayed).unwrap();
         assert_eq!(hello["type"], "daemon_hello");
         assert!(check_version(&hello).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_that_ends_before_the_hello_names_its_end() {
+        let (_dir, platform, manager) = setup();
+        let bot = manager.spawn(&spec("bot-a")).await.unwrap();
+        let end = r#"exit code 1, stderr: "Error: unknown command""#;
+        platform.state().relay_end = Some(end.to_string());
+        let error = manager.open_link(&bot).await.err().expect("refused");
+        assert_eq!(
+            error.to_string(),
+            format!("the bot closed the link before its daemon said hello (relay: {end})")
+        );
     }
 
     #[test]

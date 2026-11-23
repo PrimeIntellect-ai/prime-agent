@@ -35,7 +35,9 @@ Attach opens the normal session view against the bot's daemon. Prompts, steering
 
 ## Version match
 
-A bot runs the same prime-agent version as the daemon that owns it. The sandbox boots the public `python:3.12-bookworm` image (override it with `PRIME_AGENT_BOT_IMAGE`). The daemon installs that exact release in the sandbox when it creates the bot, and again on resume when the bot's version differs. If the versions still differ, attach and messaging are refused with a message that says which side to upgrade. A local build with no published Linux release cannot spawn bots.
+A bot runs the same prime-agent version as the daemon that owns it. The sandbox boots the public `python:3.12-bookworm` image (override it with `PRIME_AGENT_BOT_IMAGE`). The daemon installs that exact release in the sandbox when it creates the bot, and again on resume when the bot's version differs. If the versions still differ, attach and messaging are refused with a message that says which side to upgrade. After the install, the daemon checks that the bot's build has the bot guest side; a release without it refuses the spawn with a clear message.
+
+A local build (no published release) installs a linux-x64 tarball of its own build. Run `make bot-tarball` in its checkout on Linux: it puts the tarball next to `target/debug/prime-agent` and `target/release/prime-agent`, where the daemon finds it. Or set `PRIME_AGENT_BOT_TARBALL` to the tarball. The tarball must carry the daemon's exact version.
 
 ## Pause policy
 

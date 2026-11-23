@@ -111,7 +111,11 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
 
     // The hidden in-sandbox end of a bot link: pumps the exec channel to the
     // guest daemon socket until either side closes.
+    // `relay --probe` only proves this build has the guest side.
     if args.first().map(String::as_str) == Some("relay") {
+        if args.get(1).map(String::as_str) == Some("--probe") {
+            return Ok(0);
+        }
         return run_relay_mode();
     }
 

@@ -51,12 +51,17 @@ impl SandboxAuthSource {
 }
 
 /// The started process's stdio as transport halves: reading consumes its
-/// stdout, writing feeds its stdin pipe.
+/// stdout, writing feeds its stdin pipe. `ended` says how the process
+/// ended (its exit code and stderr tail) once it has.
 #[must_use]
 pub struct ExecStreamHalves {
     pub read: tokio::io::DuplexStream,
     pub write: tokio::io::DuplexStream,
+    pub ended: tokio::sync::oneshot::Receiver<String>,
 }
+
+/// The most stderr bytes kept to explain how a process ended.
+const STDERR_TAIL_BYTES: usize = 2048;
 
 /// Start one exec process and bridge its stdio to duplex halves. The
 /// returned stream ends are live until the process ends (EOF closes the
@@ -77,22 +82,41 @@ pub async fn spawn_exec_halves(
     let session_uuid = request.session_uuid.clone();
     let (stdout_read, mut stdout_write) = tokio::io::duplex(64 * 1024);
     let (stdin_read, stdin_write) = tokio::io::duplex(64 * 1024);
+    let (ended_send, ended) = tokio::sync::oneshot::channel();
 
-    // stdout: Data events flow into the client-visible end.
+    // stdout: Data events flow into the client-visible end; the stderr
+    // tail and the end event explain the end.
     tokio::spawn(async move {
-        loop {
+        let mut stderr = Vec::new();
+        let end = loop {
             match stream.next_event().await {
-                Some(Ok(CommandSessionEvent::Data { channel, data })) => {
-                    if channel == OutputChannel::Stdout
-                        && stdout_write.write_all(&data).await.is_err()
-                    {
-                        break;
+                Some(Ok(CommandSessionEvent::Data { channel, data })) => match channel {
+                    OutputChannel::Stdout => {
+                        if stdout_write.write_all(&data).await.is_err() {
+                            break "the link closed its read side".to_string();
+                        }
                     }
-                }
+                    OutputChannel::Stderr => {
+                        stderr.extend_from_slice(&data);
+                        let excess = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+                        stderr.drain(..excess);
+                    }
+                    OutputChannel::Pty => {}
+                },
                 Some(Ok(CommandSessionEvent::Start { .. } | CommandSessionEvent::Keepalive)) => {}
-                Some(Ok(CommandSessionEvent::End(_)) | Err(_)) | None => break,
+                Some(Ok(CommandSessionEvent::End(end))) => {
+                    break match (end.exit_code, end.error) {
+                        (_, Some(error)) => format!("ended with an error: {error}"),
+                        (Some(code), None) => format!("exit code {code}"),
+                        (None, None) => "ended with no exit code".to_string(),
+                    };
+                }
+                Some(Err(error)) => break format!("the exec stream failed: {error}"),
+                None => break "the exec stream ended with no end event".to_string(),
             }
-        }
+        };
+        let stderr = String::from_utf8_lossy(&stderr);
+        let _ = ended_send.send(format!("{end}, stderr: {:?}", stderr.trim()));
     });
 
     // stdin: client writes flow to the process's stdin pipe (a second
@@ -105,6 +129,7 @@ pub async fn spawn_exec_halves(
     Ok(ExecStreamHalves {
         read: stdout_read,
         write: stdin_write,
+        ended,
     })
 }
 

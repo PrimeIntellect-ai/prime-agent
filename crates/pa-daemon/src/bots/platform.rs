@@ -71,9 +71,12 @@ pub enum PlatformError {
     /// HTTP 409; retried with backoff.
     #[error("conflict: {0}")]
     Conflict(String),
-    /// Network, timeout, or 5xx; retried with backoff.
+    /// Network, timeout, 429, or 5xx; retried with backoff.
     #[error("{0}")]
     Transient(String),
+    /// HTTP 429 because the team's checkpoint storage is full; not retried.
+    #[error("the team's checkpoint storage is full: {0}")]
+    CheckpointQuota(String),
     /// Anything else; not retried.
     #[error("{0}")]
     Other(String),
@@ -302,7 +305,15 @@ fn map_error(error: &SandboxError) -> PlatformError {
             | SandboxErrorCode::RequestTimeout,
             _,
         ) => PlatformError::Transient(message),
-        (_, Some(status)) if status >= 500 => PlatformError::Transient(message),
+        // A rate limit passes: the caller retries with backoff.
+        (_, Some(429))
+            if error
+                .details()
+                .is_some_and(|details| details.contains("Checkpoint storage limit")) =>
+        {
+            PlatformError::CheckpointQuota(message)
+        }
+        (_, Some(status)) if status >= 500 || status == 429 => PlatformError::Transient(message),
         _ => PlatformError::Other(message),
     }
 }
@@ -509,8 +520,10 @@ impl BotPlatform for PrimePlatform {
             };
             let started = tokio::time::timeout(
                 STREAM_START_WAIT,
-                // The relay lives as long as the link: no process deadline.
-                // A silent reattach loses stdout, so a stream fault ends the link.
+                // The relay lives as long as the link: no deadline header
+                // (sandboxd reads `Connect-Timeout-Ms: 0` as an expired
+                // deadline). A silent reattach loses stdout, so a stream
+                // fault ends the link.
                 spawn_exec_halves(
                     &source,
                     &request,
@@ -519,7 +532,7 @@ impl BotPlatform for PrimePlatform {
                             max_reconnects: Some(0),
                             ..StreamOptions::default()
                         },
-                        connect_timeout_ms: Some(0),
+                        connect_timeout_ms: None,
                     },
                 ),
             )
@@ -558,9 +571,12 @@ impl BotPlatform for PrimePlatform {
                 match error.downcast_ref::<SandboxError>().map(map_error) {
                     Some(PlatformError::Transient(_)) => PlatformError::Transient(message),
                     Some(PlatformError::Conflict(_)) => PlatformError::Conflict(message),
-                    Some(PlatformError::NotFound(_) | PlatformError::Other(_)) | None => {
-                        PlatformError::Other(message)
-                    }
+                    Some(
+                        PlatformError::NotFound(_)
+                        | PlatformError::CheckpointQuota(_)
+                        | PlatformError::Other(_),
+                    )
+                    | None => PlatformError::Other(message),
                 }
             })?;
             Ok(GuestCredentials {
@@ -569,5 +585,38 @@ impl BotPlatform for PrimePlatform {
             })
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pa_sandbox::types::Method;
+    use pa_sandbox::SandboxError;
+
+    use super::{map_error, PlatformError};
+
+    #[test]
+    fn a_rate_limit_is_retried() {
+        let error = SandboxError::http("Sandbox list failed with HTTP 429").with_http_context(
+            Method::Get,
+            "https://api.test/sandbox",
+            Some(429),
+            None,
+        );
+        assert!(matches!(map_error(&error), PlatformError::Transient(_)));
+    }
+
+    #[test]
+    fn a_full_checkpoint_storage_is_not_retried() {
+        let error = SandboxError::http("Sandbox pause failed with HTTP 429").with_http_context(
+            Method::Post,
+            "https://api.test/sandbox/sb-1/pause",
+            Some(429),
+            Some("Checkpoint storage limit reached: 27376.7GiB used of 20480GiB allowed.".into()),
+        );
+        assert!(matches!(
+            map_error(&error),
+            PlatformError::CheckpointQuota(_)
+        ));
     }
 }
