@@ -120,10 +120,13 @@ pub(crate) fn parse_sandbox(value: serde_json::Value) -> Result<Sandbox, Sandbox
     })
 }
 
-/// The pause response: a sandbox record plus the `checkpointId` the pause
-/// froze.
+/// The pause response: a sandbox record plus the checkpoint id the pause
+/// froze (`checkpointId`, or `checkpoint_id`).
 pub(crate) fn parse_paused(value: serde_json::Value) -> Result<PausedSandbox, SandboxError> {
-    let checkpoint_id = match value.get("checkpointId") {
+    let checkpoint_id = match value
+        .get("checkpointId")
+        .or_else(|| value.get("checkpoint_id"))
+    {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(id)) if !id.is_empty() => Some(id.clone()),
         Some(_) => {
@@ -150,7 +153,7 @@ pub(crate) struct SandboxPage {
 struct RawPage {
     sandboxes: Vec<serde_json::Value>,
     page: u64,
-    #[serde(rename = "hasNext")]
+    #[serde(alias = "hasNext")]
     has_next: bool,
     #[serde(default)]
     next_cursor: Option<String>,

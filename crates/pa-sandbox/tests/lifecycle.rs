@@ -234,11 +234,11 @@ async fn list_by_label_follows_every_page() {
     let transport = ScriptedTransport::new(vec![
         ok(json!({
             "sandboxes": [sandbox_with_id("sb-1", "RUNNING")],
-            "page": 1, "perPage": 1, "hasNext": true,
+            "total": null, "page": 1, "per_page": 1, "has_next": true, "next_cursor": null,
         })),
         ok(json!({
             "sandboxes": [sandbox_with_id("sb-2", "PAUSED")],
-            "page": 2, "perPage": 1, "hasNext": false,
+            "total": null, "page": 2, "per_page": 1, "has_next": false, "next_cursor": null,
         })),
     ]);
     let client = test_client(&transport);
@@ -262,7 +262,7 @@ async fn list_by_label_follows_every_page() {
 #[tokio::test]
 async fn pause_returns_the_checkpoint_and_resume_answers_the_record() {
     let mut paused = sandbox_wire("RUNNING");
-    paused["checkpointId"] = json!("ckpt-1");
+    paused["checkpoint_id"] = json!("ckpt-1");
     let transport = ScriptedTransport::new(vec![ok(paused), ok(sandbox_wire("PAUSED"))]);
     let client = test_client(&transport);
     let pause = client.pause_sandbox("sb-1").await.unwrap();
