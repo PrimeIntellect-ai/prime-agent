@@ -732,7 +732,7 @@ impl AgentsViewMode {
             {
                 let dim = self.theme.fg_style(ThemeColor::Dim);
                 return vec![vec![crate::Span::styled(
-                    format!("  in factory: {label}"),
+                    format!("  in machine: {label}"),
                     dim,
                 )]];
             }
@@ -923,7 +923,7 @@ impl AgentsViewMode {
                 }
             }
             if self.factory_supported {
-                if let Some(keys) = all("app.agents.factory") {
+                if let Some(keys) = all("app.agents.machines") {
                     segments.push(format!("{keys} machines"));
                 }
             }

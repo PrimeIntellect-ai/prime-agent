@@ -351,7 +351,7 @@ fn update_restarting_rejection_round_trips_the_wire() {
 }
 
 /// The session-addressed lanes' kernel-not-running refusal (the
-/// `/factory off` guard's definitive-zero class): the exact wire string
+/// `/machine off` guard's definitive-zero class): the exact wire string
 /// classifies through the plain-message predicate, and no other refusal
 /// does — the guard's zero read must not fire on an unknown-command or
 /// initializing refusal, which stay unreadable and fail closed.

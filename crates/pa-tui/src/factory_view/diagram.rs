@@ -1,4 +1,4 @@
-//! The `/factory` view's diagram model: the snapshot shapes (states,
+//! The `/machine` view's diagram model: the snapshot shapes (states,
 //! transitions, live nodes, usage — including each stage's agent
 //! occupancy counts), the status glyphs and colors, and the compact
 //! guard rendering. One graph model feeds the ASCII diagram, so the

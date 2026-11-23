@@ -159,7 +159,7 @@ pub struct ActivityDock {
     pub factory_running: usize,
     /// Whether the factory group renders at all: the daemon's
     /// `factory_activity` advertisement (the factory's opt-in gate —
-    /// `factory.enabled`, off by default). A daemon without the lane
+    /// `machine.enabled`, off by default). A daemon without the lane
     /// mounts no factory group anywhere: no row, no traversal, no
     /// click, no page.
     pub factory_group: bool,

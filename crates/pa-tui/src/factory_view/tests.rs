@@ -596,7 +596,7 @@ fn a_malformed_cached_reply_mounts_with_the_error_not_a_silent_empty() {
     let mut view = FactoryView::from_reply(&json!({ "machine": {} }), 40);
     let joined = frame_text(&mut view).join("\n");
     assert!(
-        joined.contains("Error: malformed factory reply (no runs list)"),
+        joined.contains("Error: malformed machine reply (no runs list)"),
         "the malformed cache reports itself at mount: {joined}"
     );
     // A real empty reply (the runs list present) mounts clean: the
@@ -604,7 +604,7 @@ fn a_malformed_cached_reply_mounts_with_the_error_not_a_silent_empty() {
     let mut view = FactoryView::from_reply(&json!({ "runs": [] }), 40);
     let joined = frame_text(&mut view).join("\n");
     assert!(
-        joined.contains("No live factory runs."),
+        joined.contains("No live machine runs."),
         "an empty runs list is the real empty state: {joined}"
     );
     assert!(
@@ -677,8 +677,8 @@ fn the_empty_state_names_the_surface() {
     let mut view = FactoryView::new(Vec::new(), 40);
     let rows = frame_text(&mut view);
     let joined = rows.join("\n");
-    assert!(joined.contains("No live factory runs."), "{joined}");
-    assert!(joined.contains("await rlm.factory.run"), "{joined}");
+    assert!(joined.contains("No live machine runs."), "{joined}");
+    assert!(joined.contains("await rlm.machine.run"), "{joined}");
     assert!(
         joined.contains("node"),
         "the hint names the node walk: {joined}"

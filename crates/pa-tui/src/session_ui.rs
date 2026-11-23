@@ -322,7 +322,7 @@ pub(crate) struct SessionUi {
     /// snapshot — the page never repaints an unreadable overview as an
     /// empty one.
     factory_overview: serde_json::Value,
-    /// The durable session id the open `/factory` view was mounted on: the
+    /// The durable session id the open `/machine` view was mounted on: the
     /// rebind fold keeps the view across a same-session reattach (`Unknown
     /// active session` recovery) and closes it only when a different
     /// session actually takes the view's place.

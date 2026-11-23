@@ -161,7 +161,7 @@ fn the_overview_parse_carries_the_owner_wrapper() {
             {"runId": "run-4", "specId": "rsi", "machine": {}, "ownerId": hostile_id},
             {"specId": "rsi", "machine": {}},
         ],
-        "warnings": ["session owner-c: live factory graph unavailable"],
+        "warnings": ["session owner-c: live machine graph unavailable"],
     });
     assert!(overview_reply_lists_runs(&data));
     assert!(!overview_reply_lists_runs(&json!({"warnings": []})));
@@ -209,7 +209,7 @@ fn the_overview_parse_carries_the_owner_wrapper() {
     );
     assert_eq!(
         parse_overview_warnings(&data),
-        ["session owner-c: live factory graph unavailable"]
+        ["session owner-c: live machine graph unavailable"]
     );
 }
 
@@ -1440,7 +1440,7 @@ fn unreadable_owners_warn_while_other_owners_stay_listed() {
         parse_overview_runs(&json!({"runs": [
             overview_row("run-1", "rsi", "running", "owner-a", "alpha"),
         ]})),
-        vec!["session owner-c: live factory graph unavailable".to_string()],
+        vec!["session owner-c: live machine graph unavailable".to_string()],
     );
     let text = plain(&view.render(&theme(), 120, &kb()));
     assert!(
@@ -1778,7 +1778,7 @@ fn a_malformed_drill_in_reply_reports_the_lane_error() {
     assert!(view.detail.is_none());
     let text = plain(&view.render(&theme(), 100, &kb()));
     assert!(
-        text.contains("Error: malformed factory reply for machine rsi"),
+        text.contains("Error: malformed machine reply for machine rsi"),
         "{text}"
     );
 }

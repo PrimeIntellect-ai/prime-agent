@@ -370,7 +370,7 @@ enum SelectionEdge {
 struct AgentsViewMode {
     options: AgentsViewOptions,
     theme: Theme,
-    /// The daemon advertises the factory lane: `app.agents.factory` opens
+    /// The daemon advertises the machine lane: `app.agents.machines` opens
     /// the factory page through the selected session.
     factory_supported: bool,
     roster: Vec<Value>,

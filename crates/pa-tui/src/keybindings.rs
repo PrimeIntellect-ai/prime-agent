@@ -157,7 +157,7 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
     ("agentsNew", "app.agents.new"),
     ("agentsDelete", "app.agents.delete"),
     ("agentsProgram", "app.agents.program"),
-    ("agentsFactory", "app.agents.factory"),
+    ("agentsMachines", "app.agents.machines"),
     ("agentsRename", "app.agents.rename"),
     ("treeFoldOrUp", "app.tree.foldOrUp"),
     ("treeUnfoldOrDown", "app.tree.unfoldOrDown"),

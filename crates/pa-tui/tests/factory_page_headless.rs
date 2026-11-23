@@ -1,5 +1,5 @@
 //! Headless e2e for the factory page: a daemon that advertises the
-//! `factory_activity` lane opens the page on a bare `/factory`; the
+//! `factory_activity` lane opens the page on a bare `/machine`; the
 //! open fetch lists every machine (name, source, description) over the
 //! lane's `library` action, with every session's active runs (the
 //! `overview` action) and the attached session's finished runs
@@ -903,9 +903,9 @@ fn escape() -> KeyEvent {
 #[test]
 fn factory_page_lists_machines_with_runs_drills_in_and_escs_back() {
     let steps = vec![
-        // A bare `/factory` opens the page; hold for a fetched machine row
+        // A bare `/machine` opens the page; hold for a fetched machine row
         // and the nested run before the arrows walk the list.
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "\u{21b3} nightly-pr".to_string(),
             timeout_ms: 15_000,
@@ -1019,11 +1019,11 @@ fn a_foreign_run_renders_reads_and_reports_its_owner() {
         })
     };
     let steps = vec![
-        // A bare `/factory` opens the page; the anchored cursor opens
+        // A bare `/machine` opens the page; the anchored cursor opens
         // on the first live machine — pr-manager — whatever order the
         // machine list and the run rows arrive in (the needle is the
         // barrier the walk needs: the machine is live AND selected).
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "▸ ◈ pr-manager".to_string(),
             timeout_ms: 15_000,
@@ -1146,8 +1146,8 @@ fn an_older_daemons_overview_refusal_falls_back_to_the_scoped_graph() {
         reply
     };
     let steps = vec![
-        // A bare `/factory` opens the page; the machines list lands.
-        HeadlessStep::Submit("/factory".to_string()),
+        // A bare `/machine` opens the page; the machines list lands.
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "builder [repo]".to_string(),
             timeout_ms: 15_000,
@@ -1243,7 +1243,7 @@ fn a_first_open_paints_the_scoped_graph_rows_while_the_overview_is_held() {
         },
         // Open. The held overview answers zero runs seconds later, so the
         // page's own fetch cannot paint anything yet — the seed does.
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "\u{21b3} nightly-pr".to_string(),
             timeout_ms: 15_000,
@@ -1319,7 +1319,7 @@ fn the_docks_machines_item_shows_one_number_the_running_count() {
         // paused run's state (the state lives on the page, not the bar).
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(150),
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "doc-sweep \u{b7} library session \u{b7} paused".to_string(),
             timeout_ms: 15_000,
@@ -1393,7 +1393,7 @@ fn the_docks_machines_item_shows_one_number_the_running_count() {
 fn a_reopen_mounts_the_cached_overview_rows_saved() {
     let steps = vec![
         // The first open: the live row lands and warms the cache.
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "builder [repo]".to_string(),
             timeout_ms: 15_000,
@@ -1405,7 +1405,7 @@ fn a_reopen_mounts_the_cached_overview_rows_saved() {
         HeadlessStep::Key(escape()),
         // The reopen: the cached rows mount saved while the malformed
         // later reply keeps them on screen.
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "running \u{b7} saved".to_string(),
             timeout_ms: 15_000,
@@ -1466,7 +1466,7 @@ fn the_mount_seed_keeps_the_scoped_graphs_finished_runs() {
         // the finished one — the attached session's own rows, the
         // finished one carrying the session's own name (the label the
         // overview gives this session's live rows, never the raw id).
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "\u{21b3} nightly-pr".to_string(),
             timeout_ms: 15_000,
@@ -1590,7 +1590,7 @@ fn a_warm_reopen_keeps_the_saved_rows_and_gains_the_scoped_graphs_finished_run()
         // closing, so the reopen's cache is provably warm (the cold
         // scoped seed paints the same owner label the fold repaints,
         // so the label alone cannot barrier the fold).
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "7 transitions".to_string(),
             timeout_ms: 15_000,
@@ -1607,7 +1607,7 @@ fn a_warm_reopen_keeps_the_saved_rows_and_gains_the_scoped_graphs_finished_run()
         // The reopen: every LATER overview reply is held, so the
         // reopen's saved-era frames stay on screen — the finished row
         // beside the SAVED warm row is the mount seed's merge alone.
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "running \u{b7} saved".to_string(),
             timeout_ms: 15_000,
@@ -1695,7 +1695,7 @@ fn the_retained_row_scrubs_the_session_names_control_bytes() {
                 needle: "\u{2699} 1 machine".to_string(),
                 timeout_ms: 15_000,
             },
-            HeadlessStep::Submit("/factory".to_string()),
+            HeadlessStep::Submit("/machine".to_string()),
             HeadlessStep::WaitRender {
                 needle: "\u{21b3} nightly-done".to_string(),
                 timeout_ms: 15_000,
@@ -1766,7 +1766,7 @@ fn an_unnamed_owner_row_scrubs_the_ids_control_bytes() {
         overview_first: unnamed_owner_row(),
         overview_later: unnamed_owner_row(),
         steps: vec![
-            HeadlessStep::Submit("/factory".to_string()),
+            HeadlessStep::Submit("/machine".to_string()),
             HeadlessStep::WaitRender {
                 needle: "\u{21b3} unnamed-owner-run".to_string(),
                 timeout_ms: 15_000,
@@ -1833,7 +1833,7 @@ fn an_active_only_overview_fold_retains_the_scoped_graphs_finished_run() {
         },
         // Open: the seed paints the live row, the first overview reply
         // lists it live too, and the machines land for the walk.
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "\u{21b3} nightly-pr".to_string(),
             timeout_ms: 15_000,
@@ -1919,7 +1919,7 @@ fn enter_on_an_owned_saved_row_reports_the_state_not_a_dead_end() {
         }], "warnings": []})
     };
     let steps = vec![
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         // The machines list and the owned saved row nest under
         // pr-manager.
         HeadlessStep::WaitRender {
@@ -1990,7 +1990,7 @@ fn enter_on_an_owned_unarmed_row_reports_the_re_arm() {
         }], "warnings": []})
     };
     let steps = vec![
-        HeadlessStep::Submit("/factory".to_string()),
+        HeadlessStep::Submit("/machine".to_string()),
         HeadlessStep::WaitRender {
             needle: "builder [repo]".to_string(),
             timeout_ms: 15_000,
@@ -2037,7 +2037,7 @@ fn enter_on_an_owned_unarmed_row_reports_the_re_arm() {
 }
 
 /// The opt-in contract's off surface: a daemon whose hello advertises no
-/// `factory_activity` lane mounts no factory group, and a bare `/factory`
+/// `factory_activity` lane mounts no factory group, and a bare `/machine`
 /// opens no page.
 #[test]
 fn an_unadvertised_lane_mounts_no_factory_group_or_page() {
@@ -2048,8 +2048,8 @@ fn an_unadvertised_lane_mounts_no_factory_group_or_page() {
         HeadlessStep::Key(dock_right()),
         HeadlessStep::Key(dock_right()),
         HeadlessStep::Key(escape()),
-        HeadlessStep::Submit("/factory".to_string()),
-        // The refusal note is the barrier: `/factory` was handled and opened nothing.
+        HeadlessStep::Submit("/machine".to_string()),
+        // The refusal note is the barrier: `/machine` was handled and opened nothing.
         HeadlessStep::WaitRender {
             needle: "The machines page needs a daemon".to_string(),
             timeout_ms: 15_000,

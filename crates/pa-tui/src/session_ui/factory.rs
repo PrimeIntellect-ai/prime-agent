@@ -62,7 +62,7 @@ pub(crate) enum FactoryUpdate {
 }
 
 impl super::SessionUi {
-    /// Whether the daemon advertises the factory lane (older daemons never
+    /// Whether the daemon advertises the machine lane (older daemons never
     /// see the command): the open and every refresh tick key on the same
     /// gate, so an unsupported daemon spends no wakeups.
     pub(crate) fn factory_activity_supported(&self) -> bool {
@@ -85,7 +85,7 @@ impl super::SessionUi {
     pub(crate) fn open_factory_runs(&mut self, view: &mut AgentView, row: Option<FactoryRow>) {
         if !self.factory_activity_supported() {
             self.note(
-                "The run page needs a daemon that advertises the factory lane",
+                "The run page needs a daemon that advertises the machine lane",
                 view,
             );
             return;
@@ -121,7 +121,7 @@ impl super::SessionUi {
         selector: Option<(u64, u64)>,
     ) {
         if !self.factory_activity_supported() {
-            let text = "The node view needs a daemon that advertises the factory lane";
+            let text = "The node view needs a daemon that advertises the machine lane";
             self.note(text, view);
             // The factory page covers the transcript, so the status row alone
             // would be invisible: the toast overlay sits above the page.
@@ -402,7 +402,7 @@ impl super::SessionUi {
                     .get("state")
                     .and_then(Value::as_str)
                     .map_or_else(|| action.to_string(), crate::menu_panel::scrub_controls);
-                self.toast(&format!("Factory run {run_id} is now {state}"), view);
+                self.toast(&format!("Machine run {run_id} is now {state}"), view);
             }
             Err(error) => {
                 if let Some(factory_view) = view.factory_view.as_mut() {
@@ -416,12 +416,12 @@ impl super::SessionUi {
         Ok(())
     }
 
-    /// The session's live factory-run count, the `/factory off` lifecycle
+    /// The session's live factory-run count, the `/machine off` lifecycle
     /// guard's read: the same lane request and the same liveness rule the
     /// dock's count reads (`is_live` — a live state, or children still in
     /// flight), so the refusal names exactly what the dock shows. The
     /// request rides regardless of the hello's advertisement: a client
-    /// started before `/factory on` keeps its unadvertised hello, but the
+    /// started before `/machine on` keeps its unadvertised hello, but the
     /// kernel gate reads the settings live, so runs started after the
     /// toggle are live in that same client — the guard must see them.
     /// `Some(0)` also answers the kernel-not-running refusal: the lane

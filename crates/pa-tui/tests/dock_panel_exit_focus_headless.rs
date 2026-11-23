@@ -24,7 +24,7 @@ use support::{
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// The factory graph reply; `Some` also advertises the factory lane.
+    /// The factory graph reply; `Some` also advertises the machine lane.
     factory_graph: Option<Value>,
 }
 

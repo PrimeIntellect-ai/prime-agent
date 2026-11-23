@@ -34,11 +34,11 @@ use crate::{Line, Span};
 
 /// The page's malformed-lane error: a reply without the machines list is
 /// a malformed lane, never an empty library.
-pub const MALFORMED_LIBRARY_REPLY_ERROR: &str = "malformed factory reply (no machines list)";
+pub const MALFORMED_LIBRARY_REPLY_ERROR: &str = "malformed machine reply (no machines list)";
 
 /// The overview's malformed-lane error: a reply without the runs list is
 /// a malformed lane, never zero runs — the last good snapshot stays.
-pub const MALFORMED_OVERVIEW_REPLY_ERROR: &str = "malformed factory reply (no runs list)";
+pub const MALFORMED_OVERVIEW_REPLY_ERROR: &str = "malformed machine reply (no runs list)";
 
 /// One library machine row (the `library` list action's reply): the name
 /// the drill-in asks for, the description, the source level (`repo` for
@@ -417,7 +417,7 @@ impl LibraryView {
     /// a run with `!saved && is_live()`, never a saved snapshot in a
     /// live state (a durable record, an unarmed or stale cached row).
     /// Distinct from the free [`crate::factory_view::live_run_count`]
-    /// (the `/factory` gate's plain `is_live()` count over a graph
+    /// (the `/machine` gate's plain `is_live()` count over a graph
     /// reply).
     fn backed_live_run_count(&self, machine: &str) -> usize {
         self.runs_of(Some(machine))
@@ -597,7 +597,7 @@ impl LibraryView {
                 self.error = None;
             }
             None => {
-                self.set_error(Some(format!("malformed factory reply for machine {name}")));
+                self.set_error(Some(format!("malformed machine reply for machine {name}")));
             }
         }
     }
@@ -1035,7 +1035,7 @@ impl LibraryView {
         let mut tail: Vec<Line> = Vec::new();
         if self.machines.is_empty() {
             let note = if self.loaded {
-                "No machines in the library (add one with prime-agent factory import, or a machine directory under ~/.prime/agent/machines)."
+                "No machines in the library (add one with prime-agent machine import, or a machine directory under ~/.prime/agent/machines)."
             } else {
                 "Loading the machine library…"
             };

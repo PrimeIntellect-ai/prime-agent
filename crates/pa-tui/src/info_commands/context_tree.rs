@@ -366,7 +366,7 @@ fn walk_tree<'a>(
                             || derived_run_status(&members),
                             |state| run_state_status(state),
                         );
-                        (format!("factory {spec_id} {run6}"), status)
+                        (format!("machine {spec_id} {run6}"), status)
                     }
                     GroupKey::Deleted => ("deleted agents".to_string(), "deleted"),
                 };

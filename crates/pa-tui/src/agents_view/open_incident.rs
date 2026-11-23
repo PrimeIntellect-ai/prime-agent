@@ -140,12 +140,12 @@ impl AgentsViewMode {
         }
     }
 
-    /// `app.agents.factory`: open the machines page through the selected
+    /// `app.agents.machines`: open the machines page through the selected
     /// row's top-level session (a nested row's root agent); the page closes
     /// back to the agents view like an activity line's panel.
     pub(super) fn open_factory_for_selected(&mut self) {
         if !self.factory_supported {
-            self.set_status("The machines page needs the factory lane: run /factory on in a session, then restart");
+            self.set_status("The machines page needs the machine lane: run /machine on in a session, then restart");
             return;
         }
         let Some(row) = self.rows.get(self.selected).cloned() else {

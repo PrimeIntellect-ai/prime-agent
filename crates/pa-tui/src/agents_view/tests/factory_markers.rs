@@ -28,7 +28,7 @@ fn factory_child_rows_show_their_run_and_state_marker() {
         .map(flat)
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(text, "  in factory: review-loop/reviewing");
+    assert_eq!(text, "  in machine: review-loop/reviewing");
 }
 
 /// A failed graph read keeps the session's last markers, like its factory count; a successful

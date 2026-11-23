@@ -623,9 +623,9 @@ impl AgentsViewMode {
             self.cycle_program_for_selected();
             return;
         }
-        // `app.agents.factory` (default ctrl+f, empty editor only): open the factory page through
+        // `app.agents.machines` (default ctrl+f, empty editor only): open the factory page through
         // the selected row's session.
-        if !has_query && self.keybindings.matches(key, "app.agents.factory") {
+        if !has_query && self.keybindings.matches(key, "app.agents.machines") {
             self.open_factory_for_selected();
             return;
         }

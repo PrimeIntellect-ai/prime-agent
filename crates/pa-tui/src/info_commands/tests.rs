@@ -887,7 +887,7 @@ fn context_tree_groups_factory_runs_and_deleted_agents() {
         [
             "\u{25cf} main agent 1.0k $0.10 -",
             "\u{251c}\u{2500} \u{2713} worker-a 2.0k $0.02 -",
-            "\u{251c}\u{2500} \u{25c6} factory sw abcdef 8.0k $0.08 -",
+            "\u{251c}\u{2500} \u{25c6} machine sw abcdef 8.0k $0.08 -",
             "\u{2502} \u{251c}\u{2500} \u{2713} f1 3.0k $0.03 -",
             "\u{2502} \u{251c}\u{2500} \u{25c6} f2 4.0k $0.04 -",
             "\u{2502} \u{2514}\u{2500} \u{25c7} d1 1.0k $0.01 -",
@@ -908,7 +908,7 @@ fn context_tree_groups_factory_runs_and_deleted_agents() {
     ));
     assert_eq!(
         polled[5],
-        "\u{251c}\u{2500} \u{2717} factory sw abcdef 8.0k $0.08 -"
+        "\u{251c}\u{2500} \u{2717} machine sw abcdef 8.0k $0.08 -"
     );
 
     // The grand totals equal the ungrouped tree's: the real agents only.
@@ -949,7 +949,7 @@ fn context_tree_groups_factory_runs_and_deleted_agents() {
     ));
     let factory_row = collapsed
         .iter()
-        .position(|row| row.contains("factory sw abcdef 8.0k"))
+        .position(|row| row.contains("machine sw abcdef 8.0k"))
         .expect("the run row stays visible");
     assert!(
         collapsed[factory_row + 1].contains("f1 3.0k"),
@@ -981,7 +981,7 @@ fn context_tree_groups_factory_runs_and_deleted_agents() {
     ));
     assert!(
         folded.contains(
-            &"\u{2514}\u{2500} \u{2713} factory sw fedcba (10 agents) 1.0k $0.01 -".to_string()
+            &"\u{2514}\u{2500} \u{2713} machine sw fedcba (10 agents) 1.0k $0.01 -".to_string()
         ),
         "{folded:#?}"
     );

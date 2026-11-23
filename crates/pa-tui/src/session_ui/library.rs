@@ -1,5 +1,5 @@
 //! The machines page's session surface: the page open (the activity
-//! dock's machines group, `/factory`, and the agents view's factory line
+//! dock's machines group, `/machine`, and the agents view's factory line
 //! and key all land here), the view's key loop, and the daemon
 //! `factory_activity` lane the page's fetches ride (the `library` action:
 //! the machine list on open, one machine's graph payload on the drill-in;
@@ -64,7 +64,7 @@ impl super::SessionUi {
     pub(crate) fn open_factory_page(&mut self, view: &mut AgentView, user_initiated: bool) {
         if !self.factory_activity_supported() {
             self.note(
-                "The machines page needs a daemon that advertises the factory lane (turn it on with /factory on)",
+                "The machines page needs a daemon that advertises the machine lane (turn it on with /machine on)",
                 view,
             );
             return;
@@ -235,7 +235,7 @@ impl super::SessionUi {
     }
 
     /// Fire the open path's list fetch (the heartbeat refresh's shape,
-    /// one-shot: the library changes only through `prime-agent factory
+    /// one-shot: the library changes only through `prime-agent machine
     /// import | export`, so an open refetches rather than a standing
     /// poll). The reply lands through the run loop's channel; a stale
     /// epoch (a later open already fired) drops at fold time.

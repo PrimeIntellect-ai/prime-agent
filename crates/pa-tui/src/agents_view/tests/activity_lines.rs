@@ -111,7 +111,7 @@ fn child_lines_sit_one_indent_step_past_their_row() {
     );
 }
 
-/// The `app.agents.factory` key (default ctrl+f): the factory page opens through the selected
+/// The `app.agents.machines` key (default ctrl+f): the factory page opens through the selected
 /// row's top-level session (a nested child resolves to its root agent), closing back here; while
 /// the daemon advertises no factory lane it reports that instead.
 #[test]
@@ -122,7 +122,7 @@ fn the_factory_key_opens_the_factory_page_through_the_root_session() {
     assert_eq!(
         mode.status_text(),
         Some(
-            "The machines page needs the factory lane: run /factory on in a session, then restart"
+            "The machines page needs the machine lane: run /machine on in a session, then restart"
         )
     );
     mode.factory_supported = true;

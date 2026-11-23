@@ -25,7 +25,7 @@ use super::diagram::node_glyph;
 use super::mermaid::{mermaid_block_lines, split_mermaid_fences, FileSegment};
 
 /// The node reply's malformed-lane error.
-pub const MALFORMED_NODE_REPLY_ERROR: &str = "malformed factory reply (no node document)";
+pub const MALFORMED_NODE_REPLY_ERROR: &str = "malformed machine reply (no node document)";
 
 /// The node view's return target (the origin a child-session open
 /// records): the run, the state, and the selected instance, so leaving

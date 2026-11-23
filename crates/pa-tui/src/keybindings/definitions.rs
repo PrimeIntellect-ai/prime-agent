@@ -388,7 +388,7 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         def!(&["ctrl+o"], "Show the program that spawned subagents", scope "agents"),
     ),
     (
-        "app.agents.factory",
+        "app.agents.machines",
         def!(
             &["ctrl+f"],
             "Open the machines page through the selected session",

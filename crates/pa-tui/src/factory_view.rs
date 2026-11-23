@@ -303,7 +303,7 @@ impl FactoryCounts {
 /// The malformed-lane error line (one message for the mount and the
 /// fold): a reply without the runs list is a malformed lane, never
 /// zero runs.
-pub const MALFORMED_REPLY_ERROR: &str = "malformed factory reply (no runs list)";
+pub const MALFORMED_REPLY_ERROR: &str = "malformed machine reply (no runs list)";
 
 fn opt_string(value: Option<&Value>) -> Option<String> {
     value
@@ -408,7 +408,7 @@ pub(crate) fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
     })
 }
 
-/// One key press while the `/factory` view is open, resolved by the view's
+/// One key press while the `/machine` view is open, resolved by the view's
 /// own key loop (the session UI executes the returned action).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactoryViewAction {
@@ -462,7 +462,7 @@ impl FactoryRow {
     }
 }
 
-/// The `/factory` view's state: the parsed run panels, the selected row,
+/// The `/machine` view's state: the parsed run panels, the selected row,
 /// the armed stop, and the hysteresis bookkeeping.
 #[derive(Debug)]
 pub struct FactoryView {
@@ -882,13 +882,13 @@ impl FactoryView {
             panels.push(vec![Span::raw("")]);
             panels.push(vec![
                 Span::raw("  "),
-                theme.fg_span(ThemeColor::Text, "No live factory runs."),
+                theme.fg_span(ThemeColor::Text, "No live machine runs."),
             ]);
             panels.push(vec![
                 Span::raw("  "),
                 theme.fg_span(
                     ThemeColor::Muted,
-                    "Start one from the conversation: await rlm.factory.run('<spec_id>')",
+                    "Start one from the conversation: await rlm.machine.run('<spec_id>')",
                 ),
             ]);
         }
