@@ -97,13 +97,27 @@ pub(crate) struct FactoryLiveCache {
     /// The live half's warnings, one slot per owner: a real read
     /// failure's reason (a busy, successful, or skipped read clears it).
     pub(crate) warnings: BTreeMap<String, String>,
-    /// The owners with a background read in flight: at most one read per
-    /// owner, so a poll never stacks requests on one kernel.
-    pub(crate) in_flight: BTreeSet<String>,
-    /// The owners in the resident list of the latest refresh: a read that
-    /// lands after its owner passivated must not restamp the rows that
-    /// refresh pruned, or a gone session would paint as live for a poll.
-    pub(crate) resident: BTreeSet<String>,
+    /// The owners with a background read in flight, each with the
+    /// residency generation it was issued under: at most one read per
+    /// residency, so a poll never stacks requests on one kernel.
+    pub(crate) in_flight: BTreeMap<String, u64>,
+    /// The owners in the resident list of the latest refresh, each with
+    /// its current residency: a read that lands after its owner
+    /// passivated, or under an earlier residency of a re-admitted owner,
+    /// must not restamp rows or publish its timeout or failure, or a
+    /// gone worker's answer would paint as the live session's.
+    pub(crate) resident: BTreeMap<String, Residency>,
+    /// The last residency generation handed out.
+    pub(crate) last_generation: u64,
+}
+
+/// One owner's residency: the worker hosting it and the generation the
+/// live cache assigned when the owner entered the resident list or its
+/// worker changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Residency {
+    pub(crate) worker_id: String,
+    pub(crate) generation: u64,
 }
 
 /// Two activity-poll windows ([`ACTIVITY_POLL_INTERVAL`] in pa-types,
@@ -452,26 +466,46 @@ impl Supervisor {
     /// owner keeps its last rows until its read lands, and one owner's
     /// pending read never delays another owner's fold.
     fn spawn_factory_live_refresh(self: &Arc<Self>, owners: &[ResidentOwner]) {
-        let mut cache = self.factory_live.lock().unwrap();
+        let mut guard = self.factory_live.lock().unwrap();
+        let cache = &mut *guard;
         // An owner that left the resident list is gone from this refresh:
         // its kernel with it, so its cached rows must not stay (a
         // passivated owner's runs list from its durable record alone).
-        // The resident set also gates the fold: a read already in flight
-        // when the owner leaves must not restamp the rows pruned here.
-        let resident: BTreeSet<String> = owners.iter().map(|owner| owner.id.clone()).collect();
-        cache.resident.clone_from(&resident);
-        cache.rows.retain(|id, _| resident.contains(id));
-        cache.read_at.retain(|id, _| resident.contains(id));
-        cache.warnings.retain(|id, _| resident.contains(id));
+        // An owner keeps its residency only while it stays on the same
+        // worker; one that (re-)enters or moved gets a new generation,
+        // which gates the fold: a read issued under an earlier residency
+        // never restamps or warns for the current one.
+        let previous = std::mem::take(&mut cache.resident);
         for owner in owners {
-            if !cache.in_flight.insert(owner.id.clone()) {
-                continue; // its last read still pending: never stack a second
+            let residency = match previous.get(&owner.id) {
+                Some(residency) if residency.worker_id == owner.resident.worker_id => {
+                    residency.clone()
+                }
+                Some(_) | None => {
+                    cache.last_generation += 1;
+                    Residency {
+                        worker_id: owner.resident.worker_id.clone(),
+                        generation: cache.last_generation,
+                    }
+                }
+            };
+            cache.resident.insert(owner.id.clone(), residency);
+        }
+        let resident = &cache.resident;
+        cache.rows.retain(|id, _| resident.contains_key(id));
+        cache.read_at.retain(|id, _| resident.contains_key(id));
+        cache.warnings.retain(|id, _| resident.contains_key(id));
+        for owner in owners {
+            let generation = cache.resident[&owner.id].generation;
+            if cache.in_flight.get(&owner.id) == Some(&generation) {
+                continue; // this residency's read still pending: never stack a second
             }
+            cache.in_flight.insert(owner.id.clone(), generation);
             let supervisor = Arc::clone(self);
             let owner = owner.clone();
             tokio::spawn(async move {
                 let outcome = supervisor.read_factory_live(&owner).await;
-                supervisor.fold_factory_live(&owner.id, outcome);
+                supervisor.fold_factory_live(&owner.id, generation, outcome);
             });
         }
     }
@@ -511,14 +545,26 @@ impl Supervisor {
     /// rows' AGE at serve time is what bounds the live claim, so the
     /// next read that lands restores it); a real failure keeps them and
     /// carries its reason; a skipped (booting) owner keeps them through
-    /// its boot window. The owner's in-flight slot frees either way.
-    fn fold_factory_live(&self, owner: &str, outcome: Option<anyhow::Result<DaemonResponse>>) {
+    /// its boot window. The read's in-flight slot frees either way.
+    fn fold_factory_live(
+        &self,
+        owner: &str,
+        generation: u64,
+        outcome: Option<anyhow::Result<DaemonResponse>>,
+    ) {
         let mut cache = self.factory_live.lock().unwrap();
-        cache.in_flight.remove(owner);
-        // The read outlived its owner's residency: the refresh that
-        // removed the owner pruned its rows, and this late fold must not
-        // put them back (the durable record alone answers now).
-        if !cache.resident.contains(owner) {
+        if cache.in_flight.get(owner) == Some(&generation) {
+            cache.in_flight.remove(owner);
+        }
+        // The read outlived the residency it was issued under: the owner
+        // passivated (its rows were pruned and its durable record alone
+        // answers) or came back as a new residency (whose own read is
+        // issued). Its rows, timeout, or failure are not this residency's.
+        if cache
+            .resident
+            .get(owner)
+            .is_none_or(|residency| residency.generation != generation)
+        {
             return;
         }
         match outcome {
@@ -1410,14 +1456,15 @@ mod tests {
         });
         // The fold gate: production only folds a read the refresh spawned
         // for a resident owner, so seed the resident set the refresh owns.
-        supervisor
-            .factory_live
-            .lock()
-            .unwrap()
-            .resident
-            .insert("busy".to_string());
+        supervisor.factory_live.lock().unwrap().resident.insert(
+            "busy".to_string(),
+            Residency {
+                worker_id: "w-busy".to_string(),
+                generation: 1,
+            },
+        );
         // A successful read replaces the owner's rows and stamps them.
-        supervisor.fold_factory_live("busy", Some(healthy));
+        supervisor.fold_factory_live("busy", 1, Some(healthy));
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
@@ -1426,13 +1473,13 @@ mod tests {
                 "the fresh stamp qualifies the rows as live"
             );
             assert!(cache.warnings.is_empty());
-            assert!(!cache.in_flight.contains("busy"));
+            assert!(!cache.in_flight.contains_key("busy"));
         }
         // A timed-out read keeps the rows and their OLD stamp: the busy
         // owner's claim ages into the saved marker at serve time instead
         // of staying an unqualified live row forever.
         let stamped = supervisor.factory_live.lock().unwrap().read_at["busy"];
-        supervisor.fold_factory_live("busy", Some(timeout));
+        supervisor.fold_factory_live("busy", 1, Some(timeout));
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert_eq!(
@@ -1444,10 +1491,10 @@ mod tests {
                 "a timed-out read never restamps the rows it kept"
             );
             assert!(cache.warnings.is_empty(), "a busy owner is not a failure");
-            assert!(!cache.in_flight.contains("busy"));
+            assert!(!cache.in_flight.contains_key("busy"));
         }
         // A real failure keeps them and carries its reason.
-        supervisor.fold_factory_live("busy", Some(refused));
+        supervisor.fold_factory_live("busy", 1, Some(refused));
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
@@ -1458,7 +1505,7 @@ mod tests {
         }
         // A skipped (booting) owner keeps its rows through the boot
         // window and clears the owner's warning slot.
-        supervisor.fold_factory_live("busy", None);
+        supervisor.fold_factory_live("busy", 1, None);
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
@@ -1467,7 +1514,7 @@ mod tests {
                 "the boot window never restamps the rows it kept"
             );
             assert!(cache.warnings.is_empty());
-            assert!(!cache.in_flight.contains("busy"));
+            assert!(!cache.in_flight.contains_key("busy"));
         }
     }
 
@@ -1537,7 +1584,7 @@ mod tests {
                 .rows
                 .insert("gone".to_string(), vec![json!({ "runId": "run-gone" })]);
             cache.read_at.insert("gone".to_string(), Instant::now());
-            cache.in_flight.insert("gone".to_string());
+            cache.in_flight.insert("gone".to_string(), 1);
         }
         // The passivation refresh prunes the rows but cannot cancel the
         // read already in flight.
@@ -1545,12 +1592,13 @@ mod tests {
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert!(!cache.rows.contains_key("gone"));
-            assert!(cache.in_flight.contains("gone"));
+            assert!(cache.in_flight.contains_key("gone"));
         }
         // The late read lands after the prune: it must not put the rows
         // back or restamp them.
         supervisor.fold_factory_live(
             "gone",
+            1,
             Some(Ok(DaemonResponse {
                 id: None,
                 command: "factory_activity".to_string(),
@@ -1569,7 +1617,89 @@ mod tests {
             !cache.read_at.contains_key("gone"),
             "the late fold restamps nothing"
         );
-        assert!(!cache.in_flight.contains("gone"));
+        assert!(!cache.in_flight.contains_key("gone"));
+    }
+
+    /// A read issued under an owner's earlier residency lands after the
+    /// owner unloaded and was re-admitted: the re-admission issues its
+    /// own fresh read instead of waiting on the old one, and the old
+    /// worker's timeout or failure is discarded, never published as the
+    /// new residency's result.
+    #[tokio::test]
+    async fn a_late_read_from_an_earlier_residency_is_discarded() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let owner = |resident: Arc<ResidentWorker>| ResidentOwner {
+            id: "owner".to_string(),
+            active_session_id: "owner".to_string(),
+            name: None,
+            resident,
+        };
+        let readmitted = memory_only_resident("w-new", "owner");
+        // The first residency's read is in flight (seeded: a spawned
+        // read of a memory-only resident would land at once).
+        {
+            let mut cache = supervisor.factory_live.lock().unwrap();
+            cache.last_generation = 1;
+            cache.resident.insert(
+                "owner".to_string(),
+                Residency {
+                    worker_id: "w-old".to_string(),
+                    generation: 1,
+                },
+            );
+            cache.in_flight.insert("owner".to_string(), 1);
+        }
+        // Unload, then re-admit on a new worker before the read lands.
+        supervisor.spawn_factory_live_refresh(&[]);
+        supervisor.spawn_factory_live_refresh(&[owner(readmitted)]);
+        let current = {
+            let cache = supervisor.factory_live.lock().unwrap();
+            let current = cache.resident["owner"].generation;
+            assert_ne!(current, 1, "the re-admission is a new residency");
+            assert_eq!(
+                cache.in_flight.get("owner"),
+                Some(&current),
+                "the re-admission issues its own fresh read"
+            );
+            current
+        };
+        // The old worker's failure and timeout land late: both discarded.
+        supervisor.fold_factory_live(
+            "owner",
+            1,
+            Some(Ok(DaemonResponse {
+                id: None,
+                command: "factory_activity".to_string(),
+                success: false,
+                error: Some("Kernel is not running".to_string()),
+                data: None,
+                error_info: None,
+            })),
+        );
+        supervisor.fold_factory_live(
+            "owner",
+            1,
+            Some(Err(anyhow::anyhow!(WORKER_READ_TIMED_OUT))),
+        );
+        let cache = supervisor.factory_live.lock().unwrap();
+        assert!(
+            cache.warnings.is_empty(),
+            "the old residency's failure is never published"
+        );
+        assert!(!cache.rows.contains_key("owner"));
+        assert!(!cache.read_at.contains_key("owner"));
+        assert_eq!(
+            cache.in_flight.get("owner"),
+            Some(&current),
+            "the late fold never frees the fresh read's slot"
+        );
     }
 
     /// A memory-only resident (no session file: the saved catalog never
