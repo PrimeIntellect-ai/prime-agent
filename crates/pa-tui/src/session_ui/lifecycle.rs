@@ -1001,6 +1001,63 @@ mod backfill_tests {
         .expect("mock session open, node mount and rebind complete within ten seconds");
     }
 
+    /// A same-session rebind while the node's template-files fetch is out sends a new fetch on
+    /// the reattached active session: the old fetch's reply names the replaced session and is
+    /// dropped, so the view must not keep waiting on it.
+    #[tokio::test]
+    async fn a_same_session_rebind_refetches_the_node_files_in_flight() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("files.sock");
+            let (mut session, server) = mock_session_with_capabilities(
+                &socket,
+                mpsc::unbounded_channel().0,
+                &["factory_activity"],
+            )
+            .await;
+            let (factory_tx, mut factory_rx) = mpsc::unbounded_channel();
+            session.factory_updates = factory_tx;
+            session.factory_graph = json!({"runs": [
+                {"runId": "run-1", "specId": "pipeline", "machine": {"states": []}},
+            ]});
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::FactoryRuns {
+                    row: Some(crate::factory_view::FactoryRow::header("run-1")),
+                    node: Some(crate::factory_view::node::NodeTarget {
+                        run_id: "run-1".to_string(),
+                        state_id: "worker".to_string(),
+                        instance: None,
+                    }),
+                },
+                true,
+                &mut view,
+            );
+            session.active_session_id = "s1-reattached".to_string();
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            loop {
+                let update = factory_rx
+                    .recv()
+                    .await
+                    .expect("the session holds the sender");
+                if matches!(
+                    update,
+                    crate::session_ui::FactoryUpdate::NodeFiles { ref session, .. }
+                        if session == "s1-reattached"
+                ) {
+                    break;
+                }
+            }
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("the rebind sends a files fetch on the reattached session within ten seconds");
+    }
+
     /// A rebind that tears down an agents-view panel drops its return: a later dock-opened shells
     /// panel closes back to the dock, never to the agents view.
     #[tokio::test]
