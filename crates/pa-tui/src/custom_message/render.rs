@@ -137,8 +137,7 @@ pub(crate) fn agent_message_body(message: &str, theme: &Theme, width: usize) -> 
     let mut lines: Vec<Line> = Vec::new();
     for source in message.split('\n') {
         let wrapped = wrap_text(source, text_width);
-        for mut line in wrapped {
-            crate::hyperlinks::strip_osc8(&mut line);
+        for line in wrapped {
             lines.push(line);
         }
     }
@@ -208,10 +207,11 @@ pub(crate) fn render_shell_completion(
     }
     out.push(header);
     if detail.tool_output_expanded() {
-        let mut body =
-            crate::branch::branch_block(&vec![Span::raw(row.content.clone())], theme, width);
-        body.iter_mut().for_each(crate::hyperlinks::strip_osc8);
-        out.extend(body);
+        out.extend(crate::branch::branch_block(
+            &vec![Span::raw(row.content.clone())],
+            theme,
+            width,
+        ));
     }
     out
 }

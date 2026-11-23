@@ -176,7 +176,6 @@ pub fn render_compaction_stream(
                     .map(|span| Span::styled(span.content.clone(), body)),
             );
         }
-        crate::hyperlinks::strip_osc8(&mut row);
         painted.push(row);
     }
     crate::branch::branch_rows(painted, theme)
@@ -349,10 +348,7 @@ fn collapsed_summary_rows(summary: &str, style: ratatui::style::Style, width: us
         .into_iter()
         .map(|line| {
             crate::chat::pad_to(
-                vec![Span::styled(
-                    format!(" {}", crate::hyperlinks::strip_osc8_content(&line)),
-                    style,
-                )],
+                vec![Span::styled(format!(" {line}"), style)],
                 width,
                 ratatui::style::Style::default(),
             )

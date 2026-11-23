@@ -9,7 +9,7 @@ use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::str_width;
 use crate::{Line, Span};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 
 /// How much detail the conversation shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,25 +328,36 @@ pub(crate) fn render_user_block_with_style(
 ) -> Vec<Line> {
     let bg = theme.bg_style(ThemeBg::UserMessageBg);
     let content_width = width.saturating_sub(4).max(1);
-    let mut md = md.clone();
-    md.body = theme.fg_style(ThemeColor::UserMessageText);
+    let body = theme.fg_style(ThemeColor::UserMessageText);
     let mask = geometry::user_mask(text);
-    let rendered = crate::markdown::render_markdown(&mask.text, content_width, &md);
+    let rendered = crate::markdown::render_markdown(&mask.text, content_width, md);
     let mut rows: Vec<Line> = Vec::new();
     let blank = vec![Span::styled(" ".repeat(width), bg)];
     rows.push(blank.clone());
     if rendered.is_empty() {
         let row = vec![
             Span::styled("  ".to_string(), bg),
-            Span::styled(String::new(), md.body),
+            Span::styled(String::new(), body),
         ];
         rows.push(pad_to(row, width, bg));
     }
     for line in rendered {
         let mut row: Line = vec![Span::styled("  ".to_string(), bg)];
+        // The user block colors everything `userMessageText` on the block background;
+        // markdown structure (wrapping) is kept, its own colors are not, and the link
+        // affordance survives the restyle.
         let restyled: Line = line
             .into_iter()
-            .map(|span| Span::styled(span.content, bg.patch(span.style)))
+            .map(|span| {
+                let mut style = bg.patch(body);
+                if span.style.add_modifier.contains(Modifier::UNDERLINED) {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                if span.style.fg == md.link_url.fg {
+                    style = style.patch(md.link_url);
+                }
+                Span::styled(span.content, style)
+            })
             .collect();
         row.extend(mask.restore_line(theme, &restyled));
         rows.push(pad_to(row, width, bg));
