@@ -501,11 +501,11 @@ impl SessionInbox {
         taken
     }
 
-    /// Withdraw the waiting messages with the given ids: the same
-    /// journal-first, then-store order the drained reads use, with one
-    /// `Withdrawn` record per removed id, so a restart keeps the
-    /// withdrawal. Returns the removed messages in arrival order.
-    pub fn withdraw_ids(&self, ids: &std::collections::BTreeSet<String>) -> Vec<InboxMessage> {
+    /// Withdraw every waiting message of one class: the same journal-first,
+    /// then-store order the drained reads use, with one `Withdrawn` record
+    /// per removed id, so a restart keeps the withdrawal. Returns the
+    /// removed messages in arrival order.
+    pub fn withdraw_class(&self, class: &str) -> Vec<InboxMessage> {
         let mut state = self
             .state
             .lock()
@@ -513,7 +513,7 @@ impl SessionInbox {
         let mut removed = Vec::new();
         let mut remaining = Vec::new();
         for message in std::mem::take(&mut state.messages) {
-            if ids.contains(&message.id) {
+            if message.class == class {
                 removed.push(message);
             } else {
                 remaining.push(message);
@@ -1393,11 +1393,11 @@ mod tests {
         assert_eq!(drained[0].id, "inbox-1");
     }
 
-    /// An id withdrawal removes exactly those ids, journals one
+    /// A class withdrawal removes exactly that class, journals one
     /// `Withdrawn` record per id, and replays as removed (the agent-message
     /// clear of the durable store).
     #[test]
-    fn withdraw_ids_removes_exactly_those_ids_and_replays() {
+    fn withdraw_class_removes_one_class_and_replays() {
         let dir = tempfile::tempdir().unwrap();
         {
             let inbox = SessionInbox::open(Some(dir.path()));
@@ -1413,7 +1413,7 @@ mod tests {
                 notice("peer", INBOX_CLASS_AGENT_MESSAGE, "third", json!({})),
                 3_000,
             );
-            let removed = inbox.withdraw_ids(&["inbox-2", "inbox-3"].map(String::from).into());
+            let removed = inbox.withdraw_class(INBOX_CLASS_AGENT_MESSAGE);
             assert_eq!(
                 removed.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
                 ["second", "third"]
@@ -1422,8 +1422,8 @@ mod tests {
             assert_eq!(count, 1);
             assert_eq!(classes[INBOX_CLASS_BASH_DONE], 1);
         }
-        // The withdrawal replays: the removed ids stay gone, the rest
-        // survives, and a fresh id never collides.
+        // The withdrawal replays: the removed ids stay gone, the other
+        // class survives, and a fresh id never collides.
         let reopened = SessionInbox::open(Some(dir.path()));
         let drained = reopened.drain();
         assert_eq!(drained.len(), 1);

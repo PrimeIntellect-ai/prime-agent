@@ -2210,11 +2210,10 @@ async fn a_closed_session_refuses_the_delivery_with_or_without_a_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A clear takes only the not-yet-announced batch (the records the
-/// queued arrival row covers); a pause takes no inbox record at all.
-/// Announced mail stays readable through both.
+/// A clear takes every waiting agent message, announced or not; a pause
+/// takes no inbox record at all.
 #[tokio::test]
-async fn a_clear_takes_only_the_unannounced_batch_and_a_pause_takes_none() {
+async fn a_clear_takes_every_waiting_agent_message_and_a_pause_takes_none() {
     let (worker, inbox, dir) = faux_worker_with_inbox();
     worker.dispatch("clear_queue", &json!({})).await;
     worker.core.lock().unwrap().busy = true;
@@ -2230,40 +2229,17 @@ async fn a_clear_takes_only_the_unannounced_batch_and_a_pause_takes_none() {
     let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
     assert_eq!(
         cleared.data,
-        Some(json!({ "steering": ["[agent-message from peer-1]\n\nunannounced"], "followUp": [] })),
-        "the clear takes the unannounced batch only"
+        Some(json!({
+            "steering": [
+                "[agent-message from peer-1]\n\nannounced",
+                "[agent-message from peer-1]\n\nunannounced"
+            ],
+            "followUp": []
+        })),
+        "the clear takes every waiting agent message"
     );
-    let waiting: Vec<String> = inbox
-        .waiting_messages()
-        .into_iter()
-        .map(|message| message.text)
-        .collect();
-    assert_eq!(waiting, ["[agent-message from peer-1]\n\nannounced"]);
-    assert_eq!(arrival_rows(&worker), 0, "the emptied batch drops its row");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A restored arrival row arrives without its batch: a clear right after
-/// the restart cannot tell which waiting records it covers, so it takes
-/// none (older announced mail must never go).
-#[tokio::test]
-async fn a_clear_over_a_restored_arrival_row_takes_nothing() {
-    let (worker, inbox, dir) = faux_worker_with_inbox();
-    worker.dispatch("clear_queue", &json!({})).await;
-    worker.core.lock().unwrap().busy = true;
-    assert!(
-        deliver_agent_message(&worker, "before the restart")
-            .await
-            .success
-    );
-    // The restart: the queued row survives, the process-local batch not.
-    worker.inbox_arrivals.lock().unwrap().clear();
-    let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
-    assert_eq!(
-        cleared.data,
-        Some(json!({ "steering": [], "followUp": [] }))
-    );
-    assert_eq!(inbox.count().0, 1, "the waiting record stays");
+    assert_eq!(inbox.count().0, 0);
+    assert_eq!(arrival_rows(&worker), 0, "the emptied inbox drops its row");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
