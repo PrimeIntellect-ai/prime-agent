@@ -245,32 +245,32 @@ impl super::SessionUi {
         let epoch = self.library_list_epoch;
         let tx = self.library_updates.clone();
         tokio::spawn(async move {
-            let fetched = client.request_ok(DaemonCommand::FactoryActivity {
-                id: None,
-                active_session_id: active_session_id.clone(),
-                action: "library".to_string(),
-                run_id: None,
-                spec_id: None,
-                timeout_ms: None,
-                rest: Map::default(),
-            });
-            let fetched =
-                tokio::time::timeout(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), fetched).await;
+            // This read may boot the session's kernel, which can outlast the UI request bound;
+            // it runs off the key loop, so it takes the long-running class.
+            let fetched = client
+                .request_ok_with_timeout(
+                    DaemonCommand::FactoryActivity {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        action: "library".to_string(),
+                        run_id: None,
+                        spec_id: None,
+                        timeout_ms: None,
+                        rest: Map::default(),
+                    },
+                    crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS,
+                )
+                .await;
             let update = match fetched {
-                Ok(Ok(data)) => LibraryUpdate::Machines {
+                Ok(data) => LibraryUpdate::Machines {
                     session: active_session_id,
                     epoch,
                     data,
                 },
-                Ok(Err(error)) => LibraryUpdate::Error {
+                Err(error) => LibraryUpdate::Error {
                     session: active_session_id,
                     epoch,
                     message: format!("{error:#}"),
-                },
-                Err(_) => LibraryUpdate::Error {
-                    session: active_session_id,
-                    epoch,
-                    message: "timed out waiting for the Prime Agent daemon response".to_string(),
                 },
             };
             let _ = tx.send(update);
