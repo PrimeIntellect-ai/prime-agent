@@ -181,7 +181,10 @@ impl Supervisor {
                 biased;
                 read = reader.read_until(b'\n', &mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break 'serve Ok(()) };
-                    if read == 0 {
+                    // At end of stream, bytes a cancelled read took are still
+                    // buffered: they are the client's last command, even
+                    // without its newline. The next read finds `line` empty.
+                    if read == 0 && line.is_empty() {
                         break 'serve Ok(());
                     }
                     let Ok(line) = String::from_utf8(std::mem::take(&mut line)) else {
@@ -1463,6 +1466,68 @@ mod tests {
             expected("split")
         );
         connection.abort();
+    }
+
+    /// A last command without its newline, whose bytes a cancelled read took,
+    /// must still run when the client closes its write half.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_half_received_last_command_runs_at_end_of_stream() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let mut events = supervisor.events.subscribe();
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        let (client_read, mut client_write) = client_side.into_split();
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        let first = json!({
+            "type": "command",
+            "id": "first",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "command": {"type": "roster_unsubscribe"},
+        });
+        let last = json!({
+            "type": "command",
+            "id": "last",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "command": {"type": "shutdown", "force": true},
+        });
+        // One write, so one socket read takes both commands: the loop
+        // dispatches the first, its next read holds the whole last command
+        // while waiting for a newline, and the first response wins the select.
+        client_write
+            .write_all(format!("{first}\n{last}").as_bytes())
+            .await
+            .expect("send both commands");
+        let mut response = String::new();
+        client
+            .read_line(&mut response)
+            .await
+            .expect("the first response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap(),
+            response_line(&response_success(Some("first"), "roster_unsubscribe", None))
+        );
+        client_write.shutdown().await.expect("close the write half");
+        connection.await.expect("connection task").unwrap();
+        // The shutdown command's broadcast proves it ran.
+        let (_, closing) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the last command ran")
+            .expect("the event ring");
+        assert_eq!(*closing, daemon_closing_shutdown_event());
     }
 
     // One real connection speaking for `client_id`, driven through its
