@@ -117,8 +117,8 @@ pub enum SessionPanel {
     FactoryRuns {
         row: Option<crate::factory_view::FactoryRow>,
     },
-    /// The `/bots` page (the return from an attached bot).
-    Bots,
+    /// The `/bots` page (the return from an attached bot), with the error that ended the attach.
+    Bots { error: Option<String> },
 }
 
 /// The page that requested a session (the factory page's state open): leaving the requested

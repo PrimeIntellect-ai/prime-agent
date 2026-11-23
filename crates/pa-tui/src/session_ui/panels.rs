@@ -271,7 +271,12 @@ impl SessionUi {
                     self.sync_factory_selection(view);
                 }
             }
-            crate::interactive::SessionPanel::Bots => self.open_bots_page(view),
+            crate::interactive::SessionPanel::Bots { error } => {
+                self.open_bots_page(view);
+                if let Some(Overlay::Bots(page)) = view.overlay.as_mut() {
+                    page.set_attach_error(error);
+                }
+            }
         }
         self.panel_returns_to_agents_view = closes_to_agents_view
             && matches!(

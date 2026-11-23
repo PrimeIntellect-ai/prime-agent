@@ -161,7 +161,7 @@ impl SessionUi {
             } => {
                 self.pending_selection = Some(SessionSelection::Bot(bot));
                 self.pending_selection_origin = Some(SelectionOrigin {
-                    panel: SessionPanel::Bots,
+                    panel: SessionPanel::Bots { error: None },
                     closes_to_agents_view: self.panel_returns_to_agents_view,
                 });
                 self.exit_requested = true;
