@@ -143,7 +143,10 @@ impl Supervisor {
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;
 
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        // The partial line survives a cancelled read: another arm can win the
+        // select while a command is half-received, and `read_until` keeps the
+        // bytes it already took (`read_line` drops them).
+        let mut line = Vec::new();
         let mut events = self.events.subscribe();
         // Session events ride this per-connection queue (the subscriber
         // registry resolves delivery at publish time, TS `handleWorkerFrame`
@@ -174,14 +177,16 @@ impl Supervisor {
         // The loop yields the connection's result; a write failure parks the
         // error and falls through the shared exit tail below.
         let served: Result<()> = 'serve: loop {
-            line.clear();
             tokio::select! {
                 biased;
-                read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
+                read = reader.read_until(b'\n', &mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break 'serve Ok(()) };
                     if read == 0 {
                         break 'serve Ok(());
                     }
+                    let Ok(line) = String::from_utf8(std::mem::take(&mut line)) else {
+                        break 'serve Ok(());
+                    };
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() {
                         continue;
@@ -1386,6 +1391,76 @@ mod tests {
         assert!(
             line.contains("events dropped"),
             "the log names the dropped count: {line}"
+        );
+        connection.abort();
+    }
+
+    /// A command whose bytes arrive in two reads must survive the select
+    /// arm that wins in between: here the response to the command sent just
+    /// before it, which cancels the read holding the first half.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_half_received_command_survives_a_response_between_its_reads() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        let (client_read, mut client_write) = client_side.into_split();
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        let unsubscribe = |id: &str| {
+            json!({
+                "type": "command",
+                "id": id,
+                "protocol": {"name": "prime-agent.daemon", "version": 7},
+                "command": {"type": "roster_unsubscribe"},
+            })
+            .to_string()
+        };
+        let split = unsubscribe("split");
+        let (head, tail) = split.split_at(split.len() / 2);
+        // One write, so one socket read takes the first command and the
+        // second one's head: the loop dispatches the first, its next read
+        // holds the head while waiting for the rest, and the first response
+        // then wins the select.
+        client_write
+            .write_all(format!("{}\n{head}", unsubscribe("first")).as_bytes())
+            .await
+            .expect("send the first command and the head");
+        let expected =
+            |id: &str| response_line(&response_success(Some(id), "roster_unsubscribe", None));
+        let mut first = String::new();
+        client
+            .read_line(&mut first)
+            .await
+            .expect("the first response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&first).unwrap(),
+            expected("first")
+        );
+        client_write
+            .write_all(format!("{tail}\n").as_bytes())
+            .await
+            .expect("send the tail");
+        let mut second = String::new();
+        client
+            .read_line(&mut second)
+            .await
+            .expect("the second response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&second).unwrap(),
+            expected("split")
         );
         connection.abort();
     }
