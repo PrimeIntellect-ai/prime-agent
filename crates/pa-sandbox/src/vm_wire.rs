@@ -1,10 +1,8 @@
 //! The `command_session` wire helpers shared by the client and the
 //! stream pump: RPC URL construction, per-RPC headers, media-type checks,
 //! codec-fault mapping, bounded error-body previews, the non-2xx status
-//! mapping, end-of-stream parsing, and empty-message validation. Port of
-//! the helper half of `vm-process-client.ts` (TS branch
-//! `feat/direct-cloud-sandbox`); see [`crate::vm_process`] for the wire
-//! contract and the safety contract.
+//! mapping, end-of-stream parsing, and empty-message validation. See
+//! [`crate::vm_process`] for the wire contract and the safety contract.
 
 use std::time::Duration;
 

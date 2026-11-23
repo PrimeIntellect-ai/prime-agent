@@ -1,8 +1,7 @@
 //! Wire primitives for the sandbox `command_session` client: the strict
 //! protobuf varint/length-delimited reader and writer, the canonical
 //! UUID idempotency-key parser, and the Connect protocol frame envelope
-//! its streaming RPCs use. Port of the primitives half of
-//! `command-session-proto.ts` (TS branch `feat/direct-cloud-sandbox`).
+//! its streaming RPCs use.
 //!
 //! Strictness contract (TS parity):
 //! - decoders reject malformed or truncated input instead of defaulting;

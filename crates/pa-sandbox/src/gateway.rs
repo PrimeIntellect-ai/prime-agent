@@ -1,5 +1,4 @@
-//! The per-sandbox gateway credential fetch. Port of the gateway auth
-//! half of `prime-sandbox-client.ts` (TS branch `feat/direct-cloud-sandbox`):
+//! The per-sandbox gateway credential fetch:
 //!
 //! - `POST {base}/api/v1/sandbox/{id}/auth` — fetch the sandbox-bound
 //!   gateway credentials (`snake_case` body). VM execution rides them

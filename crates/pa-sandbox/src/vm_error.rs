@@ -1,6 +1,5 @@
 //! Typed, redacted errors for the sandbox `command_session` client.
-//! Port of the `VmProcessError` half of `vm-process-client.ts` (TS branch
-//! `feat/direct-cloud-sandbox`): client-side failure codes plus the
+//! Client-side failure codes plus the
 //! Connect codes this surface can surface, with no secret (gateway token)
 //! ever appearing in a message, URL, or `details` preview.
 

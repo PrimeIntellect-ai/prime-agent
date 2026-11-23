@@ -1,7 +1,6 @@
 //! `ConnectRPC` client for the sandboxd `command_session` service (VM
 //! sandboxes only), spoken over the sandbox gateway's authenticated
 //! `/{user_ns}/{job_id}` path with the sandbox-bound gateway token.
-//! Port of `vm-process-client.ts` (TS branch `feat/direct-cloud-sandbox`).
 //!
 //! This is the raw process API the cloud-delegation plan needs, not a
 //! subprocess wrapper: a Start with a caller-supplied session UUID is

@@ -1,13 +1,10 @@
 //! The sandbox `command_session` service message codec: request
 //! validation and encoding, and strict decoding of the
-//! `StartResponse`/`ConnectResponse` event envelope. Port of the message
-//! half of `command-session-proto.ts` (TS branch
-//! `feat/direct-cloud-sandbox`); the wire primitives and the Connect
-//! frame envelope live in [`crate::proto`].
+//! `StartResponse`/`ConnectResponse` event envelope. The wire primitives
+//! and the Connect frame envelope live in [`crate::proto`].
 //!
-//! Authoritative shape: `command_session.proto` in
-//! `platform/sandbox/vm-sandboxes/packages/sandboxd/spec` (the sandboxd
-//! guest service). Only the messages the gateway client needs are
+//! Authoritative shape: the sandboxd guest service's
+//! `command_session.proto`. Only the messages the gateway client needs are
 //! implemented: `StartRequest`, `ConnectRequest`, `SendInputRequest`,
 //! `SendSignalRequest`, and the
 //! `StartResponse`/`ConnectResponse` event envelope.

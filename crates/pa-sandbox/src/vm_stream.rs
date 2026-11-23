@@ -1,6 +1,5 @@
-//! One live command-session stream and its pump. Port of the stream half
-//! of `vm-process-client.ts` (TS branch `feat/direct-cloud-sandbox`); the
-//! wire contract and safety contract live in [`crate::vm_process`].
+//! One live command-session stream and its pump. The wire contract and
+//! safety contract live in [`crate::vm_process`].
 //!
 //! Event ordering is the sandboxd stream contract: a start event, then
 //! data (stdout/stderr/pty) and keepalive events, then exactly one end
