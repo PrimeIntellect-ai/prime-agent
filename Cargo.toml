@@ -20,7 +20,7 @@ members = [
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.10.5"
+version = "0.10.6-beta.28"
 edition = "2021"
 license = "MIT"
 
