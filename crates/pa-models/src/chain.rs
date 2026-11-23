@@ -202,27 +202,10 @@ impl ModelCatalog {
         // Fire-and-forget: the spawned task must never keep the runtime
         // alive on its own and must never propagate errors.
         tokio::spawn(async move {
-            let force = trigger.forced();
-            let refreshed = catalog
-                .provider_cache
-                .refresh(
-                    PUBLIC_SCOPE,
-                    RefreshOptions {
-                        force,
-                        headers: Vec::new(),
-                        is_current: None,
-                    },
-                )
+            catalog
+                .refresh_with_credentials(trigger, credentials.as_ref())
                 .await;
-            if let Some(credentials) = credentials {
-                let inference = credentials.as_inference();
-                catalog.prime_inference.refresh(&inference, force).await;
-            }
-            tracing::debug!(
-                trigger = ?trigger,
-                refreshed = refreshed.map(|models| models.len()),
-                "catalog refresh settled"
-            );
+            tracing::debug!(trigger = ?trigger, "catalog refresh settled");
         });
     }
 
@@ -267,9 +250,8 @@ impl ModelCatalog {
     /// Awaited refresh of both catalog layers — the public provider catalog and, when `credentials`
     /// are given, the credentialed Prime Inference snapshot. Unlike
     /// [`ModelCatalog::trigger_refresh_with_credentials`] (fire-and-forget), `resolve` reflects the
-    /// refreshed state as soon as this future returns. A picker open skips the hourly gate for the
-    /// Prime Inference snapshot (TS refetches it on every open), so a newly deployed route lists
-    /// without waiting for the next hourly refresh; the provider catalog keeps the gate.
+    /// refreshed state as soon as this future returns. A picker open refetches the Prime Inference
+    /// snapshot past the hourly gate; the provider catalog keeps the gate.
     pub async fn refresh_with_credentials(
         &self,
         trigger: RefreshTrigger,
