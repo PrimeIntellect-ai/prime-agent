@@ -202,6 +202,67 @@ async fn an_owed_snapshot_runs_when_a_detached_cell_settles_in_error() {
     manager.kill();
 }
 
+/// An ok settle consumes the capture its detached cell kept owed (the
+/// settle schedules its own): a stale owed flag would hand a later,
+/// unrelated detached cell's error settle a capture nothing owes.
+#[tokio::test]
+async fn an_ok_settle_consumes_the_owed_snapshot() {
+    use super::*;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let manager = snapshot_counting_manager(dir.path());
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("ready handshake");
+    let a = manager
+        .execute("fast", ExecuteOptions::default())
+        .await
+        .expect("cell A");
+    assert_eq!(a.status, ExecuteStatus::Ok);
+    let (outcomes, callback) = background_cell_outcomes();
+    let b = manager
+        .execute(
+            "slow-ok",
+            ExecuteOptions {
+                cell_timeout_ms: Some(200),
+                on_background_cell: Some(callback),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("cell B");
+    assert!(b.detached.is_some(), "cell B must detach at its budget");
+    // A's debounce fires behind the detached cell B and keeps its
+    // capture owed.
+    wait_until(
+        Duration::from_secs(10),
+        "A's capture must stay owed behind the detached cell",
+        || {
+            manager
+                .inner
+                .snapshot_owed
+                .load(std::sync::atomic::Ordering::SeqCst)
+        },
+    )
+    .await;
+    wait_until(
+        Duration::from_secs(10),
+        "cell B's terminal outcome must deliver",
+        || !outcomes.lock().unwrap().is_empty(),
+    )
+    .await;
+    assert_eq!(outcomes.lock().unwrap()[0].result.status, ExecuteStatus::Ok);
+    assert!(
+        !manager
+            .inner
+            .snapshot_owed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the ok settle must consume the owed capture"
+    );
+    manager.kill();
+}
+
 /// A cooperative kernel: an interrupt settles the running cell at once
 /// (the real runtime's `KeyboardInterrupt`), and a plain cell runs
 /// `3s` — past the stop watcher's `1s` grace window.

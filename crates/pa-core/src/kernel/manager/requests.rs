@@ -775,17 +775,16 @@ impl ReplKernelManager {
                                 }
                             }
                         };
-                        if result.status == ExecuteStatus::Ok && result.detached.is_none() {
-                            if let Some(inner) = inner.upgrade() {
-                                inner.schedule_snapshot();
-                            }
-                        } else if let Some(inner) = inner.upgrade() {
-                            // The capture this cell kept owed retries at its
-                            // settle: any status (an error outcome can still
-                            // have moved the namespace before it failed), but
-                            // only with the kernel still alive.
-                            if inner.snapshot_owed.swap(false, Ordering::SeqCst)
-                                && inner.is_running_state()
+                        if let Some(inner) = inner.upgrade() {
+                            // The settle consumes the capture this cell kept
+                            // owed: an ok settle schedules its own capture,
+                            // and any other status retries the owed one (an
+                            // error outcome can still have moved the
+                            // namespace before it failed), but only with the
+                            // kernel still alive.
+                            let owed = inner.snapshot_owed.swap(false, Ordering::SeqCst);
+                            if (result.status == ExecuteStatus::Ok && result.detached.is_none())
+                                || (owed && inner.is_running_state())
                             {
                                 inner.schedule_snapshot();
                             }
