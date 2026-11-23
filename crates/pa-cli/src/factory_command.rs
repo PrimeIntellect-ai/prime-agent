@@ -1,4 +1,4 @@
-//! `prime-agent factory`: the machine library commands.
+//! `prime-agent machine`: the machine library commands.
 //!
 //! Every subcommand — list included — is one `rlm.factory.cli_dispatch`
 //! payload through the kernel Python. The kernel owns the whole library
@@ -38,7 +38,7 @@ const CLI_DISPATCH_RUNNER: &str = concat!(
     "print(json.dumps(cli_dispatch(payload)))\n",
 );
 
-/// The parsed `prime-agent factory` invocation.
+/// The parsed `prime-agent machine` invocation.
 #[derive(Debug, PartialEq, Eq)]
 enum FactoryCommand {
     List {
@@ -70,7 +70,7 @@ enum FactoryCommand {
 
 /// Parse the subcommand and its flags; `Err` carries a usage hint.
 fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
-    let children: Vec<&str> = crate::command_registry::get_child_command_specs(&["factory"])
+    let children: Vec<&str> = crate::command_registry::get_child_command_specs(&["machine"])
         .into_iter()
         .map(|spec| spec.path[spec.path.len() - 1])
         .collect();
@@ -80,7 +80,7 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
     if !children.contains(&subcommand.as_str()) {
         let suggestion = crate::command_registry::find_command_suggestion(subcommand, &children);
         return Err(format!(
-            "Unknown factory command: {subcommand}{}",
+            "Unknown machine command: {subcommand}{}",
             suggestion.map_or_else(String::new, |s| format!(" (did you mean \"{s}\"?)"))
         ));
     }
@@ -113,13 +113,13 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
     match subcommand.as_str() {
         "list" => {
             if !operands.is_empty() {
-                return Err("Usage: prime-agent factory list [--json]".to_string());
+                return Err("Usage: prime-agent machine list [--json]".to_string());
             }
             Ok(FactoryCommand::List { json })
         }
         "import" => {
             if operands.len() != 1 {
-                return Err("Usage: prime-agent factory import <path> [--json]".to_string());
+                return Err("Usage: prime-agent machine import <path> [--json]".to_string());
             }
             Ok(FactoryCommand::Import {
                 path: operands.remove(0),
@@ -129,12 +129,12 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
         "export" => {
             if operands.len() != 1 {
                 return Err(
-                    "Usage: prime-agent factory export <name> --out <path> [--json]".to_string(),
+                    "Usage: prime-agent machine export <name> --out <path> [--json]".to_string(),
                 );
             }
             let Some(out) = out else {
                 return Err(
-                    "Usage: prime-agent factory export <name> --out <path> [--json]".to_string(),
+                    "Usage: prime-agent machine export <name> --out <path> [--json]".to_string(),
                 );
             };
             Ok(FactoryCommand::Export {
@@ -148,7 +148,7 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                 path: path.clone(),
                 json,
             }),
-            _ => Err("Usage: prime-agent factory validate <dir> [--json]".to_string()),
+            _ => Err("Usage: prime-agent machine validate <dir> [--json]".to_string()),
         },
         "compile" => match operands.as_slice() {
             [path] if !json => Ok(FactoryCommand::Compile {
@@ -156,7 +156,7 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                 params,
             }),
             _ => {
-                Err("Usage: prime-agent factory compile <dir> [--param name=value]...".to_string())
+                Err("Usage: prime-agent machine compile <dir> [--param name=value]...".to_string())
             }
         },
         "convert" => match (operands.as_slice(), out) {
@@ -166,7 +166,7 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
                 json,
             }),
             _ => Err(
-                "Usage: prime-agent factory convert <MACHINE.md|name> --out <dir> [--json]"
+                "Usage: prime-agent machine convert <MACHINE.md|name> --out <dir> [--json]"
                     .to_string(),
             ),
         },
@@ -174,18 +174,18 @@ fn parse_factory_command(args: &[String]) -> Result<FactoryCommand, String> {
     }
 }
 
-/// Run the `factory` command; returns the process exit code.
+/// Run the `machine` command; returns the process exit code.
 pub fn run_factory_command(args: &[String]) -> i32 {
     let command = match parse_factory_command(args) {
         Ok(command) => command,
         Err(empty_hint) if empty_hint.is_empty() => {
-            eprintln!("Missing factory command.");
-            eprintln!("Run \"prime-agent help factory\" for usage.");
+            eprintln!("Missing machine command.");
+            eprintln!("Run \"prime-agent help machine\" for usage.");
             return 1;
         }
         Err(error) => {
             eprintln!("Error: {error}");
-            eprintln!("Run `prime-agent help factory` for usage.");
+            eprintln!("Run `prime-agent help machine` for usage.");
             return 1;
         }
     };
@@ -227,7 +227,7 @@ fn import_payload(path: &std::path::Path) -> Value {
     })
 }
 
-/// `factory convert <MACHINE.md|name> --out <dir>`: the kernel reads and
+/// `machine convert <MACHINE.md|name> --out <dir>`: the kernel reads and
 /// validates the v1 machine, then `pa-factory` writes it as a directory.
 fn run_convert(source: &str, out: &str, json: bool) -> i32 {
     let payload = read_payload(source);
@@ -258,7 +258,7 @@ fn export_payload(name: &str, out: &std::path::Path) -> Value {
     })
 }
 
-/// `factory list`: library contents with descriptions.
+/// `machine list`: library contents with descriptions.
 fn run_list(json: bool) -> i32 {
     let payload = list_payload();
     match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
@@ -396,7 +396,7 @@ fn dispatch_via_kernel(python: &std::path::Path, payload: &Value) -> Result<Valu
         .map_err(|error| format!("unreadable kernel result: {error}"))
 }
 
-/// `factory import <path>`: validate through the kernel gate and persist.
+/// `machine import <path>`: validate through the kernel gate and persist.
 fn run_import(path: &str, json: bool) -> i32 {
     let source = crate::config::expand_tilde_path(path);
     if !source.is_file() {
@@ -413,7 +413,7 @@ fn run_import(path: &str, json: bool) -> i32 {
     }
 }
 
-/// `factory export <name> --out <path>`: serialize a machine to MACHINE.md.
+/// `machine export <name> --out <path>`: serialize a machine to MACHINE.md.
 fn run_export(name: &str, out: &str, json: bool) -> i32 {
     let payload = export_payload(name, &crate::config::expand_tilde_path(out));
     match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
@@ -556,7 +556,7 @@ mod tests {
         );
         assert!(parse_factory_command(&arg(&["convert", "builder"]))
             .unwrap_err()
-            .starts_with("Usage: prime-agent factory convert"));
+            .starts_with("Usage: prime-agent machine convert"));
         assert_eq!(
             parse_factory_command(&arg(&["validate", "a", "--param", "x=1"])),
             Err("unknown option \"--param\"".to_string())
@@ -570,12 +570,12 @@ mod tests {
         assert!(unknown.is_err());
         assert!(unknown
             .unwrap_err()
-            .contains("Unknown factory command: run"));
+            .contains("Unknown machine command: run"));
         let missing_out = parse_factory_command(&arg(&["export", "sweep"]));
         assert!(missing_out.is_err());
         assert!(missing_out
             .unwrap_err()
-            .starts_with("Usage: prime-agent factory export"));
+            .starts_with("Usage: prime-agent machine export"));
         let dangling_out = parse_factory_command(&arg(&["export", "sweep", "--out"]));
         assert!(dangling_out.is_err());
         assert!(dangling_out

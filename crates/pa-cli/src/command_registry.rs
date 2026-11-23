@@ -238,9 +238,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(&["config"], "config", "Configure package resources"),
     CommandSpec::new(
-        &["factory"],
-        "factory <list|validate|compile|convert|import|export>",
-        "Share and run factory machines from the machine library",
+        &["machine"],
+        "machine <list|validate|compile|convert|import|export>",
+        "Share and run machines from the machine library",
     )
     .description(
         "Machine directories use machine.toml, Markdown prompts, and Python states; \
@@ -248,8 +248,8 @@ MACHINE.md templates remain supported. Use validate and compile to check a direc
 before converting or running a machine.",
     ),
     CommandSpec::new(
-        &["factory", "list"],
-        "factory list [--json]",
+        &["machine", "list"],
+        "machine list [--json]",
         "List the machine library",
     )
     .description(
@@ -257,15 +257,15 @@ before converting or running a machine.",
 files that fail the parser skip with a warning.",
     )
     .options(&["--json  Print JSON"]),
-    CommandSpec::new(&["factory", "validate"], "factory validate <dir> [--json]", "Check a machine directory")
+    CommandSpec::new(&["machine", "validate"], "machine validate <dir> [--json]", "Check a machine directory")
         .description("Loads machine.toml and every file it names, then checks types, ports, routes, joins, reachability, and prompt placeholders.")
         .options(&["--json  Print JSON"]),
-    CommandSpec::new(&["factory", "compile"], "factory compile <dir> [--param name=value]...", "Print the canonical spec for a machine directory")
+    CommandSpec::new(&["machine", "compile"], "machine compile <dir> [--param name=value]...", "Print the canonical spec for a machine directory")
         .options(&["--param <name=value>  A start parameter; repeat for each"]),
-    CommandSpec::new(&["factory", "convert"], "factory convert <MACHINE.md|name> --out <dir> [--json]", "Convert a MACHINE.md machine into a directory"),
+    CommandSpec::new(&["machine", "convert"], "machine convert <MACHINE.md|name> --out <dir> [--json]", "Convert a MACHINE.md machine into a directory"),
     CommandSpec::new(
-        &["factory", "import"],
-        "factory import <path> [--json]",
+        &["machine", "import"],
+        "machine import <path> [--json]",
         "Validate and import a MACHINE.md into the personal library",
     )
     .description(
@@ -274,8 +274,8 @@ never persists and the exact errors print verbatim.",
     )
     .options(&["--json  Print JSON"]),
     CommandSpec::new(
-        &["factory", "export"],
-        "factory export <name> --out <path> [--json]",
+        &["machine", "export"],
+        "machine export <name> --out <path> [--json]",
         "Export a machine to a MACHINE.md file",
     )
     .description(
@@ -287,7 +287,7 @@ refused, never overwritten.",
         "--out <path>  Destination MACHINE.md path",
         "--json        Print JSON",
     ])
-    .examples(&["factory export review-sweep --out shared-review-sweep.MACHINE.md"]),
+    .examples(&["machine export review-sweep --out shared-review-sweep.MACHINE.md"]),
     CommandSpec::new(
         &["prompt"],
         "prompt [--model <selector>] [--cwd <dir>] [--json]",

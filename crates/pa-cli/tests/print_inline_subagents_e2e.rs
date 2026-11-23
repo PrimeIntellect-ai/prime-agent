@@ -469,7 +469,7 @@ fn print_inline_subagents_enforce_the_depth_limit() {
 }
 
 /// A factory state's child in print mode: the spawn's run tag carries the
-/// state's output contract, so the inline child's `rlm.factory.emit`
+/// state's output contract, so the inline child's `rlm.machine.emit`
 /// checks the value and writes the accepted outputs beside its session
 /// file, where the factory executor reads them.
 #[test]
@@ -481,8 +481,8 @@ fn print_inline_factory_child_emits_through_its_contract() {
         factory={\"runId\": \"run-1\", \"specId\": \"spec\", \"stateId\": \"plan\"}, \
         factory_contract={\"outputs\": [{\"name\": \"line\", \"type\": \"text\"}], \"records\": {}, \"inputs\": {\"topic\": \"tides\"}})\n\
         print(\"SPAWNED\", h.rlm_child_id)";
-    let emit = "inputs = await rlm.factory.inputs()\n\
-        receipt = await rlm.factory.emit(line=\"about \" + inputs[\"topic\"])\n\
+    let emit = "inputs = await rlm.machine.inputs()\n\
+        receipt = await rlm.machine.emit(line=\"about \" + inputs[\"topic\"])\n\
         await agent_message.send(f\"EMITTED {receipt['accepted']} {receipt['missing']}\", receiver_role=\"parent\")";
     let script = serde_json::json!({
         "responses": [
@@ -578,10 +578,10 @@ fn print_factory_resume_refuses_a_run_this_process_did_not_start() {
     let kernel = PrintLane::kernel_python();
     std::fs::write(
         lane.agent_dir.join("settings.json"),
-        r#"{"factory": {"enabled": true}}"#,
+        r#"{"machine": {"enabled": true}}"#,
     )
     .unwrap();
-    let cell = "try:\n    await rlm.factory.resume(\"run-from-an-earlier-process\")\n\
+    let cell = "try:\n    await rlm.machine.resume(\"run-from-an-earlier-process\")\n\
         except ValueError as error:\n    print(\"REFUSED\", error)";
     let script = serde_json::json!({
         "responses": [

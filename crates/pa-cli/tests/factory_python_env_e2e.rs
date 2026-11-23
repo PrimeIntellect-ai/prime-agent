@@ -37,7 +37,7 @@ esac
     let path = std::env::join_paths([Path::new("."), &project, &trusted]).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
-        .args(["factory", "list", "--json"])
+        .args(["machine", "list", "--json"])
         .current_dir(&project)
         .env("PRIME_AGENT_KERNEL_PYTHON", &python)
         .env("PYTHONPATH", path)

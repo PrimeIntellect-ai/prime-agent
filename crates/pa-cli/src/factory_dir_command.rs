@@ -1,4 +1,4 @@
-//! The machine-directory half of `prime-agent factory`: `validate`,
+//! The machine-directory half of `prime-agent machine`: `validate`,
 //! `compile`, `convert`, and the directories `list` shows.
 //!
 //! A machine directory (`machine.toml` plus Markdown and Python files) is
@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 
 use pa_factory::types::Type;
 
-/// `factory validate <dir>`: load and check one machine directory.
+/// `machine validate <dir>`: load and check one machine directory.
 pub(crate) fn run_validate(path: &str, json: bool) -> i32 {
     let dir = crate::config::expand_tilde_path(path);
     match pa_factory::load_machine_dir(&dir) {
@@ -43,7 +43,7 @@ pub(crate) fn run_validate(path: &str, json: bool) -> i32 {
     }
 }
 
-/// `factory compile <dir> [--param k=v]...`: print the canonical spec the
+/// `machine compile <dir> [--param k=v]...`: print the canonical spec the
 /// executor would run, for debugging a machine or storing it as a factory
 /// entry.
 pub(crate) fn run_compile(path: &str, params: &[String]) -> i32 {
@@ -103,7 +103,7 @@ fn parse_params(
     Ok(given)
 }
 
-/// `factory convert`: write a stored v1 machine (the kernel's `read`
+/// `machine convert`: write a stored v1 machine (the kernel's `read`
 /// result) as a machine directory at `out`, then load it back.
 pub(crate) fn run_convert(read: &Value, out: &Path, json: bool) -> i32 {
     let text = |key: &str| {
@@ -173,7 +173,7 @@ pub(crate) fn run_convert(read: &Value, out: &Path, json: bool) -> i32 {
             files.len()
         );
         println!(
-            "Its prompts keep their hand-written output instructions; the generated Outputs section now asks for rlm.factory.emit, so delete those lines."
+            "Its prompts keep their hand-written output instructions; the generated Outputs section now asks for rlm.machine.emit, so delete those lines."
         );
     }
     0
@@ -198,7 +198,7 @@ fn print_problems(dir: &Path, problems: &[pa_factory::Diagnostic], json: bool) -
 /// Merge the machine directories of every library level into the
 /// kernel's `list` result. Within a level a machine directory wins over a
 /// MACHINE.md of the same name; an earlier level wins over a later one,
-/// the order `rlm.factory.run` resolves names in. `run` resolves a
+/// the order `rlm.machine.run` resolves names in. `run` resolves a
 /// directory by its folder name, so a directory that fails to load or
 /// declares another name is a warning, never a row.
 pub(crate) fn add_machine_dirs(result: &mut Value) {
