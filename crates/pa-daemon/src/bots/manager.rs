@@ -317,7 +317,11 @@ impl BotManager {
                 by_bot.entry(bot_id).or_default().push(sandbox);
             }
         }
+        // Wakes and deletes may run meanwhile: each bot is settled under its
+        // lock, against a fresh read of its record and chosen sandbox.
         for (bot_id, mut sandboxes) in by_bot.clone() {
+            let bot_lock = self.lock_for(&bot_id);
+            let _held = bot_lock.lock().await;
             sort_newest_first(&mut sandboxes);
             for extra in &sandboxes[1..] {
                 eprintln!(
@@ -326,21 +330,30 @@ impl BotManager {
                 );
                 retry(|| self.platform.delete(&extra.id)).await?;
             }
-            let chosen = &sandboxes[0];
+            let chosen = match self.platform.get(&sandboxes[0].id).await {
+                Ok(sandbox) if !sandbox.status.is_terminal() => sandbox,
+                Ok(_) | Err(PlatformError::NotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
             let mut record = self
                 .get(&bot_id)
-                .unwrap_or_else(|| rebuilt_record(&bot_id, chosen));
+                .unwrap_or_else(|| rebuilt_record(&bot_id, &chosen));
             record.sandbox_id = Some(chosen.id.clone());
             record.status = chosen.status;
             self.save(record)?;
         }
-        for mut record in self.list() {
+        for listed in self.list() {
+            if by_bot.contains_key(&listed.bot_id) {
+                continue;
+            }
+            let bot_lock = self.lock_for(&listed.bot_id);
+            let _held = bot_lock.lock().await;
+            let Some(mut record) = self.get(&listed.bot_id) else {
+                continue;
+            };
             let Some(sandbox_id) = record.sandbox_id.clone() else {
                 continue;
             };
-            if by_bot.contains_key(&record.bot_id) {
-                continue;
-            }
             match self.platform.get(&sandbox_id).await {
                 Ok(sandbox) if !sandbox.status.is_terminal() => record.status = sandbox.status,
                 Ok(_) | Err(PlatformError::NotFound(_)) => lose_sandbox(&mut record),
@@ -554,7 +567,6 @@ impl BotManager {
                         "pa-daemon: bot {}: checkpoint restore failed: {error:#}",
                         record.bot_id
                     );
-                    break;
                 }
             }
         }
