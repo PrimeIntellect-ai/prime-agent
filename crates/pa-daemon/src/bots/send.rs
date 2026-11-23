@@ -69,8 +69,8 @@ pub async fn send_within<T>(
 /// # Errors
 ///
 /// Returns [`SendError::NotDelivered`] when the ledger refuses the id or
-/// the guest refuses the message, and [`SendError::Uncertain`] when the
-/// link fails after the send began.
+/// the command never left, and [`SendError::Uncertain`] when the guest
+/// fails the command or the link fails after the send began.
 pub async fn send_message(
     ledger: &BotLedger,
     client: &mut GuestClient,
@@ -103,7 +103,8 @@ pub async fn send_message(
     match outcome {
         Ok(receipt) => Ok(receipt),
         Err(CommandError::NotSent(error)) => Err(SendError::NotDelivered(error)),
-        Err(CommandError::Refused(error)) => Err(SendError::NotDelivered(anyhow!(error))),
+        // A guest may fail the command after its worker took the message.
+        Err(CommandError::Refused(error)) => Err(SendError::Uncertain(anyhow!(error))),
         Err(CommandError::NoResponse(error)) => Err(SendError::Uncertain(error)),
     }
 }

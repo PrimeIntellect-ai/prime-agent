@@ -48,6 +48,8 @@ enum Guest {
     Hold,
     /// Report the message, then close the link.
     Drop,
+    /// Report the message, then answer with a failure.
+    Fail,
 }
 
 /// A fake guest daemon: the hello, then one response per command. Each
@@ -73,17 +75,27 @@ fn fake_guest(
             let envelope: Value = serde_json::from_str(&line).unwrap();
             let _ = received.send(envelope["command"]["message"].as_str().unwrap().to_string());
             match behavior {
-                Guest::Answer => {}
+                Guest::Answer | Guest::Fail => {}
                 Guest::Hold => continue,
                 Guest::Drop => break,
             }
-            let response = json!({
-                "type": "response",
-                "id": envelope["id"],
-                "command": "send_message",
-                "success": true,
-                "data": { "id": "guest-msg", "deliveryStatus": "delivered" },
-            });
+            let response = if matches!(behavior, Guest::Fail) {
+                json!({
+                    "type": "response",
+                    "id": envelope["id"],
+                    "command": "send_message",
+                    "success": false,
+                    "error": "worker request timed out",
+                })
+            } else {
+                json!({
+                    "type": "response",
+                    "id": envelope["id"],
+                    "command": "send_message",
+                    "success": true,
+                    "data": { "id": "guest-msg", "deliveryStatus": "delivered" },
+                })
+            };
             let _ = writer.write_all(format!("{response}\n").as_bytes()).await;
         }
     });
@@ -178,6 +190,11 @@ async fn a_killed_send_is_never_resent() {
         Some(MessageState::Uncertain)
     );
     assert_eq!(seen.recv().await.as_deref(), Some("third"));
+    // Step 4: a guest failure may come after its worker took the message.
+    let mut failing = client(Guest::Fail, &seen_tx).await;
+    let failed = send_message(&ledger, &mut failing, "guest", "m4", "fourth", None).await;
+    assert!(matches!(failed, Err(SendError::Uncertain(_))));
+    assert_eq!(seen.recv().await.as_deref(), Some("fourth"));
     // The guest saw each message exactly once.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(seen.try_recv().is_err(), "a resend reached the guest");
