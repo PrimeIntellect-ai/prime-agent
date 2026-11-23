@@ -35,20 +35,10 @@ pub const INBOX_JOURNAL_FILE: &str = "inbox.jsonl";
 pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
     "(inbox persistence failed; messages are memory-only)";
 
-/// The `bash.completed` notice class label.
-pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
-/// The `factory.progress` notice class label.
-pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
-/// The agent-message class label: one delivered `agent_message.send`
-/// row (parent/sibling/child traffic) routed into the inbox.
-pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
-/// The child-exit class label: one `rlm_child_terminal_notice` row (a
-/// child that ended without a reply or was cancelled).
-pub const INBOX_CLASS_CHILD_EXITED: &str = "child-exited";
-/// The child-failure class label: one `rlm_child_failure` row.
-pub const INBOX_CLASS_CHILD_FAILED: &str = "child-failed";
-/// The heartbeat class label: one fired scheduled heartbeat's prompt.
-pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
+use pa_types::inbox_notice::{
+    INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED, INBOX_CLASS_CHILD_FAILED,
+    INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
+};
 
 /// The coalescing batch state the daemon's notice sink owns: the
 /// arrivals the currently queued short-notice row covers (reset when the
@@ -511,11 +501,11 @@ impl SessionInbox {
         taken
     }
 
-    /// Withdraw every waiting message of one class: the same journal-first,
-    /// then-store order the drained reads use, with one `Withdrawn` record
-    /// per removed id, so a restart keeps the withdrawal. Returns the
-    /// removed messages in arrival order.
-    pub fn withdraw_class(&self, class: &str) -> Vec<InboxMessage> {
+    /// Withdraw the waiting messages with the given ids: the same
+    /// journal-first, then-store order the drained reads use, with one
+    /// `Withdrawn` record per removed id, so a restart keeps the
+    /// withdrawal. Returns the removed messages in arrival order.
+    pub fn withdraw_ids(&self, ids: &std::collections::BTreeSet<String>) -> Vec<InboxMessage> {
         let mut state = self
             .state
             .lock()
@@ -523,7 +513,7 @@ impl SessionInbox {
         let mut removed = Vec::new();
         let mut remaining = Vec::new();
         for message in std::mem::take(&mut state.messages) {
-            if message.class == class {
+            if ids.contains(&message.id) {
                 removed.push(message);
             } else {
                 remaining.push(message);
@@ -849,7 +839,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
     (
         format!("Inbox: {summary}"),
         format!(
-            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with rlm.inbox.read()."
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
         ),
     )
 }
@@ -859,7 +849,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
 #[must_use]
 pub fn reminder_notice(count: usize) -> String {
     let noun = if count == 1 { "message" } else { "messages" };
-    format!("[inbox reminder] {count} {noun} still waiting — rlm.inbox.read()")
+    format!("[inbox reminder] {count} {noun} still waiting. Read them with msgs = await rlm.inbox.read().")
 }
 
 // The notice rows' wire vocabulary — the customType, the notice-class
@@ -873,9 +863,11 @@ use pa_types::inbox_notice::{INBOX_NOTICE_CUSTOM_TYPE, INBOX_NOTICE_SENDER};
 /// mirroring `create_agent_session_message_row`: `content` IS the notice
 /// text, so the turn's model context stays byte-identical to the
 /// plain-prompt delivery, while the details carry the inbox-system sender
-/// and the notice class for the transcript's own row class.
+/// and the notice class for the transcript's own row class. `count` is
+/// the number the text announces (the arrival batch size, or the
+/// reminder's waiting count) for the transcript header.
 #[must_use]
-pub fn create_inbox_notice_row(text: &str, class: &str, timestamp: u64) -> Value {
+pub fn create_inbox_notice_row(text: &str, class: &str, count: usize, timestamp: u64) -> Value {
     json!({
         "role": "custom",
         "customType": INBOX_NOTICE_CUSTOM_TYPE,
@@ -884,6 +876,7 @@ pub fn create_inbox_notice_row(text: &str, class: &str, timestamp: u64) -> Value
         "details": {
             "sender": INBOX_NOTICE_SENDER,
             "class": class,
+            "count": count,
         },
         "timestamp": timestamp,
     })
@@ -947,7 +940,9 @@ pub fn register_inbox_host_handlers(inbox: &Arc<SessionInbox>, handlers: &mut Ho
 mod tests {
     use super::*;
     use crate::kernel::shared::HostRequestPayload;
-    use pa_types::inbox_notice::{INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER};
+    use pa_types::inbox_notice::{
+        INBOX_CLASS_AGENT_MESSAGE, INBOX_NOTICE_CLASS_ARRIVAL, INBOX_NOTICE_CLASS_REMINDER,
+    };
     use std::io::Write as _;
 
     fn message(id: &str, class: &str, arrived_at_ms: u64, text: &str) -> InboxMessage {
@@ -1398,11 +1393,11 @@ mod tests {
         assert_eq!(drained[0].id, "inbox-1");
     }
 
-    /// A class withdrawal removes exactly that class, journals one
-    /// `Withdrawn` record per id, and replays as removed (the clear/pause
-    /// sweep of the durable store).
+    /// An id withdrawal removes exactly those ids, journals one
+    /// `Withdrawn` record per id, and replays as removed (the agent-message
+    /// clear of the durable store).
     #[test]
-    fn withdraw_class_removes_one_class_and_replays() {
+    fn withdraw_ids_removes_exactly_those_ids_and_replays() {
         let dir = tempfile::tempdir().unwrap();
         {
             let inbox = SessionInbox::open(Some(dir.path()));
@@ -1418,7 +1413,7 @@ mod tests {
                 notice("peer", INBOX_CLASS_AGENT_MESSAGE, "third", json!({})),
                 3_000,
             );
-            let removed = inbox.withdraw_class(INBOX_CLASS_AGENT_MESSAGE);
+            let removed = inbox.withdraw_ids(&["inbox-2", "inbox-3"].map(String::from).into());
             assert_eq!(
                 removed.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
                 ["second", "third"]
@@ -1427,8 +1422,8 @@ mod tests {
             assert_eq!(count, 1);
             assert_eq!(classes[INBOX_CLASS_BASH_DONE], 1);
         }
-        // The withdrawal replays: the removed ids stay gone, the other
-        // class survives, and a fresh id never collides.
+        // The withdrawal replays: the removed ids stay gone, the rest
+        // survives, and a fresh id never collides.
         let reopened = SessionInbox::open(Some(dir.path()));
         let drained = reopened.drain();
         assert_eq!(drained.len(), 1);
@@ -1573,7 +1568,7 @@ mod tests {
         assert_eq!(preview, "Inbox: 1 new message (bash-done)");
         assert_eq!(
             text,
-            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read()."
         );
         let same_class = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
@@ -1583,7 +1578,7 @@ mod tests {
         assert_eq!(preview, "Inbox: 2 new bash-done messages");
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 2 new bash-done messages; total waiting: 2. Read them with msgs = await rlm.inbox.read()."
         );
         let batch = [
             message("inbox-1", INBOX_CLASS_BASH_DONE, at - 60_000, "a"),
@@ -1597,7 +1592,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with msgs = await rlm.inbox.read()."
         );
     }
 
@@ -1709,11 +1704,11 @@ mod tests {
     fn reminder_notice_names_the_wait() {
         assert_eq!(
             reminder_notice(3),
-            "[inbox reminder] 3 messages still waiting — rlm.inbox.read()"
+            "[inbox reminder] 3 messages still waiting. Read them with msgs = await rlm.inbox.read()."
         );
         assert_eq!(
             reminder_notice(1),
-            "[inbox reminder] 1 message still waiting — rlm.inbox.read()"
+            "[inbox reminder] 1 message still waiting. Read them with msgs = await rlm.inbox.read()."
         );
     }
 
@@ -1827,14 +1822,14 @@ mod tests {
     #[test]
     fn inbox_notice_row_carries_the_text_and_the_sender_identity() {
         let arrival = format!(
-            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
+            "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
         );
         let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
-        for (class, text) in [
-            (INBOX_NOTICE_CLASS_ARRIVAL, arrival),
-            (INBOX_NOTICE_CLASS_REMINDER, reminder),
+        for (class, count, text) in [
+            (INBOX_NOTICE_CLASS_ARRIVAL, 1, arrival),
+            (INBOX_NOTICE_CLASS_REMINDER, 3, reminder),
         ] {
-            let row = create_inbox_notice_row(&text, class, 1_730_000_000_000);
+            let row = create_inbox_notice_row(&text, class, count, 1_730_000_000_000);
             // Whole-object equality: the exact wire shape, no extra keys,
             // every field present at once.
             let expected = json!({
@@ -1842,7 +1837,7 @@ mod tests {
                 "customType": INBOX_NOTICE_CUSTOM_TYPE,
                 "content": text.clone(),
                 "display": true,
-                "details": { "sender": INBOX_NOTICE_SENDER, "class": class },
+                "details": { "sender": INBOX_NOTICE_SENDER, "class": class, "count": count },
                 "timestamp": 1_730_000_000_000u64,
             });
             assert_eq!(row, expected, "the {class} notice row");

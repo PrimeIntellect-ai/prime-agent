@@ -567,13 +567,13 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
     );
     let last = outcome.frames.last().expect("a settled frame");
     // The envelope summary lines: the inbox system's own row class, both
-    // notice classes delivered by the real admission.
+    // notice classes delivered by the real admission, each with its count.
     assert!(
-        last.contains("\u{2709} Agent inbox \u{b7} arrival"),
+        last.contains("\u{2709} Agent inbox \u{b7} 1 new message"),
         "the arrival summary line renders: {last}"
     );
     assert!(
-        last.contains("\u{2709} Agent inbox \u{b7} reminder"),
+        last.contains("\u{2709} Agent inbox \u{b7} 1 unread message"),
         "the reminder summary line renders: {last}"
     );
     // The bodies stay visible under the gutter: the counts and the read

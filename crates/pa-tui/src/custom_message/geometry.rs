@@ -58,7 +58,7 @@ pub(crate) fn inbox_notice_row_count(
     width: usize,
     leading: bool,
 ) -> usize {
-    let header = super::render::inbox_notice_summary_line(&row.sender, &row.class, theme);
+    let header = super::render::inbox_notice_summary_line(row, theme);
     usize::from(leading)
         + wrapped_line_count(&header, width.saturating_sub(2).max(1))
         + agent_message_body_count(&row.text, width)
