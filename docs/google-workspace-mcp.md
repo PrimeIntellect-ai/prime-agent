@@ -118,4 +118,4 @@ For large or exact payloads, follow the "Large or integrity-critical payloads"
 section of the `mcp` skill (`skills/mcp/SKILL.md`): load the arguments from a
 file in the Python kernel, write results to a file, and verify them in code.
 
-Disconnect with `/mcp logout google-drive` (or `google-sheets`).
+Disconnect by running `/logout` and selecting google-drive (or google-sheets).

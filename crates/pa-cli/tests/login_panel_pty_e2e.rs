@@ -241,14 +241,6 @@ impl pa_tui::client_auth::ClientAuthCommands for ScriptedClientAuth {
     ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
         Box::pin(async move { Ok("Saved API key.".to_string()) })
     }
-
-    fn logout(
-        &self,
-        server: &str,
-    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
-        let server = server.to_string();
-        Box::pin(async move { Ok(format!("{server} is not connected.")) })
-    }
 }
 
 fn mcp_child_options(socket: PathBuf) -> InteractiveOptions {

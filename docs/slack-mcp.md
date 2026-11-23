@@ -28,6 +28,6 @@ Prime Agent reports the conflict instead of redirecting to an unregistered
 port. For SSH sessions, forward local port `3118` to port `3118` on the host
 running Prime Agent, or paste the final redirect URL into the auth panel.
 
-Disconnect with `/mcp logout slack`. Connector usage contributes to the existing
+Disconnect by running `/logout` and selecting slack. Connector usage contributes to the existing
 `mcp_connector_use_count` session telemetry counter; server names and Slack
 content are not recorded in that counter.

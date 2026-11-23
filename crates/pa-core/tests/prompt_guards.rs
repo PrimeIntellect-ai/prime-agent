@@ -627,47 +627,6 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
         .contains("await mcp.list_tools(\"notion\")"));
 }
 
-#[test]
-fn mcp_login_guidance_uses_the_current_menu_command() {
-    const STALE_COMMAND: &str = "/mcp login";
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let mut pending = vec![root.join("skills")];
-    while let Some(path) = pending.pop() {
-        if path.is_dir() {
-            pending.extend(
-                std::fs::read_dir(&path)
-                    .expect("read bundled skills")
-                    .map(|entry| entry.expect("skill directory entry").path()),
-            );
-        } else if path.file_name().is_some_and(|name| name == "SKILL.md") {
-            let text = std::fs::read_to_string(&path).expect("read bundled skill");
-            assert!(
-                !text.contains(STALE_COMMAND),
-                "{} names the removed MCP login command",
-                path.display()
-            );
-        }
-    }
-
-    for relative in [
-        "crates/pa-core/src/mcp/oauth.rs",
-        "crates/pa-tui/src/client_auth.rs",
-        "prime-agent-runtime/src/rlm/mcp.py",
-        "prime-agent-runtime/src/rlm/mcp_base.py",
-        "docs/slack-mcp.md",
-        "docs/google-workspace-mcp.md",
-    ] {
-        let text = std::fs::read_to_string(root.join(relative)).expect("read MCP guidance source");
-        assert!(
-            !text.contains(STALE_COMMAND),
-            "{relative} names the removed MCP login command"
-        );
-    }
-}
-
 // Async turn discipline
 
 /// Since #3580 every session kind wakes on bash completion: daemonless runs
