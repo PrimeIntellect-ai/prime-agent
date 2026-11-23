@@ -113,7 +113,8 @@ fn tool_result(entries: &Value, call_id: &str) -> (String, String) {
     (status, text)
 }
 
-type Outcomes = std::sync::Arc<std::sync::Mutex<Vec<pa_core::kernel::shared::BackgroundCellOutcome>>>;
+type Outcomes =
+    std::sync::Arc<std::sync::Mutex<Vec<pa_core::kernel::shared::BackgroundCellOutcome>>>;
 
 /// One live-kernel session that ran `calls` (one `python_repl` call per
 /// scripted turn) in a single prompt. The engine stays alive so backgrounded
@@ -323,7 +324,8 @@ async fn a_new_cell_runs_beside_a_backgrounded_cell_that_awaits() {
     );
 
     let outcome = background_outcome(&run.outcomes).await;
-    let notice = pa_core::session_engine::bash_notices::KernelNotice::background_cell_completion(&outcome);
+    let notice =
+        pa_core::session_engine::bash_notices::KernelNotice::background_cell_completion(&outcome);
     let text = serde_json::to_value(&notice.row.content).expect("notice content");
     let text = text.as_str().expect("a text-only notice");
     assert!(text.starts_with("[cell-done id:"), "{text}");

@@ -556,7 +556,10 @@ async fn the_wait_budget_backgrounds_instead_of_interrupting() {
     let runner = manager.clone();
     let drained = tokio::time::timeout(
         Duration::from_secs(6),
-        runner.wait_for_active_execution_to_clear_for_reuse(None),
+        runner.wait_for_active_execution_to_clear_for_reuse(
+                crate::kernel::manager::Admission::Exclusive,
+                None,
+            ),
     )
     .await
     .expect("the reuse wait settles");
@@ -1063,7 +1066,10 @@ async fn a_stale_retirement_never_touches_the_replacement_cell() {
         })
     };
     let stale = loop {
-        let active = lock(&manager.inner.guarded).active_executions.last().cloned();
+        let active = lock(&manager.inner.guarded)
+                .active_executions
+                .last()
+                .cloned();
         if let Some(active) = active {
             break active;
         }
@@ -1091,7 +1097,10 @@ async fn a_stale_retirement_never_touches_the_replacement_cell() {
     // Wait for the replacement's admission INSIDE the stale watcher's
     // grace window (the watcher is still running out its 1s).
     loop {
-        let active = lock(&manager.inner.guarded).active_executions.last().cloned();
+        let active = lock(&manager.inner.guarded)
+                .active_executions
+                .last()
+                .cloned();
         // The first cell's execution may still be draining; the
         // replacement is the fresh one that follows it.
         if active.is_some_and(|active| !std::sync::Arc::ptr_eq(&active, &stale)) {
@@ -1359,7 +1368,10 @@ async fn a_settled_execution_releases_its_stop_watcher() {
     // Capture the running execution: its watcher holds a terminal-watch
     // receiver while the cell runs.
     let execution = loop {
-        let active = lock(&manager.inner.guarded).active_executions.last().cloned();
+        let active = lock(&manager.inner.guarded)
+                .active_executions
+                .last()
+                .cloned();
         if let Some(active) = active {
             break active;
         }
