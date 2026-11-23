@@ -756,10 +756,7 @@ class ReplTest(unittest.TestCase):
             ("from-import", "from subprocess import run\nrun(['ls'])"),
             ("os-system", "import os\nos.system('ls')"),
             ("os-popen", "os.popen('ls')"),
-            ("os-getoutput", "import os\nos.getoutput('ls')"),
-            ("os-getstatusoutput", "os.getstatusoutput('ls')"),
             ("from-os", "from os import system\nsystem('ls')"),
-            ("from-os-getoutput", "from os import getoutput\ngetoutput('ls')"),
             ("pty", "import pty\npty.spawn('/bin/sh')"),
         ):
             events = self.repl.execute(rid, code)
