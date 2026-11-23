@@ -412,9 +412,9 @@ mod tests {
             );
         };
         let shapes = [
-            ("array-true", r#"{"factory": [true]}"#),
-            ("array-string", r#"{"factory": ["true"]}"#),
-            ("array-extra", r#"{"factory": [true, false]}"#),
+            ("array-true", r#"{"machine": [true]}"#),
+            ("array-string", r#"{"machine": ["true"]}"#),
+            ("array-extra", r#"{"machine": [true, false]}"#),
             ("enabled-string", r#"{"machine": {"enabled": "true"}}"#),
             ("enabled-integer", r#"{"machine": {"enabled": 1}}"#),
             ("enabled-null", r#"{"machine": {"enabled": null}}"#),

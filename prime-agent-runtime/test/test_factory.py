@@ -2751,12 +2751,12 @@ class FactorySettingReadTest(unittest.TestCase):
     def test_missing_or_wrong_typed_settings_read_as_disabled(self) -> None:
         # No settings file at all: the shipped default is off.
         self.assertFalse(factory_module.factory_enabled())
-        # A settings document without the factory key is the same default.
+        # A settings document without the machine key is the same default.
         self.write_settings({})
         self.assertFalse(factory_module.factory_enabled())
         # Wrong-typed values read as unset, like the lenient Rust loader.
         for document in (
-            {"factory": None},
+            {"machine": None},
             {"machine": "enabled"},
             {"machine": {"enabled": None}},
             {"machine": {"enabled": "true"}},
