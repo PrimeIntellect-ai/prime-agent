@@ -619,10 +619,11 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
 #[tokio::test]
 async fn a_journal_failure_marks_the_notice_memory_only() {
     let fx = fixture();
-    let journal = fx
-        .inbox
-        .journal_path()
-        .expect("the session's inbox is journaled");
+    let journal = pa_core::session_engine::harness_digest::session_artifact_dir_for_log(
+        &fx.dir.join("sessions").join("inbox-session.jsonl"),
+    )
+    .unwrap()
+    .join(pa_core::session_engine::inbox::INBOX_JOURNAL_FILE);
     let _ = std::fs::remove_file(&journal);
     // A directory in the journal's place fails the append even as root.
     std::fs::create_dir_all(&journal).unwrap();
@@ -655,7 +656,10 @@ async fn the_inbox_store_follows_the_session_file() {
     fx.engine().set_session_file(broken);
     let memory_only = fx.engine().open_inbox();
     assert!(!Arc::ptr_eq(&memory_only, &fx.inbox));
-    assert!(memory_only.journal_path().is_none());
+    assert!(
+        memory_only.persistence_error().is_some(),
+        "the journal could not be read"
+    );
     memory_only.push(notice(INBOX_CLASS_BASH_DONE, "kept"), 1_000);
     assert!(Arc::ptr_eq(&fx.engine().open_inbox(), &memory_only));
     assert_eq!(fx.engine().inbox().unwrap().count().0, 1);

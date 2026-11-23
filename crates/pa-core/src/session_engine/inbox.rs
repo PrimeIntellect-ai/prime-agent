@@ -325,12 +325,6 @@ impl SessionInbox {
         inbox
     }
 
-    /// The journal path this store writes (the reopen/reuse seam).
-    #[must_use]
-    pub fn journal_path(&self) -> Option<PathBuf> {
-        self.journal.clone()
-    }
-
     /// Install the daemon's post-drain seam (the worker's wake-row
     /// refresh); the kernel's read handler runs it after every drain.
     pub fn set_read_hook(&self, hook: InboxReadHook) {
