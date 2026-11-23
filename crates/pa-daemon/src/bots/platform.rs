@@ -8,10 +8,10 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use pa_sandbox::{
-    CommandSessionClient, CommandSessionEvent, CommandSessionOptions, CommandSpec, InputChannel,
-    OutputChannel, PlatformGatewayAuthSource, PrimeSandboxClient, SandboxError, SandboxErrorCode,
-    SandboxStatus, SendInputOptions, StartOptions, StartRequest, VmCreateRequest,
-    MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
+    CommandSessionClient, CommandSessionErrorCode, CommandSessionEvent, CommandSessionOptions,
+    CommandSpec, InputChannel, OutputChannel, PlatformGatewayAuthSource, PrimeSandboxClient,
+    SandboxError, SandboxErrorCode, SandboxStatus, SendInputOptions, StartOptions, StartRequest,
+    VmCreateRequest, MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
 use super::BotStatus;
@@ -159,10 +159,18 @@ impl PrimePlatform {
             connect_timeout_ms: Some(EXEC_DEADLINE_MS),
             ..StartOptions::default()
         };
-        let mut stream = sessions
-            .start(&request, options)
-            .await
-            .map_err(|error| PlatformError::Transient(error.to_string()))?;
+        // A start that failed on the link, or before the guest gateway
+        // knows the sandbox, retries. Once the command runs, a failure is
+        // final: a retry would run the script twice.
+        let mut stream = sessions.start(&request, options).await.map_err(|error| {
+            if error.is_recoverable_stream_fault()
+                || error.code() == CommandSessionErrorCode::SandboxNotFound
+            {
+                PlatformError::Transient(error.to_string())
+            } else {
+                PlatformError::Other(error.to_string())
+            }
+        })?;
         for chunk in stdin.unwrap_or_default().chunks(MAX_PROCESS_INPUT_BYTES) {
             sessions
                 .send_input(
@@ -172,11 +180,11 @@ impl PrimePlatform {
                     SendInputOptions::default(),
                 )
                 .await
-                .map_err(|error| PlatformError::Transient(error.to_string()))?;
+                .map_err(|error| PlatformError::Other(error.to_string()))?;
         }
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         while let Some(event) = stream.next_event().await {
-            match event.map_err(|error| PlatformError::Transient(error.to_string()))? {
+            match event.map_err(|error| PlatformError::Other(error.to_string()))? {
                 CommandSessionEvent::Data { channel, data } => {
                     if channel == OutputChannel::Stderr {
                         stderr.extend_from_slice(&data);
@@ -194,7 +202,7 @@ impl PrimePlatform {
                 CommandSessionEvent::Start { .. } | CommandSessionEvent::Keepalive => {}
             }
         }
-        Err(PlatformError::Transient(
+        Err(PlatformError::Other(
             "the guest command stream ended before the command exited".into(),
         ))
     }
