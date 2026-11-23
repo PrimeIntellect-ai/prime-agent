@@ -10,7 +10,7 @@
 //! (a state without a child stays selectable — the node view inspects
 //! never-entered and python states too); Enter opens the state's NODE
 //! VIEW (the shared inspection surface: the instance list, the realized
-//! prompt, the inputs, the answer, the prompt template), `o`/→ open the
+//! prompt, the inputs, the answer, the template files), `o`/→ open the
 //! state's latest child session through the standard session open, ←/Esc
 //! close the page. Navigation never acts on a run: the stop rides the
 //! agents view's two-press `app.agents.delete` grammar (a header stops
@@ -664,7 +664,7 @@ impl FactoryView {
         // child session; Esc steps back to the diagram.
         if let Some(node) = self.node.as_mut() {
             // Esc steps back through the node view's own ladder: the
-            // template document closes first, then the view itself (back
+            // files document closes first, then the view itself (back
             // to the diagram); ctrl+c leaves the node view outright.
             if key == "ctrl+c" {
                 self.node = None;
