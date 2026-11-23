@@ -263,23 +263,20 @@ fn parse_flow_node(token: &str) -> Option<(String, Option<String>)> {
     if shape.is_empty() {
         return Some((id.to_string(), None));
     }
-    let opener = shape.chars().next()?;
-    let closer = match opener {
-        '[' | '>' => ']',
-        '(' => ')',
-        '{' => '}',
-        _ => return None,
-    };
-    let rest = shape[opener.len_utf8()..].trim();
-    let mut label = rest.rfind(closer).map_or(rest, |end| &rest[..end]);
-    for (open, close) in [("((", "))"), ("([", "])"), ("[(", ")]"), ("{{", "}}")] {
-        if let Some(inner) = label
-            .strip_prefix(open)
-            .and_then(|inner| inner.strip_suffix(close))
-        {
-            label = inner.trim();
-        }
-    }
+    // Compound shapes (`((circle))`, `([stadium])`, `[(cylinder)]`, `{{hexagon}}`) open with two
+    // characters; every other shape opens with one.
+    let (open, close) = [("((", "))"), ("([", "])"), ("[(", ")]"), ("{{", "}}")]
+        .into_iter()
+        .find(|(open, _)| shape.starts_with(open))
+        .or_else(|| match shape.chars().next()? {
+            '[' => Some(("[", "]")),
+            '>' => Some((">", "]")),
+            '(' => Some(("(", ")")),
+            '{' => Some(("{", "}")),
+            _ => None,
+        })?;
+    let rest = shape[open.len()..].trim();
+    let mut label = rest.rfind(close).map_or(rest, |end| &rest[..end]).trim();
     if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
         label = &label[1..label.len() - 1];
     }

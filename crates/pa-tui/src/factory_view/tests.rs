@@ -2747,3 +2747,29 @@ fn the_node_view_merge_keeps_the_files_and_fixes_the_selection() {
     );
     assert!(view.error.is_some(), "the malformed reply reports");
 }
+
+/// A mermaid flowchart node keeps only the label inside its shape, compound shapes included.
+#[test]
+fn compound_flowchart_shapes_keep_only_their_label() {
+    use super::mermaid::{parse_mermaid, Mermaid};
+    let Some(Mermaid::Diagram { states, .. }) = parse_mermaid(
+        "flowchart TB\n  a((circle)) --> b([stadium])\n  c[(cylinder)] --> d{{hexagon}}\n  e[box] --> f>flag]",
+    ) else {
+        panic!("a flowchart parses to a diagram");
+    };
+    let labels: Vec<(&str, Option<&str>)> = states
+        .iter()
+        .map(|state| (state.id.as_str(), state.label.as_deref()))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            ("a", Some("circle")),
+            ("b", Some("stadium")),
+            ("c", Some("cylinder")),
+            ("d", Some("hexagon")),
+            ("e", Some("box")),
+            ("f", Some("flag")),
+        ]
+    );
+}
