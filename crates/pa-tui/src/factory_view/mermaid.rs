@@ -386,6 +386,19 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
     let mut fence = String::new();
     let mut active = None;
     for line in text.lines() {
+        // One rule ends a fence: its closer, or a non-blank line that
+        // dedents out of the list item holding it (CommonMark ends the
+        // item there, and the fence with it); that line is then read as
+        // ordinary Markdown.
+        if let Some((_, _, column, mermaid)) = active {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            if !line.trim().is_empty() && indent < column {
+                if mermaid {
+                    segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
+                }
+                active = None;
+            }
+        }
         let marker = markdown_fence(line);
         if let Some((delimiter, length, column, mermaid)) = active {
             // A closer sits at most three spaces past the opener's container
@@ -603,6 +616,19 @@ mod tests {
                 segments.len()
             );
         }
+    }
+
+    #[test]
+    fn an_unclosed_list_item_fence_ends_where_the_list_ends() {
+        let graph = "flowchart TB\nA --> B\n";
+        let text =
+            format!("- ```python\n  print(1)\n\nAfter the list.\n\n```mermaid\n{graph}```\n");
+        let segments = super::split_mermaid_fences(&text);
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(diagram)] if prose.contains("After the list.") && diagram == graph),
+            "{} segments",
+            segments.len()
+        );
     }
 
     #[test]
