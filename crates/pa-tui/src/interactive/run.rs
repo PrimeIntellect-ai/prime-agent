@@ -668,8 +668,11 @@ async fn run_interactive_surface(
                     ..Default::default()
                 });
             }
-            // Any other daemon refusal gets the same session-picker fallback.
-            if crate::daemon_client::is_daemon_rejection(&error) {
+            // Any other daemon refusal gets the same session-picker fallback. A bot view hands every
+            // open failure back to the bots page: its single-use link cannot be retried.
+            if crate::daemon_client::is_daemon_rejection(&error)
+                || matches!(options.session, SessionSelection::Bot(_))
+            {
                 exit_guard.cancel();
                 let frames = renderer.finish(&mut view, true);
                 return Ok(InteractiveOutcome {

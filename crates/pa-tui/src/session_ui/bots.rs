@@ -11,9 +11,11 @@ use pa_types::daemon::DaemonCommand;
 use super::{AgentView, Overlay, SessionUi, UI_REQUEST_TIMEOUT_MS};
 
 use crate::bots_view::{parse_bots, BotsAction, BotsView};
-use crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS;
 use crate::interactive::reconnect::ConnectionEvent;
 use crate::interactive::{BotAttach, SelectionOrigin, SessionPanel, SessionSelection};
+
+/// The attach wait: longer than the daemon's 15-minute budget to resume a paused sandbox.
+const ATTACH_TIMEOUT_MS: u64 = 16 * 60 * 1000;
 
 /// One background `/bots` delivery: a fetched `list_bots` answer, or an attach outcome.
 pub(crate) enum BotsUpdate {
@@ -125,7 +127,7 @@ impl SessionUi {
                         bot_id: bot_id.clone(),
                         rest: Map::default(),
                     },
-                    LONG_RUNNING_REQUEST_TIMEOUT_MS,
+                    ATTACH_TIMEOUT_MS,
                 )
                 .await
                 .map_err(|error| page_error(&error))

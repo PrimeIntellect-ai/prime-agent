@@ -331,11 +331,14 @@ fn enter_attaches_the_bot_session_and_refuses_local_commands() {
         vec![
             wait("guest-b1"),
             HeadlessStep::Submit("/login".into()),
-            wait("runs on this Mac"),
+            wait("/login runs on this Mac"),
+            HeadlessStep::Type("/mcp x".into()),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            wait("/mcp runs on this Mac"),
         ],
     );
     assert_eq!(outcome.active_session_id, "guest-b1");
-    assert!(last_frame_with(&outcome, "runs on this Mac").contains("Leave the bot view"));
+    assert!(last_frame_with(&outcome, "/mcp runs on this Mac").contains("Leave the bot view"));
 }
 
 #[test]
