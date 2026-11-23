@@ -6,8 +6,12 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 
+use pa_sandbox::CommandSpec;
+use tokio::io::AsyncWriteExt;
+
+use super::exec_stream::ExecStreamHalves;
 use super::platform::{
-    BotCreate, BotPlatform, BotSandbox, ExecOutput, PlatformError, PlatformResult,
+    BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError, PlatformResult,
 };
 use super::version::{self, GUEST_VERSION_SCRIPT, INSTALL_SCRIPT};
 use super::{bot_label, owner_label, BotManager, BotSpec, BotStatus, BOT_LABEL};
@@ -30,6 +34,10 @@ pub(crate) struct FakeState {
     /// Checkpoints that exist but are not durable yet.
     pub pending_checkpoints: std::collections::HashSet<String>,
     pub unpublished: bool,
+    /// The version a linked guest says hello with; `None` = this build's.
+    pub guest_app_version: Option<String>,
+    /// The guest ends of open links: (its stdout, its stdin).
+    pub links: Vec<(tokio::io::DuplexStream, tokio::io::DuplexStream)>,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -259,9 +267,46 @@ impl BotPlatform for FakePlatform {
         }
         .boxed()
     }
+
+    fn open_stream<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        command: &'a CommandSpec,
+    ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>> {
+        async move {
+            assert_eq!(command.args, ["relay"]);
+            let version = {
+                let mut state = self.state();
+                if state.sandbox(sandbox_id)?.status != BotStatus::Running {
+                    return Err(PlatformError::Transient("gateway not ready".into()));
+                }
+                state
+                    .guest_app_version
+                    .clone()
+                    .unwrap_or_else(|| crate::protocol::app_version().to_string())
+            };
+            let (read, mut guest_stdout) = tokio::io::duplex(4096);
+            let (guest_stdin, write) = tokio::io::duplex(4096);
+            let hello = serde_json::json!({ "type": "daemon_hello", "appVersion": version });
+            guest_stdout
+                .write_all(format!("{hello}\n").as_bytes())
+                .await
+                .unwrap();
+            self.state().links.push((guest_stdout, guest_stdin));
+            Ok(ExecStreamHalves { read, write })
+        }
+        .boxed()
+    }
+
+    fn credentials<'a>(
+        &'a self,
+        _provider: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
+        async move { Ok(GuestCredentials::default()) }.boxed()
+    }
 }
 
-fn setup() -> (tempfile::TempDir, Arc<FakePlatform>, BotManager) {
+pub(crate) fn setup() -> (tempfile::TempDir, Arc<FakePlatform>, BotManager) {
     let dir = tempfile::tempdir().unwrap();
     let platform = Arc::new(FakePlatform::default());
     let manager =
@@ -269,7 +314,7 @@ fn setup() -> (tempfile::TempDir, Arc<FakePlatform>, BotManager) {
     (dir, platform, manager)
 }
 
-fn spec(bot_id: &str) -> BotSpec {
+pub(crate) fn spec(bot_id: &str) -> BotSpec {
     BotSpec {
         bot_id: bot_id.to_string(),
         name: "helper".to_string(),
@@ -504,13 +549,15 @@ async fn live_spawn_pause_resume_delete() {
     let dir = tempfile::tempdir().unwrap();
     let manager = BotManager::new(
         dir.path(),
-        Arc::new(super::platform::PrimePlatform::new(client)),
+        Arc::new(super::platform::PrimePlatform::new(client, dir.path())),
     )
     .unwrap();
     let bot_id = format!("live-{}", uuid::Uuid::new_v4());
 
     let run = async {
         let spawned = manager.spawn(&spec(&bot_id)).await?;
+        // The guest daemon says hello over the relay, on this version.
+        drop(manager.open_link(&spawned).await?);
         let paused = manager.pause(&bot_id).await?;
         let resumed = manager.ensure_running(&bot_id).await?;
         anyhow::Ok((spawned, paused, resumed))

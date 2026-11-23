@@ -109,6 +109,12 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         return run_runtime_bootstrap();
     }
 
+    // The hidden in-sandbox end of a bot link: pumps the exec channel to the
+    // guest daemon socket until either side closes.
+    if args.first().map(String::as_str) == Some("relay") {
+        return run_relay_mode();
+    }
+
     // Public command routing: help requests, removed commands, management
     // commands, and the model/session rewrites.
     let public_command = public_command::handle_public_command(args);
@@ -327,6 +333,19 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         Ok(exit_code) => Ok(exit_code),
         Err(missing) => Err(missing.error_message()),
     }
+}
+
+/// Run the bot relay. tokio reads stdin on a blocking thread that cannot be
+/// cancelled, and the exec channel never closes stdin: dropping the runtime
+/// would wait on that read forever and keep the finished relay alive.
+fn run_relay_mode() -> Result<i32, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let relayed = runtime.block_on(pa_daemon::bots::relay::run_guest_relay());
+    runtime.shutdown_background();
+    relayed.map(|()| 0).map_err(|error| format!("{error:#}"))
 }
 
 /// Prepare the kernel runtime at install time: resolve or bootstrap the kernel
