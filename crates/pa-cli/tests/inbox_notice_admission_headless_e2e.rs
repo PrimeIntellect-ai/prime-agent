@@ -1,7 +1,7 @@
 //! Real-admission headless e2e for the inbox notice rows: one arrival
 //! notice and one reminder notice ride the REAL daemon path — the
 //! kernel's detached bash completes, the inbox store takes the message,
-//! `admit_inbox_notice`/`admit_inbox_reminder` queue their custom rows,
+//! the inbox router queues the arrival and reminder custom rows,
 //! and the wake turns deliver them — then the headless TUI attaches to
 //! that live session and renders them as their OWN attributed row class
 //! (the envelope summary line plus the always-visible guttered body),

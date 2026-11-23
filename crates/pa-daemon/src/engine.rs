@@ -365,19 +365,6 @@ pub trait SessionEngine: Send + Sync {
     /// store do nothing.
     fn clear_progress_note(&self) {}
 
-    /// Whether the given store is still the engine session's published
-    /// inbox: the consumed withdrawal re-checks its captured store under
-    /// the slot's mutex, inside the core's critical section, so a store a
-    /// replacement retired never trims the successor's batch or drops its
-    /// wake rows. Engines without an inbox slot model no replacement and
-    /// keep the permissive default.
-    fn inbox_is_live(
-        &self,
-        _inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
-    ) -> bool {
-        true
-    }
-
     /// The session's autonomous-run status snapshot (the accounting lock
     /// is async-held, hence the boxed future). The scripted harness reports `None`.
     fn autonomous_status(

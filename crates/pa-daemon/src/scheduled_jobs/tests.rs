@@ -106,8 +106,7 @@ async fn a_fire_at_a_killed_session_cancels_and_skips() {
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
-        events: Arc::new(crate::worker::EventPump::new()),
-        inbox_seam: Mutex::new(None),
+        inbox_router: std::sync::OnceLock::new(),
     };
     // The dead-target cancel registers the artifact partition itself (a fresh store knows
     // nothing of the session yet).
@@ -149,8 +148,7 @@ async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
-        events: Arc::new(crate::worker::EventPump::new()),
-        inbox_seam: Mutex::new(None),
+        inbox_router: std::sync::OnceLock::new(),
     });
     let steer_heartbeat = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
     let follow_up_heartbeat = heartbeat_job(
@@ -258,8 +256,7 @@ async fn settles_classify_ran_failed_or_skipped() {
             user_bash: Arc::new(crate::user_bash::UserBash::new()),
             store: Arc::new(AgentCronJobStore::for_session_artifacts()),
             recovery: Arc::new(std::sync::Mutex::new(None)),
-            events: Arc::new(crate::worker::EventPump::new()),
-            inbox_seam: Mutex::new(None),
+            inbox_router: std::sync::OnceLock::new(),
         });
         let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, session);
         let hooks_for_run = Arc::clone(&hooks);
@@ -478,14 +475,14 @@ fn claimed_heartbeat(
         .expect("the due job is claimed")
 }
 
-/// A heartbeat fire with the worker's inbox seam set routes its prompt
+/// A heartbeat fire with the worker's inbox router set routes its prompt
 /// into the session's durable inbox (class `heartbeat`): ONE coalesced
 /// wake row rides the delivery-mode lane instead of the full injected
 /// delivery row, the fire counts as ran (the instruction is durable at
 /// admission, so no turn-settle handshake), and a busy-window repeat
 /// replaces the job's waiting fire with one built from the live job.
 #[tokio::test]
-async fn a_seam_set_heartbeat_fire_routes_into_the_inbox() {
+async fn a_routed_heartbeat_fire_lands_in_the_inbox() {
     let dir = std::env::temp_dir().join(format!("pa-sched-inbox-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let session = write_active_session(&dir);
@@ -498,24 +495,29 @@ async fn a_seam_set_heartbeat_fire_routes_into_the_inbox() {
         &serde_json::json!({ "responses": ["ack"] }),
         0,
     );
-    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
-        engine_dir.path(),
-    )));
-    engine.set_inbox(Arc::clone(&inbox));
+    crate::engine::SessionEngine::set_session_file(
+        &*engine,
+        dir.join("sessions").join("hb-session.jsonl"),
+    );
+    let inbox = engine.open_inbox();
     let events = Arc::new(crate::worker::EventPump::new());
     let mut strip_updates = events.subscribe();
+    let work_notify = Arc::new(Notify::new());
+    let recovery = Arc::new(std::sync::Mutex::new(None));
     let hooks = Arc::new(QueueHooks {
         core: Arc::clone(&core),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::clone(&work_notify),
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
-        recovery: Arc::new(std::sync::Mutex::new(None)),
-        events,
-        inbox_seam: Mutex::new(Some(InboxSeam {
-            engine: Arc::downgrade(&engine),
-            arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
-            agent_dir: engine_dir.path().join("agent"),
-        })),
+        recovery: Arc::clone(&recovery),
+        inbox_router: std::sync::OnceLock::from(crate::agent_inbox::InboxRouter::new(
+            &engine,
+            &core,
+            &recovery,
+            &work_notify,
+            &events,
+            &engine_dir.path().join("agent"),
+        )),
     });
 
     // The steer heartbeat routes: one invisible wake row on the steering
@@ -645,22 +647,29 @@ async fn a_dropped_queued_fire_withdraws_its_inbox_message_and_wake_row() {
         &serde_json::json!({ "responses": ["ack"] }),
         0,
     );
-    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
-        engine_dir.path(),
-    )));
-    engine.set_inbox(Arc::clone(&inbox));
+    crate::engine::SessionEngine::set_session_file(
+        &*engine,
+        dir.join("sessions").join("hb-session.jsonl"),
+    );
+    let inbox = engine.open_inbox();
+    let events = Arc::new(crate::worker::EventPump::new());
+    let work_notify = Arc::new(Notify::new());
+    let recovery = Arc::new(std::sync::Mutex::new(None));
     let scheduled = Arc::new(ScheduledJobs::new(
         Arc::clone(&core),
-        Arc::new(Notify::new()),
+        Arc::clone(&work_notify),
         Arc::new(crate::user_bash::UserBash::new()),
-        Arc::new(crate::worker::EventPump::new()),
-        Arc::new(std::sync::Mutex::new(None)),
+        Arc::clone(&events),
+        Arc::clone(&recovery),
     ));
-    scheduled.set_inbox_seam(
-        std::sync::Arc::downgrade(&engine),
-        pa_core::session_engine::inbox::InboxArrivals::default(),
-        engine_dir.path().join("agent"),
-    );
+    scheduled.set_inbox_router(crate::agent_inbox::InboxRouter::new(
+        &engine,
+        &core,
+        &recovery,
+        &work_notify,
+        &events,
+        &engine_dir.path().join("agent"),
+    ));
     // The fire routes into the inbox: the durable heartbeat message and
     // its coalesced wake row (the busy window parks the row).
     let job = claimed_heartbeat(
@@ -722,40 +731,4 @@ async fn a_dropped_queued_fire_withdraws_its_inbox_message_and_wake_row() {
         core.steering.is_empty() && core.follow_up.is_empty(),
         "no wake row or direct row for the paused job"
     );
-}
-
-/// The heartbeat withdrawal is identity-checked like the durable push: a
-/// retired or replaced slot refuses it and the captured store keeps its
-/// waiting fire (the replacement's replay, not a journal record racing
-/// its reopen, decides what survives).
-#[tokio::test]
-async fn a_retired_slot_refuses_the_heartbeat_withdrawal() {
-    let dir = std::env::temp_dir().join(format!("pa-sched-retire-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let session = write_active_session(&dir);
-    let (engine, engine_dir) = crate::agent_engine::tests::faux_engine_with_settings(
-        &serde_json::json!({ "responses": ["ack"] }),
-        0,
-    );
-    let inbox = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
-        engine_dir.path(),
-    )));
-    engine.set_inbox(Arc::clone(&inbox));
-    let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
-    let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(&job, 1);
-    let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&job.id, &row).unwrap();
-    inbox.push(fields, 1);
-
-    engine.clear_inbox();
-    assert!(engine
-        .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
-        .is_none());
-    let replacement = Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(
-        &dir.join("replacement"),
-    )));
-    engine.set_inbox(replacement);
-    assert!(engine
-        .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
-        .is_none());
-    assert_eq!(inbox.count().0, 1, "the retired store stayed untouched");
 }

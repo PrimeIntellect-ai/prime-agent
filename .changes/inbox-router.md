@@ -1,0 +1,1 @@
+- An agent message, child exit, or heartbeat sent to a session that is closing or not yet built now always lands in its inbox (no more "Target session is closed" errors), and when a session opens with messages already waiting, the agent gets one inbox notice right away.

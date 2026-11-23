@@ -40,11 +40,6 @@ use pa_types::inbox_notice::{
     INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
 };
 
-/// The coalescing batch state the daemon's notice sink owns: the
-/// arrivals the currently queued short-notice row covers (reset when the
-/// row delivers or clears).
-pub type InboxArrivals = std::sync::Arc<std::sync::Mutex<Vec<InboxMessage>>>;
-
 /// The daemon's post-drain seam: every successful `rlm.inbox.read` runs
 /// it so the queued wake rows can retract or re-render over what is left
 /// (a drained store leaves no stale notice or reminder behind).

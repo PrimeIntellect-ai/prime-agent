@@ -328,9 +328,15 @@ impl Worker {
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) async fn refresh_replaced_session_state(&self) {
-        // The teardown closed the retired session; its successor starts live.
+        // The teardown closed the retired session; its successor starts
+        // live with its own inbox (opened before the closed marker
+        // clears), and mail already waiting there gets one notice.
         if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.open_inbox();
             agent_engine.clear_session_closed();
+        }
+        if let Some(router) = &self.inbox_router {
+            router.announce_waiting();
         }
         let (rlm_depth, summary, child_script) = {
             let (mut core, inputs) = self.summary_inputs();

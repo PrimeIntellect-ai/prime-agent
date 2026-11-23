@@ -21,7 +21,7 @@ use pa_core::cron::{
 };
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
-use crate::worker::{admit_inbox_notice_locked, Lane, QueuedItem, SessionCore, Worker};
+use crate::worker::{store_and_announce, Lane, QueuedItem, SessionCore, Worker};
 
 /// How long a fire waits for its turn to settle before answering the scheduler with a skip (a stuck
 /// turn must not pin the dispatch lane forever).
@@ -35,17 +35,6 @@ pub(crate) fn session_artifact_dir(session_file: &Path, session_id: &str) -> Opt
         .map(|root| root.join("session-artifacts").join(session_id))
 }
 
-/// The late-bound inbox seam of the queue hooks: the worker's live
-/// engine (weak), the shared arrival batch the wake rows coalesce in,
-/// and the agent dir the settings gate reads. Set once after the engine
-/// is built; a worker whose engine never arrives keeps the direct lane.
-#[derive(Clone)]
-struct InboxSeam {
-    engine: std::sync::Weak<crate::agent_engine::AgentSessionEngine>,
-    arrivals: pa_core::session_engine::inbox::InboxArrivals,
-    agent_dir: PathBuf,
-}
-
 /// The scheduler hooks: how a claimed job reaches this session.
 pub(crate) struct QueueHooks {
     core: Arc<Mutex<SessionCore>>,
@@ -54,11 +43,9 @@ pub(crate) struct QueueHooks {
     store: Arc<AgentCronJobStore>,
     /// The worker recovery journal (the fire checkpoint's busy evidence).
     recovery: Arc<Mutex<Option<crate::journal::WorkerRecoveryJournal>>>,
-    /// The client event stream (an inbox-routed fire's queue strip refresh).
-    events: Arc<crate::worker::EventPump>,
-    /// The late-bound inbox seam (heartbeat fires route into the session's
-    /// durable inbox once it is set; `None` keeps the direct lane).
-    inbox_seam: Mutex<Option<InboxSeam>>,
+    /// The worker's inbox router, set once the engine exists (heartbeat
+    /// fires route into the session's inbox; unset keeps the direct lane).
+    inbox_router: std::sync::OnceLock<crate::agent_inbox::InboxRouter>,
 }
 
 impl QueueHooks {
@@ -111,60 +98,36 @@ impl QueueHooks {
 
 impl QueueHooks {
     /// Route one heartbeat fire into the session's durable inbox: the
-    /// fired prompt becomes one `heartbeat` entry and ONE coalesced wake
-    /// row carries the arrival on the delivery-mode lane. The instruction
-    /// is durable at admission, so the fire counts as ran (no turn-settle
+    /// fired prompt becomes one `heartbeat` entry and the queued arrival
+    /// row announces it on the delivery-mode lane. The instruction is
+    /// durable at admission, so the fire counts as ran (no turn-settle
     /// handshake). Answers `None` when the direct lane row serves the
-    /// fire (a disabled inbox, an engine without a store, a refused
-    /// admission).
+    /// fire (`agentInbox.enabled: false`).
     fn route_heartbeat_fire(&self, job: &AgentCronJob) -> Option<RoutedFire> {
-        let seam = self
-            .inbox_seam
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
-        let engine = seam.engine.upgrade()?;
-        if !crate::agent_inbox::inbox_enabled(&engine.cwd(), &seam.agent_dir) {
-            return None;
-        }
-        let inbox = engine.inbox()?;
-        let closed_engine = Arc::clone(&engine);
-        let closed = move || closed_engine.session_is_closed();
-        let admitted = {
-            let mut core = self
-                .core
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let router = self.inbox_router.get()?;
+        router.admission(|core, inbox, closed| {
             if !core.created || core.shutdown_requested {
-                return Some(RoutedFire::Skipped);
+                return (Some(RoutedFire::Skipped), false);
             }
             // The LIVE job, read inside the admission's critical section
             // (`job` is the scheduler's pre-run snapshot): pause, stop,
             // delete, and rewrite write the store before their withdrawal
             // takes this lock, so a fire never lands after its withdrawal.
             let Some(live) = self.store.get_claimed_job(&job.id) else {
-                return Some(RoutedFire::Skipped);
+                return (Some(RoutedFire::Skipped), false);
             };
             let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
                 &live,
                 crate::util::now_ms(),
             );
-            let fields = pa_core::session_engine::inbox::heartbeat_notice_fields(&live.id, &row)?;
-            // One waiting fire per job: the newest replaces the older, and
-            // the arrival batch drops it so the notice never counts it. A
-            // store retired since the capture skips the fire: its waiting
-            // fire replays into the replacement, so a direct row would
-            // deliver twice.
-            let Some(withdrawn) = engine.withdraw_heartbeat_from_live_inbox(&inbox, &live.id)
+            let Some(fields) =
+                pa_core::session_engine::inbox::heartbeat_notice_fields(&live.id, &row)
             else {
-                return Some(RoutedFire::Skipped);
+                return (None, false);
             };
-            if !withdrawn.is_empty() {
-                seam.arrivals
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .retain(|message| withdrawn.iter().all(|gone| gone.id != message.id));
-            }
+            // One waiting fire per job: the newest replaces the older (the
+            // arrival row's covers drop the withdrawn one).
+            inbox.withdraw_heartbeat(&live.id);
             // TS cron fires resume the suspension before admission
             // (`resumeIfIdle: true`): a fire on a post-abort/post-compact
             // session is a resume site (the runner refuses suspended lanes).
@@ -175,27 +138,9 @@ impl QueueHooks {
             } else {
                 Lane::Steering
             };
-            admit_inbox_notice_locked(
-                &mut core,
-                &inbox,
-                &seam.arrivals,
-                fields,
-                lane,
-                closed,
-                Some(engine.as_ref()),
-            )
-        };
-        admitted.ok()?;
-        crate::worker::checkpoint_queue_recovery(
-            &self.recovery,
-            &self.core,
-            crate::worker::QueueCheckpoint::Admitted {
-                operation: "steer_queued",
-            },
-        );
-        self.work_notify.notify_one();
-        let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
-        Some(RoutedFire::Ran)
+            store_and_announce(core, inbox, closed, fields, lane);
+            (Some(RoutedFire::Ran), true)
+        })?
     }
 }
 
@@ -252,10 +197,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
             // The TS `heartbeat:<id>` queue key: a later fire replaces the queued one instead of
             // stacking.
             if let Some(key) = &queue_key {
-                core.steering
-                    .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
-                core.follow_up
-                    .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
+                crate::worker::remove_keyed(&mut core, key);
             }
             let lane = if rides_steering {
                 &mut core.steering
@@ -361,9 +303,8 @@ impl ScheduledJobs {
         let mut store = AgentCronJobStore::for_session_artifacts();
         // `cronStore.onHeartbeatChange` broadcasts `{ type: "heartbeats_changed" }`
         // to the clients; the supervisor re-broadcasts daemon-wide.
-        let heartbeat_events = Arc::clone(&events);
         store.on_heartbeat_change(Box::new(move || {
-            heartbeat_events.send(crate::worker::OutboundFrame::heartbeats_changed());
+            events.send(crate::worker::OutboundFrame::heartbeats_changed());
         }));
         let store = Arc::new(store);
         ScheduledJobs {
@@ -373,8 +314,7 @@ impl ScheduledJobs {
                 user_bash,
                 store: Arc::clone(&store),
                 recovery,
-                events,
-                inbox_seam: Mutex::new(None),
+                inbox_router: std::sync::OnceLock::new(),
             }),
             store,
             scheduler: tokio::sync::Mutex::new(None),
@@ -385,24 +325,10 @@ impl ScheduledJobs {
         &self.store
     }
 
-    /// Late-bind the worker's inbox seam (the live engine and the shared
-    /// arrival batch) onto the queue hooks: heartbeat fires route into
-    /// the session's durable inbox once it is set.
-    pub(crate) fn set_inbox_seam(
-        &self,
-        engine: std::sync::Weak<crate::agent_engine::AgentSessionEngine>,
-        arrivals: pa_core::session_engine::inbox::InboxArrivals,
-        agent_dir: PathBuf,
-    ) {
-        *self
-            .hooks
-            .inbox_seam
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(InboxSeam {
-            engine,
-            arrivals,
-            agent_dir,
-        });
+    /// Hand the queue hooks the worker's inbox router (set once, after
+    /// the engine exists).
+    pub(crate) fn set_inbox_router(&self, router: crate::agent_inbox::InboxRouter) {
+        let _ = self.hooks.inbox_router.set(router);
     }
 
     /// Bind the live session (TS `rebindCronJobsToState`): register the session's artifact
@@ -465,48 +391,18 @@ impl ScheduledJobs {
             return;
         }
         let key = format!("heartbeat:{}", job.id);
-        // The inbox route's withdrawal seam: the live engine and its
-        // store, when the fire routed into the durable inbox.
-        let seam = self
-            .hooks
-            .inbox_seam
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        {
-            let mut core = self
+        crate::worker::remove_keyed(
+            &mut self
                 .hooks
                 .core
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            core.steering
-                .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
-            core.follow_up
-                .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
-            if let Some(seam) = &seam {
-                if let Some(engine) = seam.engine.upgrade() {
-                    if let Some(inbox) = engine.inbox() {
-                        // The captured store is re-checked under the
-                        // slot's own mutex, inside this critical section
-                        // like the reminder's check: a replacement's
-                        // successor rows never sweep for the retired
-                        // store's job.
-                        if engine
-                            .withdraw_heartbeat_from_live_inbox(&inbox, &job.id)
-                            .is_some_and(|withdrawn| !withdrawn.is_empty())
-                        {
-                            // The wake rows that promised the withdrawn
-                            // fire refresh over what is left (an emptied
-                            // inbox leaves no stale notice or reminder).
-                            crate::worker::refresh_inbox_wake_rows_locked(
-                                &mut core,
-                                &seam.arrivals,
-                                &inbox,
-                            );
-                        }
-                    }
-                }
-            }
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &key,
+        );
+        // The fire waiting in the inbox goes too, and the wake rows that
+        // announced it follow.
+        if let Some(router) = self.hooks.inbox_router.get() {
+            router.withdraw(|_, inbox| !inbox.withdraw_heartbeat(&job.id).is_empty());
         }
         // Same settle as the other withdrawals: the verdict and snapshot must not keep the
         // withdrawn fire's busy=true (a revive would replay the deleted heartbeat's prompt).
