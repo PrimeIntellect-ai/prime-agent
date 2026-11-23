@@ -348,9 +348,8 @@ impl BotManager {
             }
             self.save(record)?;
         }
-        let orphans = lock(&self.registry).take_orphans()?;
-        let failed = self.delete_checkpoints(orphans).await;
-        lock(&self.registry).add_orphans(failed)
+        let orphans = lock(&self.registry).orphans();
+        self.delete_orphans(orphans).await
     }
 
     fn lock_for(&self, bot_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -717,21 +716,22 @@ impl BotManager {
             return Ok(());
         };
         let stale: Vec<String> = record.older_checkpoint_ids.drain(..index).collect();
+        lock(&self.registry).add_orphans(&stale)?;
         self.save(record.clone())?;
-        let failed = self.delete_checkpoints(stale).await;
-        lock(&self.registry).add_orphans(failed)
+        self.delete_orphans(stale).await
     }
 
-    /// Delete checkpoints; returns the ones that could not be deleted.
-    async fn delete_checkpoints(&self, checkpoints: Vec<String>) -> Vec<String> {
-        let mut failed = Vec::new();
+    /// Delete tracked orphan checkpoints; a failed delete stays tracked.
+    async fn delete_orphans(&self, checkpoints: Vec<String>) -> Result<()> {
         for checkpoint in checkpoints {
-            if let Err(error) = retry(|| self.platform.delete_checkpoint(&checkpoint)).await {
-                eprintln!("pa-daemon: could not delete bot checkpoint {checkpoint}: {error}");
-                failed.push(checkpoint);
+            match retry(|| self.platform.delete_checkpoint(&checkpoint)).await {
+                Ok(()) => lock(&self.registry).remove_orphan(&checkpoint)?,
+                Err(error) => {
+                    eprintln!("pa-daemon: could not delete bot checkpoint {checkpoint}: {error}");
+                }
             }
         }
-        failed
+        Ok(())
     }
 
     async fn delete_locked(&self, bot_id: &str) -> Result<()> {
@@ -756,10 +756,12 @@ impl BotManager {
         };
         let mut checkpoints = record.older_checkpoint_ids;
         checkpoints.extend(record.checkpoint_id);
-        let failed = self.delete_checkpoints(checkpoints).await;
-        let mut registry = lock(&self.registry);
-        registry.remove(bot_id)?;
-        registry.add_orphans(failed)
+        {
+            let mut registry = lock(&self.registry);
+            registry.add_orphans(&checkpoints)?;
+            registry.remove(bot_id)?;
+        }
+        self.delete_orphans(checkpoints).await
     }
 }
 

@@ -93,7 +93,8 @@ pub struct BotRecord {
 #[serde(rename_all = "camelCase")]
 struct RegistryFile {
     bots: BTreeMap<String, BotRecord>,
-    /// Checkpoints whose delete failed; boot reconcile retries them.
+    /// Checkpoints to delete; tracked before each delete, so boot reconcile
+    /// retries the ones a failure or an exit left behind.
     #[serde(default)]
     orphaned_checkpoints: Vec<String>,
 }
@@ -157,26 +158,36 @@ impl BotRegistry {
         Ok(())
     }
 
-    /// Remember checkpoints whose delete failed, and persist.
+    /// Track checkpoints to delete, and persist. A checkpoint stays tracked
+    /// until [`Self::remove_orphan`] confirms its delete.
     ///
     /// # Errors
     /// Returns an error when the file cannot be written.
-    pub fn add_orphans(&mut self, checkpoints: Vec<String>) -> Result<()> {
+    pub fn add_orphans(&mut self, checkpoints: &[String]) -> Result<()> {
         if checkpoints.is_empty() {
             return Ok(());
         }
-        self.file.orphaned_checkpoints.extend(checkpoints);
+        self.file
+            .orphaned_checkpoints
+            .extend_from_slice(checkpoints);
         self.save()
     }
 
-    /// Take the remembered orphan checkpoints, and persist.
+    /// Stop tracking a deleted checkpoint, and persist.
     ///
     /// # Errors
     /// Returns an error when the file cannot be written.
-    pub fn take_orphans(&mut self) -> Result<Vec<String>> {
-        let orphans = std::mem::take(&mut self.file.orphaned_checkpoints);
-        self.save()?;
-        Ok(orphans)
+    pub fn remove_orphan(&mut self, checkpoint: &str) -> Result<()> {
+        self.file
+            .orphaned_checkpoints
+            .retain(|tracked| tracked != checkpoint);
+        self.save()
+    }
+
+    /// The checkpoints still waiting for a delete.
+    #[must_use]
+    pub fn orphans(&self) -> Vec<String> {
+        self.file.orphaned_checkpoints.clone()
     }
 
     fn save(&self) -> Result<()> {
