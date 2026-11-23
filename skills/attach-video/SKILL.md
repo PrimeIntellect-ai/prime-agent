@@ -5,9 +5,7 @@ description: Load an on-disk video clip (MP4, WebM) into the model's context as 
 
 # Attach Video
 
-Load short on-disk video clips into the model's context as multimodal
-attachments. The clip is sent to the model as a `video_url` content part, so a
-video-capable model can actually watch it.
+Load short on-disk video clips into the model's context as multimodal attachments. The clip is sent to the model as a `video_url` content part, so a video-capable model can actually watch it.
 
 ## When to use this
 
@@ -17,10 +15,7 @@ video-capable model can actually watch it.
 
 ## When NOT to use this
 
-For *programmatic* work on a video — reading metadata, cutting, re-encoding,
-extracting frames — use a tool such as `ffmpeg` through `bash()` instead. That
-path does not put the video in the model's context; it only lets you compute
-over it. Use `attach_video` when you need to *see* the video.
+For *programmatic* work on a video — reading metadata, cutting, re-encoding, extracting frames — use a tool such as `ffmpeg` through `bash()` instead. That path does not put the video in the model's context; it only lets you compute over it. Use `attach_video` when you need to *see* the video.
 
 ## Usage
 
@@ -31,29 +26,10 @@ print(await attach_video("clip.mp4"))
 print(await attach_video("a.mp4", "b.webm"))
 ```
 
-The file is attached as-is: it is not transcoded, trimmed, or resized, and the
-original file is left untouched. Each file must be at most 7.5 MB (prime-agent's
-limit for one attachment); trim or downscale longer recordings first (for example
-`ffmpeg -i in.mp4 -t 10 -vf scale=640:-2 -an out.mp4`). The attachment is
-replayed to the model on every later turn, so prefer short, low-resolution
-clips.
+The file is attached as-is: it is not transcoded, trimmed, or resized, and the original file is left untouched. Each file must be at most 7.5 MB (prime-agent's limit for one attachment); trim or downscale longer recordings first (for example `ffmpeg -i in.mp4 -t 10 -vf scale=640:-2 -an out.mp4`). The attachment is replayed to the model on every later turn, so prefer short, low-resolution clips.
 
-Supported formats: MP4, WebM. Before attaching, the skill checks MP4 box
-boundaries and requires `ftyp`, `moov`, and a video track handler. For WebM it
-checks EBML element boundaries, the `webm` DocType, and a video track in the
-Segment's Tracks metadata. Truncated declared lengths and missing video tracks
-produce a local error.
+Supported formats: MP4, WebM. Before attaching, the skill checks MP4 box boundaries and requires `ftyp`, `moov`, and a video track handler. For WebM it checks EBML element boundaries, the `webm` DocType, and a video track in the Segment's Tracks metadata. Truncated declared lengths and missing video tracks produce a local error.
 
-These are structural checks, not a full decode. The skill does not inspect
-compressed frames, MP4 sample tables, or WebM Cluster contents. Unknown-length
-WebM Segments and Clusters are allowed; an unknown-length Cluster consumes the
-remaining bytes, so Tracks must appear before it. The provider can still reject
-an unsupported codec, missing media data, or damaged frames. No transcoder or
-external media probe is required.
+These are structural checks, not a full decode. The skill does not inspect compressed frames, MP4 sample tables, or WebM Cluster contents. Unknown-length WebM Segments and Clusters are allowed; an unknown-length Cluster consumes the remaining bytes, so Tracks must appear before it. The provider can still reject an unsupported codec, missing media data, or damaged frames. No transcoder or external media probe is required.
 
-The skill errors if a file is not a supported video, is too large, or if the
-current model does not declare video input
-(`"input": ["text", "image", "video"]` in `models.json`). Only
-OpenAI-compatible chat-completions providers receive the video itself; other
-providers, and models without declared video input, see a placeholder saying
-the video was omitted.
+The skill errors if a file is not a supported video, is too large, or if the current model does not declare video input (`"input": ["text", "image", "video"]` in `models.json`). Only OpenAI-compatible chat-completions providers receive the video itself; other providers, and models without declared video input, see a placeholder saying the video was omitted.

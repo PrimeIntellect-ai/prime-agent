@@ -1,0 +1,1 @@
+- A heartbeat keeps at most one waiting message in the agent inbox: a newer fire replaces the older one, and a fire that lands after its heartbeat was paused, stopped, deleted, or rewritten no longer leaves a stale prompt behind.

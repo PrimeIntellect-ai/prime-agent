@@ -12,7 +12,6 @@ mod broadcast;
 mod burst;
 mod feed;
 mod interleave;
-mod lane_behavior;
 mod park;
 mod queue;
 

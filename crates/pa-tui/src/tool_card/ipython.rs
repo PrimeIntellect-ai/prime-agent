@@ -18,7 +18,7 @@ use super::ipython_details::{
 };
 use super::layout::RowOutput;
 use super::{highlight, ToolCallCard};
-use crate::chat::Detail;
+use crate::chat::{ChatEntry, Detail};
 use crate::code_preview::{
     parse_ipython_bash_cell, preview_bash_command, preview_ipython_code, python_statement_lines,
     CodePreviewLanguage,
@@ -210,6 +210,7 @@ fn layout(
         width,
     );
     render_sent_agent_messages(lines, &details, level.tool_output_expanded(), theme, width);
+    render_inbox_messages(lines, &details, level, theme, width);
     render_transcript_reads(lines, &details, expanded, theme, width);
     if !expanded {
         return;
@@ -594,6 +595,41 @@ fn render_sent_agent_messages(
                     lines.push(|| row);
                 }
             }
+        }
+    }
+}
+
+/// The messages the cell's `rlm.inbox.read` calls returned, each through the
+/// transcript row renderer of the notice it replaced; like the sent
+/// messages, their bodies follow the conversation level.
+fn render_inbox_messages(
+    lines: &mut RowOutput,
+    details: &IpythonDetails,
+    level: Detail,
+    theme: &Theme,
+    width: usize,
+) {
+    use crate::custom_message::{geometry, injected_prompt, render};
+    let leading = level.tool_output_expanded();
+    for entry in &details.inbox_messages {
+        match entry {
+            ChatEntry::AgentMessage(row) => lines.rows(
+                || geometry::agent_message_row_count(row, level, theme, width, leading),
+                || render::render_agent_message(row, level, theme, width, leading),
+            ),
+            ChatEntry::ShellCompletion(row) => lines.rows(
+                || geometry::shell_completion_row_count(row, level, width, leading),
+                || render::render_shell_completion(row, level, theme, width, leading),
+            ),
+            ChatEntry::InjectedPrompt(row) => lines.rows(
+                || injected_prompt::count_injected_prompt(row, level, theme, width),
+                || injected_prompt::render_injected_prompt(row, level, theme, width),
+            ),
+            ChatEntry::CustomPanel(row) => lines.rows(
+                || geometry::custom_panel_row_count(row, theme, width),
+                || render::render_custom_panel(row, theme, width),
+            ),
+            _ => {}
         }
     }
 }
