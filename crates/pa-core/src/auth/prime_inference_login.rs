@@ -259,15 +259,10 @@ mod tests {
                         .and_then(serde_json::Value::as_str)
                         .expect("public key")
                         .to_string();
-                    let mut rng = rsa::rand_core::OsRng;
                     let public_key =
-                        rsa::RsaPublicKey::from_public_key_pem(&public_pem).expect("public pem");
+                        rsa::PublicKey::from_public_key_pem(&public_pem).expect("public pem");
                     let cipher = public_key
-                        .encrypt(
-                            &mut rng,
-                            rsa::Oaep::new::<sha2::Sha256>(),
-                            b"fixture-browser-key",
-                        )
+                        .oaep_encrypt::<sha2::Sha256>(b"fixture-browser-key")
                         .expect("encrypt");
                     let encoded = base64::engine::general_purpose::STANDARD.encode(cipher);
                     *self.dynamic_status.lock().unwrap() = Some(encoded);

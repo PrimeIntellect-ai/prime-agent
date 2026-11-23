@@ -379,6 +379,10 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         message: String,
+        /// Queue only into a running turn: an idle, paused, or suspended
+        /// session answers `{queued: false}` and starts nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        require_busy: Option<bool>,
         #[serde(flatten)]
         input: PromptInput,
         #[serde(flatten)]

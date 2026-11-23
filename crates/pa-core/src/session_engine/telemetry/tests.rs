@@ -510,6 +510,43 @@ async fn tool_calls_fold_into_run_aggregates() {
     assert!(!all.contains("private-extension-tool"));
 }
 
+/// Video blocks in tool results (the `attach_video` adoption) count into
+/// `agent session ended`; the payload, mime type, and path never ride an event.
+#[tokio::test]
+async fn video_attachments_count_into_session_ended() {
+    let fixture = fixture();
+    emit(&fixture, AgentEvent::AgentStart);
+    let (tool_start, mut tool_end) = tool_execution_event("python_repl", false);
+    if let AgentEvent::ToolExecutionEnd { result, .. } = &mut tool_end {
+        let video = ToolResultContent::Video(pa_agent::types::VideoContent {
+            data: "cHJpdmF0ZS12aWRlbw==".to_string(),
+            mime_type: "video/mp4".to_string(),
+        });
+        result.content.extend([video.clone(), video]);
+    }
+    emit(&fixture, tool_start);
+    emit(&fixture, tool_end);
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            aborted: false,
+            messages: Vec::new(),
+        },
+    );
+    SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    )
+    .end()
+    .await
+    .unwrap();
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["video_attachment_count"], serde_json::json!(2));
+    let all = serde_json::to_string(&fixture.mock.events()).unwrap();
+    assert!(!all.contains("cHJpdmF0ZS12aWRlbw") && !all.contains("video/mp4"));
+}
+
 /// Skills, RLM child usage, MCP connector use, kernel boots, and feature
 /// outcomes count into `agent session ended` instead of their own events.
 #[tokio::test]
@@ -1016,9 +1053,10 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
     let install_id = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b";
     let mut config = TelemetryClientConfig::new(install_id);
     config.flush_interval = Duration::from_mins(10);
-    config.sinks = vec![
-        Arc::new(pa_telemetry::AnalyticsSink::new(url)) as Arc<dyn pa_telemetry::TelemetrySink>
-    ];
+    config.sinks = vec![Arc::new(pa_telemetry::AnalyticsSink::new(
+        url,
+        pa_ai::utils::tls::http_client_builder(),
+    )) as Arc<dyn pa_telemetry::TelemetrySink>];
     let client = TelemetryClient::spawn(config).unwrap();
     let mut fixture = fixture();
     fixture.client = client.clone();

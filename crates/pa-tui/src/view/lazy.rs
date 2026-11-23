@@ -167,14 +167,9 @@ impl AgentView {
     pub(super) fn prepend_cursor_spacing(&self, prepended: usize) -> Option<bool> {
         let (section, _) = self.sparse_window?.cursor?;
         let index = section.checked_sub(1)? + prepended;
-        matches!(
-            self.chat.get(index)?,
-            crate::chat::ChatEntry::Tool(_)
-                | crate::chat::ChatEntry::AgentMessage(_)
-                | crate::chat::ChatEntry::InboxNotice(_)
-                | crate::chat::ChatEntry::ShellCompletion(_)
-        )
-        .then(|| self.conversation_leading(index, self.entry_detail(index).tool_output_expanded()))
+        self.chat.get(index)?.is_envelope_row().then(|| {
+            self.conversation_leading(index, self.entry_detail(index).tool_output_expanded())
+        })
     }
 
     pub(super) fn note_prepended_entries(

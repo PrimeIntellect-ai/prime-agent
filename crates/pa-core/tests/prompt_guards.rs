@@ -20,7 +20,9 @@ use pa_core::prompts::model_prompts::MODEL_PROMPTS_TOML;
 use pa_core::prompts::system_prompt::{
     system_prompt_breakdown, BuildSystemPromptOptions, SegmentKind,
 };
-use pa_core::skills::load_skills_from_dir;
+use pa_core::resources::{ContextFile, LoadedResources};
+use pa_core::settings::{Settings, SettingsManager};
+use pa_core::skills::{load_skills_from_dir, Skill};
 
 /// The workspace bundled skills directory (source-checkout layout):
 /// pa-core lives at `<root>/crates/pa-core`.
@@ -32,13 +34,41 @@ fn bundled_skills_dir() -> std::path::PathBuf {
         .join("skills")
 }
 
-fn sorted_bundled_skills() -> Vec<pa_core::skills::Skill> {
+fn sorted_bundled_skills() -> Vec<Skill> {
     let skills_dir = bundled_skills_dir();
     let mut loaded = load_skills_from_dir(&skills_dir, "package");
     loaded
         .skills
         .sort_by(|left, right| left.name.cmp(&right.name));
     loaded.skills
+}
+
+fn default_settings() -> SettingsManager {
+    SettingsManager::in_memory(&Settings::default())
+}
+
+/// A root daemon session's prompt inputs over borrowed settings,
+/// resources, and skills.
+fn session_options<'a>(
+    settings: &'a SettingsManager,
+    resources: &'a LoadedResources,
+    skills: &'a [Skill],
+) -> BuildSystemPromptOptions<'a> {
+    BuildSystemPromptOptions {
+        settings,
+        resources,
+        skills,
+        selected_tools: vec!["python_repl"],
+        model_prompt_extras: None,
+        model_input: &[],
+        cwd: "/w".to_string(),
+        messages_path: Some("/log.jsonl".to_string()),
+        generic_mcp_servers: Vec::new(),
+        rlm_depth: 0,
+        factory_child: false,
+        daemonless: false,
+        can_spawn: false,
+    }
 }
 
 // Cache safety
@@ -77,23 +107,32 @@ fn static_layers_contain_no_dynamic_content() {
 
 #[test]
 fn cached_prefix_is_stable_across_sessions() {
-    let mut options = BuildSystemPromptOptions {
-        cwd: "/first/cwd".to_string(),
-        messages_path: Some("/first/session.jsonl".to_string()),
-        model_prompt_extras: Some("model guidance."),
-        skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["python_repl"]),
-        ..Default::default()
-    };
+    let skills = sorted_bundled_skills();
+    let settings = default_settings();
+    let resources = LoadedResources::default();
+    let mut options = session_options(&settings, &resources, &skills);
+    options.cwd = "/first/cwd".to_string();
+    options.messages_path = Some("/first/session.jsonl".to_string());
+    options.model_prompt_extras = Some("model guidance.");
     let first = system_prompt_breakdown(&options);
 
+    let other_settings = SettingsManager::in_memory(
+        &serde_json::from_value(serde_json::json!({ "agentInbox": { "enabled": false } })).unwrap(),
+    );
+    let other_resources = LoadedResources {
+        agents_files: vec![ContextFile {
+            path: "AGENTS.md".into(),
+            content: "Never commit main.".into(),
+        }],
+        append_system_prompt: vec!["And one more thing.".into()],
+        ..Default::default()
+    };
+    let mut options = session_options(&other_settings, &other_resources, &skills);
     options.cwd = "/completely/different".into();
     options.messages_path = None;
-    options.rlm_depth = Some(3);
-    options.rlm_parent_agent = Some("orchestrator");
+    options.model_prompt_extras = Some("model guidance.");
+    options.rlm_depth = 3;
     options.generic_mcp_servers = vec!["slack".into(), "github".into()];
-    options.context_files = vec![("AGENTS.md".into(), "Never commit main.".into())];
-    options.append_system_prompt = Some("And one more thing.".into());
     let second = system_prompt_breakdown(&options);
 
     assert_eq!(first.cached_prefix_len, second.cached_prefix_len);
@@ -121,7 +160,7 @@ fn cached_prefix_is_stable_across_sessions() {
     assert!(second_tail.contains("/completely/different"));
     assert!(second_tail.contains("Enabled generic MCP servers: `github`, `slack`."));
     assert!(second_tail.contains("Recursive agent depth: 3 (not root)"));
-    assert!(second_tail.contains("You are a child agent spawned by orchestrator."));
+    assert!(second_tail.contains("You are a child agent spawned by your parent agent."));
     assert!(second_tail.contains("# Project Context"));
     assert!(second_tail.ends_with("And one more thing."));
 
@@ -567,13 +606,10 @@ fn every_shipped_skill_is_discoverable() {
 /// or daemonless, registers the bash completion notice the degrade relies on.
 #[test]
 fn bounded_await_contract_renders_in_daemon_and_daemonless_sessions() {
-    let mut options = BuildSystemPromptOptions {
-        cwd: "/w".to_string(),
-        messages_path: Some("/log.jsonl".to_string()),
-        skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["python_repl"]),
-        ..Default::default()
-    };
+    let skills = sorted_bundled_skills();
+    let settings = default_settings();
+    let resources = LoadedResources::default();
+    let mut options = session_options(&settings, &resources, &skills);
     for daemonless in [false, true] {
         options.daemonless = daemonless;
         let prompt = system_prompt_breakdown(&options).assembled;
@@ -590,13 +626,10 @@ fn bounded_await_contract_renders_in_daemon_and_daemonless_sessions() {
 /// location]`-style XML the TS `formatSkillsForPrompt` emits, without a `python_import` line.
 #[test]
 fn generic_mcp_skill_renders_in_the_prompt_inventory() {
-    let mut options = BuildSystemPromptOptions {
-        cwd: "/w".to_string(),
-        messages_path: Some("/log.jsonl".to_string()),
-        skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["python_repl"]),
-        ..Default::default()
-    };
+    let skills = sorted_bundled_skills();
+    let settings = default_settings();
+    let resources = LoadedResources::default();
+    let mut options = session_options(&settings, &resources, &skills);
     let breakdown = system_prompt_breakdown(&options);
     let inventory = breakdown
         .segments

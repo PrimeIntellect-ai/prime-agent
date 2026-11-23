@@ -2,7 +2,7 @@
 //! spawned one-way tasks and their note outcomes.
 use super::{
     export_share, key_event_to_id, AgentView, DaemonCommand, Duration, GhAuthStatus, GistOutcome,
-    InfoContent, KeyEvent, Map, Result, SessionUi, ShareLoader, StatusKind, Value,
+    InfoContent, KeyEvent, Map, Overlay, Result, SessionUi, ShareLoader, StatusKind, Value,
     UI_REQUEST_TIMEOUT_MS,
 };
 
@@ -275,7 +275,7 @@ impl SessionUi {
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
         let mut traces_dialog = crate::auth_panel::AuthPanel::new("Login to Prime Agent Traces");
         traces_dialog.set_cancel_signal(panel.cancel_signal());
-        view.auth_panel = Some(traces_dialog);
+        view.overlay = Some(Overlay::AuthPanel(traces_dialog));
         tokio::spawn(async move {
             let outcome = traces.0.login(panel.clone()).await;
             panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome, gen });
@@ -542,7 +542,7 @@ impl SessionUi {
             task,
             tmp_file: tmp_file.clone(),
         });
-        view.share_loader = Some(ShareLoader::new());
+        view.overlay = Some(Overlay::ShareLoader(ShareLoader::new()));
         self.dirty = true;
         Ok(())
     }
@@ -559,7 +559,7 @@ impl SessionUi {
         let Some(run) = self.share.take() else {
             return;
         };
-        view.share_loader = None;
+        view.close_overlay_if(|overlay| matches!(overlay, Overlay::ShareLoader(_)));
         let _ = std::fs::remove_file(&run.tmp_file);
         match outcome {
             Ok(gist) => {
@@ -591,7 +591,7 @@ impl SessionUi {
                     run.task.abort();
                     let _ = std::fs::remove_file(&run.tmp_file);
                 }
-                view.share_loader = None;
+                view.overlay = None;
                 self.note("Share cancelled", view);
             }
         }
