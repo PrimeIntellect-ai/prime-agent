@@ -205,12 +205,20 @@ fn decode_label(text: &str) -> String {
     let mut rest = text.as_str();
     while let Some(at) = rest.find('#') {
         out.push_str(&rest[..at]);
-        let Some(end) = rest[at..].find(';') else {
+        // The candidate ends at the next `;` or `#`: a hash before any
+        // semicolon is not an entity, and stopping there keeps the scan
+        // linear in the label length.
+        let Some(end) = rest[at + 1..]
+            .find([';', '#'])
+            .map(|offset| at + 1 + offset)
+        else {
             out.push_str(&rest[at..]);
             return out;
         };
-        let code = &rest[at + 1..at + end];
-        let decoded = if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
+        let code = &rest[at + 1..end];
+        let decoded = if !rest[end..].starts_with(';') {
+            None
+        } else if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
             u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
         } else if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_digit()) {
             code.parse().ok().and_then(char::from_u32)
@@ -226,7 +234,7 @@ fn decode_label(text: &str) -> String {
         };
         if let Some(ch) = decoded {
             out.push(if ch.is_control() { ' ' } else { ch });
-            rest = &rest[at + end + 1..];
+            rest = &rest[end + 1..];
         } else {
             // Not an entity: keep the hash and rescan from the next
             // character, so an ordinary hash never eats a later entity.
@@ -527,5 +535,18 @@ mod tests {
             panic!("expected mermaid")
         };
         assert_eq!(graph, "flowchart TB\nA --> B\n");
+    }
+
+    #[test]
+    fn many_hashes_before_a_semicolon_decode_in_linear_time() {
+        let label = format!("{}{}", "#".repeat(200_000), ";#34;");
+        let started = std::time::Instant::now();
+        let decoded = super::decode_label(&label);
+        assert_eq!(&decoded[decoded.len() - 2..], ";\"");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "decode took {:?}",
+            started.elapsed()
+        );
     }
 }
