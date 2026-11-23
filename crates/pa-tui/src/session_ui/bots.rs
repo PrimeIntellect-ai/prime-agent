@@ -18,8 +18,9 @@ use crate::interactive::{BotAttach, SelectionOrigin, SessionPanel, SessionSelect
 /// One background `/bots` delivery: a fetched `list_bots` answer, or an attach outcome.
 pub(crate) enum BotsUpdate {
     Catalog(Result<Value, String>),
+    /// One attach outcome, tagged with the request number it answers.
     Attached {
-        bot_id: String,
+        request: u64,
         result: Result<BotAttach, String>,
     },
 }
@@ -104,10 +105,9 @@ impl SessionUi {
     }
 
     /// The attach runs in the background: the daemon may resume a paused sandbox first.
-    fn spawn_bot_attach(&self, bot_id: String, name: String) {
+    fn spawn_bot_attach(&self, request: u64, bot_id: String, name: String) {
         let client = self.client.clone();
         let tx = self.bots_updates.clone();
-        let attached_id = bot_id.clone();
         tokio::spawn(async move {
             let result = client
                 .request_ok_with_timeout(
@@ -135,10 +135,7 @@ impl SessionUi {
                         guest_session_id: field("guestSessionId")?,
                     })
                 });
-            let _ = tx.send(BotsUpdate::Attached {
-                bot_id: attached_id,
-                result,
-            });
+            let _ = tx.send(BotsUpdate::Attached { request, result });
         });
     }
 
@@ -153,9 +150,9 @@ impl SessionUi {
                 Ok(catalog) => page.apply_catalog(catalog),
                 Err(error) => page.set_fetch_error(Some(error)),
             },
-            // A result for an attach this page did not start (a closed and reopened page)
-            // drops.
-            BotsUpdate::Attached { bot_id, .. } if !page.is_attaching(&bot_id) => return,
+            // A result for an attach this page is not waiting for (an earlier request, or one
+            // from a closed page) drops.
+            BotsUpdate::Attached { request, .. } if !page.is_attaching(request) => return,
             BotsUpdate::Attached {
                 result: Ok(bot), ..
             } => {
@@ -193,8 +190,9 @@ impl SessionUi {
             BotsAction::Refresh => self.spawn_bots_refresh(),
             BotsAction::Attach { bot_id, name } => {
                 page.set_attach_error(None);
-                page.set_attaching(Some((bot_id.clone(), name.clone())));
-                self.spawn_bot_attach(bot_id, name);
+                self.bots_attach_requests += 1;
+                page.set_attaching(Some((self.bots_attach_requests, name.clone())));
+                self.spawn_bot_attach(self.bots_attach_requests, bot_id, name);
             }
             BotsAction::Close => {
                 view.overlay = None;

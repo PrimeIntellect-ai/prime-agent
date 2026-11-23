@@ -302,9 +302,12 @@ async fn run_agents_view_flow(
                     pa_tui::interactive::run_interactive(next.clone(), UiMode::Terminal).await?;
                 handoff = Some((next, outcome));
             } else if let Some((requester, mut page)) = origin.take() {
-                // The error that ended a bot attach shows on the reopened `/bots` page.
+                // The error that ended a bot attach shows on the reopened `/bots` page, not as
+                // an agents-view status.
                 if let pa_tui::interactive::SessionPanel::Bots { error } = &mut page.panel {
-                    *error = status_message.take();
+                    if outcome.agents_view_notice.is_some() {
+                        *error = status_message.take();
+                    }
                 }
                 let outcome = pa_tui::interactive::run_interactive_origin_open(
                     requester.clone(),

@@ -29,8 +29,10 @@ pub struct BotAttach {
 /// Returns `Err` when the bot cannot run, the link cannot open (a guest on another version
 /// fails with the link's `VersionMismatch`), or the endpoint cannot bind.
 pub async fn attach_bot(manager: &BotManager, agent_dir: &Path, bot_id: &str) -> Result<BotAttach> {
-    let record = manager.ensure_running(bot_id).await?;
+    // The guard comes first: the pause policy must not pause the bot between its resume and
+    // the link.
     let guard = manager.attach_guard(bot_id);
+    let record = manager.ensure_running(bot_id).await?;
     let stream = manager.open_link(&record).await?;
     let endpoint = serve_link(stream, &endpoint_dir(agent_dir)?, guard).await?;
     Ok(BotAttach {

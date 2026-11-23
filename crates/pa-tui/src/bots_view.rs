@@ -221,8 +221,8 @@ pub struct BotsView {
     fetch_error: Option<String>,
     /// The last failed attach (a version mismatch shows here); a fetch never clears it.
     attach_error: Option<String>,
-    /// The bot an attach request is in flight for: `(bot_id, name)`.
-    attaching: Option<(String, String)>,
+    /// The attach request in flight: `(request number, bot name)`.
+    attaching: Option<(u64, String)>,
 }
 
 /// The name column's fixed width.
@@ -286,15 +286,17 @@ impl BotsView {
         self.attach_error = error;
     }
 
-    /// The attach in flight (`Some((bot_id, name))`), or none.
-    pub fn set_attaching(&mut self, bot: Option<(String, String)>) {
-        self.attaching = bot;
+    /// The attach in flight (`Some((request, name))`), or none.
+    pub fn set_attaching(&mut self, attach: Option<(u64, String)>) {
+        self.attaching = attach;
     }
 
-    /// Whether this page is waiting for the attach of `bot_id`.
+    /// Whether this page is waiting for attach request `request`.
     #[must_use]
-    pub fn is_attaching(&self, bot_id: &str) -> bool {
-        self.attaching.as_ref().is_some_and(|(id, _)| id == bot_id)
+    pub fn is_attaching(&self, request: u64) -> bool {
+        self.attaching
+            .as_ref()
+            .is_some_and(|(id, _)| *id == request)
     }
 
     /// One key press.
