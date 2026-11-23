@@ -67,6 +67,10 @@ const STATUS_WORKING: &[u8] = b"\x1b]7501;state=working:app=prime-agent\x1b\\";
 const STATUS_DONE: &[u8] = b"\x1b]7501;state=done:app=prime-agent\x1b\\";
 const STATUS_IDLE: &[u8] = b"\x1b]7501;state=idle:app=prime-agent\x1b\\";
 const STATUS_ERROR: &[u8] = b"\x1b]7501;state=error:app=prime-agent\x1b\\";
+/// The retry countdown row's needle. The countdown redraws the submit-time
+/// loader row in place and writes only the changed cells, so the mock's
+/// `status-retry-sentinel` loses the `t` it shares with `Waiting`.
+const RETRY_SENTINEL: &[u8] = b"retry-sentinel";
 
 /// The child-mode env: which surface this re-executed binary runs.
 const CHILD_MODE_ENV: &str = "PA_DIFF_CHILD_MODE";
@@ -299,7 +303,7 @@ fn program_status_stays_silent_without_a_detection_reply() {
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
     let mark = harness.mark();
     harness.write(b"retry\r");
-    harness.wait_from(mark, b"status-retry-sentinel", "the run went on");
+    harness.wait_from(mark, RETRY_SENTINEL, "the run went on");
     let stream = exit_without_status_clear(harness, "the unsupported program-status route");
     assert!(status_reports(&stream).is_empty());
 }
@@ -353,11 +357,7 @@ fn program_status_stays_working_during_provider_retry() {
     let mut harness = program_status_harness(&ChildSpec::new("chat"));
     let start = harness.mark();
     harness.write(b"retry\r");
-    harness.wait_from(
-        start,
-        b"status-retry-sentinel",
-        "the retry countdown rendered",
-    );
+    harness.wait_from(start, RETRY_SENTINEL, "the retry countdown rendered");
     let mark = harness.mark();
     harness.write(b"resume\r");
     harness.wait_from(mark, STATUS_DONE, "the resumed retry completed");
@@ -430,11 +430,7 @@ fn program_status_session_close_drops_pending_retry() {
     let mut harness = program_status_harness(&ChildSpec::new("chat"));
     let mark = harness.mark();
     harness.write(b"retry\r");
-    harness.wait_from(
-        mark,
-        b"status-retry-sentinel",
-        "the retry countdown rendered",
-    );
+    harness.wait_from(mark, RETRY_SENTINEL, "the retry countdown rendered");
     harness.wait_from(mark, STATUS_WORKING, "the pending retry reports working");
     let mark = harness.mark();
     harness.write(b"/copy\r");
