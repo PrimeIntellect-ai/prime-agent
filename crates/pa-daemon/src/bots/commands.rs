@@ -39,6 +39,10 @@ pub async fn admit_bot_spawn(agent_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The supervisor's own spawn deadline, inside the worker's wait, so a
+/// spawn the worker gave up on is deleted rather than left running.
+pub const SPAWN_DEADLINE: std::time::Duration = std::time::Duration::from_mins(13);
+
 /// Owner and name pairs with a spawn in flight: two concurrent spawns
 /// of one name for one owner never both provision.
 static SPAWNING: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
@@ -140,9 +144,11 @@ impl Supervisor {
                 spec.name
             );
         }
-        let record = manager.spawn(spec).await?;
-        let first_prompt = async {
-            let mut client = super::guest::GuestClient::connect(&manager, &record).await?;
+        let started = tokio::time::timeout(SPAWN_DEADLINE, async {
+            let record = manager.spawn(spec).await?;
+            let mut client = super::guest::GuestClient::connect(&manager, &record)
+                .await
+                .context("the bot did not get its task")?;
             super::send::send_message(
                 &super::ledger::BotLedger::new(agent_dir, &record.bot_id),
                 &mut client,
@@ -152,19 +158,26 @@ impl Supervisor {
                 None,
             )
             .await
-            .map_err(|error| anyhow::anyhow!("{error}"))
-        };
-        if let Err(error) = first_prompt.await {
-            let deleted = manager.delete(&record.bot_id).await;
-            return Err(match deleted {
-                Ok(()) => error.context("the bot did not get its task, so it was deleted"),
-                Err(delete_error) => error.context(format!(
-                    "the bot did not get its task, and deleting it failed: {delete_error:#}"
-                )),
-            });
+            .map_err(|error| anyhow::anyhow!("the bot did not get its task: {error}"))?;
+            anyhow::Ok(record)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "the bot did not start within {SPAWN_DEADLINE:?}"
+            ))
+        });
+        match started {
+            // The bot now runs a turn; the reply path follows it from here.
+            Ok(record) => Ok(record),
+            // A failed spawn leaves nothing billing, whatever step it reached.
+            Err(error) => match manager.delete(&spec.bot_id).await {
+                Ok(()) => Err(error.context("the bot was deleted")),
+                Err(delete_error) => {
+                    Err(error.context(format!("deleting the bot failed: {delete_error:#}")))
+                }
+            },
         }
-        // The bot now runs a turn; the reply path follows it from here.
-        Ok(record)
     }
 
     /// `delete_bot`: delete one bot its owner names.

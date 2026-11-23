@@ -105,6 +105,12 @@ impl LinkAgentObserveController {
         limit: u64,
         roles: Vec<String>,
     ) -> anyhow::Result<Value> {
+        if agent.runtime_kind.as_deref() == Some("bot") {
+            anyhow::bail!(
+                "agent {} is a bot: its transcript lives in its sandbox; message it with agent_message",
+                agent.session_name.as_deref().unwrap_or(&agent.session_id)
+            );
+        }
         let command = pa_types::daemon::DaemonCommand::GetSessionMessages {
             id: None,
             active_session_id: agent.active_session_id.clone().unwrap_or_default(),
