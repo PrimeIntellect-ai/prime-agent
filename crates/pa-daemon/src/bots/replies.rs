@@ -42,9 +42,10 @@ const SETTLE_POLL: Duration = Duration::from_secs(2);
 /// The transcript rows one sync reads from the end of the bot session.
 const TAIL_ROWS: u64 = 400;
 
-/// The answer of one settled run: the id and text of the last assistant
-/// row with text after the last delivered row, and the timestamp (guest
-/// clock, ms) of the run's first row.
+/// One settled run after the last delivered row: the id of its last row
+/// (the next run starts after it), the text of its last assistant row with
+/// text (empty when it has none), and the timestamp (guest clock, ms) of
+/// its first row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SettledAnswer {
     pub row_id: String,
@@ -69,9 +70,9 @@ fn row_timestamp(row: &Value) -> Option<u64> {
         .or_else(|| timestamp.as_str().and_then(crate::util::iso_to_unix_ms))
 }
 
-/// The settled answer after the last delivered row: one per settled run,
+/// The settled run after the last delivered row: one per settled run,
 /// however many owner messages the run answered. `Err` names the newest
-/// assistant row when the last delivered row is outside the page: what
+/// row when the last delivered row is outside the page: what
 /// came after it may or may not have been delivered, so nothing is.
 pub(crate) fn settled_answer(
     rows: &[Value],
@@ -81,28 +82,25 @@ pub(crate) fn settled_answer(
         None => 0,
         Some(id) => {
             let Some(position) = rows.iter().position(|row| row["id"].as_str() == Some(id)) else {
-                let newest = rows.iter().rev().find_map(|row| {
-                    (row["message"]["role"] == "assistant")
-                        .then(|| row["id"].as_str())
-                        .flatten()
-                });
+                let newest = rows.iter().rev().find_map(|row| row["id"].as_str());
                 return newest.map_or(Ok(None), |id| Err(id.to_string()));
             };
             position + 1
         }
     };
     let run = &rows[start.min(rows.len())..];
-    let answer = run.iter().rev().find_map(|row| {
-        let message = &row["message"];
-        if message["role"] != "assistant" {
-            return None;
-        }
-        let answer = crate::types::message_text(message);
-        let row_id = row["id"].as_str()?;
-        (!answer.trim().is_empty()).then(|| (row_id.to_string(), answer))
-    });
-    Ok(answer.map(|(row_id, answer)| SettledAnswer {
-        row_id,
+    let Some(row_id) = run.iter().rev().find_map(|row| row["id"].as_str()) else {
+        return Ok(None);
+    };
+    let answer = run
+        .iter()
+        .rev()
+        .filter(|row| row["message"]["role"] == "assistant")
+        .map(|row| crate::types::message_text(&row["message"]))
+        .find(|answer| !answer.trim().is_empty())
+        .unwrap_or_default();
+    Ok(Some(SettledAnswer {
+        row_id: row_id.to_string(),
         answer,
         started_at: run.first().and_then(row_timestamp),
     }))
@@ -234,9 +232,11 @@ where
     match settled_answer(&rows, last_turn.as_deref()) {
         // A run in which the bot messaged its owner already answered, like
         // a local child that replied: its answer is recorded, not delivered.
+        // A run without answer text still moves the cursor to its last row.
         Ok(Some(run)) => {
             settled = 1;
-            let answer = (!run.replied(&outbox_times)).then(|| bounded_answer(&run.answer));
+            let answer = (!run.replied(&outbox_times) && !run.answer.trim().is_empty())
+                .then(|| bounded_answer(&run.answer));
             deliveries.push((Delivery::Turn(run.row_id), answer));
         }
         Ok(None) => {}

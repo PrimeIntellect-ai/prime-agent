@@ -138,6 +138,23 @@ async fn a_restart_never_delivers_a_reply_twice() {
 }
 
 #[tokio::test]
+async fn a_send_only_run_does_not_swallow_the_next_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut guest = FakeGuest::default();
+    guest.turn("a1", "first answer");
+    assert_eq!(sync(dir.path(), &mut guest).await, ["first answer"]);
+    // The bot answers only with a message; its run ends with a tool-only
+    // row and a trailing notice.
+    guest.turn_with("a2", "", Some("a note"));
+    guest
+        .rows
+        .push(json!({ "id": "n2", "message": { "role": "custom", "content": "notice", "timestamp": crate::util::iso_from_unix_ms(guest.clock + 5) } }));
+    assert_eq!(sync(dir.path(), &mut guest).await, ["a note"]);
+    guest.turn("a3", "third answer");
+    assert_eq!(sync(dir.path(), &mut guest).await, ["third answer"]);
+}
+
+#[tokio::test]
 async fn a_settled_idle_bot_pauses_after_its_turn() {
     let dir = tempfile::tempdir().unwrap();
     let mut guest = FakeGuest::default();
