@@ -1,0 +1,1 @@
+- The system prompt, the Prime Intellect sandbox skill, and the new `docs/bots-page.md` describe bots: spawn one with `rlm.spawn(target="sandbox")` after `/bots on`, message it like a child, attach from `/bots`; the `prime sandbox` CLI is the human and admin path only.

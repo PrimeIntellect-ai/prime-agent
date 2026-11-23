@@ -68,6 +68,7 @@ prime train init && prime train rl.toml              # configure + launch a run
 prime sandbox create python:3.11-slim --timeout-minutes 120
 prime sandbox run <sandbox-id> "python --version"
 prime sandbox delete <sandbox-id>
+# (an agent that needs a standing sandbox spawns a bot instead: references/sandboxes.md)
 
 # Inference
 prime inference models              # list available models
