@@ -251,9 +251,11 @@ impl AgentsViewMode {
         let row = self.rows.get(self.selected)?;
         let stop = Self::delete_arm_word(row);
         match row.kind {
-            RowKind::SubagentSummary | RowKind::Code | RowKind::Shells | RowKind::FactoryRuns => {
-                None
-            }
+            RowKind::SubagentSummary
+            | RowKind::Code
+            | RowKind::Shells
+            | RowKind::FactoryRuns
+            | RowKind::Bot => None,
             RowKind::PersistentShell => Some(()),
             // An agent with a live session stops (an idle-but-live row still stops, never
             // deletes its file); a saved-only row deletes.
@@ -405,7 +407,8 @@ impl AgentsViewMode {
             | RowKind::Subagent
             | RowKind::Code
             | RowKind::Shells
-            | RowKind::FactoryRuns => None,
+            | RowKind::FactoryRuns
+            | RowKind::Bot => None,
             RowKind::PersistentShell => {
                 let shell_id = row.summary.get("shellId")?.as_str()?.to_string();
                 Some(DeleteAction::StopShell { shell_id, name })

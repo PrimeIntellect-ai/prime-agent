@@ -135,9 +135,10 @@ fn saved_aliases(saved: &Value) -> Vec<String> {
     aliases
 }
 
-/// The SESSION column's width cap (TS `Math.min(28, ...)`, which `build_layout` mirrors): the
-/// widest the name column ever renders.
-const SESSION_NAME_COLUMN_MAX_CELLS: usize = 28;
+/// The SESSION column's width cap (TS `Math.min(28, ...)` originally; widened for the bot rows,
+/// whose `◈ bot ☁ remote` chips cut the name off at 28 cells): the widest the name column ever
+/// renders.
+const SESSION_NAME_COLUMN_MAX_CELLS: usize = 40;
 
 /// The widest title the SESSION column renders: the column cap minus the two cells every agent
 /// row spends on its icon and gap.
@@ -656,7 +657,11 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .filter(|row| row.kind != crate::agents_view_forest::RowKind::Code)
         .collect();
     let cost = |row: &crate::agents_view_forest::AgentsViewRow| {
-        if row.kind == crate::agents_view_forest::RowKind::PersistentShell {
+        if matches!(
+            row.kind,
+            crate::agents_view_forest::RowKind::PersistentShell
+                | crate::agents_view_forest::RowKind::Bot
+        ) {
             "-".to_string()
         } else {
             format!("${:.2}", row.cost)

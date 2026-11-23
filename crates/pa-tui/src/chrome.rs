@@ -95,6 +95,9 @@ pub enum ActivityGroup {
     Subagents,
     Heartbeats,
     Bash,
+    /// The sandbox bots this daemon owns (the `/bots` page's roster). The group always renders
+    /// — the bots lane ships with the daemon — and opens the full bots page.
+    Bots,
     /// The factory page: live factory runs. Its group renders exactly
     /// while the daemon advertises the `factory_activity` lane (the
     /// opt-in gate; an advertised empty one reads its zero count) and
@@ -147,6 +150,13 @@ pub struct ActivityDock {
     pub shells: Vec<String>,
     /// How many of the running shells are persistent.
     pub shells_persistent: usize,
+    /// The sandbox bots actively running right now (the collapsed
+    /// count's number; the running subset of the page's rows).
+    pub bots_running: usize,
+    /// The alive-but-not-running bots (the expanded row's breakdown).
+    pub bots_alive: usize,
+    /// Each bot as one `<name> <state>` item (the expanded row).
+    pub bots_items: Vec<String>,
     /// The current session's stored factory specs (the expanded factory
     /// row's breakdown; the collapsed segment counts live runs only).
     pub factory_specs: usize,
@@ -189,6 +199,7 @@ impl ActivityDock {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Bots,
         ];
         if self.factory_group {
             groups.push(ActivityGroup::Factory);
@@ -810,6 +821,19 @@ pub fn render_activity_dock_segments(
                     ));
                 }
             }
+            // The bots indicator counts the running bots (the page's running subset); the
+            // active bots only — the dead rows stay a /bots-page concern, not a status-bar
+            // cluster.
+            ActivityGroup::Bots => {
+                line.push(theme.fg_span(
+                    activity_color(dock.bots_running),
+                    format!(
+                        "\u{25c8} {} bot{}",
+                        dock.bots_running,
+                        if dock.bots_running == 1 { "" } else { "s" }
+                    ),
+                ));
+            }
             // The factory indicator counts the running runs, and the paused
             // ones in their own amber cluster (the heartbeats' grammar): done
             // and failed runs stay as panels inside the factory page.
@@ -928,6 +952,23 @@ fn render_expanded_dock_row(
             });
             let items: Vec<String> = breakdown.into_iter().chain(dock.shells.clone()).collect();
             expanded_group_row(theme, width, ("▸", "shells"), dock.shells.len(), &items)
+        }
+        // The bots group: the running count with the active
+        // breakdown, then each bot's item (the page's rows).
+        ActivityGroup::Bots => {
+            let breakdown = (dock.bots_running + dock.bots_alive > 0)
+                .then(|| format!("{} running · {} alive", dock.bots_running, dock.bots_alive));
+            let items: Vec<String> = breakdown
+                .into_iter()
+                .chain(dock.bots_items.clone())
+                .collect();
+            expanded_group_row(
+                theme,
+                width,
+                ("\u{25c8}", "bots"),
+                dock.bots_running,
+                &items,
+            )
         }
         // The stored specs and live runs lead, then each live run.
         ActivityGroup::Factory => {

@@ -751,8 +751,9 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
     });
     let steps = vec![
         // Focus the dock and step down to the factory row (subagents ->
-        // heartbeats -> shells -> factory rows); Enter opens the page.
+        // heartbeats -> shells -> bots -> factory rows); Enter opens the page.
         HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
@@ -792,6 +793,7 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "factory: only-run".to_string(),
@@ -823,6 +825,7 @@ fn a_closed_session_clears_the_open_factory_page() {
     let graph = json!({ "runs": [factory_page_run("run-1", "only-run")] });
     let steps = vec![
         HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),
         HeadlessStep::Key(down()),

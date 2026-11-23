@@ -544,6 +544,7 @@ async fn a_held_shells_read_survives_the_agents_view_handoff() {
                     }
                 }
                 "roster_unsubscribe" => replies.push((id, Value::Null)),
+                "list_bots" => replies.push((id, json!({"bots": []}))),
                 other => panic!("unexpected command: {other}"),
             }
             // The first view can open only after the server observed its unanswered shells read.

@@ -51,7 +51,7 @@ impl BotRow {
 
     /// The row's section (the agents page's grouping): `Running` while the sandbox runs,
     /// `Idle` while it is paused or starting, `Inactive` when it is stopped or failed.
-    fn section(&self) -> Section {
+    pub(crate) fn section(&self) -> Section {
         match self.status.as_str() {
             "running" => Section::Running,
             "paused" | "creating" => Section::Idle,
@@ -236,9 +236,6 @@ const LIST_FRAME_ROWS: usize = 5;
 /// Rows per bot (the row + its note) plus the detail pane's height.
 const ROW_HEIGHT: usize = 2;
 const DETAIL_ROWS: usize = 9;
-/// The list's preferred window, in bots — the rendered-line budget
-/// (`* ROW_HEIGHT`) the section headings and spacers consume too.
-const PREFERRED_VISIBLE: usize = 8;
 
 /// One display entry in the sectioned list: the spacer between section
 /// blocks, a section heading with its row count, or one bot's row pair
@@ -454,7 +451,7 @@ impl BotsView {
         // then forward with whatever remains.
         let visible = menu_list_layout(
             Some(viewport_rows),
-            PREFERRED_VISIBLE * ROW_HEIGHT,
+            viewport_rows,
             display.iter().map(DisplayItem::lines).sum::<usize>(),
             LIST_FRAME_ROWS
                 + error_rows

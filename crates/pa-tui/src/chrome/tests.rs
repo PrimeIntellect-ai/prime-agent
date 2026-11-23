@@ -17,7 +17,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ◈ 0 bots  ·  ⚙ 0 factory"
     );
     let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
     assert_eq!(
@@ -26,6 +26,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Bots,
             ActivityGroup::Factory,
         ],
         "the segments follow the row's group order"
@@ -144,7 +145,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ◈ 0 bots  ·  ⚙ 0 factory  ·  Pursuing goal (0s)"
     );
     // The operator's 2026-09-24 color-coding directive.
     let success = theme.fg_style(ThemeColor::Success).fg;
@@ -194,7 +195,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ◈ 0 bots  ·  ⚙ 0 factory"
     );
     // The all-zero dock renders its own empty state — the zero
     // readout — and the zero segments stay neutral, never green. The
@@ -211,7 +212,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{25c8} 0 bots  \u{b7}  \u{2699} 0 factory"
     );
     assert!(frame[1]
         .iter()
@@ -327,7 +328,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ◈ 0 bots  ·  ⚙ 0 factory"
     );
     // Two running children plus seven running descendants: ONE
     // number — the summed total, never the pair, never the
@@ -345,7 +346,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ◈ 0 bots  ·  ⚙ 0 factory"
     );
     assert!(!text.contains("2,"), "no direct/nested pair: {text}");
     assert!(!text.contains("idle"), "no category breakdown: {text}");
@@ -366,7 +367,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ◈ 0 bots  ·  ⚙ 0 factory"
     );
 }
 
@@ -393,6 +394,9 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         heartbeats_paused: 1,
         shells: vec!["cargo test · 12.0s".to_string()],
         shells_persistent: 0,
+        bots_running: 0,
+        bots_alive: 0,
+        bots_items: Vec::new(),
         factory_specs: 2,
         factory_runs: vec!["nightly paused".to_string()],
         factory_counts: crate::factory_view::FactoryRunCounts {
@@ -414,6 +418,7 @@ fn the_focused_dock_expands_into_one_row_per_group() {
             " ◆ subagents   3 running · 1 idle · 2 inactive",
             " ◷ heartbeats  5m lane canary",
             " ▸ shells      1 running · 0 persistent  ·  cargo test · 12.0s",
+            " ◈ bots",
             " ⚙ factory     2 factories · 0 running · 1 paused  ·  nightly paused",
             " Pursuing goal (0s)",
         ]
@@ -430,10 +435,10 @@ fn the_focused_dock_expands_into_one_row_per_group() {
         focused: false,
         ..dock
     };
-    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 120));
+    let texts = line_texts(&render_activity_dock(&collapsed, &theme, 140));
     assert_eq!(
         texts[1..],
-        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)"]
+        [" ◆ 3 subagents  ·  ◷ 2 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ◈ 0 bots  ·  ⚙ 0 factory · ◐ 1 paused  ·  Pursuing goal (0s)"]
     );
 }
 
@@ -510,7 +515,7 @@ fn the_expanded_factory_row_counts_stored_specs_without_runs() {
     };
     let texts = line_texts(&render_activity_dock(&dock, &theme, 80));
     assert_eq!(
-        texts[4].trim_end(),
+        texts[5].trim_end(),
         " ⚙ factory     2 factories · 0 running"
     );
     let collapsed = ActivityDock {
@@ -572,6 +577,7 @@ fn dock_arrows_visit_every_group_even_when_empty() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Bots,
             ActivityGroup::Factory,
         ]
     );
@@ -585,6 +591,10 @@ fn dock_arrows_visit_every_group_even_when_empty() {
     );
     assert_eq!(
         dock.step(ActivityGroup::Bash, ActivityDirection::Next),
+        ActivityGroup::Bots
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Bots, ActivityDirection::Next),
         ActivityGroup::Factory
     );
     assert_eq!(
@@ -600,6 +610,10 @@ fn dock_arrows_visit_every_group_even_when_empty() {
     );
     assert_eq!(
         dock.step(ActivityGroup::Factory, ActivityDirection::Prev),
+        ActivityGroup::Bots
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Bots, ActivityDirection::Prev),
         ActivityGroup::Bash
     );
     assert_eq!(
@@ -646,16 +660,18 @@ fn dock_arrows_visit_the_same_groups_with_items() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Bots,
             ActivityGroup::Factory,
             ActivityGroup::Goal,
         ]
     );
     // The full cycle right: every group in order, the goal group
-    // included, back to the start in five presses.
+    // included, back to the start in six presses.
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Heartbeats,
         ActivityGroup::Bash,
+        ActivityGroup::Bots,
         ActivityGroup::Factory,
         ActivityGroup::Goal,
         ActivityGroup::Subagents,
@@ -667,6 +683,7 @@ fn dock_arrows_visit_the_same_groups_with_items() {
     for expected in [
         ActivityGroup::Goal,
         ActivityGroup::Factory,
+        ActivityGroup::Bots,
         ActivityGroup::Bash,
         ActivityGroup::Heartbeats,
         ActivityGroup::Subagents,
@@ -725,7 +742,7 @@ fn an_unadvertised_factory_lane_mounts_no_factory_group() {
         .map(|span| span.content.as_str())
         .collect::<String>();
     assert_eq!(
-        text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells",
+        text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ◈ 0 bots",
         "no factory segment renders: {text}"
     );
     assert!(
@@ -737,13 +754,13 @@ fn an_unadvertised_factory_lane_mounts_no_factory_group() {
     // The arrows wrap the remaining groups exactly: a stale Factory
     // selection steps to the row's real ends, never a hidden group.
     assert_eq!(
-        dock.step(ActivityGroup::Bash, ActivityDirection::Next),
+        dock.step(ActivityGroup::Bots, ActivityDirection::Next),
         ActivityGroup::Subagents,
-        "the cycle wraps past the shells group"
+        "the cycle wraps past the bots group"
     );
     assert_eq!(
         dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
-        ActivityGroup::Bash,
+        ActivityGroup::Bots,
         "the reverse cycle wraps past the subagents group"
     );
 }
@@ -763,11 +780,13 @@ fn an_empty_group_renders_a_dimmed_row_and_stays_selectable() {
     let frame = render_activity_dock(&dock, &theme, 60);
     let dim = theme.fg_style(ThemeColor::Dim).fg;
     let band = theme.selection_row_style();
-    for (row, title) in
-        frame[1..]
-            .iter()
-            .zip(["◆ subagents", "◷ heartbeats", "▸ shells", "⚙ factory"])
-    {
+    for (row, title) in frame[1..].iter().zip([
+        "◆ subagents",
+        "◷ heartbeats",
+        "▸ shells",
+        "◈ bots",
+        "⚙ factory",
+    ]) {
         let text: String = row.iter().map(|span| span.content.as_str()).collect();
         assert_eq!(text.trim_end(), format!(" {title}"), "no details: {text:?}");
         let span = row

@@ -144,6 +144,31 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             shells,
             shells_persistent: crate::bash_view::ShellCounts::of(&shell_rows).persistent,
+            // The bots group reads the cached `list_bots` rows: the running count is the
+            // collapsed number, alive-not-running feed the expanded breakdown (the per-bot items
+            // still carry each row's own state).
+            bots_running: self
+                .bots_catalog
+                .iter()
+                .filter(|bot| bot.section() == crate::agents_view_state::Section::Running)
+                .count(),
+            bots_alive: self
+                .bots_catalog
+                .iter()
+                .filter(|bot| bot.section() == crate::agents_view_state::Section::Idle)
+                .count(),
+            bots_items: self
+                .bots_catalog
+                .iter()
+                .map(|bot| {
+                    let state = match bot.section() {
+                        crate::agents_view_state::Section::Running => "running",
+                        crate::agents_view_state::Section::Idle => "alive",
+                        crate::agents_view_state::Section::Inactive => "dead",
+                    };
+                    format!("{} {state}", bot.name)
+                })
+                .collect(),
             factory_specs: crate::factory_view::stored_spec_count(&self.factory_graph),
             factory_runs,
             factory_counts: crate::factory_view::FactoryRunCounts::of(&runs),
@@ -322,6 +347,13 @@ impl SessionUi {
             crate::chrome::ActivityGroup::Bash => {
                 self.emit_activity_opened("bash");
                 self.open_bash_view(view);
+            }
+            crate::chrome::ActivityGroup::Bots => {
+                self.emit_activity_opened("bots");
+                match self.bot_refusal("bots") {
+                    Some(refusal) => self.note(&refusal, view),
+                    None => self.open_bots_page(view),
+                }
             }
             crate::chrome::ActivityGroup::Factory => {
                 self.emit_activity_opened("factory");

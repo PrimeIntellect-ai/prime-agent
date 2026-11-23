@@ -29,7 +29,9 @@ impl AgentsViewMode {
         let count_agents = |section: Section| {
             self.rows
                 .iter()
-                .filter(|row| row.kind == RowKind::Agent && row.section == section)
+                .filter(|row| {
+                    matches!(row.kind, RowKind::Agent | RowKind::Bot) && row.section == section
+                })
                 .count()
         };
         let (running, idle, inactive) = (
@@ -329,7 +331,10 @@ impl AgentsViewMode {
                     section,
                     self.rows
                         .iter()
-                        .filter(|row| row.kind == RowKind::Agent && row.section == section)
+                        .filter(|row| {
+                            matches!(row.kind, RowKind::Agent | RowKind::Bot)
+                                && row.section == section
+                        })
                         .count(),
                 )
             })
@@ -363,7 +368,8 @@ impl AgentsViewMode {
                 let mut include = false;
                 for (index, row) in self.rows.iter().enumerate() {
                     if row.depth == 0 {
-                        include = row.kind == RowKind::Agent && row.section == *section;
+                        include = matches!(row.kind, RowKind::Agent | RowKind::Bot)
+                            && row.section == *section;
                     }
                     if include {
                         display.push(DisplayItem::Row(index, row));
@@ -582,6 +588,45 @@ impl AgentsViewMode {
             let line = pad_line(line, width);
             return finish_session_row(theme, line, selected, hovered, width);
         }
+        // A bot row: the bots page's dot semantics carry the icon color; the name cell carries
+        // the `◈ bot · ☁ remote` chips.
+        if row.kind == RowKind::Bot {
+            let dot = match row.section {
+                Section::Running => ThemeColor::Success,
+                Section::Idle => ThemeColor::Text,
+                Section::Inactive => ThemeColor::Dim,
+            };
+            let mut line: Line = vec![
+                crate::Span::styled(
+                    "\u{25c7}",
+                    theme
+                        .fg_style(dot)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                crate::Span::raw(" "),
+                theme.fg_span(ThemeColor::Success, "\u{25c8} bot"),
+                crate::Span::raw(" "),
+                theme.fg_span(ThemeColor::Muted, "\u{2601} remote"),
+                crate::Span::raw(" "),
+            ];
+            let chips = str_width("\u{25c8} bot \u{2601} remote ");
+            let title = truncate_text(&row.title, layout.name_width.saturating_sub(2 + chips));
+            let pad = layout
+                .name_width
+                .saturating_sub(str_width(&title) + 2 + chips);
+            line.push(crate::Span::styled(title, theme.fg_style(ThemeColor::Text)));
+            line.push(crate::Span::raw(" ".repeat(pad)));
+            line.push(crate::Span::raw("  "));
+            line.push(theme.fg(ThemeColor::Muted, cell(&row.model, layout.model_width)));
+            line.push(crate::Span::raw("  "));
+            let details = layout
+                .details
+                .get(&row.identity)
+                .cloned()
+                .unwrap_or_default();
+            line.push(theme.fg(ThemeColor::Dim, details));
+            return finish_session_row(theme, line, selected, hovered, width);
+        }
         let icon = match row.section {
             _ if row.kind == RowKind::PersistentShell => "$",
             Section::Running => ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"][self.pulse % 4],
@@ -688,7 +733,27 @@ impl AgentsViewMode {
     /// The selected agent/subagent row's progress note: wrapped,
     /// indented to the title column, dim; other row kinds render nothing.
     pub(super) fn render_note_details(&self, row: &AgentsViewRow, width: usize) -> Vec<Line> {
-        if width == 0 || !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
+        if width == 0 {
+            return Vec::new();
+        }
+        // The bot row's note: the sandbox facts, dim, mirroring the `/bots` detail pane.
+        if row.kind == RowKind::Bot {
+            let bot_id = row.summary.get("botId").and_then(Value::as_str);
+            return self
+                .bots
+                .iter()
+                .find(|bot| Some(bot.bot_id.as_str()) == bot_id)
+                .map(|bot| {
+                    let note = format!(
+                        "  sandbox {} \u{b7} checkpoint {}",
+                        bot.sandbox_id,
+                        bot.checkpoint_id.as_deref().unwrap_or("none")
+                    );
+                    vec![vec![self.theme.fg(ThemeColor::Dim, note)]]
+                })
+                .unwrap_or_default();
+        }
+        if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
             return Vec::new();
         }
         let Some(note) = row

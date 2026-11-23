@@ -72,6 +72,8 @@ pub enum RowKind {
     FactoryRuns,
     /// One machine-wide persistent shell with its assigned session.
     PersistentShell,
+    /// One sandbox bot (a top-level row from `list_bots`); Enter attaches to it.
+    Bot,
 }
 
 /// The summary line's identity prefix (the `subagents:` prefix, so a carried selection
@@ -109,7 +111,8 @@ impl AgentsViewRow {
             | RowKind::Subagent
             | RowKind::Shells
             | RowKind::FactoryRuns
-            | RowKind::PersistentShell => true,
+            | RowKind::PersistentShell
+            | RowKind::Bot => true,
         }
     }
 }
