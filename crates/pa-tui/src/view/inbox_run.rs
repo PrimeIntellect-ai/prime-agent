@@ -51,6 +51,17 @@ impl AgentView {
         }
     }
 
+    /// The entry that paints `index`'s rows: a collapsed run paints on its
+    /// head, every other entry on itself.
+    pub(super) fn painting_entry(&self, index: usize) -> usize {
+        if matches!(self.chat[index], ChatEntry::InboxNotice(_)) && !self.inbox_run_expanded(index)
+        {
+            self.inbox_run_head(index)
+        } else {
+            index
+        }
+    }
+
     pub(super) fn inbox_run_expanded(&self, index: usize) -> bool {
         self.entry_detail(self.inbox_run_head(index))
             .tool_output_expanded()
@@ -228,6 +239,43 @@ mod tests {
         ]);
         assert_eq!(view.inbox_run(4), 1..5);
         assert!((1..5).all(|index| view.inbox_run_expanded(index)));
+    }
+
+    /// Older history that ends in inbox notices joins a collapsed run whose
+    /// counter line tops a paused window: the line moves to the run's new
+    /// head and stays on top, now counting the joined notice.
+    #[test]
+    fn a_prepend_joining_a_collapsed_run_keeps_its_counter_line_on_top() {
+        let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+        view.splash_suppressed = true;
+        for index in 0..3 {
+            view.push_entry(notice(&format!("[inbox 19:1{index} UTC] newer")));
+        }
+        for index in 0..200 {
+            view.push_entry(ChatEntry::User {
+                text: format!("after {index}"),
+            });
+        }
+        view.render_frame(37, 24);
+        view.scroll_to_top();
+        // The counter line, then the first entry after the run.
+        let top = |rows: &[String], count: &str| {
+            let counter = rows.iter().position(|row| row.contains(count));
+            let after = rows.iter().position(|row| row.contains("after 0"));
+            counter
+                .zip(after)
+                .is_some_and(|(counter, after)| counter < after)
+        };
+        let home = rows_text(&view.render_frame(37, 24));
+        assert!(top(&home, "Agent inbox \u{b7} 3 new"), "{home:?}");
+        view.prepend_entries(vec![
+            ChatEntry::User {
+                text: "older".to_string(),
+            },
+            notice("[inbox 19:00 UTC] older"),
+        ]);
+        let after = rows_text(&view.render_frame(37, 24));
+        assert!(top(&after, "Agent inbox \u{b7} 4 new"), "{after:?}");
     }
 
     /// An older-history trim that drops a click-expanded run's head keeps
