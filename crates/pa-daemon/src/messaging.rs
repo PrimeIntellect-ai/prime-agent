@@ -11,6 +11,7 @@ use pa_types::daemon::{DaemonCommand, DaemonWorkerCommand};
 use serde_json::{json, Map, Value};
 
 use crate::backpressure::RouteAdmission;
+use crate::bots::send::SendError;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::{RosterFamilySeedOwner, Supervisor};
@@ -187,26 +188,38 @@ impl Supervisor {
             Ok(manager) => manager,
             Err(error) => return fail(format!("{error:#}")),
         };
-        let record = match manager.ensure_running(&bot.bot_id).await {
-            Ok(record) => record,
-            Err(error) => return fail(format!("bot {} could not start: {error:#}", bot.name)),
-        };
-        let mut client = match crate::bots::guest::GuestClient::connect(&manager, &record).await {
-            Ok(client) => client,
-            Err(error) => return fail(format!("bot {} is unreachable: {error:#}", bot.name)),
-        };
         let msg_id = format!("agentmsg_{}", uuid::Uuid::new_v4());
-        let receipt = match crate::bots::send::send_message(
-            &crate::bots::ledger::BotLedger::new(agent_dir, &record.bot_id),
-            &mut client,
-            &record.guest_session_id,
+        let ledger = crate::bots::ledger::BotLedger::new(agent_dir, &bot.bot_id);
+        // One deadline for wake, link, and send, inside the worker's wait:
+        // the worker never gives up on a send that still runs here.
+        let sent = crate::bots::send::send_within(
+            &ledger,
             &msg_id,
-            message,
-            delivery_mode,
+            crate::bots::commands::BOT_DEADLINE,
+            async {
+                let record = manager.ensure_running(&bot.bot_id).await.map_err(|error| {
+                    SendError::NotDelivered(error.context("the bot could not start"))
+                })?;
+                let mut client = crate::bots::guest::GuestClient::connect(&manager, &record)
+                    .await
+                    .map_err(|error| {
+                        SendError::NotDelivered(error.context("the bot is unreachable"))
+                    })?;
+                let receipt = crate::bots::send::send_message(
+                    &ledger,
+                    &mut client,
+                    &record.guest_session_id,
+                    &msg_id,
+                    message,
+                    delivery_mode,
+                )
+                .await?;
+                Ok((record, receipt))
+            },
         )
-        .await
-        {
-            Ok(receipt) => receipt,
+        .await;
+        let (record, receipt) = match sent {
+            Ok(sent) => sent,
             Err(error) => return fail(format!("message to bot {}: {error}", bot.name)),
         };
         // The bot now runs a turn; the reply path follows it from here.

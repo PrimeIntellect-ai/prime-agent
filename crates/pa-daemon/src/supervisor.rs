@@ -413,11 +413,15 @@ impl Supervisor {
         // Bot sends a dead predecessor left in `sending` are uncertain now:
         // the predecessor is gone, and no message is ever resent.
         match crate::bots::ledger::recover_all(&self.options.agent_dir) {
-            Ok(recovered) => {
-                for (bot_id, msg_id) in recovered {
+            Ok(recovery) => {
+                for (bot_id, msg_id) in recovery.uncertain {
                     self.log.append(&format!(
                         "bot {bot_id} message {msg_id}: delivery uncertain after restart"
                     ));
+                }
+                for error in recovery.failed {
+                    self.log
+                        .append(&format!("bot ledger recovery skipped a ledger: {error:#}"));
                 }
             }
             Err(error) => self

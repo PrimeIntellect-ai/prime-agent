@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use super::commands::{admit_bot_spawn, BOTS_DISABLED_MESSAGE};
 use super::guest::GuestClient;
 use super::ledger::{recover_all, BotLedger, MessageState};
-use super::send::{send_message, SendError};
+use super::send::{send_message, send_within, SendError};
 
 #[tokio::test]
 async fn a_bot_spawn_is_refused_until_the_user_opts_in() {
@@ -141,11 +141,14 @@ async fn a_killed_send_is_never_resent() {
     drop(answering);
 
     // Restart: the boot recovery settles the interrupted send. A live
-    // writer's rows stay as they are.
+    // writer's rows stay as they are, and a corrupt ledger is skipped.
+    std::fs::write(dir.path().join("bots/ledger/bot-0.json"), "{ not json").unwrap();
+    let recovery = recover_all(dir.path()).unwrap();
     assert_eq!(
-        recover_all(dir.path()).unwrap(),
+        recovery.uncertain,
         vec![("bot-1".to_string(), "m1".to_string())]
     );
+    assert_eq!(recovery.failed.len(), 1);
     assert_eq!(
         ledger.message_state("m1").unwrap(),
         Some(MessageState::Uncertain)
@@ -178,4 +181,37 @@ async fn a_killed_send_is_never_resent() {
     // The guest saw each message exactly once.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(seen.try_recv().is_err(), "a resend reached the guest");
+}
+
+/// A send its deadline cuts after the `sending` row is durable is
+/// `uncertain`; one cut before that row is not delivered.
+#[tokio::test]
+async fn a_send_past_its_deadline_is_uncertain() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = BotLedger::new(dir.path(), "bot-1");
+    let (seen_tx, mut seen) = mpsc::unbounded_channel::<String>();
+    let mut held = client(Guest::Hold, &seen_tx).await;
+    let cut = send_within(
+        &ledger,
+        "m1",
+        Duration::from_millis(200),
+        send_message(&ledger, &mut held, "guest", "m1", "first", None),
+    )
+    .await;
+    assert!(matches!(cut, Err(SendError::Uncertain(_))));
+    assert_eq!(
+        ledger.message_state("m1").unwrap(),
+        Some(MessageState::Uncertain)
+    );
+    assert_eq!(seen.recv().await.as_deref(), Some("first"));
+
+    let never_began = send_within(
+        &ledger,
+        "m2",
+        Duration::from_millis(200),
+        std::future::pending::<Result<(), SendError>>(),
+    )
+    .await;
+    assert!(matches!(never_began, Err(SendError::NotDelivered(_))));
+    assert_eq!(ledger.message_state("m2").unwrap(), None);
 }

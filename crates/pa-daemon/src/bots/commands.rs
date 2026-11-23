@@ -39,9 +39,9 @@ pub async fn admit_bot_spawn(agent_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The supervisor's own spawn deadline, inside the worker's wait, so a
-/// spawn the worker gave up on is deleted rather than left running.
-pub const SPAWN_DEADLINE: std::time::Duration = std::time::Duration::from_mins(13);
+/// The supervisor's own deadline for a bot spawn or send, inside the
+/// worker's wait, so work the worker gave up on never keeps running.
+pub const BOT_DEADLINE: std::time::Duration = std::time::Duration::from_mins(13);
 
 /// Owner and name pairs with a spawn in flight: two concurrent spawns
 /// of one name for one owner never both provision.
@@ -144,7 +144,7 @@ impl Supervisor {
                 spec.name
             );
         }
-        let started = tokio::time::timeout(SPAWN_DEADLINE, async {
+        let started = tokio::time::timeout(BOT_DEADLINE, async {
             let record = manager.spawn(spec).await?;
             let mut client = super::guest::GuestClient::connect(&manager, &record)
                 .await
@@ -164,7 +164,7 @@ impl Supervisor {
         .await
         .unwrap_or_else(|_| {
             Err(anyhow::anyhow!(
-                "the bot did not start within {SPAWN_DEADLINE:?}"
+                "the bot did not start within {BOT_DEADLINE:?}"
             ))
         });
         match started {

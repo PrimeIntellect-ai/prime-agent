@@ -184,35 +184,60 @@ impl BotLedger {
     }
 }
 
+/// What [`recover_all`] did.
+#[derive(Debug, Default)]
+pub struct Recovery {
+    /// `(bot_id, msg_id)` of each send that is `uncertain` now.
+    pub uncertain: Vec<(String, String)>,
+    /// One error per ledger that could not be read or written; recovery
+    /// went on with the other ledgers.
+    pub failed: Vec<anyhow::Error>,
+}
+
 /// Boot recovery: mark every `sending` row of every bot ledger whose
 /// writer process is gone as `uncertain`. The supervisor runs it once
-/// at start, after the boot reap.
+/// at start, after the boot reap. One bad ledger does not stop the
+/// recovery of the others.
 ///
 /// # Errors
 ///
-/// Returns an error when the ledger directory or a ledger cannot be
-/// read or written.
-pub fn recover_all(agent_dir: &Path) -> Result<Vec<(String, String)>> {
+/// Returns an error when the ledger directory cannot be read.
+pub fn recover_all(agent_dir: &Path) -> Result<Recovery> {
     let dir = agent_dir.join("bots").join("ledger");
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Recovery::default())
+        }
         Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
     };
-    let mut recovered = Vec::new();
+    let mut recovery = Recovery::default();
     for entry in entries {
-        let path = entry?.path();
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                recovery
+                    .failed
+                    .push(anyhow::Error::new(error).context(format!("read {}", dir.display())));
+                continue;
+            }
+        };
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
         let Some(bot_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        for msg_id in BotLedger::new(agent_dir, bot_id).recover_interrupted()? {
-            recovered.push((bot_id.to_string(), msg_id));
+        match BotLedger::new(agent_dir, bot_id).recover_interrupted() {
+            Ok(msg_ids) => recovery.uncertain.extend(
+                msg_ids
+                    .into_iter()
+                    .map(|msg_id| (bot_id.to_string(), msg_id)),
+            ),
+            Err(error) => recovery.failed.push(error),
         }
     }
-    Ok(recovered)
+    Ok(recovery)
 }
 
 fn prune_sent(doc: &mut LedgerDoc) {

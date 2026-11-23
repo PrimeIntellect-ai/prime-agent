@@ -39,9 +39,9 @@ impl LinkAgentMessageController {
     }
 }
 
-/// Budget for a supervisor-routed send to a bot: the bot may resume
-/// from a pause first.
-const BOT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Budget for a supervisor-routed send to a bot: the bot may resume or
+/// boot first. It outlasts the supervisor's own deadline for the send.
+const BOT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(15);
 
 /// Budget for the peer-ticket request on the supervisor link (the TS
 /// `get_direct_worker_transport` window).

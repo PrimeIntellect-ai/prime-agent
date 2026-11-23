@@ -28,6 +28,39 @@ impl std::fmt::Display for SendError {
     }
 }
 
+/// Run one whole send (wake, link, and [`send_message`] as `msg_id`)
+/// under `deadline`. A send cut off after its `sending` row is durable
+/// may have landed, so the row becomes `uncertain`; it is never resent.
+///
+/// # Errors
+///
+/// Returns the send's own error, [`SendError::Uncertain`] when the
+/// deadline cut a begun send, and [`SendError::NotDelivered`] when it
+/// cut the send before the ledger row.
+pub async fn send_within<T>(
+    ledger: &BotLedger,
+    msg_id: &str,
+    deadline: std::time::Duration,
+    send: impl std::future::Future<Output = Result<T, SendError>>,
+) -> Result<T, SendError> {
+    let Ok(outcome) = tokio::time::timeout(deadline, send).await else {
+        let expired = anyhow!("the bot did not answer within {deadline:?}");
+        return match ledger.message_state(msg_id) {
+            Ok(Some(MessageState::Sending)) => {
+                // A failed write leaves the row `sending`; boot recovery
+                // turns it `uncertain`.
+                let _ = ledger.finish_message(msg_id, MessageState::Uncertain);
+                Err(SendError::Uncertain(expired))
+            }
+            Ok(Some(MessageState::Sent | MessageState::Uncertain) | None) => {
+                Err(SendError::NotDelivered(expired))
+            }
+            Err(error) => Err(SendError::Uncertain(error.context(expired))),
+        };
+    };
+    outcome
+}
+
 /// Send `message` to the bot session `guest_session_id` as `msg_id`.
 /// The ledger row is `sending` before the first byte leaves and `sent`
 /// only after the guest's receipt. Every other outcome leaves the row
