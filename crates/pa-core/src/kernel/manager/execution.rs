@@ -5,12 +5,12 @@ use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 
 use super::{
-    anyhow, json, live_kernels, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc,
-    AsyncWriteExt, Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult,
-    LateSentAgentMessageCallback, Lifecycle, Signal, Value, AGENT_MESSAGE_DISPLAY_MIME,
-    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_BACKGROUND_CELL_MESSAGE,
-    KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS,
-    MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    anyhow, json, live_kernels, lock, parse_sent_agent_message, AbortSignal, ActiveExecution,
+    Admission, Arc, AsyncWriteExt, Duration, ExecuteResult, ExecuteStatus, Inner, Instant,
+    InternalExecuteResult, LateSentAgentMessageCallback, Lifecycle, Signal, Value,
+    AGENT_MESSAGE_DISPLAY_MIME, KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE,
+    KERNEL_BUSY_BACKGROUND_CELL_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+    KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
 };
 
 impl Inner {
@@ -43,12 +43,8 @@ impl Inner {
     }
 
     pub(crate) fn force_abort(&self, execution: &Arc<ActiveExecution>) {
-        {
-            let g = lock(&self.guarded);
-            let is_active = matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution));
-            if !is_active {
-                return;
-            }
+        if !lock(&self.guarded).holds(execution) {
+            return;
         }
         lock(&execution.buffers).status = ExecuteStatus::Aborted;
         self.resolve_execution(execution, false);
@@ -59,10 +55,7 @@ impl Inner {
     /// await, so a settled execution's late watcher can never signal or
     /// retire the next cell.
     pub(crate) fn execution_is_live(&self, execution: &Arc<ActiveExecution>) -> bool {
-        let is_active = {
-            let g = lock(&self.guarded);
-            matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution))
-        };
+        let is_active = lock(&self.guarded).holds(execution);
         is_active && !lock(&execution.buffers).settled
     }
 
@@ -84,8 +77,7 @@ impl Inner {
         let claimed = {
             let buffers = lock(&execution.buffers);
             let mut g = lock(&self.guarded);
-            let is_active = matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution));
-            if !is_active || buffers.settled {
+            if !g.holds(execution) || buffers.settled {
                 false
             } else {
                 g.lifecycle.transition(Lifecycle::Defunct);
@@ -107,28 +99,42 @@ impl Inner {
         }
     }
 
-    /// Wait until no execution is active, bounded by the busy-reuse window.
-    /// A busy cell is interrupted while it waits — except a detached
-    /// (backgrounded) one: nobody awaits that work any more, so it is never
-    /// signalled, and the wait answers the background-cell message instead.
+    /// Wait until no running request blocks `admission`, bounded by the
+    /// busy-reuse window. A blocking attached cell is interrupted while it
+    /// waits — a detached (backgrounded) one never is: nobody awaits that
+    /// work any more, so the wait answers the background-cell message instead.
     pub(crate) async fn wait_for_active_execution_to_clear_for_reuse(
         self: &Arc<Self>,
+        admission: Admission,
         signal: Option<&AbortSignal>,
     ) -> anyhow::Result<()> {
+        let blocking = |g: &super::Guarded| -> Vec<Arc<ActiveExecution>> {
+            g.active_executions
+                .iter()
+                .filter(|active| match admission {
+                    Admission::Exclusive => true,
+                    Admission::BesideDetached => !active.detached.load(Ordering::SeqCst),
+                })
+                .cloned()
+                .collect()
+        };
         let started = Instant::now();
         loop {
             let notified = self.busy_notify.notified();
-            let active_detached = {
+            let attached_ids: Vec<String> = {
                 let g = lock(&self.guarded);
-                match &g.active_execution {
-                    Some(active) => {
-                        if g.lifecycle.is_shut_down() {
-                            return Err(anyhow!("Kernel has been shut down"));
-                        }
-                        active.detached.load(Ordering::SeqCst)
-                    }
-                    None => return Ok(()),
+                let blocking = blocking(&g);
+                if blocking.is_empty() {
+                    return Ok(());
                 }
+                if g.lifecycle.is_shut_down() {
+                    return Err(anyhow!("Kernel has been shut down"));
+                }
+                blocking
+                    .iter()
+                    .filter(|active| !active.detached.load(Ordering::SeqCst))
+                    .map(|active| active.request_id.clone())
+                    .collect()
             };
             let elapsed = started.elapsed();
             if elapsed >= Duration::from_millis(KERNEL_BUSY_REUSE_WAIT_MS) {
@@ -137,18 +143,14 @@ impl Inner {
             let wait_ms = (KERNEL_BUSY_REUSE_WAIT_MS - elapsed.as_millis() as u64)
                 .min(KERNEL_BUSY_INTERRUPT_INTERVAL_MS);
             let wait = tokio::time::sleep(Duration::from_millis(wait_ms.max(1)));
-            let interrupt = if active_detached {
-                None
-            } else {
-                let active_id = lock(&self.guarded)
-                    .active_execution
-                    .as_ref()
-                    .map(|a| a.request_id.clone());
+            let interrupt = (!attached_ids.is_empty()).then(|| {
                 let inner = Arc::clone(self);
-                Some(tokio::spawn(async move {
-                    let _ = inner.interrupt(active_id.as_deref()).await;
-                }))
-            };
+                tokio::spawn(async move {
+                    for id in attached_ids {
+                        let _ = inner.interrupt(Some(&id)).await;
+                    }
+                })
+            });
             tokio::select! {
                 () = notified => {}
                 () = wait => {}
@@ -165,58 +167,59 @@ impl Inner {
                 }
             }
         }
-        if let Some(active) = lock(&self.guarded).active_execution.clone() {
-            return Err(if active.detached.load(Ordering::SeqCst) {
+        let blocking = blocking(&lock(&self.guarded));
+        if blocking.is_empty() {
+            return Ok(());
+        }
+        Err(
+            if blocking
+                .iter()
+                .all(|active| active.detached.load(Ordering::SeqCst))
+            {
                 anyhow!("{KERNEL_BUSY_BACKGROUND_CELL_MESSAGE}")
             } else {
                 anyhow!("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}")
-            });
-        }
-        Ok(())
+            },
+        )
     }
 
     fn notify_active_execution_idle(&self) {
         self.busy_notify.notify_waiters();
     }
 
-    pub(crate) fn reject_active_execution(&self, message: &str) {
-        let execution = {
-            let mut g = lock(&self.guarded);
-            g.active_execution.take()
-        };
-        if let Some(execution) = execution {
+    pub(crate) fn reject_active_executions(&self, message: &str) {
+        let executions = std::mem::take(&mut lock(&self.guarded).active_executions);
+        if executions.is_empty() {
+            return;
+        }
+        for execution in executions {
             if let Some(tx) = lock(&execution.result_tx).take() {
                 let _ = tx.send(Err(anyhow!("{message}")));
             }
             // The teardown rejected the execution: its watchers exit.
             execution.notify_terminated();
-            self.notify_active_execution_idle();
         }
+        self.notify_active_execution_idle();
     }
 
     pub(crate) fn finish_active_execution(&self, execution: &Arc<ActiveExecution>) {
-        let is_active = {
-            let g = lock(&self.guarded);
-            matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution))
-        };
-        if !is_active {
+        if !lock(&self.guarded).holds(execution) {
             return;
         }
         self.resolve_execution(execution, true);
     }
 
+    /// Drop `execution` from the running requests; `true` when it was there.
+    pub(crate) fn remove_active_execution(&self, execution: &Arc<ActiveExecution>) -> bool {
+        let mut g = lock(&self.guarded);
+        let before = g.active_executions.len();
+        g.active_executions
+            .retain(|active| !Arc::ptr_eq(active, execution));
+        g.active_executions.len() != before
+    }
+
     fn resolve_execution(&self, execution: &Arc<ActiveExecution>, clear_active: bool) {
-        let did_clear_active = if clear_active {
-            let mut g = lock(&self.guarded);
-            matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution))
-                .then(|| {
-                    g.active_execution = None;
-                    true
-                })
-                .unwrap_or(false)
-        } else {
-            false
-        };
+        let did_clear_active = clear_active && self.remove_active_execution(execution);
         let mut buffers = lock(&execution.buffers);
         if !buffers.settled {
             buffers.settled = true;

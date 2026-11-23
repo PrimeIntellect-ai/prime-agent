@@ -102,9 +102,9 @@ impl KernelNotice {
     }
 
     /// Whether this notice's arrival ends a running cell's wait. A cell's
-    /// own completion never does: the kernel runs one cell at a time, so a
-    /// cell still waiting when the notice lands started after the
-    /// backgrounded one settled, and the notice cannot concern it.
+    /// own completion never does: a cell still waiting when the notice lands
+    /// is a different cell (one that started after the backgrounded one, or
+    /// beside it), so the notice does not concern it and is read after it.
     #[must_use]
     pub fn wakes_cell_wait(&self) -> bool {
         self.row.custom_type != messages::ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE

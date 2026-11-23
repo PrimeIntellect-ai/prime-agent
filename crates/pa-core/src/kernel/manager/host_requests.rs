@@ -63,12 +63,13 @@ impl Inner {
             .filter(|t| !t.is_empty())
             .ok_or_else(|| anyhow!("host request payload must have a string type"))?;
         if request_type == END_TURN_REQUEST_TYPE {
-            // The manager's own answer: mark the executing cell, and the
-            // flag rides the settled result so the turn ends once the
-            // batch settles.
+            // The manager's own answer: mark the executing cell (the newest
+            // when cells run side by side), and the flag rides the settled
+            // result so the turn ends once the batch settles.
             let execution = lock(&self.guarded)
-                .active_execution
-                .clone()
+                .active_executions
+                .last()
+                .cloned()
                 .ok_or_else(|| anyhow!("rlm.end_turn has no running cell to end the turn for"))?;
             let mut buffers = lock(&execution.buffers);
             // A cell that settled between the clone and this write could

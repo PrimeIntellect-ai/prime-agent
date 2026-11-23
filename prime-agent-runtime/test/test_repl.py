@@ -2129,6 +2129,47 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(done["reason"], "snapshot not found")
 
 
+class ConcurrentCellTest(unittest.TestCase):
+    """A new cell runs beside a running cell that waits at an await point,
+    and is refused while the running cell executes synchronous code."""
+
+    def setUp(self) -> None:
+        self.repl = ReplProcess()
+        self.addCleanup(self.repl.close)
+        self.repl.ready()
+
+    def until_both_done(self) -> list[dict]:
+        events: list[dict] = []
+        pending = {"slow", "next"}
+        while pending:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("event") == "done":
+                pending.discard(event.get("id"))
+        return events
+
+    def test_a_new_cell_runs_while_a_running_cell_awaits(self):
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nawait asyncio.sleep(3)\nprint('slow done')"})
+        time.sleep(0.5)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        events = self.until_both_done()
+        dones = [e["id"] for e in events if e.get("event") == "done"]
+        self.assertEqual(dones, ["next", "slow"])
+        by_cell = {cell: "".join(e["text"] for e in events if e.get("event") == "stdout" and e.get("id") == cell) for cell in ("slow", "next")}
+        self.assertEqual(by_cell, {"slow": "slow done\n", "next": "next ran\n"})
+
+    def test_a_new_cell_is_refused_while_a_running_cell_runs_synchronous_code(self):
+        self.repl.send({"type": "execute", "id": "slow", "code": "import time\ntime.sleep(7)"})
+        time.sleep(0.5)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        events = self.until_both_done()
+        dones = [(e["id"], e["status"]) for e in events if e.get("event") == "done"]
+        self.assertEqual(dones, [("next", "error"), ("slow", "ok")])
+        refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertNotIn("next ran", stream_text(events, "stdout"))
+
+
 class FinishRequestTest(unittest.TestCase):
     """In-process checks of the parked-interrupt bookkeeping on request finish."""
 
@@ -2143,9 +2184,10 @@ class FinishRequestTest(unittest.TestCase):
         self.repl_module._pending_interrupts["ids"].clear()
         self.repl_module._pending_interrupts["any"] = False
         self.repl_module._finishing_rid = None
-        self.repl_module._handoff_interrupted = False
+        self.repl_module._handoff_interrupted.clear()
         self.repl_module._sigint_target = None
-        self.repl_module._active.update({"task": None, "rid": None, "interrupted": False})
+        self.repl_module._active.clear()
+        self.repl_module._interrupted.clear()
 
     def test_parked_any_survives_while_another_request_is_inflight(self):
         repl = self.repl_module
@@ -2353,7 +2395,7 @@ class FinishRequestTest(unittest.TestCase):
 
     def test_nonprotocol_keyboardinterrupt_after_committed_restore_is_not_recovered(self):
         # A user-originated KeyboardInterrupt (no _sigint_handler provenance:
-        # _active["interrupted"] stays False) after the restore committed must
+        # the rid never joins _interrupted) after the restore committed must
         # keep the interrupted error, not be converted to snapshot success.
         from unittest import mock
 
@@ -2452,7 +2494,7 @@ class FinishRequestTest(unittest.TestCase):
                 raise AssertionError("a done task must not be cancelled")
 
         repl._inflight.update({"handoff", "other"})
-        repl._active.update({"task": DoneTask(), "rid": "handoff", "interrupted": False})
+        repl._active["handoff"] = DoneTask()
         previous = signal.signal(signal.SIGINT, repl._sigint_handler)
         self.addCleanup(signal.signal, signal.SIGINT, previous)
         repl._request_interrupt(None)
@@ -2461,7 +2503,7 @@ class FinishRequestTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(repl._sigint_target, "handoff")
         self.assertFalse(repl._pending_interrupts["any"])
-        self.assertTrue(repl._consume_handoff_interrupt())
+        self.assertTrue(repl._consume_handoff_interrupt("handoff"))
         self.assertFalse(repl._handoff_interrupted)
         self.assertIn("other", repl._inflight)
 
@@ -3368,7 +3410,7 @@ class ProtocolFrameAtomicityTest(unittest.TestCase):
                 "        sent = real_write(fd, bytes(data[:4096]))",
                 # The request-interrupt path: mark the rid, then SIGINT the
                 # main thread while the frame is only partly on the wire.
-                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        repl_module._request_interrupt('tear')",
                 "        return sent",
                 "    return real_write(fd, data)",
                 "repl_module.os.write = write",

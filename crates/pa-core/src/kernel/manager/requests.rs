@@ -4,9 +4,9 @@
 use std::sync::atomic::Ordering;
 
 use super::{
-    anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    AtomicBool, Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus, Instant,
-    InternalExecuteResult, KernelStartOptions, Mutex, ReplKernelManager, Request,
+    anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Admission, Arc,
+    AsyncWriteExt, AtomicBool, Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus,
+    Instant, InternalExecuteResult, KernelStartOptions, Mutex, ReplKernelManager, Request,
     DEFAULT_MAX_OUTPUT_CHARS, KERNEL_ABORT_GRACE_MS,
 };
 
@@ -253,7 +253,13 @@ impl ReplKernelManager {
             return Box::pin(self.enqueue_request(request, opts, execution_timeout_ms)).await;
         }
 
-        self.wait_for_active_execution_to_clear_for_reuse(opts.signal.as_ref())
+        // A user cell runs beside backgrounded cells; everything else (the
+        // runtime bootstrap, state requests) waits out every running request.
+        let admission = match &request {
+            Request::Execute { .. } if !opts.internal => Admission::BesideDetached,
+            _ => Admission::Exclusive,
+        };
+        self.wait_for_active_execution_to_clear_for_reuse(admission, opts.signal.as_ref())
             .await?;
         if let Some(signal) = &opts.signal {
             if signal.is_aborted() {
@@ -308,7 +314,11 @@ impl ReplKernelManager {
                 return Ok(InternalExecuteResult::aborted(started));
             }
         }
-        if lock(&self.inner.guarded).active_execution.is_some() {
+        if lock(&self.inner.guarded)
+            .active_executions
+            .iter()
+            .any(|active| !active.detached.load(Ordering::SeqCst))
+        {
             return Err(anyhow!("Kernel already has an active execution"));
         }
 
@@ -325,7 +335,6 @@ impl ReplKernelManager {
                 std::mem::take(&mut g.pending_background_output_chars);
             buffers.background_output_truncated =
                 std::mem::replace(&mut g.pending_background_output_truncated, false);
-            g.active_execution = None; // reset below with the execution in hand
         }
         let (namespace_code, restores_namespace) = match &request {
             Request::Execute { .. } => (true, false),
@@ -365,10 +374,9 @@ impl ReplKernelManager {
             stop_cause: Mutex::new(None),
             settled_tx: tokio::sync::watch::channel(false).0,
         });
-        {
-            let mut g = lock(&self.inner.guarded);
-            g.active_execution = Some(execution.clone());
-        }
+        lock(&self.inner.guarded)
+            .active_executions
+            .push(execution.clone());
 
         // The stop watcher and the wait clocks. The wait budget's deadline
         // and the session wake's subscription arm BEFORE the request goes on
@@ -487,10 +495,7 @@ impl ReplKernelManager {
         let (mut send_task, stdin_retire) = {
             let writer = lock(&self.inner.child).as_ref().map(|c| c.stdin.clone());
             let Some(stdin) = writer else {
-                {
-                    let mut g = lock(&self.inner.guarded);
-                    g.active_execution = None;
-                }
+                self.inner.remove_active_execution(&execution);
                 return Err(anyhow!("Kernel stdin is not connected"));
             };
             let mut line = frame.to_string();
@@ -620,13 +625,7 @@ impl ReplKernelManager {
             return result;
         }
         if let Err(error) = send_outcome {
-            {
-                let mut g = lock(&self.inner.guarded);
-                if matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, &execution))
-                {
-                    g.active_execution = None;
-                }
-            }
+            self.inner.remove_active_execution(&execution);
             Err(error)
         } else {
             // The wait: the cell's settlement, or a detach (the session

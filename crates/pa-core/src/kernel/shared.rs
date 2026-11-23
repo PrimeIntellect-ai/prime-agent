@@ -41,10 +41,9 @@ pub const KERNEL_LEVEL_WAKE_SETTLE_MS: u64 = 250;
 pub const KERNEL_WRITE_CEILING_MS: u64 = 1_000;
 pub const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS: usize = 256;
 pub const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE: &str = "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
-/// The message when a new cell cannot start because a backgrounded cell is
-/// still running: another cell cannot start until it settles, so the wait
-/// answers with the state the model needs instead of dead ends.
-pub const KERNEL_BUSY_BACKGROUND_CELL_MESSAGE: &str = "The Python kernel is still running a backgrounded cell, so no other cell can start until it settles. Do not call python_repl again: end the turn, and read the cell's completion notice when it arrives. The user can cancel backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired.";
+/// The message when a state request or the runtime bootstrap cannot start
+/// because a backgrounded cell is still running (user cells run beside it).
+pub const KERNEL_BUSY_BACKGROUND_CELL_MESSAGE: &str = "The Python kernel is still running a backgrounded cell, so this request cannot start until it settles. Read the cell's completion notice when it arrives. The user can cancel backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired.";
 
 /// Cap for unattributed background output buffered between and during cells.
 pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;

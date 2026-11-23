@@ -438,8 +438,13 @@ impl Inner {
         // snapshot and stall dispose.
         lock(&self.guarded).flushing_snapshot_for_dispose = true;
         async {
-            if lock(&self.guarded).active_execution.is_some() {
-                let _ = self.interrupt(None).await;
+            let running: Vec<String> = lock(&self.guarded)
+                .active_executions
+                .iter()
+                .map(|execution| execution.request_id.clone())
+                .collect();
+            for id in running {
+                let _ = self.interrupt(Some(&id)).await;
             }
             // Wait for the execution queue to drain, bounded by the snapshot
             // execution timeout.
