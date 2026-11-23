@@ -166,7 +166,11 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
 #[tokio::test]
 async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle() {
     let worker = created_worker_with_journal().await;
-    worker.core.lock().unwrap().busy = true;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.running_tool_calls.insert("cell".to_string());
+    }
     let notify = Arc::new(Notify::new());
     admit_turn_held_notice(
         &worker.recovery,
@@ -237,6 +241,7 @@ async fn a_turn_held_notice_from_a_settled_delivery_cannot_cut_the_next_turn() {
         // The timer has finished sleeping but cannot take the admission lock.
         let mut guard = core.lock().unwrap();
         guard.busy = true;
+        guard.running_tool_calls.insert("cell".to_string());
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let timer_core = Arc::clone(&core);
         let timer_recovery = Arc::clone(&recovery);
@@ -277,6 +282,7 @@ async fn a_turn_held_notice_stays_quiet_during_an_abort() {
     {
         let mut core = worker.core.lock().unwrap();
         core.busy = true;
+        core.running_tool_calls.insert("cell".to_string());
         core.abort_requested = true;
     }
     let notify = Arc::new(Notify::new());

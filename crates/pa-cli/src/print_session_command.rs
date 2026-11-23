@@ -316,8 +316,6 @@ mod tests {
                     tools: Vec::new(),
                     custom_system_prompt: None,
                     prompt_guidelines: Vec::new(),
-                    generic_mcp_servers: Vec::new(),
-                    allow_recursion: None,
                     session_manager: Some(session_manager),
                     extra_host_handlers: None,
                     conversation_log_path: None,

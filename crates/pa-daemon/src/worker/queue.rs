@@ -610,8 +610,12 @@ pub(crate) fn admit_turn_held_notice(
         pa_types::ai::UserContent::Blocks(_) => String::new(),
     };
     let mut core_guard = core.lock().unwrap();
+    // A cell in flight is what holds the turn. Without a running tool call
+    // the model is streaming, often its final answer, and a queued row would
+    // only start an extra turn after it.
     if delivery.is_cancelled()
         || !core_guard.busy
+        || core_guard.running_tool_calls.is_empty()
         || !core_guard.steering.is_empty()
         || core_guard.abort_requested
         || core_guard.compacting
@@ -667,9 +671,7 @@ pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 /// notice rides the lane the arrival requested (agent messages honor
 /// their delivery mode; notices ride steering), never demoting a
 /// queued steering notice to follow-up, and a replacement clears the
-/// key from both lanes first, so a batch never splits. Answers the
-/// capacity refusal when the gate rejects the arrival (the sink passes
-/// a permissive gate).
+/// key from both lanes first, so a batch never splits.
 #[allow(clippy::too_many_arguments)] // the admission's gates and seams ride as separate handles (lock-order reasons)
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
@@ -680,27 +682,53 @@ pub(crate) fn admit_inbox_notice(
     notice: pa_core::session_engine::inbox::InboxNotice,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
-    capacity_error: impl Fn(
-        &std::collections::VecDeque<QueuedItem>,
-        &std::collections::VecDeque<QueuedItem>,
-    ) -> Option<String>,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
-    // them would queue an invisible row for a busy session.
-    let mut core_guard = core.lock().unwrap();
+    // them would queue an invisible row for a busy session. The guard
+    // drops with this statement: the checkpoint re-locks the core.
+    let queued = admit_inbox_notice_locked(
+        &mut core.lock().unwrap(),
+        inbox,
+        arrivals,
+        notice,
+        lane,
+        session_is_closed,
+        engine,
+    )?;
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+    Ok(queued)
+}
+
+/// [`admit_inbox_notice`] over an already locked core, without the
+/// checkpoint and wake (the checkpoint re-locks the core, so the caller
+/// runs both after releasing its guard): the heartbeat route holds the
+/// lock across its live-job check and withdrawal.
+#[allow(clippy::too_many_arguments)] // the wrapper's seams minus the lock-order handles
+pub(crate) fn admit_inbox_notice_locked(
+    core_guard: &mut SessionCore,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    notice: pa_core::session_engine::inbox::InboxNotice,
+    lane: Lane,
+    session_is_closed: impl Fn() -> bool,
+    engine: Option<&crate::agent_engine::AgentSessionEngine>,
+) -> Result<bool, String> {
     // A notice that raced past the sink's first check is refused here
     // (the close's clear wipes the lanes); its message already made the
     // journal durable, which is honest — it did arrive.
     if session_is_closed() {
         return Err("Target session is closed".to_string());
-    }
-    // The capacity gate, re-sampled under this same lock with the lane
-    // lengths it reads here: concurrent arrivals can never pass one
-    // stale sample together.
-    if let Some(error) = capacity_error(&core_guard.steering, &core_guard.follow_up) {
-        return Err(error);
     }
     // The append is atomic with the session swap: the route-fetched store
     // is identity-checked under the slot's own mutex (push_to_live_inbox),
@@ -760,6 +788,7 @@ pub(crate) fn admit_inbox_notice(
         let custom_message = pa_core::session_engine::inbox::create_inbox_notice_row(
             &text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+            arrivals.len(),
             now,
         );
         // The replacement pattern the scheduler's queue keys use: the
@@ -789,19 +818,6 @@ pub(crate) fn admit_inbox_notice(
             forced_batch: false,
         });
     }
-    // The checkpoint re-locks the core (documented order: recovery lock
-    // first), so the admission's guard must release first.
-    drop(core_guard);
-    // The busy-evidence checkpoint: the notice is undelivered live
-    // work until its turn settles.
-    checkpoint_queue_recovery(
-        recovery,
-        core,
-        QueueCheckpoint::Admitted {
-            operation: "steer_queued",
-        },
-    );
-    work_notify.notify_one();
     Ok(queued)
 }
 
@@ -860,7 +876,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
         {
             if item.message != text || item.preview.as_deref() != Some(preview.as_str()) {
-                rerender_inbox_notice(item, &text);
+                rerender_inbox_notice(item, &text, batch.len());
                 item.preview = Some(preview.clone());
                 changed = true;
             }
@@ -885,7 +901,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .chain(follow_up.iter_mut())
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
         {
-            if rerender_inbox_notice(item, &reminder) {
+            if rerender_inbox_notice(item, &reminder, count) {
                 changed = true;
             }
         }
@@ -948,6 +964,7 @@ pub(crate) fn admit_inbox_reminder(
     let custom_message = pa_core::session_engine::inbox::create_inbox_notice_row(
         &message,
         pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
+        count,
         now,
     );
     let (policy, queue_visible) = if core_guard.busy {
@@ -989,11 +1006,11 @@ pub(crate) fn admit_inbox_reminder(
 }
 
 /// Re-render one queued inbox notice row's text: the queue's `message`
-/// and the custom twin's `content` move together — a stale twin would
-/// deliver an old count — while the twin's sender, class, and admission
-/// timestamp keep the row's identity (the re-render only re-syncs
-/// content). Returns whether the text changed.
-fn rerender_inbox_notice(item: &mut QueuedItem, text: &str) -> bool {
+/// and the custom twin's `content` and `details.count` move together — a
+/// stale twin would deliver an old count — while the twin's sender, class,
+/// and admission timestamp keep the row's identity (the re-render only
+/// re-syncs content). Returns whether the text changed.
+fn rerender_inbox_notice(item: &mut QueuedItem, text: &str, count: usize) -> bool {
     if item.message == text {
         return false;
     }
@@ -1001,6 +1018,9 @@ fn rerender_inbox_notice(item: &mut QueuedItem, text: &str) -> bool {
     if let Some(row) = item.custom_message.as_mut() {
         if let Some(object) = row.as_object_mut() {
             object.insert("content".to_string(), json!(text));
+        }
+        if let Some(details) = row.get_mut("details").and_then(Value::as_object_mut) {
+            details.insert("count".to_string(), json!(count));
         }
     }
     true

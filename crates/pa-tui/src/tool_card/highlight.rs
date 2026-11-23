@@ -1,8 +1,11 @@
-//! Python syntax highlighting for expanded ipython cells, the
-//! highlight.js python grammar's scope coloring. Cell-level scope
-//! coloring only: one color per cell. F-string substitutions and
+//! Python syntax highlighting for expanded ipython cells and markdown
+//! fences, the highlight.js python grammar's scope coloring. Cell-level
+//! scope coloring only: one color per cell. F-string substitutions and
 //! backslash escapes keep the string color (cli-highlight renders those
-//! scopes with the identity function).
+//! scopes with the identity function). Bash fences live in `highlight/bash.rs`.
+
+mod bash;
+pub(crate) use bash::highlight_bash;
 
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
@@ -48,6 +51,7 @@ pub(crate) enum Scope {
     Comment,
     Title,
     Params,
+    Variable,
 }
 
 impl Scope {
@@ -60,7 +64,7 @@ impl Scope {
             Scope::String => Some(palette.string),
             Scope::Comment => Some(palette.comment),
             Scope::Title => Some(palette.function),
-            Scope::Params => Some(palette.variable),
+            Scope::Params | Scope::Variable => Some(palette.variable),
         }
     }
 }
@@ -410,11 +414,16 @@ fn quote_char(byte: u8) -> char {
 /// Highlight python `code` into per-line spans. The whole block is one
 /// highlight.js pass, so multi-line strings carry across lines.
 pub(crate) fn highlight_python(code: &str, palette: &SyntaxPalette) -> Vec<Line> {
+    scoped_lines(code, tokenize(code), palette)
+}
+
+/// Split the token stream of `code` into per-line spans; a token that
+/// spans line breaks carries its style onto every line it covers.
+fn scoped_lines(code: &str, tokens: Vec<(String, Scope)>, palette: &SyntaxPalette) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     let mut current: Line = Vec::new();
-    for (text, scope) in tokenize(code) {
+    for (text, scope) in tokens {
         let style = scope.style(palette);
-        // A token carries at most one line break (comments stop at it).
         for (index, part) in text.split('\n').enumerate() {
             if index > 0 {
                 lines.push(std::mem::take(&mut current));

@@ -82,12 +82,6 @@ def _set_completion_notices_wired(wired: bool) -> None:
     _completion_notices_wired = wired
 
 
-def _completion_notices_are_wired() -> bool:
-    """Read the wiring flag (module-attribute imports of `rlm.bash` bind the
-    `bash()` function, not the module, so the flag needs an importable seam)."""
-    return _completion_notices_wired
-
-
 # One stderr hint per degrade, budgeted per kernel (nano-rlm's
 # MAX_LONG_RUN_NOTES shape): the first few degrades teach the contract, later
 # ones stay quiet.
@@ -104,8 +98,8 @@ def _note_degrade(handle: "BashHandle", bound: float) -> None:
     sys.stderr.write(
         f"bash: still running after {bound:g}s (pid {handle._pid}); "
         "returned a snapshot: r.running is True, r.output is the output so "
-        "far, r.handle is the live handle. End the turn — a [bash-done] "
-        "notification arrives when it finishes.\n"
+        "far, r.handle is the live handle. End the turn — a completion "
+        "notice arrives when it finishes.\n"
     )
 
 
@@ -392,7 +386,7 @@ class BashSnapshot:
 
     `r.output`/`r.exit_code` read like a BashResult's — output so far and
     None while running — and `r.running` is True; `r.handle` is the live
-    handle: collect the final result on the [bash-done] notification or with
+    handle: collect the final result on the completion notice or with
     `await r.handle`. The snapshot itself is not awaitable (that was #3076's
     rejected wrapper shape).
     """
@@ -406,8 +400,8 @@ class BashSnapshot:
     def __repr__(self) -> str:
         return (
             f"<BashSnapshot running pid={self.handle._pid} "
-            f"after {self.duration:g}s: collect on the [bash-done] "
-            "notification or await .handle>"
+            f"after {self.duration:g}s: collect on the completion "
+            "notice or await .handle>"
         )
 
 
@@ -1415,8 +1409,8 @@ def bash(
     notices (the kernel bootstrap turns the bound on), an await that is still
     running after 1 second instead DEGRADES: it returns a BashSnapshot
     (r.running True, r.output the output so far, r.handle the live handle)
-    while the command keeps running, and its [bash-done] notification arrives
-    on completion. In sessions without completion notices every await stays
+    while the command keeps running, and its completion notice arrives when
+    it finishes. In sessions without completion notices every await stays
     unbounded. `h = bash(cmd)` used as a background handle (any
     .pid/.running/.output()/.tail()/.poll()/.kill() access before the first
     await) survives cancellation; awaiting it only waits. Leak
@@ -1452,7 +1446,7 @@ def bash(
             "launch the command (bash() returns immediately and "
             "auto-backgrounds it) and end the turn; a [bash-done] "
             "notification resumes you. An await always yields after 1 second."
-            if _completion_notices_are_wired()
+            if _completion_notices_wired
             else "launch the command (bash() returns immediately) and read "
             "the handle in a later cell; this session has no [bash-done] "
             "notice, so an await waits until the command finishes."

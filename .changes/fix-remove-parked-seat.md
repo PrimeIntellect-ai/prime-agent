@@ -1,0 +1,1 @@
+- A session whose turn crashed or was dropped mid-run no longer stays busy for good (every later message used to fail with "Agent is already processing").
