@@ -112,6 +112,7 @@ impl AgentView {
                     detail,
                     &self.theme,
                     width,
+                    true,
                 )
             }
             ChatEntry::RefinementOutcome(row) => {
