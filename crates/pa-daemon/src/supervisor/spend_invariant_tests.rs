@@ -222,7 +222,8 @@ async fn a_supervisor_restart_keeps_the_total_and_reconciles_a_lost_report() {
     write_root_row(&restarted, &family.root, Some("w-root"));
     assert_total(&restarted, 1.75, "the first frame after the restart");
     // The root worker re-registers: the registration's detached family
-    // reconcile adds the lost row and re-stamps the root's row.
+    // reconcile adds the lost row and pushes the root's re-stamped row.
+    let mut events = restarted.events.subscribe();
     let command = DaemonCommand::WorkerRegister {
         id: None,
         active_session_id: "w-root".to_string(),
@@ -238,12 +239,20 @@ async fn a_supervisor_restart_keeps_the_total_and_reconciles_a_lost_report() {
         .await;
     assert!(registered.success, "{registered:?}");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while (total(&restarted, "root") - 1.875).abs() > 1e-9 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        loop {
+            let (_, push) = events.recv().await.expect("the events channel stays open");
+            let rows = push["changed"].as_array().cloned().unwrap_or_default();
+            if rows
+                .iter()
+                .any(|row| row["summary"]["sessionId"] == json!("root"))
+            {
+                break;
+            }
         }
     })
     .await
-    .expect("the registration reconciles the lost report");
+    .expect("the registration's reconcile pushes the root's row");
+    assert_total(&restarted, 1.875, "after the registration reconcile");
     // The child's own registration repeats the reconcile and adds nothing.
     assert!(restarted.reconcile_usage(&family.child).await.is_empty());
     assert_total(&restarted, 1.875, "after a repeated reconcile");
