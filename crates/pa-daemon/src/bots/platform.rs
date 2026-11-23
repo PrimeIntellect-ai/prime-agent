@@ -509,7 +509,15 @@ impl BotPlatform for PrimePlatform {
             };
             let started = tokio::time::timeout(
                 STREAM_START_WAIT,
-                spawn_exec_halves(&source, &request, StartOptions::default()),
+                // The relay lives as long as the link: no process deadline.
+                spawn_exec_halves(
+                    &source,
+                    &request,
+                    StartOptions {
+                        connect_timeout_ms: Some(0),
+                        ..StartOptions::default()
+                    },
+                ),
             )
             .await;
             let error = match started {

@@ -681,12 +681,13 @@ impl BotManager {
                 env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
                 Some(auth)
             }
-            None => {
-                self.platform
-                    .credentials(guest_provider(record))
-                    .await?
-                    .auth_json
-            }
+            // Best effort: the sandbox's rules are already set.
+            None => self
+                .platform
+                .credentials(guest_provider(record))
+                .await
+                .ok()
+                .and_then(|credentials| credentials.auth_json),
         };
         if let Some(auth) = auth {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());

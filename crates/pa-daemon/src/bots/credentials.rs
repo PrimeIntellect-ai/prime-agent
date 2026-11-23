@@ -225,37 +225,25 @@ pub async fn provision(
     let mut auth = AuthStorage::create(agent_dir);
     let injections = injections(&mut auth, provider);
     let mut provisioned = provision_injections(client, injections).await;
-    provisioned.prime_team = effective_prime_team(&mut auth);
+    provisioned.prime_team = effective_prime_team(&auth);
     provisioned
 }
 
-/// The team the Prime Inference key bills to: `PRIME_TEAM_ID` first, then
-/// the stored selection, but only for the stored key. An environment key
-/// never borrows the login's team.
-fn effective_prime_team(auth: &mut AuthStorage) -> Option<PrimeTeamCredential> {
-    if let Some(team_id) = std::env::var("PRIME_TEAM_ID")
-        .ok()
-        .map(|team| team.trim().to_string())
-        .filter(|team| !team.is_empty())
-    {
-        return Some(PrimeTeamCredential {
+/// The team the Prime Inference key bills to, as the auth storage resolves
+/// its `X-Prime-Team-ID` header.
+fn effective_prime_team(auth: &AuthStorage) -> Option<PrimeTeamCredential> {
+    let team_id = auth
+        .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)?
+        .remove("X-Prime-Team-ID")?;
+    match auth.get_prime_inference_team_selection() {
+        StoredPrimeTeam::Team(team) if team.team_id == team_id => Some(team),
+        _ => Some(PrimeTeamCredential {
             name: team_id.clone(),
             team_id,
             slug: None,
             role: None,
             created_at: None,
-        });
-    }
-    let stored_key = match auth.get_all().credential(PRIME_INFERENCE_PROVIDER_ID) {
-        Some(AuthCredential::ApiKey { key, .. }) => Some(key),
-        _ => None,
-    };
-    if stored_key.is_none() || auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID) != stored_key {
-        return None;
-    }
-    match auth.get_prime_inference_team_selection() {
-        StoredPrimeTeam::Team(team) => Some(team),
-        StoredPrimeTeam::NotSelected | StoredPrimeTeam::PersonalAccount => None,
+        }),
     }
 }
 
