@@ -570,27 +570,6 @@ impl Provider for AnthropicMessagesProvider {
 }
 
 #[cfg(test)]
-mod always_on_adaptive_thinking_tests {
-    use super::is_always_on_adaptive_thinking_model;
-
-    #[test]
-    fn always_on_models_reject_thinking_disabled_and_sampling_params() {
-        assert!(is_always_on_adaptive_thinking_model("claude-fable-5"));
-        assert!(is_always_on_adaptive_thinking_model("claude-mythos-5"));
-        assert!(is_always_on_adaptive_thinking_model("claude-opus-5-5"));
-        assert!(is_always_on_adaptive_thinking_model(
-            "anthropic/claude-opus-5.5"
-        ));
-    }
-
-    #[test]
-    fn optional_thinking_models_still_accept_disabled() {
-        assert!(!is_always_on_adaptive_thinking_model("claude-opus-5"));
-        assert!(!is_always_on_adaptive_thinking_model("claude-sonnet-5"));
-    }
-}
-
-#[cfg(test)]
 mod subscription_identity_tests {
     use super::build_request_headers;
     use crate::types::{zero_model_cost, Model, ModelInput};

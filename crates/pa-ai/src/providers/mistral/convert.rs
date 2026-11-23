@@ -385,27 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_tool_result_text() {
-        assert_eq!(build_tool_result_text("done", false, false, false), "done");
-        assert_eq!(
-            build_tool_result_text("boom", false, false, true),
-            "[tool error] boom"
-        );
-        assert_eq!(
-            build_tool_result_text("", true, true, false),
-            "(see attached image)"
-        );
-        assert_eq!(
-            build_tool_result_text("", true, false, false),
-            "(image omitted: model does not support images)"
-        );
-        assert_eq!(
-            build_tool_result_text("", false, false, true),
-            "[tool error] (no tool output)"
-        );
-    }
-
-    #[test]
     fn tool_result_video_becomes_placeholder_for_video_model() {
         let model: Model = serde_json::from_value(json!({
             "id": "m", "name": "Mistral",

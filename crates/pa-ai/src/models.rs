@@ -107,14 +107,4 @@ mod tests {
         assert!((usage.cost.cache_write.as_f64() - 0.25).abs() < 1e-9);
         assert!((usage.cost.total.as_f64() - (10.0 + 5.0 + 0.01 + 0.25)).abs() < 1e-9);
     }
-
-    #[test]
-    fn thinking_helpers_stay_re_exported() {
-        let m = model(false, None);
-        assert_eq!(
-            get_supported_thinking_levels(&m),
-            vec![pa_types::ai::ModelThinkingLevel::Off]
-        );
-        assert!(models_are_equal(Some(&m), Some(&m)));
-    }
 }

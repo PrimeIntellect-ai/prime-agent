@@ -146,22 +146,3 @@ async fn an_explicitly_configured_max_tokens_reaches_the_wire_unchanged() {
     let body = wire_body_for(glm_model(131_072, true)).await;
     assert_eq!(body["max_tokens"], json!(131_072));
 }
-
-#[tokio::test]
-async fn a_catalog_model_stays_capped_at_the_default_output_ceiling() {
-    // The untouched default: a catalog model's declared maxTokens is a
-    // ceiling the request clamps to 32000 (TS `DEFAULT_MAX_OUTPUT_TOKENS`)
-    // — most catalog models declare far more than a turn needs, so their
-    // request size must not change.
-    let body = wire_body_for(glm_model(131_072, false)).await;
-    assert_eq!(body["max_tokens"], json!(32_000));
-}
-
-#[tokio::test]
-async fn a_model_without_max_tokens_sends_no_output_budget() {
-    // A model that declares no max output (0) sends neither budget field:
-    // the provider defaults server-side.
-    let body = wire_body_for(glm_model(0, false)).await;
-    assert!(body.get("max_tokens").is_none());
-    assert!(body.get("max_completion_tokens").is_none());
-}

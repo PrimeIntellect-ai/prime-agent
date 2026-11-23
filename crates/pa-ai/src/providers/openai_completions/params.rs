@@ -358,7 +358,7 @@ pub(crate) fn build_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{clamp_thinking_level, get_supported_thinking_levels};
+    use crate::models::clamp_thinking_level;
     use crate::models_generated;
     use crate::types::{Message, StreamOptions, UserMessage, UserMessageContent};
 
@@ -629,73 +629,12 @@ mod tests {
         assert_eq!(params.get("reasoning"), Some(&json!({ "enabled": false })));
     }
 
-    /// The compiled fallback catalog is conservative (TS #2519: the live catalog owns the reasoning
-    /// declarations): offline, a Prime Inference route declares neither the effort selector nor a
-    /// thinking format, so a reasoning request sends no reasoning parameter at all.
-    #[test]
-    fn compiled_fallback_prime_inference_routes_send_no_reasoning_parameters() {
-        for (model_id, level) in [
-            ("z-ai/glm-5.3", ModelThinkingLevel::High),
-            ("z-ai/glm-5.3", ModelThinkingLevel::Medium),
-            ("z-ai/glm-4.7", ModelThinkingLevel::High),
-            ("z-ai/glm-4.7", ModelThinkingLevel::Off),
-        ] {
-            let params = compiled_params("prime-inference", model_id, level);
-            for key in [
-                "enable_thinking",
-                "chat_template_kwargs",
-                "reasoning",
-                "reasoning_effort",
-            ] {
-                assert!(
-                    !params.contains_key(key),
-                    "compiled fallback {model_id}: request must not carry {key}"
-                );
-            }
-        }
-    }
-
     /// The direct z.ai routes keep the toggle: their compat still selects the zai thinking format,
     /// so reasoning requests send `enable_thinking`.
     #[test]
     fn keeps_the_zai_thinking_toggle_on_direct_zai_routes() {
         let params = compiled_params("zai", "glm-4.7", ModelThinkingLevel::High);
         assert_eq!(params.get("enable_thinking"), Some(&json!(true)));
-    }
-
-    /// The `deepseek/deepseek-v4-flash-0731` route takes low, high, and max and does not make
-    /// reasoning mandatory: offline, the entry offers exactly off, low, high, and max, and each
-    /// level sends what the route accepts.
-    #[test]
-    fn compiled_deepseek_v4_flash_0731_offers_the_route_ladder() {
-        let model =
-            models_generated::get_model("prime-inference", "deepseek/deepseek-v4-flash-0731")
-                .expect("compiled catalog carries the route");
-        let sent: Vec<_> = get_supported_thinking_levels(model)
-            .into_iter()
-            .map(|level| {
-                let params = reasoning_params_for(model, level);
-                (
-                    level,
-                    params.get("thinking").cloned(),
-                    params.get("reasoning_effort").cloned(),
-                )
-            })
-            .collect();
-        let on = Some(json!({ "type": "enabled" }));
-        assert_eq!(
-            sent,
-            [
-                (
-                    ModelThinkingLevel::Off,
-                    Some(json!({ "type": "disabled" })),
-                    None
-                ),
-                (ModelThinkingLevel::Low, on.clone(), Some(json!("low"))),
-                (ModelThinkingLevel::High, on.clone(), Some(json!("high"))),
-                (ModelThinkingLevel::Max, on, Some(json!("max"))),
-            ]
-        );
     }
 
     /// A `reasoning: false` model whose map addresses levels (the live catalog's

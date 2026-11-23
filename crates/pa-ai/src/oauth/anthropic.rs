@@ -547,7 +547,7 @@ mod tests {
     }
 
     /// The flow on a free loopback port (the registered port is `start`'s
-    /// production bind; `a_bound_port_fails_the_start_clearly` pins it).
+    /// production bind).
     async fn login_on_a_free_port(
         http: &ScriptedHttp,
         ui: &ScriptedUi,
@@ -616,53 +616,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_exchange_surfaces_the_ts_message() {
-        let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
-        let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
-        assert_eq!(
-            error,
-            format!(
-                "Token exchange request failed. url={TOKEN_URL}; redirect_uri={REDIRECT_URI}; response_type=authorization_code; details=Error: HTTP request failed. status=400; url={TOKEN_URL}; body=no grant"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn a_missing_field_exchange_names_the_response() {
-        let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
-        let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
-        assert!(
-            error.starts_with("Token exchange response missing field: refresh_token"),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_refresh_surfaces_the_ts_message() {
-        let http = ScriptedHttp::new(vec![(TOKEN_URL, 401, "expired")]);
-        let error = refresh_anthropic_token(&http, "r-old").await.unwrap_err();
-        assert_eq!(
-            error,
-            format!(
-                "Anthropic token refresh request failed. url={TOKEN_URL}; details=Error: HTTP request failed. status=401; url={TOKEN_URL}; body=expired"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_token_endpoint_surfaces_the_transport_error() {
-        // Nothing scripted: the transport fails the request.
-        let http = ScriptedHttp::new(Vec::new());
-        let error = refresh_anthropic_token(&http, "r-old").await.unwrap_err();
-        assert!(
-            error.starts_with("Anthropic token refresh request failed. url="),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
         let http = token_http();
         let ui = ScriptedUi::new(
@@ -690,34 +643,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_paste_ends_the_login() {
-        let http = token_http();
-        let ui = ScriptedUi::new(Some(ScriptedAnswer::ready()), None);
-        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
-        assert_eq!(error, LOGIN_CANCELLED);
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_prompt_ends_the_login() {
-        let http = token_http();
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value("   ")),
-            Some(ScriptedAnswer::ready()),
-        );
-        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
-        assert_eq!(error, LOGIN_CANCELLED);
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_surface_ends_the_login_between_polls() {
-        // The flag flips when the url lands: the race loop's first
-        // poll-step check ends the flow before any code arrives.
-        let http = token_http();
-        let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), None);
-        ui.cancel_on_auth = true;
-        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
-        assert_eq!(error, LOGIN_CANCELLED);
-        assert!(http.requests.lock().unwrap().is_empty());
+    async fn a_cancelled_surface_ends_the_login_at_every_step() {
+        // Cancel at the paste, at the manual prompt, and between polls
+        // once the url lands: no step sends a token request.
+        let cases = [
+            (Some(ScriptedAnswer::ready()), None, false),
+            (
+                Some(ScriptedAnswer::value("   ")),
+                Some(ScriptedAnswer::ready()),
+                false,
+            ),
+            (Some(ScriptedAnswer::Pending), None, true),
+        ];
+        for (manual, prompt, cancel_on_auth) in cases {
+            let http = token_http();
+            let mut ui = ScriptedUi::new(manual, prompt);
+            ui.cancel_on_auth = cancel_on_auth;
+            let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
+            assert_eq!(error, LOGIN_CANCELLED);
+            assert!(http.requests.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

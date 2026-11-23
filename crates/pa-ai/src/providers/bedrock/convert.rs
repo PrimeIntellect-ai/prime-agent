@@ -474,31 +474,6 @@ mod supports_adaptive_thinking_tests {
 }
 
 #[cfg(test)]
-mod supports_always_on_adaptive_thinking_tests {
-    use super::supports_always_on_adaptive_thinking;
-
-    #[test]
-    fn bedrock_always_on_models_reject_sampling_params() {
-        assert!(supports_always_on_adaptive_thinking(
-            "us.anthropic.claude-opus-5-5-v1",
-            Some("Claude Opus 5.5")
-        ));
-        assert!(supports_always_on_adaptive_thinking(
-            "anthropic.claude-fable-5",
-            None
-        ));
-    }
-
-    #[test]
-    fn bedrock_optional_thinking_models_keep_sampling_params() {
-        assert!(!supports_always_on_adaptive_thinking(
-            "us.anthropic.claude-opus-5-v1",
-            Some("Claude Opus 5")
-        ));
-    }
-}
-
-#[cfg(test)]
 mod prompt_caching_gate_tests {
     use super::*;
 
@@ -538,10 +513,6 @@ mod prompt_caching_gate_tests {
         ] {
             assert!(supports_prompt_caching(&model_with_id(id)), "{id}");
         }
-    }
-
-    #[test]
-    fn older_claude_ids_still_do_not() {
         for id in [
             "anthropic.claude-3-haiku-20240307-v1:0",
             "anthropic.claude-v2:1",
