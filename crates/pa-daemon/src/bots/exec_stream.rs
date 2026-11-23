@@ -93,7 +93,7 @@ pub async fn spawn_exec_halves(
                 Some(Ok(CommandSessionEvent::Data { channel, data })) => match channel {
                     OutputChannel::Stdout => {
                         if stdout_write.write_all(&data).await.is_err() {
-                            break None;
+                            break "the link closed its read side".to_string();
                         }
                     }
                     OutputChannel::Stderr => {
@@ -104,15 +104,19 @@ pub async fn spawn_exec_halves(
                     OutputChannel::Pty => {}
                 },
                 Some(Ok(CommandSessionEvent::Start { .. } | CommandSessionEvent::Keepalive)) => {}
-                Some(Ok(CommandSessionEvent::End(end))) => break Some(end),
-                Some(Err(_)) | None => break None,
+                Some(Ok(CommandSessionEvent::End(end))) => {
+                    break match (end.exit_code, end.error) {
+                        (_, Some(error)) => format!("ended with an error: {error}"),
+                        (Some(code), None) => format!("exit code {code}"),
+                        (None, None) => "ended with no exit code".to_string(),
+                    };
+                }
+                Some(Err(error)) => break format!("the exec stream failed: {error}"),
+                None => break "the exec stream ended with no end event".to_string(),
             }
         };
-        let code = end
-            .and_then(|end| end.exit_code)
-            .map_or_else(|| "no exit code".to_string(), |code| format!("exit code {code}"));
         let stderr = String::from_utf8_lossy(&stderr);
-        let _ = ended_send.send(format!("{code}, stderr: {:?}", stderr.trim()));
+        let _ = ended_send.send(format!("{end}, stderr: {:?}", stderr.trim()));
     });
 
     // stdin: client writes flow to the process's stdin pipe (a second

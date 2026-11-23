@@ -114,14 +114,14 @@ impl BotManager {
             HELLO_TIMEOUT,
             handshake(halves.read, halves.write, halves.ended),
         )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "the bot {} did not say hello within {}s",
-                    bot.name,
-                    HELLO_TIMEOUT.as_secs()
-                )
-            })?
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the bot {} did not say hello within {}s",
+                bot.name,
+                HELLO_TIMEOUT.as_secs()
+            )
+        })?
     }
 }
 

@@ -26,8 +26,9 @@ use super::{
 
 /// The budget for one wake, create, or pause.
 const OPERATION_BUDGET: Duration = Duration::from_mins(15);
-/// Attempts for one platform call that answers 409, 5xx, or a network error.
-const RETRY_ATTEMPTS: u32 = 6;
+/// Attempts for one platform call that answers 409, 429, 5xx, or a network
+/// error: about 30 s of backoff, so a busy account's rate limit passes.
+const RETRY_ATTEMPTS: u32 = 10;
 
 /// Starts the guest daemon when it is not up, then opens the bot session. It
 /// reopens `BOT_SESSION_FILE`, or the file a marker on the guest disk names, so
@@ -956,7 +957,7 @@ where
                 if attempt < RETRY_ATTEMPTS =>
             {
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(2));
+                delay = (delay * 2).min(Duration::from_secs(5));
                 attempt += 1;
             }
             result => return result,
