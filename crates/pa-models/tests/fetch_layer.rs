@@ -56,7 +56,7 @@ async fn redirects_are_refused() {
 }
 
 #[tokio::test]
-async fn non_success_statuses_surface_with_their_code() {
+async fn fetch_errors_carry_the_status_or_none_for_transport() {
     let server = common::MockServer::start(vec![status(404, "Not Found")]).await;
     let fetcher = CatalogFetcher::new();
     let error = fetcher
@@ -70,17 +70,27 @@ async fn non_success_statuses_surface_with_their_code() {
         .await
         .expect_err("status");
     assert_eq!(error.status(), Some(401));
+
+    // Bind then close: nothing listens on this port anymore.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let error = fetcher
+        .fetch(&format!("http://127.0.0.1:{port}/x"), None)
+        .await
+        .expect_err("connection refused");
+    assert!(error.status().is_none());
 }
 
 #[tokio::test]
-async fn content_length_over_the_cap_fails_before_reading() {
+async fn bodies_past_the_cap_fail_before_or_mid_read() {
+    // The production cap rejects a declared content-length before reading.
     let server = common::MockServer::start(vec![common::oversized_header()]).await;
-    let fetcher = CatalogFetcher::new();
-    assert!(fetcher.fetch(&server.url("/x"), None).await.is_err());
-}
+    assert!(CatalogFetcher::new()
+        .fetch(&server.url("/x"), None)
+        .await
+        .is_err());
 
-#[tokio::test]
-async fn streamed_bodies_past_the_cap_fail_mid_read() {
     let server = common::MockServer::start(vec![common::oversized_stream()]).await;
     let fetcher = CatalogFetcher::with_limits(Duration::from_secs(5), 64 * 1024);
     let error = fetcher
@@ -112,18 +122,4 @@ async fn hard_timeout_aborts_unresponsive_servers() {
         .expect_err("timeout");
     assert!(error.status().is_none());
     assert!(started.elapsed() < Duration::from_secs(2), "hard abort");
-}
-
-#[tokio::test]
-async fn connection_failures_are_transport_errors() {
-    // Bind then close: nothing listens on this port anymore.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let fetcher = CatalogFetcher::new();
-    let error = fetcher
-        .fetch(&format!("http://127.0.0.1:{port}/x"), None)
-        .await
-        .expect_err("connection refused");
-    assert!(error.status().is_none());
 }
