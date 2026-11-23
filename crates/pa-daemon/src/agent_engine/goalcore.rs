@@ -74,15 +74,36 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Arm the background-skip fallback wake one window out: the deferred
-    /// mint sites and the settle consult's self-heal share the arming.
+    /// Arm the background-skip fallback wake one window out, unless one is
+    /// still waiting to fire: the deferred mint sites and the settle
+    /// consult's self-heal share the arming. A turn inside the window (a
+    /// user prompt, a steering notice, a post-compaction consult) never
+    /// pushes the bound out; the firing wake's own marker turn arms the
+    /// next window. The check and the store write run under the goal
+    /// driver lock, which the mint and the goal's transitions hold: a
+    /// deferral a mint already consumed, or a goal that left the active
+    /// state, arms no stale wake.
     pub(crate) async fn arm_background_skip_wake(&self) {
-        self.schedule_goal_wake(
-            GoalWakeKind::BackgroundSkip,
-            crate::util::now_ms()
-                + pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WINDOW_MS,
-        )
-        .await;
+        let Some(live) = self.live_handles() else {
+            return;
+        };
+        let job = {
+            let driver = live.goal.driver.lock().await;
+            if !driver.owes_continuation()
+                || !driver.owns_continuation_wakeup()
+                || self.background_skip_wake_armed()
+            {
+                return;
+            }
+            self.create_goal_wake_job(
+                GoalWakeKind::BackgroundSkip,
+                crate::util::now_ms()
+                    + pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WINDOW_MS,
+            )
+        };
+        if let Some(job) = job {
+            self.wake_goal_scheduler(job).await;
+        }
     }
 
     /// Arm a goal wake: a durable one-shot cron job at `wake_at_ms` whose
@@ -96,6 +117,19 @@ impl AgentSessionEngine {
         kind: GoalWakeKind,
         wake_at_ms: u64,
     ) -> Option<String> {
+        let job = self.create_goal_wake_job(kind, wake_at_ms)?;
+        let id = job.id.clone();
+        self.wake_goal_scheduler(job).await;
+        Some(id)
+    }
+
+    /// The store half of arming a goal wake: retire the prior wake, then
+    /// write the replacement job.
+    fn create_goal_wake_job(
+        &self,
+        kind: GoalWakeKind,
+        wake_at_ms: u64,
+    ) -> Option<pa_core::cron::AgentCronJob> {
         // Exactly one wake per window: the prior job retires before the
         // replacement arms — repeated boundaries must never stack marker
         // turns.
@@ -118,13 +152,13 @@ impl AgentSessionEngine {
                 pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_MARKER_TEXT,
             ),
         };
-        let job = wiring
+        wiring
             .store
             .create(&pa_core::cron::store::CreateAgentCronJobInput {
                 active_session_id: binding.active_session_id.clone(),
                 session_id: binding.session_id.clone(),
                 session_file: binding.session_file.clone(),
-                cwd: binding.cwd.clone(),
+                cwd: binding.cwd,
                 source: Some(source.to_string()),
                 label: Some(label.to_string()),
                 prompt: marker.to_string(),
@@ -132,22 +166,30 @@ impl AgentSessionEngine {
                 now: Some(crate::util::now_ms()),
                 ..Default::default()
             })
-            .ok()?;
-        // Re-arm the scheduler so the armed job gets a live timer
-        // (`drop_queued: false` keeps the queued-fire withdrawal a no-op).
+            .ok()
+    }
+
+    /// Re-arm the scheduler so an armed goal wake gets a live timer
+    /// (`drop_queued: false` keeps the queued-fire withdrawal a no-op).
+    async fn wake_goal_scheduler(&self, job: pa_core::cron::AgentCronJob) {
+        let Some(wiring) = self.cron_wiring() else {
+            return;
+        };
         if let Some(hook) = &wiring.mutation_hook {
             let mutation = pa_core::session_engine::host_requests::RlmHeartbeatMutation {
-                job: job.clone(),
+                job,
                 drop_queued: false,
             };
             hook(mutation).await;
         }
-        Some(job.id)
     }
 
-    /// Whether the session's background-skip wake is still Active in the
-    /// cron store (the settle consult's self-heal: a fire that completed
-    /// without running must not strand the goal behind a hung shell).
+    /// Whether the session holds a background-skip wake still waiting to
+    /// fire: Active in the cron store and not claimed by a dispatch. A
+    /// claimed wake is firing now (it completes only after its marker
+    /// turn), so that turn's end arms the next window; a fire that
+    /// completed without running leaves none, so the settle consult's
+    /// self-heal re-arms behind a hung shell.
     pub(crate) fn background_skip_wake_armed(&self) -> bool {
         let Some(wiring) = self.cron_wiring() else {
             return false;
@@ -162,6 +204,7 @@ impl AgentSessionEngine {
                         pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
                     )
                 && job.session_id == binding.session_id
+                && wiring.store.get_claimed_job(&job.id).is_none()
         })
     }
 

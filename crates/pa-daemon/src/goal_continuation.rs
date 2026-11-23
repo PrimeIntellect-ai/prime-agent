@@ -138,8 +138,9 @@ impl AgentSessionEngine {
             // Self-heal: a fire that completed without running (withdrawn
             // or cleared mid-teardown) strands the owed deferral with no
             // wake; the next settle consult behind a still-live shell
-            // re-arms it so the bounded-stall guarantee survives.
-            if self.has_live_background_bash_handles() && !self.background_skip_wake_armed() {
+            // re-arms it so the bounded-stall guarantee survives (an
+            // armed wake stays put).
+            if self.has_live_background_bash_handles() {
                 self.arm_background_skip_wake().await;
             }
             return;

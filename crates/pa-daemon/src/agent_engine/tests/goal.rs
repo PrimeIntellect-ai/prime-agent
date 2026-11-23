@@ -829,6 +829,7 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
                     "responses": [
                         {"text": "warm ok"},
                         {"text": "goal turn reply"},
+                        {"text": "user turn reply"},
                         {"text": "marker turn reply"},
                     ]
                 })
@@ -931,8 +932,36 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         }),
         "the still-live handle must keep the fallback wake armed"
     );
-    // THE RE-ARM: the fired marker turn's own end re-consults the boundary
-    // and cancels-first into a fresh wake - exactly one Active, a new id.
+    // A turn inside the window leaves the waiting wake in place: its end
+    // re-defers behind the live handle, but the bound must not move out.
+    let mut user_events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "a user turn".to_string(), &mut user_events);
+    let waiting: Vec<_> = store
+        .list()
+        .into_iter()
+        .filter(|job| {
+            job.label.as_deref()
+                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
+                && job.status == pa_core::cron::JobStatus::Active
+        })
+        .collect();
+    let [still_waiting] = waiting.as_slice() else {
+        panic!("a turn inside the window must keep exactly one wake: {waiting:?}");
+    };
+    assert_eq!(
+        (
+            still_waiting.id.as_str(),
+            still_waiting.next_run_at.as_deref()
+        ),
+        (first_wake_id.as_str(), wake.next_run_at.as_deref()),
+        "a turn inside the window must not push the wake out"
+    );
+    // THE RE-ARM: the scheduler claims the due wake and its marker turn
+    // runs; that turn's end re-consults the boundary and cancels-first
+    // into a fresh wake - exactly one Active, a new id.
+    store
+        .claim_due(fire_at_ms, crate::util::now_ms())
+        .expect("the scheduler claims the due wake");
     let mut marker_events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,
@@ -997,6 +1026,17 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
                 && job.status == pa_core::cron::JobStatus::Active
         }),
         "the successful mint retired the armed wake"
+    );
+    // A stale arming that runs after the mint consumed the deferral (it
+    // raced the mint) must not leave a wake that would fire an unsolicited
+    // marker turn.
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
+    engine
+        .runtime
+        .block_on(async { engine.arm_background_skip_wake().await });
+    assert!(
+        !engine.background_skip_wake_armed(),
+        "an arming behind a consumed deferral must arm nothing"
     );
 }
 
