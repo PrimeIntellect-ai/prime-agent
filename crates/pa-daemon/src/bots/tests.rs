@@ -610,15 +610,10 @@ async fn live_ask(
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::timeout_at(
             deadline,
-            super::replies::sync_deliveries(
-                &mut guest,
-                &ledger,
-                &bot.guest_session_id,
-                |text| {
-                    reply = text;
-                    async { anyhow::Ok(()) }
-                },
-            ),
+            super::replies::sync_deliveries(&mut guest, &ledger, &bot.guest_session_id, |text| {
+                reply = text;
+                async { anyhow::Ok(()) }
+            }),
         )
         .await??;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
