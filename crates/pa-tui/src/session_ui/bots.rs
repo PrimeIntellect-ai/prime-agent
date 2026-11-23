@@ -12,6 +12,7 @@ use super::{picker_viewport_rows, AgentView, Overlay, SessionUi, UI_REQUEST_TIME
 
 use crate::bots_view::{parse_bots, BotsAction, BotsView};
 use crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS;
+use crate::interactive::reconnect::ConnectionEvent;
 use crate::interactive::{BotAttach, SelectionOrigin, SessionPanel, SessionSelection};
 
 /// One background `/bots` delivery: a fetched `list_bots` answer, or an attach outcome.
@@ -200,17 +201,30 @@ impl SessionUi {
         })
     }
 
-    pub(crate) fn is_bot(&self) -> bool {
-        self.bot.is_some()
-    }
-
-    /// The bot's link closed: a bot view never reconnects (the endpoint was single-use).
-    pub(crate) fn bot_link_closed(&mut self, view: &mut AgentView) {
-        let name = self.bot.as_ref().map_or("", |bot| bot.name.as_str());
-        self.error_row(
-            &format!("The link to the bot {name} closed. Leave this view and attach again."),
-            view,
-        );
-        self.dirty = true;
+    /// Whether `event` is a lost link of this bot view. A bot view never reconnects: the
+    /// endpoint was single-use, and the reconnect driver would dial this Mac's daemon. The
+    /// first loss shows one error row.
+    pub(crate) fn bot_link_lost(&mut self, event: &ConnectionEvent, view: &mut AgentView) -> bool {
+        let Some(bot) = &self.bot else {
+            return false;
+        };
+        if !matches!(
+            event,
+            ConnectionEvent::UpdateNotice { .. }
+                | ConnectionEvent::ShutdownNotice
+                | ConnectionEvent::ConnectionLost
+                | ConnectionEvent::SupervisorDied { .. }
+                | ConnectionEvent::DirectLinkLost { .. }
+        ) {
+            return false;
+        }
+        if !std::mem::replace(&mut self.bot_link_closed, true) {
+            let message = format!(
+                "The link to the bot {} closed. Leave this view and attach again.",
+                bot.name
+            );
+            self.error_row(&message, view);
+        }
+        true
     }
 }

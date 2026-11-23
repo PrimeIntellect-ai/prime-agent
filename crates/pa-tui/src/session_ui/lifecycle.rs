@@ -161,6 +161,7 @@ impl SessionUi {
                 SessionSelection::Bot(bot) => Some(bot.clone()),
                 _ => None,
             },
+            bot_link_closed: false,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),

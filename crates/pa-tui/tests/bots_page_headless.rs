@@ -22,6 +22,8 @@ struct Mock {
     session: &'static str,
     list_bots: Value,
     attach_bot: Result<Value, &'static str>,
+    /// Drop the connection right after the attach answer (a closed bot link).
+    close_after_attach: bool,
 }
 
 fn serve(listener: &UnixListener, mock: &Mock) {
@@ -88,6 +90,9 @@ fn serve(listener: &UnixListener, mock: &Mock) {
             }
         };
         write_json(&mut writer, &response);
+        if mock.close_after_attach && command == "attach" {
+            break;
+        }
     }
 }
 
@@ -202,6 +207,7 @@ fn local_mock(list_bots: Value, attach_bot: Result<Value, &'static str>) -> Mock
         session: "owner",
         list_bots,
         attach_bot,
+        close_after_attach: false,
     }
 }
 
@@ -312,6 +318,7 @@ fn enter_attaches_the_bot_session_and_refuses_local_commands() {
         session: "guest-b1",
         list_bots: json!({}),
         attach_bot: Err("unused"),
+        close_after_attach: false,
     };
     let outcome = run(
         &endpoint,
@@ -325,4 +332,34 @@ fn enter_attaches_the_bot_session_and_refuses_local_commands() {
     );
     assert_eq!(outcome.active_session_id, "guest-b1");
     assert!(last_frame_with(&outcome, "runs on this Mac").contains("Leave the bot view"));
+}
+
+#[test]
+fn a_closed_bot_link_shows_an_error_and_never_reconnects() {
+    let dir = tempfile::tempdir().unwrap();
+    let endpoint = dir.path().join("bot.sock");
+    let bot = BotAttach {
+        bot_id: "b1".into(),
+        name: "triage".into(),
+        endpoint: endpoint.clone(),
+        guest_session_id: "guest-b1".into(),
+    };
+    let guest = Mock {
+        session: "guest-b1",
+        list_bots: json!({}),
+        attach_bot: Err("unused"),
+        close_after_attach: true,
+    };
+    let outcome = run(
+        &endpoint,
+        SessionSelection::Bot(bot),
+        guest,
+        vec![
+            wait("link to the bot triage closed"),
+            HeadlessStep::WaitMs(1_500),
+        ],
+    );
+    let last = outcome.frames.last().unwrap();
+    assert!(last.contains("link to the bot triage closed"), "{last}");
+    assert!(!last.contains("reconnecting"), "{last}");
 }

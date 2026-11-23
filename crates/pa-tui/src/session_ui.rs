@@ -337,6 +337,8 @@ pub(crate) struct SessionUi {
     bots_updates: mpsc::UnboundedSender<BotsUpdate>,
     /// The bot this view is attached to: `Some` when the client talks to a bot's guest daemon.
     bot: Option<crate::interactive::BotAttach>,
+    /// The bot view's link closed (its error row showed once).
+    bot_link_closed: bool,
     /// The activity dock holds keyboard focus (and renders expanded).
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,

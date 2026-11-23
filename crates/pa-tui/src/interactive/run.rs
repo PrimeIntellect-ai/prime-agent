@@ -1397,11 +1397,7 @@ async fn run_interactive_surface(
                     // The closed stream parks its arm; a recovery already in flight owns the run,
                     // otherwise the loss is a daemon hiccup.
                     events = None;
-                    if session.is_bot() {
-                        session.bot_link_closed(&mut view);
-                    } else {
-                        session.connection_event(ConnectionEvent::ConnectionLost, &mut view);
-                    }
+                    session.connection_event(ConnectionEvent::ConnectionLost, &mut view);
                 }
             }
             reader_death = async {
@@ -1419,10 +1415,6 @@ async fn run_interactive_surface(
                         session.apply_client_event(event, &mut view);
                     }
                     let direct_alive = session.client.direct_session_id().is_some();
-                    if session.is_bot() {
-                        session.bot_link_closed(&mut view);
-                        continue;
-                    }
                     session.connection_event(
                         ConnectionEvent::SupervisorDied { direct_alive },
                         &mut view,

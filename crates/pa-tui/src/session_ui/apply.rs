@@ -24,6 +24,11 @@ impl SessionUi {
         event: ConnectionEvent,
         view: &mut AgentView,
     ) -> ConnectionEffect {
+        // A bot view's endpoint was single-use: a lost link never reconnects (the reconnect
+        // driver would dial this Mac's daemon).
+        if self.bot_link_lost(&event, view) {
+            return ConnectionEffect::None;
+        }
         let before = std::mem::discriminant(&self.connection);
         let effect = self.connection.on(event);
         match &effect {
