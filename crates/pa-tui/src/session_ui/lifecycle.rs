@@ -498,14 +498,15 @@ impl SessionUi {
         self.settled = None;
         self.outcome_after_compaction = None;
         // The resynced state owns the loader: a turn still live behind the
-        // re-attach keeps the spinner, one that died with the old link does not. A
-        // compaction in flight seeds the compaction loader (see `rebuild_view`): its
-        // `compaction_end` clears it.
-        let streaming = attach.snapshot.get("state").is_some_and(|state| {
-            ["isStreaming", "isCompacting"]
-                .iter()
-                .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
-        });
+        // re-attach keeps the spinner, one that died with the old link does
+        // not. A compaction in flight seeds the compaction loader instead
+        // (see `rebuild_view`): its `compaction_end` clears it.
+        let streaming = attach
+            .snapshot
+            .get("state")
+            .and_then(|state| state.get("isStreaming"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         self.pending_run_streaming = Some(streaming);
         self.run_outcome = crate::program_status::Status::Done;
         self.streaming_index = None;
