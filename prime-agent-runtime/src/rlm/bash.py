@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn, cast
 
 from . import _winjob
-from .inbox_lifecycle import NoticeLifecycle, advance
+from .inbox_lifecycle import NoticeLifecycle
 
 _IS_POSIX = os.name == "posix"
 
@@ -260,6 +260,18 @@ def _creating_cell_waits_for(
     if isinstance(waiter, asyncio.Future):
         targets += (waiter,)
     return _completion_reaches(awaiter, targets)
+
+
+def _live_cell_owner() -> asyncio.Task[Any] | None:
+    """Body task of the cell executing right now, ignoring detached context copies."""
+    try:
+        from . import repl
+
+        if repl.is_active():
+            return repl.active_cell_task()
+    except (ImportError, RuntimeError):
+        pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -781,21 +793,22 @@ class BashHandle:
         callback()
 
     def _note_result_consumed(self) -> None:
-        """Record a read of the finished result, from any cell, task, or no
-        cell at all: a read before completion does not count. Read before the
-        notice left the kernel, the notice is never sent; read after, the host
-        is asked to withdraw it. An unread notice still goes out, so a failed
-        or long command keeps its wake-up."""
+        """Record a read of the finished result from any cell or task while a
+        cell is live: a read before completion does not count, and neither does
+        a read with no live cell (it reaches nobody, and the notice is the idle
+        session's only wake-up). Read before the notice left the kernel, the
+        notice is never sent; read after, the host is asked to withdraw it."""
         if not self._done.is_set():
+            return
+        if _live_cell_owner() is None:
             return
         with self._callback_lock:
             if self._notice_state is NoticeLifecycle.QUEUED:
-                target = NoticeLifecycle.CONSUMED
+                self._notice_state = NoticeLifecycle.CONSUMED
             elif self._notice_state is NoticeLifecycle.SENT:
-                target = NoticeLifecycle.WITHDRAWN
+                self._notice_state = NoticeLifecycle.WITHDRAWN
             else:
                 return
-            self._notice_state = advance(self._notice_state, target)
             notice, self._consumed_notice = self._consumed_notice, None
         if notice is not None:
             notice()
@@ -805,7 +818,7 @@ class BashHandle:
         with self._callback_lock:
             if self._notice_state is not NoticeLifecycle.QUEUED:
                 return False
-            self._notice_state = advance(self._notice_state, NoticeLifecycle.SENT)
+            self._notice_state = NoticeLifecycle.SENT
             return True
 
     def _schedule_background_completion_notice(self) -> None:
@@ -885,9 +898,9 @@ class BashHandle:
         The host delivers a queued notice at the reading cell's turn boundary,
         which begins when that cell's done event is processed: a withdrawal
         frame that leaves the kernel after done arrives too late, and the stale
-        notice wakes the model anyway. Writing the frame right here puts a
-        read inside a cell ahead of that cell's done on the wire, where the
-        host must withdraw before it can dispatch. The reply never matters
+        notice wakes the model anyway. Reads happen inside a live cell, so
+        writing the frame right here puts it ahead of done on the wire, where
+        the host must withdraw before it can dispatch. The reply never matters
         (unknown reply ids are dropped), so the request is fire-and-forget:
         no future to await, no event-loop hop that could run after the cell.
         """
