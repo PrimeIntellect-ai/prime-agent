@@ -11,11 +11,10 @@
 use crate::types::Method;
 use thiserror::Error;
 
-/// Cap for the `details` preview of an error response body (TS
-/// `MAX_RESPONSE_PREVIEW_CHARS`).
+/// Cap for the `details` preview of an error response body.
 pub const MAX_RESPONSE_PREVIEW_CHARS: usize = 512;
 
-/// The failure codes, wire-identical to the TS `PrimeSandboxErrorCode` set.
+/// The failure codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxErrorCode {
     /// A caller-supplied argument failed local validation; nothing was sent.
@@ -44,7 +43,7 @@ pub enum SandboxErrorCode {
 }
 
 impl SandboxErrorCode {
-    /// The wire name, identical to the TS code strings.
+    /// The stable code name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -195,14 +194,14 @@ impl SandboxError {
     /// Attach a `details` preview without HTTP context (wait outcomes).
     #[must_use]
     pub fn with_details(mut self, details: Option<String>) -> Self {
-        if details.is_some() {
-            self.details = details;
+        if let Some(details) = details {
+            self.details = Some(Self::bound_preview(&details));
         }
         self
     }
 
     /// Attach the request context (method, url, status, details) to a status
-    /// or response error, mirroring the TS error properties.
+    /// or response error.
     #[must_use]
     pub fn with_http_context(
         mut self,
@@ -220,8 +219,7 @@ impl SandboxError {
         self
     }
 
-    /// True when the key name marks a secret value (TS
-    /// `REDACTED_KEY_PATTERN`): `authorization`, `api[-_]?key`, `token`,
+    /// True when the key name marks a secret value: `authorization`, `api[-_]?key`, `token`,
     /// `secret`, or `password`, case-insensitive.
     fn is_secret_key(key: &str) -> bool {
         let lowered = key.to_lowercase();
@@ -234,8 +232,7 @@ impl SandboxError {
             || lowered.contains("api_key")
     }
 
-    /// Scrub secret-bearing keys from a parsed JSON value, recursively (TS
-    /// `scrubJsonSecrets`).
+    /// Scrub secret-bearing keys from a parsed JSON value, recursively.
     #[must_use]
     pub fn scrub_json_secrets(value: &serde_json::Value) -> serde_json::Value {
         match value {
@@ -260,8 +257,7 @@ impl SandboxError {
         }
     }
 
-    /// Replace every occurrence of a known secret with `[redacted]` (TS
-    /// `redactSecrets`).
+    /// Replace every occurrence of a known secret with `[redacted]`.
     #[must_use]
     pub fn redact_secrets(text: &str, secrets: &[&str]) -> String {
         let mut redacted = text.to_string();
@@ -273,8 +269,7 @@ impl SandboxError {
         redacted
     }
 
-    /// Bound a preview to [`MAX_RESPONSE_PREVIEW_CHARS`] (TS
-    /// `boundPreview`).
+    /// Bound a preview to [`MAX_RESPONSE_PREVIEW_CHARS`].
     #[must_use]
     pub fn bound_preview(text: &str) -> String {
         if text.len() <= MAX_RESPONSE_PREVIEW_CHARS {
@@ -293,7 +288,7 @@ impl SandboxError {
     /// Build a bounded, secret-scrubbed preview from an error-response body:
     /// JSON bodies are key-scrubbed and re-serialized, plain bodies are
     /// string-redacted, and known secret strings are redacted either way
-    /// (TS `previewFromText`).
+    ///.
     #[must_use]
     pub fn preview_from_text(text: &str, secrets: &[&str]) -> Option<String> {
         if text.is_empty() {

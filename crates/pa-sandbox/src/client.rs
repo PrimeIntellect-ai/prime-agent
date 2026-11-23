@@ -13,7 +13,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::error::{SandboxError, SandboxErrorCode};
+use crate::error::SandboxError;
 use crate::record::{parse_checkpoint, parse_paused, parse_sandbox, parse_sandbox_page};
 use crate::transport::{ReqwestSandboxTransport, SandboxTransport, TransportRequest};
 use crate::types::{
@@ -74,7 +74,7 @@ impl PrimeSandboxClient<ReqwestSandboxTransport> {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxErrorCode::InvalidRequest`] when the API key is
+    /// Returns [`crate::SandboxErrorCode::InvalidRequest`] when the API key is
     /// empty, the base URL is not an acceptable https origin, or the
     /// request deadline is not positive.
     pub fn new(api_key: &str, options: ClientOptions) -> Result<Self, SandboxError> {
@@ -87,7 +87,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxErrorCode::InvalidRequest`] when the API key is
+    /// Returns [`crate::SandboxErrorCode::InvalidRequest`] when the API key is
     /// empty, the base URL is not an acceptable https origin, or the
     /// request deadline is not positive.
     pub fn with_transport(
@@ -136,7 +136,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxErrorCode::InvalidRequest`] when the request fails
+    /// Returns [`crate::SandboxErrorCode::InvalidRequest`] when the request fails
     /// local validation (nothing is sent); the last transient transport
     /// error when every retry fails; a status-mapped error otherwise.
     pub async fn create_vm_sandbox(
@@ -184,7 +184,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// # Errors
     ///
     /// Returns a status-mapped error for non-2xx responses and
-    /// [`SandboxErrorCode::InvalidResponse`] for malformed 200 bodies.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for malformed 200 bodies.
     pub async fn get_sandbox(&self, sandbox_id: &str) -> Result<Sandbox, SandboxError> {
         assert_sandbox_id(sandbox_id)?;
         self.request_json(
@@ -206,7 +206,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// # Errors
     ///
     /// Returns a status-mapped error for non-2xx responses and
-    /// [`SandboxErrorCode::InvalidResponse`] for a malformed page.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed page.
     pub async fn list_sandboxes(&self, labels: &[String]) -> Result<Vec<Sandbox>, SandboxError> {
         let mut sandboxes = Vec::new();
         let mut page: u64 = 1;
@@ -259,7 +259,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// Returns a status-mapped error for non-2xx responses (a 409
     /// `conflict` when the sandbox cannot pause now) and
-    /// [`SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
     pub async fn pause_sandbox(&self, sandbox_id: &str) -> Result<PausedSandbox, SandboxError> {
         assert_sandbox_id(sandbox_id)?;
         self.request_json(
@@ -281,7 +281,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// # Errors
     ///
     /// Returns a status-mapped error for non-2xx responses and
-    /// [`SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
     pub async fn resume_sandbox(&self, sandbox_id: &str) -> Result<Sandbox, SandboxError> {
         assert_sandbox_id(sandbox_id)?;
         self.request_json(
@@ -301,33 +301,15 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// # Errors
     ///
-    /// Returns a status-mapped error for other non-2xx responses and
-    /// [`SandboxErrorCode::InvalidResponse`] when the 200 body is not a
-    /// JSON object.
+    /// Returns a status-mapped error for other non-2xx responses. Any 2xx
+    /// is success, whatever its body.
     pub async fn delete_sandbox(&self, sandbox_id: &str) -> Result<(), SandboxError> {
         assert_sandbox_id(sandbox_id)?;
-        let outcome = self
-            .request_json(
-                Method::Delete,
-                format!("{}/api/v1/sandbox/{sandbox_id}", self.base_url),
-                self.platform_headers(),
-                None,
-                self.request_timeout,
-                self.platform_secrets(),
-                "Sandbox delete",
-                |value| require_delete_response(&value),
-            )
-            .await;
-        match outcome {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                if error.code() == SandboxErrorCode::Http && error.status() == Some(404) {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }
-        }
+        self.delete_tolerating_404(
+            format!("{}/api/v1/sandbox/{sandbox_id}", self.base_url),
+            "Sandbox delete",
+        )
+        .await
     }
 
     /// Poll a sandbox until it reports `RUNNING`: fail fast with a typed
@@ -337,8 +319,8 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxErrorCode::TerminalStatus`] with the redacted
-    /// platform error in `details`, or [`SandboxErrorCode::Timeout`] with
+    /// Returns [`crate::SandboxErrorCode::TerminalStatus`] with the redacted
+    /// platform error in `details`, or [`crate::SandboxErrorCode::Timeout`] with
     /// the last observed status in `details`.
     pub async fn wait_for_running(
         &self,
@@ -386,7 +368,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 ))
                 .with_details(Some(format!("last status {}", sandbox.status.as_str()))));
             }
-            tokio::time::sleep(options.poll_interval).await;
+            tokio::time::sleep(options.poll_interval.min(deadline - Instant::now())).await;
         }
     }
 
@@ -407,6 +389,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// The shared JSON request pipeline: typed transport errors, status
     /// mapping with a bounded redacted `details` preview, and strict
     /// response parsing.
+    // Gateway calls pass their own headers, deadline, and redaction set.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn request_json<R, Parse>(
         &self,
@@ -461,7 +444,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// # Errors
     ///
     /// Returns a status-mapped error for non-2xx responses and
-    /// [`SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
     pub async fn create_checkpoint(
         &self,
         sandbox_id: &str,
@@ -485,7 +468,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// # Errors
     ///
     /// Returns a status-mapped error for non-2xx responses and
-    /// [`SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed 200 body.
     pub async fn get_checkpoint(
         &self,
         checkpoint_id: &str,
@@ -519,10 +502,19 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// a running sandbox.
     pub async fn delete_checkpoint(&self, checkpoint_id: &str) -> Result<(), SandboxError> {
         assert_sandbox_id(checkpoint_id)?;
-        let url = format!(
-            "{}/api/v1/sandbox/checkpoints/{checkpoint_id}",
-            self.base_url
-        );
+        self.delete_tolerating_404(
+            format!(
+                "{}/api/v1/sandbox/checkpoints/{checkpoint_id}",
+                self.base_url
+            ),
+            "Checkpoint delete",
+        )
+        .await
+    }
+
+    /// An idempotent platform delete: any 2xx (whatever its body) and a
+    /// 404 are success.
+    async fn delete_tolerating_404(&self, url: String, context: &str) -> Result<(), SandboxError> {
         let response = self
             .transport
             .execute(TransportRequest {
@@ -543,7 +535,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             response.status,
             &response.body,
             &self.platform_secrets(),
-            "Checkpoint delete",
+            context,
         ))
     }
 
@@ -552,8 +544,8 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxErrorCode::TerminalStatus`] with the checkpoint's
-    /// terminal state in `details`, or [`SandboxErrorCode::Timeout`] with
+    /// Returns [`crate::SandboxErrorCode::TerminalStatus`] with the checkpoint's
+    /// terminal state in `details`, or [`crate::SandboxErrorCode::Timeout`] with
     /// the last observed state in `details`.
     pub async fn wait_for_checkpoint(
         &self,
@@ -583,23 +575,12 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                     checkpoint.state
                 )));
             }
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(poll_interval.min(deadline - Instant::now())).await;
         }
     }
 }
 
-/// The delete response contract: any JSON object .
-fn require_delete_response(value: &serde_json::Value) -> Result<(), SandboxError> {
-    if value.is_object() {
-        Ok(())
-    } else {
-        Err(SandboxError::invalid_response(
-            "Sandbox delete response must be a JSON object",
-        ))
-    }
-}
-
-/// Map a non-2xx response onto the typed error contract :
+/// Map a non-2xx response onto the typed error contract:
 /// a 3xx is a refused redirect (the transport never follows one),
 /// HTTP 408 is a `request_timeout`, HTTP 409 a `conflict`, and HTTP 502
 /// with `{ "error": "sandbox_not_found" }` a `sandbox_not_found`; anything

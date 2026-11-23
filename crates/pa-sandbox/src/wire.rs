@@ -74,6 +74,7 @@ pub(crate) fn normalize_base_url(
 ) -> Result<String, SandboxError> {
     let invalid =
         || SandboxError::invalid_request("Prime sandbox base URL must be an https URL with a host");
+    let value = value.trim();
     let parsed = url::Url::parse(value).map_err(|_| invalid())?;
     if parsed.username() != "" || parsed.password().is_some() {
         return Err(invalid());

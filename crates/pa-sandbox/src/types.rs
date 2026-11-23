@@ -8,20 +8,19 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Create retry budget: transient transport failures retry up to this many
-/// attempts reusing the same server-side idempotency key (TS
-/// `PRIME_SANDBOX_CREATE_MAX_ATTEMPTS`).
+/// attempts reusing the same server-side idempotency key.
 pub const PRIME_SANDBOX_CREATE_MAX_ATTEMPTS: usize = 3;
 
-/// Default per-request deadline (TS `DEFAULT_REQUEST_TIMEOUT_MS` = 30 s).
+/// Default per-request deadline.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `timeout_minutes` value for a sandbox with no lifetime cap.
 pub const NO_TIMEOUT_MINUTES: i64 = -1;
 
-/// Default overall wait budget (TS `DEFAULT_WAIT_TIMEOUT_MS` = 10 min).
+/// Default overall wait budget.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Default wait poll interval (TS `DEFAULT_WAIT_POLL_INTERVAL_MS` = 2 s).
+/// Default wait poll interval.
 pub const DEFAULT_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The sandbox lifecycle statuses (wire names uppercase).
@@ -45,7 +44,7 @@ pub enum SandboxStatus {
 
 impl SandboxStatus {
     /// Parse the wire name; `None` for unknown statuses (the caller maps
-    /// that to an `invalid_response` error, TS `parsePrimeSandbox`).
+    /// that to an `invalid_response` error).
     #[must_use]
     pub fn from_wire(value: &str) -> Option<Self> {
         match value {
@@ -74,8 +73,7 @@ impl SandboxStatus {
         }
     }
 
-    /// True for the statuses a sandbox never leaves (TS
-    /// `TERMINAL_SANDBOX_STATUSES`).
+    /// True for the statuses a sandbox never leaves.
     #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Error | Self::Terminated | Self::Timeout)
@@ -176,12 +174,11 @@ impl SandboxCheckpoint {
 }
 
 /// A create request for a VM-backed sandbox. The client always sends
-/// `vm: true` (container creates are out of scope for this slice) and an
+/// `vm: true` and an
 /// `idempotency_key` (the request's when set, else a fresh UUID).
 ///
 /// `region` is deliberately unrepresentable: it is not caller-selectable
-/// for VM sandboxes, so the TS runtime guard becomes a compile-time
-/// exclusion in Rust.
+/// for VM sandboxes.
 #[derive(Clone)]
 pub struct VmCreateRequest {
     /// Sandbox name; non-empty, at most 100 characters.
@@ -197,7 +194,7 @@ pub struct VmCreateRequest {
     /// GPU count; 0 to 8 (requires `gpu_type` when > 0).
     pub gpu_count: u32,
     /// GPU type/model; required with `gpu_count > 0`, forbidden otherwise.
-    /// An empty string is treated as unset (TS behavior).
+    /// An empty string is treated as unset.
     pub gpu_type: Option<String>,
     /// Structured VM start command; `None` keeps the image default.
     pub start_command: Option<StartCommand>,
@@ -408,6 +405,23 @@ fn iso_to_unix_secs(value: &str) -> Option<i64> {
     let hour: i64 = time_parts.next()?.parse().ok()?;
     let minute: i64 = time_parts.next()?.parse().ok()?;
     let second: i64 = time_parts.next().map_or("0", |part| part).parse().ok()?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    // A bounded year keeps the arithmetic below far from overflow.
+    let valid = (1..=9999).contains(&year)
+        && (1..=12).contains(&month)
+        && (1..=month_days).contains(&day)
+        && hour < 24
+        && minute < 60
+        && second < 61;
+    if !valid || hour < 0 || minute < 0 || second < 0 {
+        return None;
+    }
     // Days from the civil calendar (Howard Hinnant's algorithm).
     let years = if month <= 2 { year - 1 } else { year };
     let era = years.div_euclid(400);

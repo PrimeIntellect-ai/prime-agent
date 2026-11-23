@@ -8,14 +8,13 @@
 //! - transport failures are already-typed [`SandboxError`]s carrying the
 //!   request method and URL; non-2xx statuses are returned to the caller,
 //!   which owns the error-body preview (the transport never parses);
-//! - redirects are refused (`reqwest::redirect::Policy::none()`, a
-//!   reviewed deviation from the TS module's default-following `fetch`):
+//! - redirects are refused (`reqwest::redirect::Policy::none()`):
 //!   an authenticated platform or gateway call never hops origins, so the
 //!   Bearer key cannot leak toward a redirect target; a moved sandbox API
 //!   is a client configuration change, never a silent hop;
 //! - [`SandboxTransport::execute_streaming`] opens a request and returns
 //!   the live response for incremental reads: the gateway download path
-//!   (TS streams it under its own transfer cap) and the `ConnectRPC`
+//!   and the `ConnectRPC`
 //!   `command_session` streams (a live process event stream is unbounded)
 //!   need the body while it arrives, not buffered after the fact.
 
@@ -25,7 +24,7 @@ use std::time::Duration;
 use crate::error::SandboxError;
 use crate::types::Method;
 
-/// Default response body cap (TS `MAX_JSON_BODY_BYTES` = 32 MiB).
+/// Default response body cap.
 pub const MAX_JSON_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// One outbound HTTP request.
@@ -45,9 +44,7 @@ pub struct TransportRequest {
     /// frames.
     pub body: Option<Vec<u8>>,
     /// Per-request response byte cap for buffered reads; `None` uses the
-    /// transport default (32 MiB). The TS client applies per-call caps
-    /// (JSON bodies 32 MiB, unary proto 1 MiB); the transport mirrors that
-    /// per call.
+    /// transport default (32 MiB).
     pub max_response_bytes: Option<usize>,
     /// The per-request deadline; `None` is no deadline (the `ConnectRPC`
     /// streams that inherit the server default rather than sending
@@ -149,7 +146,7 @@ impl ResponseChunks {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxErrorCode::Network`] when the live body read
+    /// Returns [`crate::SandboxErrorCode::Network`] when the live body read
     /// fails.
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, SandboxError> {
         match self {
@@ -224,12 +221,10 @@ impl ReqwestSandboxTransport {
     pub fn with_max_response_bytes(max_response_bytes: usize) -> Self {
         Self {
             client: pa_ai::utils::tls::http_client_builder()
-                // Redirects are refused (a reviewed deviation from the TS
-                // module, which relies on global `fetch` following them): a
-                // redirected platform or gateway call would forward the
-                // request with the Bearer key toward an unvalidated origin,
-                // and a moved sandbox API is a client configuration change,
-                // never a silent hop.
+                // Redirects are refused: a redirected call would forward the
+                // Bearer key toward an unvalidated origin, and a moved
+                // sandbox API is a client configuration change, never a
+                // silent hop.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("sandbox reqwest client"),
@@ -242,8 +237,8 @@ impl ReqwestSandboxTransport {
         let url = request.url.clone();
         {
             // The deadline is raced in tokio (below), never delegated to
-            // reqwest: the TS contract types a lost race as `timeout`, not
-            // as reqwest's transport error.
+            // reqwest: a lost race is a typed `timeout`, not reqwest's
+            // transport error.
             let mut builder = self.client.request(reqwest_method(method), &url);
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
@@ -303,9 +298,8 @@ impl SandboxTransport for ReqwestSandboxTransport {
             Ok(TransportResponse { status, body })
         };
         // The deadline is raced against the call: an unresponsive server
-        // loses even though reqwest never resolves (TS fetchWithTimeout).
-        // `None` is no deadline (the TS streaming opens without
-        // `Connect-Timeout-Ms`).
+        // loses even though reqwest never resolves.
+        // `None` is no deadline.
         raced_deadline(request.timeout, call, method, &url).await
     }
 
@@ -335,8 +329,7 @@ impl SandboxTransport for ReqwestSandboxTransport {
             })
         };
         // The deadline covers the open only: body reads stream for as long
-        // as the server sends (TS fetchWithDeadline resolves on the head,
-        // then reads outside the timeout). `None` is no deadline.
+        // as the server sends. `None` is no deadline.
         raced_deadline(request.timeout, call, method, &url).await
     }
 }
