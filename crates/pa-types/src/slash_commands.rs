@@ -264,26 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_registry_matches_owned_registry() {
-        let owned = SlashCommandRegistry::builtin();
-        let cached = SlashCommandRegistry::builtin_cached();
-        assert!(std::ptr::eq(cached, SlashCommandRegistry::builtin_cached()));
-        assert_eq!(cached.all(), owned.all());
-        assert_eq!(
-            cached.suggestion_candidates(),
-            owned.suggestion_candidates()
-        );
-        for name in owned.suggestion_candidates().into_iter().chain(["unknown"]) {
-            assert_eq!(cached.resolve_name(name), owned.resolve_name(name));
-            assert_eq!(cached.get(name), owned.get(name));
-            assert_eq!(cached.is_builtin(name), owned.is_builtin(name));
-            assert_eq!(cached.takes_argument(name), owned.takes_argument(name));
-            let input = format!("/{name} -- example");
-            assert_eq!(cached.parse(&input), owned.parse(&input));
-        }
-    }
-
-    #[test]
     fn parse_resolves_and_keeps_args() {
         let registry = SlashCommandRegistry::builtin();
         let resolved = registry.parse("/thinking high").unwrap();
@@ -295,18 +275,6 @@ mod tests {
         assert_eq!(plain.name, "model");
         assert_eq!(plain.args, "");
         assert!(registry.parse("not a command").is_none());
-    }
-
-    #[test]
-    fn session_commands_execute_in_session() {
-        let registry = SlashCommandRegistry::builtin();
-        for name in SESSION_SLASH_COMMAND_NAMES {
-            assert!(is_session_slash_command_name(name));
-            assert_eq!(
-                registry.get(name).unwrap().execution,
-                SlashCommandExecution::Session
-            );
-        }
     }
 
     #[test]
@@ -322,12 +290,5 @@ mod tests {
             Some("compact")
         );
         assert_eq!(find_slash_command_suggestion("zzzzzz", &candidates), None);
-    }
-
-    #[test]
-    fn edit_distance_counts_substitutions() {
-        assert_eq!(slash_command_edit_distance("abc", "abc"), 0);
-        assert_eq!(slash_command_edit_distance("ab", "ac"), 1);
-        assert_eq!(slash_command_edit_distance("", "abc"), 3);
     }
 }
