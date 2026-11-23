@@ -116,6 +116,14 @@ impl SettingsManager {
         self.global_raw.as_ref()
     }
 
+    /// The recorded global-scope load failure (`Some` when the file
+    /// exists but cannot be read or parsed; saves for that scope are
+    /// then skipped rather than rewriting a document it could not
+    /// load).
+    pub(crate) fn global_load_error(&self) -> Option<&str> {
+        self.global_load_error.as_deref()
+    }
+
     #[must_use]
     pub fn project_settings(&self) -> &Settings {
         &self.project
@@ -1251,6 +1259,172 @@ mod tests {
             .set_factory_enabled(false)
             .expect("set factory disabled");
         assert!(!manager.get_factory_enabled());
+    }
+
+    /// `bots.enabled` reads the GLOBAL scope only and only the JSON
+    /// boolean `true` enables it: every malformed, wrong-typed, or
+    /// absent shape stays disabled (the daemon's sandbox-admission
+    /// gate rides this exact read, so a shape that slipped through
+    /// here would provision a sandbox the user never opted into).
+    #[test]
+    fn bots_enabled_requires_true_in_global_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        // No settings file at all: disabled.
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manager = SettingsManager::create(&cwd, &agent_dir);
+        assert!(!manager.get_bots_enabled(), "no file reads as disabled");
+
+        // Each shape writes its own settings path, so every read is a
+        // cold cache read, never a stale stat-identity hit.
+        let shapes: [(&str, bool); 8] = [
+            (r#"{"bots": [true]}"#, false),
+            (r#"{"bots": {"enabled": "true"}}"#, false),
+            (r#"{"bots": {"enabled": 1}}"#, false),
+            (r#"{"bots": "yes"}"#, false),
+            (r#"{"bots": {}}"#, false),
+            (r#"{"compaction": {}}"#, false),
+            (r#"{"bots": {"enabled": false}}"#, false),
+            (r#"{"bots": {"enabled": true}}"#, true),
+        ];
+        for (index, (document, expected)) in shapes.iter().enumerate() {
+            let agent_dir = dir.path().join(format!("agent-{index}"));
+            std::fs::create_dir_all(&agent_dir).unwrap();
+            std::fs::write(agent_dir.join("settings.json"), document).unwrap();
+            let manager = SettingsManager::create(&cwd, &agent_dir);
+            assert_eq!(
+                manager.get_bots_enabled(),
+                *expected,
+                "the getter reads {document} as {expected}"
+            );
+        }
+
+        // A corrupt document: the disabled default.
+        let agent_dir = dir.path().join("agent-corrupt");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("settings.json"), "{ not json").unwrap();
+        let manager = SettingsManager::create(&cwd, &agent_dir);
+        assert!(!manager.get_bots_enabled());
+
+        // A project-scope override never enables the gate: only the
+        // agent-dir (global) document the daemon's gate reads counts.
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(project_dir.join(".prime/agent")).unwrap();
+        std::fs::write(
+            project_dir.join(".prime/agent/settings.json"),
+            r#"{ "bots": { "enabled": true } }"#,
+        )
+        .unwrap();
+        let manager = SettingsManager::create(&project_dir, dir.path().join("agent-true"));
+        assert!(
+            !manager.get_bots_enabled(),
+            "a project-scope override never enables the gate"
+        );
+
+        // The persisted off/on round trip through the setter: the write
+        // lands in the global document the daemon's gate reads, and
+        // the write changes only `bots.enabled`.
+        let mut manager = SettingsManager::create(&cwd, dir.path().join("agent-round"));
+        assert!(!manager.get_bots_enabled());
+        manager.set_bots_enabled(true).expect("set bots enabled");
+        assert!(manager.get_bots_enabled());
+        manager.set_bots_enabled(false).expect("set bots disabled");
+        assert!(!manager.get_bots_enabled());
+        let content = std::fs::read_to_string(dir.path().join("agent-round").join("settings.json"))
+            .expect("global file");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(value["bots"]["enabled"], false);
+    }
+
+    /// A corrupt global settings file makes the bots setter fail
+    /// loud: the manager never rewrites a scope it failed to load, so
+    /// the opt-in write is refused instead of silently skipped — the
+    /// caller reports the error and the daemon's gate keeps refusing
+    /// spawns (the disabled default), never a success note over a
+    /// write that never landed.
+    #[test]
+    fn set_bots_enabled_fails_when_the_global_file_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("settings.json"), "{ not json").unwrap();
+
+        let mut manager = SettingsManager::create(&cwd, &agent_dir);
+        assert!(!manager.get_bots_enabled());
+        let error = manager
+            .set_bots_enabled(true)
+            .expect_err("the skipped save is an error, not a silent success");
+        assert!(
+            error.to_string().contains("bots.enabled not saved"),
+            "the error names the unsaved gate: {error:#}"
+        );
+        // The corrupt document is never replaced or repaired.
+        assert_eq!(
+            std::fs::read_to_string(agent_dir.join("settings.json")).unwrap(),
+            "{ not json"
+        );
+        // A fresh read — the daemon gate's shape — still sees the
+        // disabled default.
+        assert!(!SettingsManager::create(&cwd, &agent_dir).get_bots_enabled());
+    }
+
+    /// Permission semantics need a non-root runner (the venv bootstrap
+    /// tests' rule): `chmod` cannot deny root, so the unreadable-file
+    /// leg below skips as root and the gate harness runs it as a
+    /// non-root user.
+    #[cfg(unix)]
+    fn skip_when_root() -> bool {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: run as a non-root user (chmod cannot deny root)");
+            return true;
+        }
+        false
+    }
+
+    /// The read-through cache must not out-live the file's readability:
+    /// a global settings document that turns unreadable under an
+    /// unchanged stat identity (chmod changes no dev/ino/mtime/length)
+    /// reads as a load failure on the next manager, so the strict gates
+    /// this read feeds — the daemon's `bots.enabled` sandbox admission —
+    /// fail closed instead of authorizing on the cached copy.
+    #[cfg(unix)]
+    #[test]
+    fn bots_enabled_fails_closed_when_the_global_file_becomes_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        if skip_when_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let settings = agent_dir.join("settings.json");
+        std::fs::write(&settings, r#"{"bots": {"enabled": true}}"#).unwrap();
+
+        // The first read warms the process-wide read cache for this path.
+        let manager = SettingsManager::create(&cwd, &agent_dir);
+        assert!(manager.get_bots_enabled());
+
+        // chmod leaves the stat identity unchanged, so only the
+        // readability revalidation keeps the next read honest.
+        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let fresh = SettingsManager::create(&cwd, &agent_dir);
+        assert!(
+            !fresh.get_bots_enabled(),
+            "an unreadable global document fails closed, never cached-true"
+        );
+
+        // Readability restored: the cached copy is byte-identical to the
+        // file (the identity still matches), so the gate reads true again.
+        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let restored = SettingsManager::create(&cwd, &agent_dir);
+        assert!(restored.get_bots_enabled());
     }
 
     #[test]

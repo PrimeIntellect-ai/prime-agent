@@ -39,6 +39,10 @@ impl LinkAgentMessageController {
     }
 }
 
+/// Budget for a supervisor-routed send to a bot: the bot may resume
+/// from a pause first.
+const BOT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Budget for the peer-ticket request on the supervisor link (the TS
 /// `get_direct_worker_transport` window).
 const PEER_TICKET_TIMEOUT_MS: u64 = 5_000;
@@ -188,6 +192,17 @@ impl AgentMessageController for LinkAgentMessageController {
                 .aliases
                 .push(std::mem::replace(&mut member.id, durable));
             child_members.push(member);
+        }
+        for bot in super::owned_bot_rows(&self.link, identity.session_id.as_deref()).await {
+            let Some(bot_id) = bot.get("botId").and_then(Value::as_str) else {
+                continue;
+            };
+            child_members.push(AgentFamilyMember {
+                relationship: AgentFamilyRelationship::Child,
+                id: bot_id.to_string(),
+                name: bot.get("name").and_then(Value::as_str).map(str::to_string),
+                aliases: Vec::new(),
+            });
         }
         // TS `selectAgentFamily` order: parent, siblings by name, then
         // children by name.
@@ -349,6 +364,18 @@ impl LinkAgentMessageController {
         &self,
         input: AgentMessageSendInput,
     ) -> anyhow::Result<AgentMessageReceipt> {
+        // A bot may have to resume from a pause before it takes the
+        // message, so a bot target gets minutes, not seconds.
+        let identity = self.family_identity();
+        let budget = if super::owned_bot_rows(&self.link, identity.session_id.as_deref())
+            .await
+            .iter()
+            .any(|bot| bot.get("botId").and_then(Value::as_str) == Some(input.target.as_str()))
+        {
+            BOT_SEND_TIMEOUT
+        } else {
+            std::time::Duration::from_secs(30)
+        };
         let data = self
             .link
             .request_success(
@@ -360,7 +387,7 @@ impl LinkAgentMessageController {
                     "agentOrigin": true,
                     "deliveryMode": input.delivery_mode,
                 }),
-                std::time::Duration::from_secs(30),
+                budget,
             )
             .await?;
         receipt_from_wire(&data, input)

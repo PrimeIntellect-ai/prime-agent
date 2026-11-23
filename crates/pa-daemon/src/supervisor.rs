@@ -410,6 +410,20 @@ impl Supervisor {
         // dead predecessor — alive, still holding their session leases — die here, and a
         // wedged predecessor supervisor dies with them; workers on OTHER sockets are never touched.
         crate::boot_reap::reap_predecessors(&self).await;
+        // Bot sends a dead predecessor left in `sending` are uncertain now:
+        // the predecessor is gone, and no message is ever resent.
+        match crate::bots::ledger::recover_all(&self.options.agent_dir) {
+            Ok(recovered) => {
+                for (bot_id, msg_id) in recovered {
+                    self.log.append(&format!(
+                        "bot {bot_id} message {msg_id}: delivery uncertain after restart"
+                    ));
+                }
+            }
+            Err(error) => self
+                .log
+                .append(&format!("bot ledger recovery failed: {error:#}")),
+        }
 
         // Update boot (spec §6): consume the roster from the spawn env BEFORE the sweep deletes
         // the file it points at, then run the restore + re-arm pass concurrently with serving —

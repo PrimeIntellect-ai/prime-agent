@@ -1,0 +1,1 @@
+- `rlm.spawn(target="sandbox")` starts a bot: a child agent in its own Prime sandbox, managed by the daemon. It is off by default; `/bots on|off|status` sets the global `bots.enabled` opt-in. The owner messages a bot with `agent_message.send`; each message goes at most once, and a send that may not have arrived is reported, never resent.

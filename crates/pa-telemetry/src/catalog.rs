@@ -1254,12 +1254,21 @@ const WEB_SEARCH_PROVIDER_CHANGED: EventRule = EventRule {
     )],
 };
 
+/// The bots opt-in toggle: boolean-only (no sandbox id, session id,
+/// model prompt, file path, key, or command argument rides it).
+const BOTS_ENABLED_CHANGED: EventRule = EventRule {
+    name: "bots enabled changed",
+    since: 2,
+    properties: &[("enabled", required(boolean()))],
+};
+
 /// Every catalogued event, flattened.
 #[must_use]
 pub fn catalog() -> Vec<&'static EventRule> {
     let mut all: Vec<&'static EventRule> = vec![
         &HARNESS_REFINEMENTS_CHANGED,
         &WEB_SEARCH_PROVIDER_CHANGED,
+        &BOTS_ENABLED_CHANGED,
         &AGENT_STARTED,
         &AGENT_RUN_COMPLETED,
         &AGENT_SESSION_ENDED,
@@ -1537,6 +1546,34 @@ mod tests {
         properties.set("anything", json!("kept"));
         assert_eq!(sanitize("a future event", &mut properties), 0);
         assert_eq!(properties.get("anything"), Some(&json!("kept")));
+    }
+
+    /// The `bots enabled changed` rule is behavioral, not just a
+    /// catalog row: sanitize keeps the event boolean-only (unknown
+    /// keys drop, a non-boolean `enabled` drops) instead of passing
+    /// the event through untouched.
+    #[test]
+    fn sanitize_keeps_the_bots_enabled_changed_event_boolean_only() {
+        let mut properties = Properties::new();
+        properties.set("enabled", json!(true));
+        properties.set("sandbox_id", json!("sb-bots")); // not a catalogued property
+        properties.set("prompt", json!("private spawn prompt")); // not a catalogued property
+        let adjusted = sanitize("bots enabled changed", &mut properties);
+        assert_eq!(properties.get("enabled"), Some(&json!(true)));
+        assert!(
+            properties.get("sandbox_id").is_none() && properties.get("prompt").is_none(),
+            "the rule keeps the event boolean-only"
+        );
+        assert_eq!(adjusted, 2, "one per dropped key");
+
+        // A non-boolean `enabled` is dropped, never coerced.
+        let mut properties = Properties::new();
+        properties.set("enabled", json!("true"));
+        assert_eq!(sanitize("bots enabled changed", &mut properties), 1);
+        assert!(
+            properties.get("enabled").is_none(),
+            "a string enabled drops"
+        );
     }
 
     #[test]

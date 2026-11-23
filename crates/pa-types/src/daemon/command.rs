@@ -596,6 +596,41 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Start a bot (a hosted sandbox child) for an owner session and hand
+    /// it its first prompt. Supervisor-owned: workers send it over their
+    /// supervisor link for `rlm.spawn(target="sandbox")`.
+    SpawnBot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        /// The owner's durable session id.
+        owner_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<String>,
+        prompt: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Delete one bot the owner session owns.
+    DeleteBot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        bot_id: String,
+        owner_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// The bots the daemon manages, optionally only one owner's.
+    ListBots {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner_session_id: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The `/factory` view's bridge lane over the session kernel's factory
     /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
     /// Rust-native extension, advertised by the `factory_activity` capability.

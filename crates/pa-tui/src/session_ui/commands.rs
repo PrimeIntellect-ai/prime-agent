@@ -385,6 +385,46 @@ impl SessionUi {
             // factory surfaces on the next client start (the running
             // connection keeps the advertisement its hello was built
             // with).
+            // `/bots on|off|status`: the hosted-sandbox spawn opt-in. The
+            // toggle persists `bots.enabled`, the global settings key the
+            // daemon's sandbox-admission gate reads fresh per attempt, so
+            // `/bots off` blocks the next sandbox spawn on a running
+            // daemon. Existing bots keep their lifecycle either way.
+            "bots" => {
+                let Some(settings) = &self.client_settings else {
+                    self.note("/bots is not available in this client yet", view);
+                    return Ok(());
+                };
+                let arg = resolved.args.trim().to_lowercase();
+                match arg.as_str() {
+                    "on" | "off" => {
+                        let enabled = arg == "on";
+                        if let Err(error) = settings.set_bots_enabled(enabled) {
+                            self.error_row(&format!("{error:#}"), view);
+                            return Ok(());
+                        }
+                        let note = if enabled {
+                            "Bots are enabled: new sandbox spawns are admitted. Existing bots keep their lifecycle (collect, delete) either way."
+                        } else {
+                            "Bots are disabled: new sandbox spawns are refused. Existing bots keep their lifecycle (collect, delete) either way."
+                        };
+                        self.note(note, view);
+                    }
+                    "" | "status" => {
+                        let note = if settings.bots_enabled() {
+                            "Bots are enabled. New sandbox spawns are admitted; run /bots off to refuse them."
+                        } else {
+                            "Bots are disabled (off by default). Run /bots on to admit new sandbox spawns."
+                        };
+                        self.note(note, view);
+                    }
+                    _ => {
+                        view.editor
+                            .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                        self.error_row("Usage: /bots [on|off|status]", view);
+                    }
+                }
+            }
             "factory" => {
                 let arg = resolved.args.trim().to_lowercase();
                 match arg.as_str() {

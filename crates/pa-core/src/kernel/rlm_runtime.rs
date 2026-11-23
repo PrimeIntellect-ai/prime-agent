@@ -86,6 +86,61 @@ pub fn normalize_requested_rlm_subagent_thinking_level(
     Ok(Some(matched))
 }
 
+/// Spawn placement targets `rlm.spawn` accepts for its `target` kwarg
+/// (placement admission accepts both here; the opt-in gate that
+/// refuses a sandbox spawn until the global `bots.enabled` setting is
+/// on lives in the daemon's sandbox-admission path).
+pub const RLM_SPAWN_TARGETS: [&str; 2] = ["local", "sandbox"];
+
+/// Typed spawn placement: where an admitted `rlm.spawn` child session runs.
+///
+/// * Omission is local and byte-identical. The kernel forwards `target`
+///   only when the caller passed one, so an omitted target reaches this
+///   module as `None` and resolves to [`RlmSpawnTarget::Local`]: the same
+///   wire payload, the same request, the same local spawn as before.
+/// * Sandbox admission is opt-in, never a fallback. The placement parser
+///   admits [`RlmSpawnTarget::Sandbox`] here; the daemon's
+///   sandbox-admission path refuses it while the global `bots.enabled`
+///   opt-in is off (default), before any provisioning, and no host
+///   implementation silently runs a sandbox child locally.
+/// * Admission parity. A sandbox child admits into the exact
+///   `RLMSpawnHandle` wire shape, takes the same sibling name
+///   reservation, and shows through `rlm.list_subagents`/`rlm.collect`/
+///   `rlm.delete_subagent` with the shared status vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RlmSpawnTarget {
+    /// The daemon's local worker tree (the default).
+    #[default]
+    Local,
+    /// A bot: a hosted sandbox child the daemon's bot manager provisions.
+    Sandbox,
+}
+
+/// Validate the requested spawn placement. `None` when absent (local).
+///
+/// # Errors
+///
+/// Returns an error, prefixed with `operation`, when the target is not one
+/// of the supported placement targets.
+pub fn normalize_requested_rlm_spawn_target(
+    value: Option<&str>,
+    operation: &str,
+) -> anyhow::Result<Option<RlmSpawnTarget>> {
+    let Some(value) = value else { return Ok(None) };
+    let target = value.trim().to_lowercase();
+    let matched = match target.as_str() {
+        "local" => RlmSpawnTarget::Local,
+        "sandbox" => RlmSpawnTarget::Sandbox,
+        _ => {
+            return Err(error(
+                operation,
+                &format!("target must be one of: {}", RLM_SPAWN_TARGETS.join(", ")),
+            ));
+        }
+    };
+    Ok(Some(matched))
+}
+
 /// Validate the requested model override. `None` when absent.
 ///
 /// # Errors
@@ -369,6 +424,26 @@ pub fn kwargs_from_payload(payload: &Value) -> serde_json::Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_spawn_target() {
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(None, "rlm.spawn").unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(Some("local"), "rlm.spawn").unwrap(),
+            Some(RlmSpawnTarget::Local)
+        );
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(Some(" Sandbox "), "rlm.spawn").unwrap(),
+            Some(RlmSpawnTarget::Sandbox)
+        );
+        assert!(
+            normalize_requested_rlm_spawn_target(Some("edge"), "rlm.spawn").is_err(),
+            "an unknown target is rejected instead of defaulting to local"
+        );
+    }
 
     #[test]
     fn normalizes_session_name() {

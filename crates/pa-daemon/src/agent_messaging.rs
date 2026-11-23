@@ -16,6 +16,26 @@ use pa_core::session_engine::agent_messaging::{
 
 use crate::supervisor_link::SupervisorLink;
 
+/// The bots `owner_session_id` owns, as the supervisor's `list_bots`
+/// rows. Bots are Child members of their owner. An unavailable list
+/// reads as no bots: bots never block the local family.
+pub(crate) async fn owned_bot_rows(
+    link: &SupervisorLink,
+    owner_session_id: Option<&str>,
+) -> Vec<Value> {
+    let Some(owner) = owner_session_id else {
+        return Vec::new();
+    };
+    link.request_success(
+        json!({ "type": "list_bots", "ownerSessionId": owner }),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .and_then(|data| data.get("bots").and_then(Value::as_array).cloned())
+    .unwrap_or_default()
+}
+
 /// One session's durable family identity: the ids its family references it
 /// by, and its recorded parent edge in every identifier form the roster
 /// exposes. Membership derives from these edges alone, never from names.

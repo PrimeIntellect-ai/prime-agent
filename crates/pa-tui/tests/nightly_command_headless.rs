@@ -165,6 +165,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_factory_enabled(&self, _enabled: bool) -> Result<()> {
         Ok(())
     }
+    fn bots_enabled(&self) -> bool {
+        false
+    }
+    fn set_bots_enabled(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
     fn warnings_anthropic_extra_usage(&self) -> bool {
         true
     }

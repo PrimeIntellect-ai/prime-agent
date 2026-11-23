@@ -195,6 +195,17 @@ pub trait ClientSettings: Send + Sync {
     /// Returns an error when opening or persisting the settings store
     /// fails.
     fn set_factory_enabled(&self, enabled: bool) -> Result<()>;
+    /// `bots.enabled` (the hosted-sandbox spawn opt-in; unset reads
+    /// as disabled).
+    fn bots_enabled(&self) -> bool;
+    /// Persists `bots.enabled` to the global scope — the same shared
+    /// settings key the daemon's sandbox-admission gate reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when opening or persisting the settings store
+    /// fails.
+    fn set_bots_enabled(&self, enabled: bool) -> Result<()>;
     /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
     /// `details`): the conversation-detail level the chat starts at.
     /// `chatDetail` (`overview`/`details`/`all`; the default reads as

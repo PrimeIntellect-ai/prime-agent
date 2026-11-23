@@ -426,6 +426,15 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "search_session_content",
         r#"{"type": "search_session_content", "query": "backoff"}"#,
     ),
+    (
+        "spawn_bot",
+        r#"{"type": "spawn_bot", "name": "b", "ownerSessionId": "o", "prompt": "p"}"#,
+    ),
+    (
+        "delete_bot",
+        r#"{"type": "delete_bot", "botId": "b", "ownerSessionId": "o"}"#,
+    ),
+    ("list_bots", r#"{"type": "list_bots"}"#),
 ];
 
 #[test]

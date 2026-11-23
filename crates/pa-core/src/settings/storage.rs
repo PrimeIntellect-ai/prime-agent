@@ -242,9 +242,10 @@ fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
 }
 
 impl SettingsStorage for FileSettingsStorage {
-    /// The consolidated read arm: on a cache hit, one `stat` and the cached content;
-    /// on a miss, the full locked cycle, byte-identical to `with_lock`'s read arm, which
-    /// also populates the cache. The same-process mutex still orders in-process writers.
+    /// The consolidated read arm: on a cache hit, one `stat`, one readability
+    /// open, and the cached content; on a miss, the full locked cycle,
+    /// byte-identical to `with_lock`'s read arm, which also populates the
+    /// cache. The same-process mutex still orders in-process writers.
     fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
         let path = &self.target(scope)?;
         let _process_guard = process_lock(path);
@@ -261,7 +262,14 @@ impl SettingsStorage for FileSettingsStorage {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = cache.get(path) {
-                if entry.identity == identity {
+                // A stat match alone does not prove a locked read would
+                // return these bytes right now: a permission change
+                // (chmod) leaves dev/ino/mtime/length untouched. An
+                // unreadable file must surface as the read failure the
+                // locked cycle raises, never the cached copy — the
+                // strict gates this read feeds (the daemon's
+                // `bots.enabled` sandbox admission) fail closed on it.
+                if entry.identity == identity && fs::File::open(path).is_ok() {
                     return Ok(Some(entry.content.clone()));
                 }
             }

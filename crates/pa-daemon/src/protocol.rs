@@ -170,6 +170,9 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "kill_persistent_shell",
     "get_session_messages",
     "search_session_content",
+    "spawn_bot",
+    "delete_bot",
+    "list_bots",
 ];
 
 /// Parsed client command envelope.
@@ -932,6 +935,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::RosterUnsubscribe { .. }
         | DaemonCommand::Create { .. }
         | DaemonCommand::SendMessage { .. }
+        | DaemonCommand::SpawnBot { .. }
+        | DaemonCommand::DeleteBot { .. }
+        | DaemonCommand::ListBots { .. }
         | DaemonCommand::AckResult { .. }
         | DaemonCommand::PrepareUpdateRestart { .. }
         | DaemonCommand::CommitUpdateRestart { .. }
@@ -994,6 +1000,9 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::KillPersistentShell { .. } => "kill_persistent_shell",
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
+        DaemonCommand::SpawnBot { .. } => "spawn_bot",
+        DaemonCommand::DeleteBot { .. } => "delete_bot",
+        DaemonCommand::ListBots { .. } => "list_bots",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",

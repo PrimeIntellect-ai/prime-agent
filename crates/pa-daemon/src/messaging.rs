@@ -48,6 +48,19 @@ impl Supervisor {
             },
             None => None,
         };
+        // A bot target leaves the local worker plane: the message goes
+        // over the bot's link, at most once.
+        if let Some(bot) = self.bot_target(target_active_session_id) {
+            return self
+                .send_message_to_bot(
+                    command_id,
+                    &bot,
+                    source.as_ref(),
+                    message,
+                    delivery_mode.clone(),
+                )
+                .await;
+        }
         // The source summary, once read (the wake reads it for its scope;
         // the sender endpoint reuses it).
         let mut source_summary: Option<Value> = None;
@@ -143,6 +156,81 @@ impl Supervisor {
             ),
             Err(error) => fail(format!("{error:#}")),
         }
+    }
+
+    /// Deliver one owner message to a bot: start the bot if it is paused,
+    /// open its link, and send a normal `send_message` to the bot
+    /// session through the ledger. Only the bot's owner (or a client) may
+    /// send. The receipt names the bot, not the guest's own ids.
+    async fn send_message_to_bot(
+        self: &Arc<Self>,
+        command_id: &str,
+        bot: &crate::bots::BotRecord,
+        source: Option<&Arc<ResidentWorker>>,
+        message: &str,
+        delivery_mode: Option<Value>,
+    ) -> DaemonResponse {
+        let fail = |error: String| response_failure(Some(command_id), "send_message", &error, None);
+        if let Some(source) = source {
+            let summary = match self.source_worker_summary(source).await {
+                Ok(summary) => summary,
+                Err(error) => return fail(format!("{error:#}")),
+            };
+            if summary.get("sessionId").and_then(Value::as_str)
+                != Some(bot.owner_session_id.as_str())
+            {
+                return fail(format!("Only the owner of bot {} can message it", bot.name));
+            }
+        }
+        let agent_dir = &self.options.agent_dir;
+        let manager = match crate::bots::manager_for(agent_dir) {
+            Ok(manager) => manager,
+            Err(error) => return fail(format!("{error:#}")),
+        };
+        let record = match manager.ensure_running(&bot.bot_id).await {
+            Ok(record) => record,
+            Err(error) => return fail(format!("bot {} could not start: {error:#}", bot.name)),
+        };
+        let mut client = match crate::bots::guest::GuestClient::connect(&manager, &record).await {
+            Ok(client) => client,
+            Err(error) => return fail(format!("bot {} is unreachable: {error:#}", bot.name)),
+        };
+        let msg_id = format!("agentmsg_{}", uuid::Uuid::new_v4());
+        let receipt = match crate::bots::send::send_message(
+            &crate::bots::ledger::BotLedger::new(agent_dir, &record.bot_id),
+            &mut client,
+            &record.guest_session_id,
+            &msg_id,
+            message,
+            delivery_mode,
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => return fail(format!("message to bot {}: {error}", bot.name)),
+        };
+        // The bot now runs a turn; the reply path follows it from here.
+        let field = |name: &str| receipt.get(name).cloned().unwrap_or(Value::Null);
+        response_success(
+            Some(command_id),
+            "send_message",
+            Some(json!({
+                "id": msg_id,
+                "target": {
+                    "activeSessionId": record.bot_id,
+                    "sessionId": record.bot_id,
+                    "sessionName": record.name,
+                    "runtimeKind": "bot",
+                },
+                "deliveryStatus": receipt
+                    .get("deliveryStatus")
+                    .cloned()
+                    .unwrap_or_else(|| json!("queued")),
+                "deliveryMode": field("deliveryMode"),
+                "deliveredAt": field("deliveredAt"),
+                "queuedAt": field("queuedAt"),
+            })),
+        )
     }
 
     /// The send source's live session summary (`get_state`), strict: the
