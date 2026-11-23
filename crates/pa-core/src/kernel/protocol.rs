@@ -19,9 +19,10 @@ pub enum Request {
     Execute {
         code: String,
         /// The runtime's own bootstrap execute (the host sends it after
-        /// every restore attempt): the runtime records the names it
-        /// binds as runtime-owned and keeps it from releasing the
-        /// factory boot arm.
+        /// every restore attempt). The runtime's only use of the flag is
+        /// to skip `boot_arm_persisted_runs()` in `_handle_execute`
+        /// (`prime-agent-runtime/src/rlm/repl.py`), so this execute never
+        /// releases the factory boot arm.
         runtime_bootstrap: bool,
     },
     Interrupt,
