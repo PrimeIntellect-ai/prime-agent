@@ -2,10 +2,8 @@
 
 use super::{default_rlm_extra_uv_args, BootstrapPythonSkill, BootstrapVersion, Path};
 
-/// Schema of `.bootstrap-version`; a mismatch rebuilds the venv.
-// Schema 10 rebuilt shared venvs so project Python skills previously installed
-// as editable packages cannot keep executing through site-packages startup.
-// Schema 11 rebuilds them with Pillow in the default packages.
+/// Schema of `.bootstrap-version`; a mismatch rebuilds the venv, so bump it
+/// whenever the default packages or the skill install mode change.
 pub(super) const BOOTSTRAP_SCHEMA: u64 = 11;
 pub(super) const STATE_SNAPSHOT_REQUIREMENT: &str = "dill";
 const BOOTSTRAP_VERSION_FILE: &str = ".bootstrap-version";

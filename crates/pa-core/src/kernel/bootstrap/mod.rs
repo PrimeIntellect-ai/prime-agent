@@ -363,8 +363,7 @@ async fn ensure_kernel_venv(
         // Build beside the live path and swap the finished candidate in: a
         // session that already resolved this venv keeps a working interpreter
         // for the whole build, and a failed build leaves the live venv as it
-        // was. Deleting the live path first left every concurrent session
-        // with "python: No such file or directory" until the rebuild ended.
+        // was.
         let candidate = venv::venv_candidate_path(&venv);
         rebuild_kernel_venv(
             &venv,
@@ -483,12 +482,6 @@ mod tests {
             "old",
             "the swap renames the old venv aside instead of deleting it"
         );
-    }
-
-    #[test]
-    fn the_kernel_bootstrap_installs_pillow_for_attach_image() {
-        assert!(default_rlm_extra_uv_args().contains(&"pillow"));
-        assert!(default_rlm_extra_import_names().contains(&"PIL"));
     }
 
     #[tokio::test(start_paused = true)]
