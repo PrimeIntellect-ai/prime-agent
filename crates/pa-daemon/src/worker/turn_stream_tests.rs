@@ -205,7 +205,15 @@ impl SessionEngine for GateProbeEngine {
 
 #[tokio::test]
 async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
-    for (held_past_window, pacing_only) in [(false, false), (true, false), (true, true)] {
+    // `cell_running`: a tool call is in flight at the window. Without one the
+    // model is streaming, and a turn that then ends on its own gets no extra
+    // pacing turn.
+    for (held_past_window, pacing_only, cell_running) in [
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+        (true, false, false),
+    ] {
         let (started_tx, started_rx) = oneshot::channel();
         let started_tx = Mutex::new(Some(started_tx));
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
@@ -255,8 +263,15 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
                 .await;
         });
         started_rx.await.unwrap();
+        if cell_running {
+            core.lock()
+                .unwrap()
+                .running_tool_calls
+                .insert("cell".to_string());
+        }
         tokio::task::yield_now().await;
-        let checkpoint_blocker = (held_past_window && !pacing_only).then(|| {
+        let queues = held_past_window && !pacing_only && cell_running;
+        let checkpoint_blocker = queues.then(|| {
             let recovery = Arc::clone(&recovery);
             let (locked_tx, locked_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -278,7 +293,7 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
             assert!(core.lock().unwrap().steering.is_empty());
             tokio::time::advance(std::time::Duration::from_secs(2)).await;
             tokio::task::yield_now().await;
-            if pacing_only {
+            if !queues {
                 assert!(core.lock().unwrap().steering.is_empty());
                 assert!(futures::FutureExt::now_or_never(work_notify.notified()).is_none());
             } else {
@@ -309,6 +324,10 @@ async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
         }
         finish_tx.send(()).unwrap();
         turn.await.unwrap();
+        assert!(
+            core.lock().unwrap().steering.is_empty(),
+            "no pacing row is left to start another turn"
+        );
         // A later busy delivery must not receive the completed turn's timer.
         core.lock().unwrap().busy = true;
         tokio::time::advance(std::time::Duration::from_secs(61)).await;

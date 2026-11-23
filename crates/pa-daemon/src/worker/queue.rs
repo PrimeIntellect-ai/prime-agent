@@ -606,8 +606,12 @@ pub(crate) fn admit_turn_held_notice(
         pa_types::ai::UserContent::Blocks(_) => String::new(),
     };
     let mut core_guard = core.lock().unwrap();
+    // A cell in flight is what holds the turn. Without a running tool call
+    // the model is streaming, often its final answer, and a queued row would
+    // only start an extra turn after it.
     if delivery.is_cancelled()
         || !core_guard.busy
+        || core_guard.running_tool_calls.is_empty()
         || !core_guard.steering.is_empty()
         || core_guard.abort_requested
         || core_guard.compacting

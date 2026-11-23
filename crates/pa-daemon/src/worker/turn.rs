@@ -330,8 +330,8 @@ impl TurnRunner {
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The `[turn-held]` pacing window: one notice per non-pacing delivery
         // held busy past [`TURN_HELD_WINDOW`]. The admission's held gate
-        // (same delivery still busy, nothing queued to cut it already, not
-        // compacting or shutting down) runs inside its ONE lock section —
+        // (same delivery still busy with a tool call running, nothing queued
+        // to cut it already, not compacting or shutting down) runs inside its ONE lock section —
         // never through a re-locking closed-check closure, which would
         // self-deadlock the session. A queued row stops the held turn at
         // its next boundary (the queued-steering probe) and delivers as
