@@ -25,20 +25,28 @@ const INBOX_REMINDER_DISABLED_POLL_MS: u64 = 60_000;
 
 impl AgentSessionEngine {
     /// The inbox store for the current session file, opened and
-    /// published on first use (the store already opened for the same
-    /// session dir is kept, even when its journal could not be read). Runs
-    /// when a session opens (create, replacement), so notices route into
-    /// the inbox before the first build, and at every build.
+    /// published on first use (see [`Self::open_inbox_at`]). Runs when a
+    /// session opens (create, replacement), so notices route into the
+    /// inbox before the first build, and at every build.
+    pub(crate) fn open_inbox(&self) -> Arc<SessionInbox> {
+        let session_file = self
+            .session_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.open_inbox_at(session_file.as_deref())
+    }
+
+    /// The inbox store for one session file (`None`: an in-memory
+    /// session), opened and published unless the store already opened for
+    /// the same session dir is published (kept even when its journal could
+    /// not be read).
     ///
     /// # Panics
     ///
     /// Panics when the inbox slot lock is poisoned.
-    pub(crate) fn open_inbox(&self) -> Arc<SessionInbox> {
-        let dir = self
-            .session_file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_deref()
+    pub(crate) fn open_inbox_at(&self, session_file: Option<&Path>) -> Arc<SessionInbox> {
+        let dir = session_file
             .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
         let mut slot = self
             .inbox

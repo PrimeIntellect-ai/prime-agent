@@ -664,3 +664,32 @@ async fn the_inbox_store_follows_the_session_file() {
     assert!(Arc::ptr_eq(&fx.engine().open_inbox(), &memory_only));
     assert_eq!(fx.engine().inbox().unwrap().count().0, 1);
 }
+
+/// A message sent while the session is being replaced reaches the new
+/// session's inbox and is announced when the new session opens; the
+/// outgoing session's inbox never sees it.
+#[tokio::test]
+async fn a_message_sent_during_a_replacement_reaches_the_new_session() {
+    let fx = fixture();
+    let successor = fx.dir.join("sessions").join("successor.jsonl");
+    fx.worker
+        .teardown_for_replacement(&successor)
+        .await
+        .expect("the teardown");
+    let delivered = deliver_agent_message(&fx.worker, "mid-replacement").await;
+    assert!(delivered.success, "{delivered:?}");
+    assert_eq!(fx.inbox.count().0, 0, "the outgoing session never sees it");
+    // The swap points the engine at the successor's file, then the
+    // successor opens.
+    fx.engine().set_session_file(successor);
+    fx.worker.refresh_replaced_session_state().await;
+    let inbox = fx.engine().inbox().expect("the successor's inbox");
+    assert!(!Arc::ptr_eq(&inbox, &fx.inbox));
+    let rows = rows(&fx.worker);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].covers, waiting_ids(&inbox));
+    assert!(
+        rows[0].text.contains("1 new message (agent-message)"),
+        "{rows:?}"
+    );
+}

@@ -581,7 +581,7 @@ impl Worker {
         // One replacement at a time: the fork's teardown, swap, restore, and rebuild share
         // the replacement gate with the other whole-session replacements.
         let _replacement_gate = self.replacement_gate.lock().await;
-        if let Err(error) = self.teardown_for_replacement().await {
+        if let Err(error) = self.teardown_for_replacement(&forked.path).await {
             return response_failure(None, "fork", &format!("{error:#}"), None);
         }
         match self.tree_navigation.replace_with_fork(forked).await {

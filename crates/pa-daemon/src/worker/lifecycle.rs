@@ -209,14 +209,22 @@ impl Worker {
     /// swapping onto the replacement file: the queued actions cancel, the runs
     /// abort and settle, then the runtime retires and the RLM children close.
     /// Tree moves never run this (the kernel stays warm).
-    pub(crate) async fn teardown_for_replacement(&self) -> anyhow::Result<()> {
-        // Mark the session closed before the children close: the marker keeps
-        // settle retries from minting continuations into the retiring session.
-        if let Some(agent_engine) = &self.agent_engine {
-            agent_engine.mark_session_closed();
-        }
+    pub(crate) async fn teardown_for_replacement(
+        &self,
+        successor: &std::path::Path,
+    ) -> anyhow::Result<()> {
         {
             let mut core = self.core.lock().unwrap();
+            // Mark the session closed before the children close: the marker keeps
+            // settle retries from minting continuations into the retiring session.
+            // From the same critical section on, mail for this worker lands in
+            // the successor's inbox (announced when the successor opens): the
+            // outgoing session never reopens through this worker.
+            if let Some(agent_engine) = &self.agent_engine {
+                agent_engine.mark_session_closed();
+                agent_engine
+                    .open_inbox_at(Some(successor).filter(|path| !path.as_os_str().is_empty()));
+            }
             core.steering.clear();
             core.follow_up.clear();
         }

@@ -337,7 +337,7 @@ impl Worker {
         // are one critical section against a concurrent replacement.
         let _replacement_gate = self.replacement_gate.lock().await;
         // A failed retire fails the command with the old runtime already torn down.
-        if let Err(error) = self.teardown_for_replacement().await {
+        if let Err(error) = self.teardown_for_replacement(&target.file.path).await {
             return response_failure(None, command, &format!("{error:#}"), None);
         }
         if let Some(cwd) = target.cwd.as_deref() {
