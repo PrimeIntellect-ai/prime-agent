@@ -17,6 +17,14 @@ pub(crate) enum GoalWakeKind {
     BackgroundSkip,
 }
 
+/// What retiring the session's goal wakes does with one a dispatch has
+/// already claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimedGoalWake {
+    Retire,
+    Keep,
+}
+
 impl AgentSessionEngine {
     /// Write the durable `rlm_max_depth_state` entry: straight into the
     /// built session's persistence handle, or parked for the build.
@@ -132,8 +140,14 @@ impl AgentSessionEngine {
     ) -> Option<pa_core::cron::AgentCronJob> {
         // Exactly one wake per window: the prior job retires before the
         // replacement arms — repeated boundaries must never stack marker
-        // turns.
-        self.cancel_goal_wake();
+        // turns. A background-skip arming keeps a claimed wake: the
+        // scheduler claims before the per-session dispatch lane, so the
+        // claim may still wait behind another turn, and retiring it would
+        // push the bound a full window out.
+        self.retire_goal_wakes(match kind {
+            GoalWakeKind::Backoff => ClaimedGoalWake::Retire,
+            GoalWakeKind::BackgroundSkip => ClaimedGoalWake::Keep,
+        });
         let wiring = self.cron_wiring()?;
         let binding = self.kernel_cron_binding()?;
         let schedule_text = format!(
@@ -186,10 +200,10 @@ impl AgentSessionEngine {
 
     /// Whether the session holds a background-skip wake still waiting to
     /// fire: Active in the cron store and not claimed by a dispatch. A
-    /// claimed wake is firing now (it completes only after its marker
-    /// turn), so that turn's end arms the next window; a fire that
-    /// completed without running leaves none, so the settle consult's
-    /// self-heal re-arms behind a hung shell.
+    /// claimed wake is firing or queued to fire (it completes only after
+    /// its marker turn), so an arming arms the next window beside it and
+    /// leaves it in place; a fire that completed without running leaves
+    /// none, so the settle consult's self-heal re-arms behind a hung shell.
     pub(crate) fn background_skip_wake_armed(&self) -> bool {
         let Some(wiring) = self.cron_wiring() else {
             return false;
@@ -213,6 +227,10 @@ impl AgentSessionEngine {
     /// no-progress backoff or the background-skip fallback). A fired job
     /// stays untouched.
     pub(crate) fn cancel_goal_wake(&self) {
+        self.retire_goal_wakes(ClaimedGoalWake::Retire);
+    }
+
+    fn retire_goal_wakes(&self, claimed: ClaimedGoalWake) {
         let Some(wiring) = self.cron_wiring() else {
             return;
         };
@@ -235,6 +253,9 @@ impl AgentSessionEngine {
                 )
                 || job.session_id != binding.session_id
             {
+                continue;
+            }
+            if claimed == ClaimedGoalWake::Keep && wiring.store.get_claimed_job(&job.id).is_some() {
                 continue;
             }
             if let Err(error) = wiring.store.cancel(&job.id, crate::util::now_ms()) {

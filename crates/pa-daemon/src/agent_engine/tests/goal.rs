@@ -831,6 +831,7 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
                         {"text": "goal turn reply"},
                         {"text": "user turn reply"},
                         {"text": "marker turn reply"},
+                        {"text": "queued turn reply"},
                     ]
                 })
                 .to_string(),
@@ -956,27 +957,49 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         (first_wake_id.as_str(), wake.next_run_at.as_deref()),
         "a turn inside the window must not push the wake out"
     );
+    let active_wakes = || -> Vec<pa_core::cron::AgentCronJob> {
+        store
+            .list()
+            .into_iter()
+            .filter(|job| {
+                job.label.as_deref()
+                    == Some(
+                        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
+                    )
+                    && job.status == pa_core::cron::JobStatus::Active
+            })
+            .collect()
+    };
+    let complete_dispatch = |dispatch: &pa_core::cron::store::AgentCronDispatch| {
+        store
+            .record_dispatch_result(
+                &dispatch.id,
+                &pa_core::cron::store::DispatchResultOptions {
+                    now: Some(crate::util::now_ms()),
+                    outcome: "ran",
+                    error: None,
+                },
+            )
+            .expect("the scheduler records the fire");
+    };
     // THE RE-ARM: the scheduler claims the due wake and its marker turn
-    // runs; that turn's end re-consults the boundary and cancels-first
-    // into a fresh wake - exactly one Active, a new id.
-    store
+    // runs; that turn's end re-consults the boundary and arms the next
+    // window, and the fired one-shot completes after its turn - exactly
+    // one Active, a new id.
+    let claimed = store
         .claim_due(fire_at_ms, crate::util::now_ms())
         .expect("the scheduler claims the due wake");
+    let [first_fire] = claimed.as_slice() else {
+        panic!("the scheduler claims exactly the due wake: {claimed:?}");
+    };
     let mut marker_events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,
         pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_MARKER_TEXT.to_string(),
         &mut marker_events,
     );
-    let rearmed: Vec<_> = store
-        .list()
-        .into_iter()
-        .filter(|job| {
-            job.label.as_deref()
-                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
-                && job.status == pa_core::cron::JobStatus::Active
-        })
-        .collect();
+    complete_dispatch(first_fire);
+    let rearmed = active_wakes();
     let [rewake] = rearmed.as_slice() else {
         panic!("the marker turn must re-arm exactly one wake: {rearmed:?}");
     };
@@ -984,6 +1007,45 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         rewake.id != first_wake_id,
         "the re-arm must replace the fired wake, not stack beside it"
     );
+    // A CLAIMED WAKE QUEUED BEHIND ANOTHER TURN: the scheduler claims
+    // before the per-session dispatch lane, so another turn can end while
+    // the claimed wake still waits to run its marker. That turn's arming
+    // must leave the claimed wake to fire on time (retiring it would push
+    // the bound a full window out) and arm the next window beside it.
+    let rewake_fire_at_ms = pa_core::cron::parse_iso_millis(
+        rewake
+            .next_run_at
+            .as_deref()
+            .expect("the re-armed wake carries a fire time"),
+    )
+    .expect("the fire time parses");
+    let rewake_id = rewake.id.clone();
+    let claimed = store
+        .claim_due(rewake_fire_at_ms, crate::util::now_ms())
+        .expect("the scheduler claims the re-armed wake");
+    let [queued_fire] = claimed.as_slice() else {
+        panic!("the scheduler claims exactly the re-armed wake: {claimed:?}");
+    };
+    let mut queued_ahead_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "a turn queued ahead of the claimed wake".to_string(),
+        &mut queued_ahead_events,
+    );
+    assert!(
+        store.get_claimed_job(&rewake_id).is_some(),
+        "a turn ending ahead of the claimed wake must not retire it"
+    );
+    assert!(
+        engine.background_skip_wake_armed(),
+        "the next window arms beside the claimed wake"
+    );
+    complete_dispatch(queued_fire);
+    let after_fire = active_wakes();
+    let [next_wake] = after_fire.as_slice() else {
+        panic!("the claimed wake's fire must leave exactly one wake: {after_fire:?}");
+    };
+    assert_ne!(next_wake.id, rewake_id);
     // SELF-HEAL: a fire that completed without running (withdrawn or
     // cleared) strands the owed deferral with no wake; the next settle
     // consult behind the still-live shell re-arms it.
