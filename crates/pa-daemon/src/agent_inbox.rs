@@ -26,8 +26,8 @@ const INBOX_REMINDER_DISABLED_POLL_MS: u64 = 60_000;
 impl AgentSessionEngine {
     /// Open the inbox store for the current session file and publish it
     /// (the store already serving that journal is kept). Runs when a
-    /// session opens (create, replacement) and at every build, so
-    /// notices route into the inbox before the first build.
+    /// session opens (create, replacement), so notices route into the
+    /// inbox before the first build.
     ///
     /// # Panics
     ///
@@ -39,21 +39,17 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_deref()
             .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
-        let journal = dir
-            .as_deref()
-            .map(|dir| dir.join(pa_core::session_engine::inbox::INBOX_JOURNAL_FILE));
         let mut slot = self
             .inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(open) = slot.as_ref().filter(|open| open.journal_path() == journal) {
-            return Arc::clone(open);
+        let inbox = SessionInbox::open_or_reuse(slot.as_ref(), dir.as_deref());
+        if !slot.as_ref().is_some_and(|open| Arc::ptr_eq(open, &inbox)) {
+            if let Some(hook) = self.inbox_read_hook() {
+                inbox.set_read_hook(hook);
+            }
+            *slot = Some(Arc::clone(&inbox));
         }
-        let inbox = Arc::new(SessionInbox::open(dir.as_deref()));
-        if let Some(hook) = self.inbox_read_hook() {
-            inbox.set_read_hook(hook);
-        }
-        *slot = Some(Arc::clone(&inbox));
         inbox
     }
 

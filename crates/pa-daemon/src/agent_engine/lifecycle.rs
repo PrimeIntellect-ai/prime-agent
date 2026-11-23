@@ -968,8 +968,10 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         // The session's agent inbox, opened when the session opened (the
-        // kernel reads it through `rlm.inbox.*`).
-        let inbox = self.open_inbox();
+        // kernel reads it through `rlm.inbox.*`). The build never reopens
+        // it: a memory-only store (unreadable journal) keeps what arrived
+        // before the build.
+        let inbox = self.inbox().unwrap_or_else(|| self.open_inbox());
         // The engine session stays non-persisted (the worker owns the
         // durable file); the configured session dir leads, the file's
         // parent is the fallback.
