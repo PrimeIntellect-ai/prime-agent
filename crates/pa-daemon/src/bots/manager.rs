@@ -116,6 +116,9 @@ pub struct BotManager {
     registry: Mutex<BotRegistry>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     attached: Arc<Mutex<HashMap<String, usize>>>,
+    /// The guest auth for a sandbox created with matching header rules,
+    /// until its bootstrap writes it. Keyed by sandbox id.
+    guest_auth: Mutex<HashMap<String, Value>>,
     image: String,
     release: ReleaseSource,
 }
@@ -131,6 +134,7 @@ impl BotManager {
             registry: Mutex::new(BotRegistry::load(agent_dir)?),
             locks: Mutex::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
+            guest_auth: Mutex::new(HashMap::new()),
             image: std::env::var(BOT_IMAGE_ENV)
                 .ok()
                 .filter(|image| !image.is_empty())
@@ -611,6 +615,9 @@ impl BotManager {
             network_rules: credentials.network_rules,
         };
         let created = retry(|| self.platform.create(&request)).await?;
+        if let Some(auth) = credentials.auth_json {
+            lock(&self.guest_auth).insert(created.id.clone(), auth);
+        }
         record.sandbox_id = Some(created.id.clone());
         record.status = created.status;
         self.save(record.clone())?;
@@ -665,14 +672,16 @@ impl BotManager {
         }
         record.version = local.to_string();
         let mut env = bootstrap_env(record);
-        let credentials = self.platform.credentials(guest_provider(record)).await?;
-        if let Some(auth) = credentials.auth_json {
+        // Only a sandbox created here gets auth: its header rules match it.
+        let auth = lock(&self.guest_auth).get(&sandbox_id).cloned();
+        if let Some(auth) = auth {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
         }
         let output = self
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
             .await?;
         check_exit("start the bot daemon", &output)?;
+        lock(&self.guest_auth).remove(&sandbox_id);
         let ids: Value = output
             .stdout
             .lines()

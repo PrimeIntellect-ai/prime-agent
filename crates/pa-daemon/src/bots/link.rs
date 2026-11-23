@@ -16,8 +16,12 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, BufReader}
 use super::relay::BRIDGE_SOCKET_ENV;
 use super::{BotManager, BotRecord, GUEST_DAEMON_SOCKET};
 
-/// How long the relay may take to start and the guest to say hello.
-const LINK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Starts the relay in the guest.
+pub(crate) const RELAY_SCRIPT: &str =
+    r#"export PATH="${HOME:-/root}/.local/bin:$PATH"; exec prime-agent relay"#;
+
+/// How long the guest daemon may take to say hello over the relay.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The guest runs another prime-agent version than this Mac. Its
 /// `Display` names the side to upgrade and how.
@@ -90,27 +94,28 @@ impl BotManager {
             .sandbox_id
             .as_deref()
             .with_context(|| format!("the bot {} has no sandbox", bot.name))?;
+        // The release installer puts the binary in ~/.local/bin, which is
+        // not on the exec PATH.
         let command = CommandSpec {
-            cmd: "prime-agent".into(),
-            args: vec!["relay".into()],
+            cmd: "bash".into(),
+            args: vec!["-c".into(), RELAY_SCRIPT.into()],
             envs: BTreeMap::from([(
                 BRIDGE_SOCKET_ENV.to_string(),
                 GUEST_DAEMON_SOCKET.to_string(),
             )]),
             cwd: None,
         };
-        tokio::time::timeout(LINK_TIMEOUT, async {
-            let halves = self.platform.open_stream(sandbox_id, &command).await?;
-            handshake(halves.read, halves.write).await
-        })
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "the bot {} did not answer within {}s",
-                bot.name,
-                LINK_TIMEOUT.as_secs()
-            )
-        })?
+        let halves = self.platform.open_stream(sandbox_id, &command).await?;
+        // Dropping the halves on a timeout ends the relay.
+        tokio::time::timeout(HELLO_TIMEOUT, handshake(halves.read, halves.write))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the bot {} did not say hello within {}s",
+                    bot.name,
+                    HELLO_TIMEOUT.as_secs()
+                )
+            })?
     }
 }
 

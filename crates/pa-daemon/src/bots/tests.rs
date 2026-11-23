@@ -274,7 +274,7 @@ impl BotPlatform for FakePlatform {
         command: &'a CommandSpec,
     ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>> {
         async move {
-            assert_eq!(command.args, ["relay"]);
+            assert_eq!(command.args[1], super::link::RELAY_SCRIPT);
             let version = {
                 let mut state = self.state();
                 if state.sandbox(sandbox_id)?.status != BotStatus::Running {

@@ -1,6 +1,7 @@
 //! The guest's provider credentials. A bot sandbox never holds a real
 //! key: each provider the home auth storage holds an API key for is stored
-//! once as a platform secret (`PRIME_AGENT_<PROVIDER>_KEY`), and the
+//! once as a platform secret (`PRIME_AGENT_<PROVIDER>_KEY_<FINGERPRINT>`; a
+//! rotated key gets a new secret), and the
 //! sandbox's network policy has the platform set it in that provider's
 //! auth header on the sandbox's HTTPS requests, outside the sandbox. The
 //! guest sends [`GUEST_API_KEY_PLACEHOLDER`], which the platform replaces.
@@ -12,7 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use pa_core::auth::{AuthCredential, AuthStorage, PRIME_INFERENCE_PROVIDER_ID};
+use pa_core::auth::{
+    AuthCredential, AuthStorage, PrimeTeamCredential, StoredPrimeTeam, PRIME_INFERENCE_PROVIDER_ID,
+};
 use pa_sandbox::transport::ReqwestSandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 
@@ -112,26 +115,31 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
     rules
 }
 
-/// The stored API keys the platform can inject, prime-inference first. A
+/// The API keys the platform can inject (stored, or from the environment
+/// for `required`), prime-inference first. OAuth logins are left out. A
 /// host an earlier provider holds (the platform never combines rules), or
 /// one past the platform's host limit, is left out.
-fn injections(auth: &mut AuthStorage) -> Vec<Injection> {
+fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
     let stored = auth.get_all();
     let mut providers = auth.list();
+    if !providers.iter().any(|provider| provider == required) {
+        providers.push(required.to_string());
+    }
     providers.sort_by_key(|provider| (provider != PRIME_INFERENCE_PROVIDER_ID, provider.clone()));
     let mut hosts = BTreeSet::new();
     let mut injections = Vec::new();
     for provider in providers {
         if !matches!(
             stored.credential(&provider),
-            Some(AuthCredential::ApiKey { .. })
+            Some(AuthCredential::ApiKey { .. }) | None
         ) {
             continue;
         }
         let Some(key) = auth.get_api_key(&provider).filter(|key| !key.is_empty()) else {
             continue;
         };
-        let secret = secret_name(&provider);
+        let fingerprint = super::sha256_hex(key.as_bytes())[..12].to_ascii_uppercase();
+        let secret = format!("{}_{fingerprint}", secret_name(&provider));
         let mut rules = provider_rules(&provider, &secret);
         rules.retain(|host, _| hosts.len() < MAX_RULE_HOSTS && hosts.insert(host.clone()));
         if rules.is_empty() {
@@ -156,6 +164,8 @@ pub struct Provisioned {
     rules: BTreeMap<String, HeaderRule>,
     providers: Vec<String>,
     failed: Vec<(String, anyhow::Error)>,
+    /// The team the injected Prime Inference key bills to.
+    prime_team: Option<PrimeTeamCredential>,
 }
 
 impl Provisioned {
@@ -165,6 +175,12 @@ impl Provisioned {
     #[must_use]
     pub fn confirmed_providers(&self) -> Vec<String> {
         self.providers.clone()
+    }
+
+    /// The guest's `auth.json` for the confirmed providers.
+    #[must_use]
+    pub fn guest_auth(&self) -> Option<serde_json::Value> {
+        guest_auth_json(&self.providers, self.prime_team.as_ref())
     }
 
     /// The network rules for a guest running `provider`. Fails when that
@@ -188,6 +204,12 @@ impl Provisioned {
             Some(error) => Err(error.context(format!(
                 "the platform secret for the {provider} key could not be provisioned"
             ))),
+            None if !self.providers.iter().any(|confirmed| confirmed == provider) => {
+                Err(anyhow::anyhow!(
+                    "A bot on {provider} needs a {provider} API key. \
+                     Log in with an API key; a subscription login cannot be shared with a bot."
+                ))
+            }
             None => Ok(self.rules),
         }
     }
@@ -200,9 +222,35 @@ impl Provisioned {
 pub async fn provision(
     client: &PrimeSandboxClient<ReqwestSandboxTransport>,
     agent_dir: &Path,
+    provider: &str,
 ) -> Provisioned {
-    let injections = injections(&mut AuthStorage::create(agent_dir));
-    provision_injections(client, injections).await
+    let mut auth = AuthStorage::create(agent_dir);
+    let injections = injections(&mut auth, provider);
+    let mut provisioned = provision_injections(client, injections).await;
+    provisioned.prime_team = effective_prime_team(&auth);
+    provisioned
+}
+
+/// The team the Prime Inference key bills to: `PRIME_TEAM_ID` first, then
+/// the stored selection (the auth storage's order).
+fn effective_prime_team(auth: &AuthStorage) -> Option<PrimeTeamCredential> {
+    if let Some(team_id) = std::env::var("PRIME_TEAM_ID")
+        .ok()
+        .map(|team| team.trim().to_string())
+        .filter(|team| !team.is_empty())
+    {
+        return Some(PrimeTeamCredential {
+            name: team_id.clone(),
+            team_id,
+            slug: None,
+            role: None,
+            created_at: None,
+        });
+    }
+    match auth.get_prime_inference_team_selection() {
+        StoredPrimeTeam::Team(team) => Some(team),
+        StoredPrimeTeam::NotSelected | StoredPrimeTeam::PersonalAccount => None,
+    }
 }
 
 async fn provision_injections(
@@ -275,32 +323,26 @@ async fn secret_names(
         .collect())
 }
 
-/// The home `auth.json`, or an empty object.
-#[must_use]
-pub fn home_auth(agent_dir: &Path) -> serde_json::Value {
-    std::fs::read_to_string(agent_dir.join("auth.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}))
-}
-
-/// The guest's auth storage: one API-key entry per injected provider,
-/// holding the placeholder. The prime-inference entry keeps its billing
+/// The guest's auth storage: one API-key record per injected provider,
+/// holding the placeholder. The Prime Inference record carries its billing
 /// team. `None` when no provider is injected.
-#[must_use]
-pub fn guest_auth_json(
-    home_auth: &serde_json::Value,
+fn guest_auth_json(
     providers: &[String],
+    prime_team: Option<&PrimeTeamCredential>,
 ) -> Option<serde_json::Value> {
-    let mut auth = serde_json::Map::new();
-    for provider in providers {
-        let mut entry = home_auth
-            .get(provider)
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "type": "api_key" }));
-        entry["key"] = GUEST_API_KEY_PLACEHOLDER.into();
-        auth.insert(provider.clone(), entry);
-    }
+    let auth: serde_json::Map<String, serde_json::Value> = providers
+        .iter()
+        .map(|provider| {
+            let record = AuthCredential::ApiKey {
+                key: GUEST_API_KEY_PLACEHOLDER.to_string(),
+                prime_team: (provider == PRIME_INFERENCE_PROVIDER_ID)
+                    .then(|| prime_team.cloned())
+                    .flatten(),
+            };
+            let record = serde_json::to_value(record).expect("an auth record serializes");
+            (provider.clone(), record)
+        })
+        .collect();
     (!auth.is_empty()).then_some(serde_json::Value::Object(auth))
 }
 
@@ -401,35 +443,32 @@ mod tests {
     /// host (serper) are not.
     #[test]
     fn only_stored_api_keys_with_an_api_host_are_injected() {
-        let injected = injections(&mut auth(&home_auth()));
-        let summary: Vec<(&str, &str, &str)> = injected
+        let injected = injections(&mut auth(&home_auth()), PRIME_INFERENCE_PROVIDER_ID);
+        let summary: Vec<(&str, &str)> = injected
             .iter()
-            .map(|injection| {
-                (
-                    injection.provider.as_str(),
-                    injection.secret.as_str(),
-                    injection.key.as_str(),
-                )
-            })
+            .map(|injection| (injection.provider.as_str(), injection.key.as_str()))
             .collect();
         assert_eq!(
             summary,
-            [
-                (
-                    "prime-inference",
-                    "PRIME_AGENT_PRIME_INFERENCE_KEY",
-                    "sk-prime"
-                ),
-                ("google", "PRIME_AGENT_GOOGLE_KEY", "sk-google"),
-            ]
+            [("prime-inference", "sk-prime"), ("google", "sk-google")]
         );
+        // A rotated key gets a new secret.
+        assert!(injected[1].secret.starts_with("PRIME_AGENT_GOOGLE_KEY_"));
+        let rotated = injections(
+            &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
+            "google",
+        );
+        assert_ne!(rotated[0].secret, injected[1].secret);
 
-        let keyed = injections(&mut auth(&json!({
-            "zai": { "type": "api_key", "key": "sk-zai" },
-            "openai": { "type": "api_key", "key": "sk-openai" },
-            "anthropic": { "type": "api_key", "key": "sk-ant-api" },
-            "prime-inference": { "type": "api_key", "key": "" },
-        })));
+        let keyed = injections(
+            &mut auth(&json!({
+                "zai": { "type": "api_key", "key": "sk-zai" },
+                "openai": { "type": "api_key", "key": "sk-openai" },
+                "anthropic": { "type": "api_key", "key": "sk-ant-api" },
+                "prime-inference": { "type": "api_key", "key": "" },
+            })),
+            PRIME_INFERENCE_PROVIDER_ID,
+        );
         let providers: Vec<&str> = keyed
             .iter()
             .map(|injection| injection.provider.as_str())
@@ -439,19 +478,22 @@ mod tests {
 
     #[test]
     fn the_guest_auth_holds_placeholders_and_the_team_only() {
+        let team = PrimeTeamCredential {
+            team_id: "team-1".into(),
+            name: "Team One".into(),
+            slug: None,
+            role: None,
+            created_at: None,
+        };
         let providers = ["prime-inference".to_string(), "google".to_string()];
-        let guest = guest_auth_json(&home_auth(), &providers).unwrap();
+        let guest = guest_auth_json(&providers, Some(&team)).unwrap();
+        assert_eq!(guest["prime-inference"]["type"], "api_key");
+        assert_eq!(guest["prime-inference"]["key"], GUEST_API_KEY_PLACEHOLDER);
+        assert_eq!(guest["prime-inference"]["primeTeam"]["teamId"], "team-1");
         assert_eq!(
-            guest,
-            json!({
-                "prime-inference": {
-                    "type": "api_key",
-                    "key": GUEST_API_KEY_PLACEHOLDER,
-                    "primeTeam": { "teamId": "team-1", "name": "Team One" },
-                },
-                "google": { "type": "api_key", "key": GUEST_API_KEY_PLACEHOLDER },
-            })
+            guest["google"],
+            json!({ "type": "api_key", "key": GUEST_API_KEY_PLACEHOLDER })
         );
-        assert!(guest_auth_json(&home_auth(), &[]).is_none());
+        assert!(guest_auth_json(&[], Some(&team)).is_none());
     }
 }

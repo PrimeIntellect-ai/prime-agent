@@ -12,8 +12,8 @@ use pa_sandbox::{
     CommandSessionClient, CommandSessionErrorCode, CommandSessionEvent, CommandSessionOptions,
     CommandSpec, HeaderRule, InputChannel, OutputChannel, PlatformGatewayAuthSource,
     PrimeSandboxClient, SandboxError, SandboxErrorCode, SandboxStatus, SendInputOptions,
-    StartOptions, StartRequest, StreamOptions, VmCreateRequest, MAX_PROCESS_INPUT_BYTES,
-    NO_TIMEOUT_MINUTES,
+    SendSignalOptions, StartOptions, StartRequest, StreamOptions, VmCreateRequest, VmSignal,
+    MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
 use super::credentials;
@@ -143,6 +143,8 @@ const BOT_MEMORY_GB: f64 = 4.0;
 const BOT_DISK_GB: f64 = 20.0;
 const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
+/// How long a streamed guest process may take to start.
+const STREAM_START_WAIT: Duration = Duration::from_secs(60);
 /// A bootstrap or install command gets this long before sandboxd kills it.
 const EXEC_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// The daemon stops waiting on a silent gateway this long after sandboxd's kill.
@@ -498,15 +500,36 @@ impl BotPlatform for PrimePlatform {
     ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>> {
         async move {
             let source = SandboxAuthSource::new(Arc::clone(&self.client), sandbox_id.to_string());
+            let session_uuid = uuid::Uuid::new_v4().to_string();
             let request = StartRequest {
                 command: command.clone(),
                 pty: None,
                 stdin: true,
-                session_uuid: uuid::Uuid::new_v4().to_string(),
+                session_uuid: session_uuid.clone(),
             };
-            spawn_exec_halves(&source, &request, StartOptions::default())
-                .await
-                .map_err(|error| PlatformError::Transient(format!("{error:#}")))
+            let started = tokio::time::timeout(
+                STREAM_START_WAIT,
+                spawn_exec_halves(&source, &request, StartOptions::default()),
+            )
+            .await;
+            if let Ok(halves) = started {
+                halves.map_err(|error| PlatformError::Transient(format!("{error:#}")))
+            } else {
+                // The process may have started without its start event
+                // reaching us; do not leave it running.
+                if let Ok(client) = source.command_client() {
+                    let _ = client
+                        .send_signal(
+                            &session_uuid,
+                            VmSignal::Terminate,
+                            SendSignalOptions::default(),
+                        )
+                        .await;
+                }
+                Err(PlatformError::Transient(
+                    "the guest process sent no start event in time".into(),
+                ))
+            }
         }
         .boxed()
     }
@@ -516,11 +539,8 @@ impl BotPlatform for PrimePlatform {
         provider: &'a str,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            let provisioned = credentials::provision(&self.client, &self.agent_dir).await;
-            let auth_json = credentials::guest_auth_json(
-                &credentials::home_auth(&self.agent_dir),
-                &provisioned.confirmed_providers(),
-            );
+            let provisioned = credentials::provision(&self.client, &self.agent_dir, provider).await;
+            let auth_json = provisioned.guest_auth();
             let network_rules = provisioned
                 .rules_for(provider)
                 .map_err(|error| PlatformError::Other(format!("{error:#}")))?;
