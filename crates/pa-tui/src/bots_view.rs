@@ -272,12 +272,6 @@ impl BotsView {
             .unwrap_or(0);
     }
 
-    /// The selected row.
-    #[must_use]
-    pub fn selected_row(&self) -> Option<&BotRow> {
-        self.rows.get(self.selected)
-    }
-
     /// A failed fetch: the rows stay, the error renders.
     pub fn set_fetch_error(&mut self, error: Option<String>) {
         self.fetch_error = error;
