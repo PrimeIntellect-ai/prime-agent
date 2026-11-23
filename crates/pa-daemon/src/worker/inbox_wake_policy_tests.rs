@@ -37,6 +37,17 @@ fn admit(
     arrivals: &InboxArrivals,
     notice: InboxNotice,
 ) {
+    admit_on(worker, notify, inbox, arrivals, notice, Lane::Steering);
+}
+
+fn admit_on(
+    worker: &Worker,
+    notify: &Arc<Notify>,
+    inbox: &Arc<SessionInbox>,
+    arrivals: &InboxArrivals,
+    notice: InboxNotice,
+    lane: Lane,
+) {
     admit_inbox_notice(
         &worker.recovery,
         &worker.core,
@@ -44,7 +55,7 @@ fn admit(
         inbox,
         arrivals,
         notice,
-        Lane::Steering,
+        lane,
         || false,
         None,
     )
@@ -60,7 +71,7 @@ fn hold(worker: &Worker) -> Option<tokio::time::Instant> {
 }
 
 /// Take the queued arrival row the way the runner's pickup does.
-fn deliver(
+fn pick_up(
     worker: &Worker,
     arrivals: &InboxArrivals,
     inbox: &Arc<SessionInbox>,
@@ -69,6 +80,17 @@ fn deliver(
     let mut item = core.steering.pop_front().expect("the queued arrival row");
     deliver_inbox_arrival_row_locked(&mut core, &mut item, arrivals, inbox);
     (item.message, item.preview)
+}
+
+/// Pick the row up and accept its transcript row, as a turn does.
+fn deliver(
+    worker: &Worker,
+    arrivals: &InboxArrivals,
+    inbox: &Arc<SessionInbox>,
+) -> (String, Option<String>) {
+    let delivered = pick_up(worker, arrivals, inbox);
+    consume_shown_inbox_items_locked(&mut worker.core.lock().unwrap(), arrivals, inbox);
+    delivered
 }
 
 #[tokio::test(start_paused = true)]
@@ -211,4 +233,41 @@ async fn a_delivery_consumes_what_it_shows_and_leaves_counted_items_waiting() {
         ),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn a_picked_row_that_is_never_accepted_leaves_its_items_waiting() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    admit(&worker, &notify, &inbox, &arrivals, bash_done(1, 0));
+    let (text, _) = pick_up(&worker, &arrivals, &inbox);
+    assert!(text.contains("shown below and marked read"), "{text}");
+    // The turn settles (an abort, a compaction) before the row is accepted.
+    worker.core.lock().unwrap().inbox_shown_unaccepted.clear();
+    assert_eq!(
+        inbox
+            .waiting_messages()
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[bash-done pid:1 exit:0]"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sole_follow_up_arrival_waits_out_the_debounce() {
+    let (worker, inbox, arrivals, notify) = routing_state();
+    let start = tokio::time::Instant::now();
+    admit_on(
+        &worker,
+        &notify,
+        &inbox,
+        &arrivals,
+        notice(
+            pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
+            "hello",
+            0,
+        ),
+        Lane::FollowUp,
+    );
+    assert_eq!(hold(&worker), Some(start + DEBOUNCE));
 }

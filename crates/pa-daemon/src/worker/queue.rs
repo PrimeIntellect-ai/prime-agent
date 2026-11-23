@@ -858,11 +858,13 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
 }
 
 /// Deliver the inbox arrival row the runner just picked: the row
-/// re-renders over the live batch and withdraws the items it shows
-/// (`inbox_router::shown_items`) from the inbox in the same step, so the
-/// waiting count drains with the delivery and the model is never told to
-/// read what it was just shown. Items the row only counts wait for a read.
-/// A recovered row (its batch unknown) delivers as queued.
+/// re-renders over the live batch, counting the items it shows
+/// (`inbox_router::shown_items`) as read, so the model is never told to
+/// read what it was just shown. The shown items stay in the inbox until
+/// the row's transcript row is accepted
+/// ([`consume_shown_inbox_items_locked`]); an abort or crash before that
+/// leaves them waiting. Items the row only counts wait for a read. A
+/// recovered row (its batch unknown) delivers as queued.
 pub(crate) fn deliver_inbox_arrival_row_locked(
     core_guard: &mut SessionCore,
     item: &mut QueuedItem,
@@ -870,28 +872,38 @@ pub(crate) fn deliver_inbox_arrival_row_locked(
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
 ) {
     core_guard.inbox_wake_due = None;
-    {
-        let mut batch = arrivals.lock().unwrap();
-        let waiting = inbox.waiting_ids();
-        batch.retain(|message| waiting.contains(&message.id));
-        if batch.is_empty() {
-            return;
-        }
-        let shown = shown_items(&batch)
-            .into_iter()
-            .map(|message| message.id.clone())
-            .collect();
-        inbox.withdraw_ids(&shown);
-        let (count, _, _) = inbox.count();
-        let (preview, text) = delivered_notice_text(&batch, count);
-        rerender_inbox_notice(
-            item,
-            &inbox.with_persistence_error_clause(text),
-            batch.len(),
-        );
-        item.preview = Some(preview);
+    let mut batch = arrivals.lock().unwrap();
+    let waiting = inbox.waiting_ids();
+    batch.retain(|message| waiting.contains(&message.id));
+    if batch.is_empty() {
+        return;
     }
-    // A queued reminder follows the drained count.
+    let shown: std::collections::BTreeSet<String> = shown_items(&batch)
+        .into_iter()
+        .map(|message| message.id.clone())
+        .collect();
+    let (preview, text) = delivered_notice_text(&batch, waiting.len() - shown.len());
+    rerender_inbox_notice(
+        item,
+        &inbox.with_persistence_error_clause(text),
+        batch.len(),
+    );
+    item.preview = Some(preview);
+    core_guard.inbox_shown_unaccepted = shown;
+}
+
+/// Withdraw the items the delivered arrival row showed, once its
+/// transcript row is accepted; a queued reminder follows the drained count.
+pub(crate) fn consume_shown_inbox_items_locked(
+    core_guard: &mut SessionCore,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) {
+    let shown = std::mem::take(&mut core_guard.inbox_shown_unaccepted);
+    if shown.is_empty() {
+        return;
+    }
+    inbox.withdraw_ids(&shown);
     refresh_inbox_wake_rows_locked(core_guard, arrivals, inbox);
 }
 

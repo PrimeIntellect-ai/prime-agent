@@ -1,12 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    deliver_inbox_arrival_row_locked, emit_refinement_event_for_session, emit_refinement_row,
-    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
-    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
-    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    checkpoint_queue_recovery, compact_action_label, consume_shown_inbox_items_locked,
+    create_daemon_event_meta, deliver_inbox_arrival_row_locked, emit_refinement_event_for_session,
+    emit_refinement_row, gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot,
+    DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest,
+    QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine,
+    TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
 use std::sync::{Arc, Mutex};
@@ -159,7 +159,8 @@ impl TurnRunner {
 
     /// Take the next delivery from `lane` and mark the session busy with
     /// it. An inbox arrival row delivers through
-    /// [`deliver_inbox_arrival_row_locked`], which consumes what it shows.
+    /// [`deliver_inbox_arrival_row_locked`]; its accepted row consumes what
+    /// it shows.
     fn pick(
         &self,
         core: &mut SessionCore,
@@ -460,6 +461,16 @@ impl TurnRunner {
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         let batch_len = items.len();
+        // The arrival row's accepted transcript row consumes what it shows.
+        let arrival_row = items
+            .iter()
+            .position(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        let inbox_arrivals = self.inbox_arrivals.clone();
+        let inbox = self
+            .inbox_engine
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|engine| engine.inbox());
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepted_prefix_seen = Arc::clone(&accepted_prefix);
@@ -724,6 +735,12 @@ impl TurnRunner {
                 {
                     accepted_rows += 1;
                     accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(inbox) = inbox
+                        .as_ref()
+                        .filter(|_| arrival_row == Some(accepted_rows - 1))
+                    {
+                        consume_shown_inbox_items_locked(&mut core, &inbox_arrivals, inbox);
+                    }
                     if accepted_rows == 1 {
                         if let Some(active) = core.active_action.as_mut() {
                             active.phase = "committing".to_string();
@@ -1163,6 +1180,8 @@ impl TurnRunner {
                     lane_items.push_front(item);
                 }
             }
+            // An arrival row the turn never accepted leaves its shown items waiting.
+            core.inbox_shown_unaccepted.clear();
             let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
             // Publish the note clear and idle transition atomically to
             // roster readers, which capture core then the engine note.

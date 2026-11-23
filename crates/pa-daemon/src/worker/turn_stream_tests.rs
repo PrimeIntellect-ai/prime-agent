@@ -54,6 +54,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         pending_next_turn: Vec::new(),
         active_action: None,
         inbox_wake_due: None,
+        inbox_shown_unaccepted: std::collections::BTreeSet::new(),
         run_cut_at_tool_boundary: false,
         running_tool_calls: std::collections::HashSet::new(),
         running_admission_ids: std::collections::HashSet::new(),

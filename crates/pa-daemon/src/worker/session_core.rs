@@ -103,6 +103,10 @@ pub(crate) struct SessionCore {
     /// an idle session (the success hold or the debounce, see
     /// `inbox_router::wake_delay`); cleared when the row delivers.
     pub(crate) inbox_wake_due: Option<tokio::time::Instant>,
+    /// The inbox items the picked arrival row shows: its accepted
+    /// transcript row withdraws them, so a turn that never accepts the row
+    /// leaves them waiting.
+    pub(crate) inbox_shown_unaccepted: std::collections::BTreeSet<String>,
     /// The last run's final turn ran tools: a queued steer stopped it at a
     /// tool boundary, so the row that stopped it continues the turn at once.
     pub(crate) run_cut_at_tool_boundary: bool,
@@ -125,17 +129,20 @@ impl SessionCore {
     }
 
     /// The instant the turn runner waits for instead of taking queued work:
-    /// `Some` only while the inbox arrival row is the only queued item, its
-    /// due time is still ahead, and the last run ended on its own. Any other
+    /// `Some` only while the inbox arrival row is the only queued item (in
+    /// either lane), its due time is still ahead, and the last run ended on
+    /// its own. Any other
     /// queued work starts a turn the row joins, and a run cut at a tool
     /// boundary continues at once with the row that cut it.
     pub(crate) fn inbox_wake_hold(
         &self,
         now: tokio::time::Instant,
     ) -> Option<tokio::time::Instant> {
-        let only_the_arrival_row = self.follow_up.is_empty()
-            && self.steering.len() == 1
-            && self.steering[0].queue_key.as_deref() == Some(super::INBOX_ARRIVAL_QUEUE_KEY);
+        let mut queued = self.steering.iter().chain(self.follow_up.iter());
+        let only_the_arrival_row = matches!(
+            (queued.next(), queued.next()),
+            (Some(item), None) if item.queue_key.as_deref() == Some(super::INBOX_ARRIVAL_QUEUE_KEY)
+        );
         if !only_the_arrival_row || self.run_cut_at_tool_boundary {
             return None;
         }
@@ -189,6 +196,7 @@ impl SessionCore {
             pending_next_turn: Vec::new(),
             active_action: None,
             inbox_wake_due: None,
+            inbox_shown_unaccepted: std::collections::BTreeSet::new(),
             run_cut_at_tool_boundary: false,
         }
     }
