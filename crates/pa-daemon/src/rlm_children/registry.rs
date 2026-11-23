@@ -570,7 +570,6 @@ fn ledger_child_records(
             direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             factory: edge.factory.is_some(),
-            prompt_admitted: true,
             retirement: Retirement::live(),
             session_file: Some(edge.child),
             last_emitted_status: None,
