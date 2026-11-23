@@ -406,7 +406,11 @@ impl InboxState {
         // The rewrite replaces every pending record: it must be durable
         // before the rename can drop the old file on a crash, so this
         // call site opts into the atomic write's pre-rename fsync and
-        // the post-rename directory sync.
+        // the post-rename directory sync. The append handle closes first:
+        // Windows cannot rename over an open file, and a rename that
+        // succeeds before a failed directory sync must not leave appends
+        // going to the replaced file.
+        journal.file = None;
         let rewrite = crate::settings::storage::atomic_write_with(
             &journal.path,
             &lines,
@@ -414,8 +418,6 @@ impl InboxState {
         );
         match rewrite {
             Ok(()) => {
-                // The rename replaced the file the handle pointed at.
-                journal.file = None;
                 journal.len = lines.len() as u64;
                 journal.compact_at = JOURNAL_COMPACT_MIN_BYTES.max(2 * journal.len);
                 // The rewrite re-persisted every pending message: the

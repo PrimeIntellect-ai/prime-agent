@@ -508,7 +508,7 @@ fn a_bounded_bash_await_degrades_and_the_notice_wakes_the_session() {
         journal
             .lines()
             .last()
-            .is_some_and(|line| line.contains("\"kind\":\"withdrawn\"")),
+            .is_some_and(|line| line.contains("\"kind\":\"removed\"")),
         "the collection journaled its withdrawal: {journal}"
     );
 
