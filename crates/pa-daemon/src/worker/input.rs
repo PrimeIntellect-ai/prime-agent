@@ -204,7 +204,6 @@ impl Worker {
         if let Some(row) = custom_message.as_ref() {
             if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
                 let minted = crate::child_status_notices::consume(
-                    &self.config.agent_dir,
                     payload.get("rlmNoticeNonce").and_then(Value::as_str),
                 );
                 if !minted {

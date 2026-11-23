@@ -134,6 +134,24 @@ class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual([when - started for when, _ in sent], [240.0, 480.0])
 
+    async def test_waiting_window_restarts_while_nothing_runs(self):
+        handle = self.handle()
+        live = set()
+
+        def ticks():
+            live.add(handle)
+            yield (240.0, False)
+            live.clear()
+            yield (300.0, False)
+            yield (1000.0, False)
+            # A later job's first idle tick comes before one window of its own.
+            live.add(handle)
+            yield (1015.0, False)
+            yield (1255.0, False)
+
+        sent = await self.run_ticks(live, {}, ticks(), [])
+        self.assertEqual([when for when, _ in sent], [240.0, 1255.0])
+
     async def test_waiting_rejected_notice_does_not_delay_next_idle_tick(self):
         handle = self.handle()
         sent = await self.run_ticks(
