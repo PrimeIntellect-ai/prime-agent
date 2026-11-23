@@ -736,17 +736,18 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // immediately to its settled cancelled envelope; unknown
             // selectors keep erroring (a respawned freed name wins first).
             let mut deleted_results: Vec<RlmChildResult> = Vec::new();
-            let mut bot_results: Vec<RlmChildResult> = Vec::new();
-            if targets.is_empty() {
-                let identity = this.identity.lock().expect("identity lock").clone();
-                bot_results.extend(owned_bots(&this, &identity).await.iter().map(bot_result));
-            }
+            let identity = this.identity.lock().expect("identity lock").clone();
+            let mut bots: Vec<Value> = if targets.is_empty() {
+                owned_bots(&this, &identity).await
+            } else {
+                Vec::new()
+            };
             for target in &targets {
                 let record = match this.resolve_record(target, "child").await {
                     Ok(record) => record,
                     Err(miss) => {
                         if let Some(bot) = owned_bot(&this, target).await {
-                            bot_results.push(bot_result(&bot));
+                            bots.push(bot);
                             continue;
                         }
                         let matches = this
@@ -815,10 +816,30 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 };
                 results.push(result);
             }
+            // A bot has no completion event: re-read the selected bots after
+            // the local waits, and poll the running ones inside the budget.
+            if timeout_ms > 0 && !bots.is_empty() {
+                loop {
+                    let fresh = owned_bots(&this, &identity).await;
+                    for bot in &mut bots {
+                        if let Some(row) = fresh
+                            .iter()
+                            .find(|row| row.get("botId") == bot.get("botId"))
+                        {
+                            bot.clone_from(row);
+                        }
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() || bots.iter().all(|bot| bot_result(bot).settled) {
+                        break;
+                    }
+                    tokio::time::sleep(remaining.min(BOT_COLLECT_POLL)).await;
+                }
+            }
             // Live entries first, the deleted generations' envelopes after,
             // the bots' snapshots last.
             results.extend(deleted_results);
-            results.extend(bot_results);
+            results.extend(bots.iter().map(bot_result));
             Ok(results)
         })
     }
@@ -973,11 +994,11 @@ fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: 
         })
 }
 
-/// Budget for `spawn_bot`: provisioning, the version install, and the
-/// first prompt.
-const SPAWN_BOT_TIMEOUT: Duration = Duration::from_mins(15);
-/// Budget for the supervisor's bot delete.
-const BOT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often a waiting `rlm.collect` re-reads a running bot.
+const BOT_COLLECT_POLL: Duration = Duration::from_secs(1);
+/// Budget for `spawn_bot` and `delete_bot`, past the supervisor's own
+/// deadline, so the worker never gives up first.
+const BOT_COMMAND_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// `rlm.spawn(target="sandbox")`: a bot. The worker checks the name and
 /// the model; the supervisor gates on `bots.enabled`, provisions, and
@@ -1032,7 +1053,7 @@ async fn spawn_bot(
                 // only the depth left below it.
                 "rlmMaxDepth": identity.rlm_max_depth.saturating_sub(identity.rlm_depth + 1),
             }),
-            SPAWN_BOT_TIMEOUT,
+            BOT_COMMAND_TIMEOUT,
         )
         .await?;
     let bot_id = bot

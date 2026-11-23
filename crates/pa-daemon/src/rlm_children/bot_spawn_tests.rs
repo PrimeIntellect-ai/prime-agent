@@ -24,8 +24,13 @@ fn bot_row() -> Value {
     })
 }
 
-/// A fake supervisor that serves the bot commands and records them.
-async fn fake_supervisor(commands: Arc<std::sync::Mutex<Vec<Value>>>) -> std::path::PathBuf {
+/// A fake supervisor that serves the bot commands and records them. Once
+/// `running_reads` is set, the bot stays running for that many more
+/// `list_bots` reads, then pauses.
+async fn fake_supervisor(
+    commands: Arc<std::sync::Mutex<Vec<Value>>>,
+    running_reads: Arc<std::sync::Mutex<Option<usize>>>,
+) -> std::path::PathBuf {
     let socket = std::env::temp_dir().join(format!(
         "pa-bot-spawn-{}.sock",
         uuid::Uuid::new_v4().simple()
@@ -34,6 +39,7 @@ async fn fake_supervisor(commands: Arc<std::sync::Mutex<Vec<Value>>>) -> std::pa
     tokio::spawn(async move {
         while let Ok(stream) = listener.accept().await {
             let commands = Arc::clone(&commands);
+            let running_reads = Arc::clone(&running_reads);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -60,7 +66,13 @@ async fn fake_supervisor(commands: Arc<std::sync::Mutex<Vec<Value>>>) -> std::pa
                                 .unwrap()
                                 .iter()
                                 .any(|command| command["type"] == "delete_bot");
-                            let bots = if deleted { vec![] } else { vec![bot_row()] };
+                            let mut bot = bot_row();
+                            match running_reads.lock().unwrap().as_mut() {
+                                Some(0) => bot["status"] = json!("paused"),
+                                Some(reads) => *reads -= 1,
+                                None => {}
+                            }
+                            let bots = if deleted { vec![] } else { vec![bot] };
                             response_success(Some(&id), &kind, Some(json!({ "bots": bots })))
                         }
                         other => response_failure(Some(&id), other, "unexpected command", None),
@@ -94,7 +106,8 @@ fn request(name: &str, target: RlmSpawnTarget) -> RlmSpawnRequest {
 #[tokio::test]
 async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let socket = fake_supervisor(Arc::clone(&commands)).await;
+    let running_reads = Arc::new(std::sync::Mutex::new(None));
+    let socket = fake_supervisor(Arc::clone(&commands), Arc::clone(&running_reads)).await;
     let sessions = SupervisorChildSessions::new(
         Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
         std::env::temp_dir(),
@@ -138,6 +151,13 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         .unwrap();
     assert_eq!(collected.len(), 1);
     assert!(!collected[0].settled);
+    // A waiting collect re-reads the bot until its turn ends.
+    *running_reads.lock().unwrap() = Some(1);
+    let collected = sessions
+        .collect(vec!["scout".to_string()], 10_000)
+        .await
+        .unwrap();
+    assert_eq!(collected[0].status, "done");
     // A local child cannot take the bot's name.
     let refused = sessions
         .spawn(request("scout", RlmSpawnTarget::Local))

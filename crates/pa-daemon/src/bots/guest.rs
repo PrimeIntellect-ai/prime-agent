@@ -10,7 +10,7 @@ use pa_types::daemon::{
 };
 use pa_types::platform::transport::{AsyncReadHalf, AsyncWriteHalf, TransportStream};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use super::{BotManager, BotRecord};
 
@@ -20,6 +20,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(30);
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 /// The client id the guest daemon sees for the owner's commands.
 const CLIENT_ID: &str = "prime-agent-bot-owner";
+/// The longest frame line the client reads from the guest.
+const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The outcome class of a failed [`GuestClient::command`].
 #[derive(Debug)]
@@ -151,11 +153,33 @@ async fn read_frame(reader: &mut BufReader<Box<dyn AsyncReadHalf>>) -> Result<Va
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line).await? == 0 {
+        let read = (&mut *reader)
+            .take(MAX_FRAME_BYTES + 1)
+            .read_line(&mut line)
+            .await?;
+        if read == 0 {
             bail!("the bot link closed");
+        }
+        if read as u64 > MAX_FRAME_BYTES {
+            bail!("the bot sent a frame longer than {MAX_FRAME_BYTES} bytes");
         }
         if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
             return Ok(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_frame_without_an_end_is_refused_at_the_limit() {
+        let endless: Box<dyn AsyncReadHalf> = Box::new(tokio::io::repeat(b'a'));
+        let error = read_frame(&mut BufReader::new(endless)).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("the bot sent a frame longer than {MAX_FRAME_BYTES} bytes")
+        );
     }
 }

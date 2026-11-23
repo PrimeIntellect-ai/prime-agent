@@ -39,7 +39,7 @@ pub async fn admit_bot_spawn(agent_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The supervisor's own deadline for a bot spawn or send, inside the
+/// The supervisor's own deadline for a bot spawn, send, or delete, inside the
 /// worker's wait, so work the worker gave up on never keeps running.
 pub const BOT_DEADLINE: std::time::Duration = std::time::Duration::from_mins(13);
 
@@ -215,7 +215,11 @@ impl Supervisor {
                 .into_iter()
                 .find(|bot| &bot.bot_id == bot_id && &bot.owner_session_id == owner_session_id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown bot: {bot_id}"))?;
-            manager.delete(&record.bot_id).await?;
+            tokio::time::timeout(BOT_DEADLINE, manager.delete(&record.bot_id))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("the bot was not deleted within {BOT_DEADLINE:?}")
+                })??;
             anyhow::Ok(record)
         }
         .await;
