@@ -219,6 +219,8 @@ pub struct BotsView {
     selected: usize,
     detail_open: bool,
     fetch_error: Option<String>,
+    /// The last failed attach (a version mismatch shows here); a fetch never clears it.
+    attach_error: Option<String>,
     /// The bot an attach request is in flight for: `(bot_id, name)`.
     attaching: Option<(String, String)>,
 }
@@ -274,9 +276,14 @@ impl BotsView {
         self.rows.get(self.selected)
     }
 
-    /// A failed fetch or attach: the rows stay, the error renders.
+    /// A failed fetch: the rows stay, the error renders.
     pub fn set_fetch_error(&mut self, error: Option<String>) {
         self.fetch_error = error;
+    }
+
+    /// A failed attach (`Some`), or a new attach clearing the last one (`None`).
+    pub fn set_attach_error(&mut self, error: Option<String>) {
+        self.attach_error = error;
     }
 
     /// The attach in flight (`Some((bot_id, name))`), or none.
@@ -355,16 +362,18 @@ impl BotsView {
         lines.push(Vec::new());
 
         // The error wraps: a version mismatch's upgrade message must read in full.
-        let error_lines = self.fetch_error.as_ref().map_or_else(Vec::new, |error| {
-            let line = vec![theme.fg_span(ThemeColor::Error, format!("Error: {error}"))];
-            wrap_line(&line, width.saturating_sub(2).max(1))
-                .into_iter()
-                .map(|mut line| {
-                    line.insert(0, Span::raw("  "));
-                    line
-                })
-                .collect()
-        });
+        let error_lines: Vec<Line> = [&self.fetch_error, &self.attach_error]
+            .into_iter()
+            .flatten()
+            .flat_map(|error| {
+                let line = vec![theme.fg_span(ThemeColor::Error, format!("Error: {error}"))];
+                wrap_line(&line, width.saturating_sub(2).max(1))
+            })
+            .map(|mut line| {
+                line.insert(0, Span::raw("  "));
+                line
+            })
+            .collect();
         let error_rows = error_lines.len() + usize::from(!error_lines.is_empty());
         if !error_lines.is_empty() {
             lines.extend(error_lines);

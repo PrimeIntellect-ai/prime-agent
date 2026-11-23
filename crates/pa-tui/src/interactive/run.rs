@@ -198,7 +198,18 @@ async fn run_interactive_surface(
     // The first open attempt uses this connection (a fresh-pane connect failure must stay a
     // pre-mount failure); a wait retry reconnects against the successor daemon.
     let (client, events) = match &options.session {
-        SessionSelection::Bot(bot) => crate::session_ui::connect_bot(bot).await?,
+        // A failed bot connect hands back to the page that asked for it (the origin), never to
+        // the shell.
+        SessionSelection::Bot(bot) => match crate::session_ui::connect_bot(bot).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    ..Default::default()
+                })
+            }
+        },
         _ => DaemonClient::connect_with_retry(&options.socket_path)
             .await
             .with_context(|| "the interactive UI could not attach to the daemon")?,

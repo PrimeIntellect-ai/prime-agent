@@ -299,7 +299,11 @@ fn enter_attaches_the_bot_session_and_refuses_local_commands() {
             HeadlessStep::Submit("/bots".into()),
             wait("triage"),
             HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            HeadlessStep::WaitMs(2_000),
+            // The handoff leaves the run as soon as the attach lands.
+            HeadlessStep::WaitGone {
+                needle: "Bots · sandboxes".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
     );
     let expected = BotAttach {
@@ -362,4 +366,33 @@ fn a_closed_bot_link_shows_an_error_and_never_reconnects() {
     let last = outcome.frames.last().unwrap();
     assert!(last.contains("link to the bot triage closed"), "{last}");
     assert!(!last.contains("reconnecting"), "{last}");
+}
+
+#[test]
+fn a_failed_bot_connect_hands_back_instead_of_exiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let bot = BotAttach {
+        bot_id: "b1".into(),
+        name: "triage".into(),
+        endpoint: dir.path().join("gone.sock"),
+        guest_session_id: "guest-b1".into(),
+    };
+    std::env::remove_var("TMUX");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps: Vec::new(),
+        width: 100,
+        height: 30,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(
+            options(dir.path().join("d.sock"), SessionSelection::Bot(bot)),
+            UiMode::Headless(plan),
+        ))
+        .expect("a failed bot connect is not a fatal error");
+    assert!(outcome.return_to_agents_view);
+    assert!(outcome.agents_view_notice.is_some());
 }

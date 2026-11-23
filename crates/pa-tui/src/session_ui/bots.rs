@@ -170,7 +170,7 @@ impl SessionUi {
                 result: Err(error), ..
             } => {
                 page.set_attaching(None);
-                page.set_fetch_error(Some(error));
+                page.set_attach_error(Some(error));
             }
         }
         self.dirty = true;
@@ -192,7 +192,7 @@ impl SessionUi {
             BotsAction::None | BotsAction::ToggleDetail => {}
             BotsAction::Refresh => self.spawn_bots_refresh(),
             BotsAction::Attach { bot_id, name } => {
-                page.set_fetch_error(None);
+                page.set_attach_error(None);
                 page.set_attaching(Some((bot_id.clone(), name.clone())));
                 self.spawn_bot_attach(bot_id, name);
             }
