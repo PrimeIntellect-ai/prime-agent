@@ -2910,6 +2910,7 @@ class FakeHost:
         self.on_message: Callable[[dict[str, Any]], None] | None = None
         self.check_errors: dict[str, str] = {}
         self.factory_task_busy_until_collect: dict[str, int] = {}
+        self.deleted: dict[str, dict[str, Any]] = {}
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -3037,8 +3038,21 @@ class FakeHost:
             results = []
             for target in payload["targets"]:
                 child = self.children.get(target)
+                if target in self.deleted:
+                    # The real host answers a deleted factory child with a
+                    # settled cancelled envelope that owns no background jobs.
+                    results.append(
+                        self._entry(
+                            child_id=target,
+                            name=self.deleted[target]["name"],
+                            status="cancelled",
+                            settled=True,
+                            error="deleted",
+                        )
+                    )
+                    continue
                 if child is None:
-                    continue  # deleted children vanish from collect results
+                    continue
                 outcome = (
                     self.child_outcomes.get(target)
                     or self.outcomes.get(child["node"])
@@ -3087,6 +3101,8 @@ class FakeHost:
         if request_type == "rlm.delete_subagent":
             target = payload["target"]
             child = self.children.pop(target, None)
+            if child is not None:
+                self.deleted[target] = child
             # The real host's delete receipt reports the row as cancelled
             # (a live child's delete settles it cancelled), so the kernel's
             # payload validation sees the same shape it sees in production.
@@ -3124,6 +3140,24 @@ class DeleteFailsHost(FakeHost):
             self.calls.append((request_type, payload or {}))
             raise RuntimeError("delete_subagent: child already gone")
         return await super().__call__(request_type, payload)
+
+
+class StaleCollectHost(FakeHost):
+    """FakeHost whose ``stale_collect``-th collect computes its results, then
+    suspends until ``release`` is set: the caller reads them stale."""
+
+    def __init__(self, clock: "FakeClock | None" = None, *, stale_collect: int):
+        super().__init__(clock=clock)
+        self.stale_collect = stale_collect
+        self.computed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = await super().__call__(request_type, payload)
+        if request_type == "rlm.collect" and self.collects == self.stale_collect:
+            self.computed.set()
+            await self.release.wait()
+        return result
 
 
 class LateAnswerHost(FakeHost):
@@ -8069,6 +8103,50 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertIn("factory_task_work_held", [event["kind"] for event in status["events"]])
 
     @async_test
+    async def test_deleting_the_held_child_and_resuming_starts_the_next_state(self) -> None:
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        started = await self.start()
+        status = await self.settle(started)
+        self.assertIn("still runs background jobs", status["pause_reason"])
+
+        await rlm_module.rlm.delete_subagent("child-1")
+        await rlm_module.rlm.factory.resume(started["run_id"])
+        status = await self.settle(started)
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
+
+    @async_test
+    async def test_a_stale_owner_poll_cannot_reopen_a_stopped_run(self) -> None:
+        # Collect 2 arms the background-job deadline; the clock jump makes
+        # collect 3 read it as expired, and stop() lands while that poll's
+        # busy result is in flight.
+        stale = StaleCollectHost(clock=self.clock, stale_collect=3)
+        stale.session_root = self.host.session_root
+        stale.outcomes = self.host.outcomes
+        self.host = stale
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.clock.advance_per_collect = factory_module.TASK_WORK_WAIT_SECONDS
+        self.host.emitted["design"] = {"design": "the design", "risk": "low"}
+        self.host.outcomes["design"]["factory_task_busy"] = True
+        started = await self.start()
+        run = self.executor._runs[started["run_id"]]
+        await self.host.computed.wait()
+
+        await rlm_module.rlm.factory.stop(started["run_id"])
+        self.host.release.set()
+        await run.task
+
+        [design] = run.states["design"].entries[0].instances
+        self.assertEqual(
+            (run.state, design.status, design.factory_task_activity),
+            ("stopped", "cancelled", "idle"),
+        )
+
+    @async_test
     async def test_valid_emit_with_unverified_activity_is_stored_but_holds_successor(self) -> None:
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = None
@@ -8304,6 +8382,25 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
             ["Do the work carefully.\n\n## Inputs\n- design: the design\n"],
         )
         self.assertEqual(len(self.host.spawn_calls("design")), 1)
+
+    @async_test
+    async def test_the_background_job_deadline_survives_a_restart(self) -> None:
+        self.host.outcomes["design"] = {"status": "done", "answer": "designed", "factory_task_busy": True}
+        gate = self.host.gate("rlm.collect", 3)
+        self.addCleanup(gate.set)
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 3).wait()
+        run = self.executor._runs[run_id]
+        [design] = run.states["design"].entries[0].instances
+        self.assertIsNotNone(design.task_work_until)
+
+        run.task.cancel()
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+
+        [adopted] = restarted._runs[run_id].states["design"].entries[0].instances
+        self.assertEqual(adopted.task_work_until, design.task_work_until)
 
     @async_test
     async def test_an_admission_inside_the_throttle_window_survives_via_its_journal(self) -> None:

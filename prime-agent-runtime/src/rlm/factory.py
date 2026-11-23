@@ -1264,9 +1264,7 @@ message, to emit them before its entry fails with ``missing_output``."""
 
 TASK_WORK_WAIT_SECONDS = 900.0
 """How long a settled child's background jobs may hold the next admission
-before the run pauses and names them: an accepted emit whose child left a
-long job running (a recursive grep over the agent dir) otherwise held the
-run silently for hours."""
+before the run pauses and names the child."""
 
 REPAIR_POLL_SECONDS = 5.0
 """How often a repairing child's outputs file is re-read."""
@@ -6428,7 +6426,9 @@ class FactoryExecutor:
                     self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
             for state, entry, instance in owner_polls:
-                if run.loop_generation != generation:
+                # A stop or pause that landed during the collect owns the
+                # instances now: a stale poll must not re-mark them busy.
+                if not self._loop_alive(run, generation):
                     return
                 result = results_by_child.get(instance.child_id or "")
                 if result is None or not result.settled or result.factory_task_busy is None:
@@ -6441,6 +6441,7 @@ class FactoryExecutor:
                     continue
                 if instance.task_work_until is None:
                     instance.task_work_until = self._now_fn() + TASK_WORK_WAIT_SECONDS
+                    self._persist_run(run, force=True)
                 elif self._now_fn() >= instance.task_work_until:
                     run.state = "paused"
                     self._mark_paused(run)
