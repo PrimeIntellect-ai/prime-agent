@@ -25,13 +25,14 @@ The harness often sends messages to the agent. These are user messages starting 
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
 - `attach_video(*paths: str) -> str`: loads short MP4/WebM clips directly into context if the agent's model declares video input, errors otherwise; only OpenAI-compatible chat-completions providers receive the video, others see a placeholder
 - `rlm.end_turn()`: async; the sanctioned terminal programmatic call — returns the turn to the user; the turn ends when the batch's end-turn call finishes Ok (any other tool calls in the same message still execute first, one end-turn is enough, no further assistant response follows); background work keeps running after the turn returns, and the remaining jobs' completion notices collect the results; raises where the host does not support it, never a silent no-op
-- `rlm.inbox.read(sender: str | None = None, inbox_class: str | None = None, since_ms: int | None = None, before_ms: int | None = None) -> list[RLMInboxMessage]`: drains and returns the messages waiting in this session's inbox, oldest first; only available to daemon-backed sessions; each given filter narrows the read (exact `sender` and `inbox_class`, arrival time from `since_ms` inclusive to `before_ms` exclusive, in epoch milliseconds) and only the matching messages leave the inbox; read messages are gone from the inbox, so assign the result
+- `rlm.inbox.read(sender: str | None = None, inbox_class: str | None = None, since_ms: int | None = None, before_ms: int | None = None, key: str | None = None) -> list[RLMInboxMessage]`: drains and returns the messages waiting in this session's inbox, oldest first; only available to daemon-backed sessions; each given filter narrows the read (exact `sender` of an agent message, exact `inbox_class`, exact `key` together with `inbox_class`, arrival time from `since_ms` inclusive to `before_ms` exclusive, in epoch milliseconds) and only the matching messages leave the inbox; read messages are gone from the inbox, so assign the result
 - `rlm.inbox.count() -> RLMInboxCount`: the waiting count, oldest arrival, and per-class counts, without draining
 - `RLMInboxMessage`
   - `id: str`
   - `inbox_class: Literal["bash-done", "factory-progress", "agent-message", "child-exited", "child-failed", "heartbeat"]`
   - `arrived_at_ms: int`: milliseconds since the epoch
-  - `sender: str | None`: the command, factory run id, agent name, child session name, or heartbeat job id
+  - `sender: str | None`: the agent name of an agent message
+  - `key: str | None`: the command, factory run id, cell id, child session name, or heartbeat job id of the other classes
   - `text: str`: the full notice
   - `meta: dict`
 - `RLMInboxCount`
