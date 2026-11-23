@@ -312,6 +312,8 @@ pub struct NodeView {
     pub files: Option<NodeFiles>,
     files_open: bool,
     files_scroll: usize,
+    /// A template-files fetch is out: the run's refresh sends no second one.
+    files_request_in_flight: bool,
     request_epoch: Option<u64>,
     requested_selector: Option<(u64, u64)>,
     last_viewport: Cell<Option<(usize, usize)>>,
@@ -334,6 +336,7 @@ impl NodeView {
             files: None,
             files_open: false,
             files_scroll: 0,
+            files_request_in_flight: false,
             request_epoch: None,
             requested_selector: None,
             last_viewport: Cell::new(None),
@@ -392,6 +395,7 @@ impl NodeView {
             files: None,
             files_open: false,
             files_scroll: 0,
+            files_request_in_flight: false,
             request_epoch: None,
             requested_selector: None,
             last_viewport: Cell::new(None),
@@ -518,12 +522,25 @@ impl NodeView {
     pub fn set_files(&mut self, files: NodeFiles) {
         self.files = Some(files);
         self.files_error = None;
+        self.files_request_in_flight = false;
     }
 
     /// Record a template-files fetch failure without replacing the node's
     /// own document error or last good file snapshot.
     pub fn set_files_error(&mut self, message: &str) {
         self.files_error = Some(crate::menu_panel::scrub_controls(message));
+        self.files_request_in_flight = false;
+    }
+
+    /// Whether the view still needs its template files and no fetch for
+    /// them is out.
+    pub fn wants_files(&self) -> bool {
+        self.files.is_none() && !self.files_request_in_flight
+    }
+
+    /// Record that a template-files fetch went out.
+    pub fn mark_files_requested(&mut self) {
+        self.files_request_in_flight = true;
     }
 
     /// One Esc: the files document closes first (back to the instance
@@ -1520,5 +1537,18 @@ mod tests {
         assert_eq!(node.selected_selector(), Some((0, 0)));
         assert_eq!(node.document_selector(), Some((0, 0)));
         assert!(node.error.is_none());
+    }
+
+    #[test]
+    fn a_files_fetch_in_flight_holds_the_next_one() {
+        let mut node = NodeView::loading("run", "worker");
+        assert!(node.wants_files());
+        node.mark_files_requested();
+        assert!(!node.wants_files(), "one fetch at a time");
+        node.set_files_error("library request failed");
+        assert!(node.wants_files(), "a failed fetch may retry");
+        node.mark_files_requested();
+        node.set_files(NodeFiles::default());
+        assert!(!node.wants_files(), "landed files need no fetch");
     }
 }

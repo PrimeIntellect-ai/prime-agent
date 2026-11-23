@@ -145,7 +145,7 @@ impl super::SessionUi {
             fetch_files = factory_view
                 .node
                 .as_ref()
-                .is_some_and(|node| node.files.is_none());
+                .is_some_and(crate::factory_view::node::NodeView::wants_files);
             if fetch_files {
                 // The machine's spec id rides the focused run: the node's
                 // template files fetch (the library payload) needs it.
@@ -161,6 +161,9 @@ impl super::SessionUi {
             .and_then(|factory_view| factory_view.node.as_mut())
         {
             node.set_request_epoch(request_epoch, selector);
+            if fetch_files && spec_id.is_some() {
+                node.mark_files_requested();
+            }
         }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
