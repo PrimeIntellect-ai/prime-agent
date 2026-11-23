@@ -192,13 +192,18 @@ mod tests {
                 true
             }
         });
+        assert!(throw_if_aborted(&signal).is_ok());
         controller.abort();
         assert!(signal.is_aborted());
+        assert!(throw_if_aborted(&signal).is_err());
         assert!(observer.await.unwrap());
     }
 
     #[tokio::test]
-    async fn race_with_abort_wins_on_abort() {
+    async fn race_with_abort_resolves_unless_aborted() {
+        let value = race_with_abort(async { 7 }, &AbortSignal::never()).await;
+        assert_eq!(value.unwrap(), 7);
+
         let controller = AbortController::new();
         let signal = controller.signal();
         let aborter = {
@@ -213,13 +218,6 @@ mod tests {
             .unwrap_err();
         aborter.await.unwrap();
         assert!(is_abort_error(&err));
-    }
-
-    #[tokio::test]
-    async fn race_with_abort_resolves_operation() {
-        let signal = AbortSignal::never();
-        let value = race_with_abort(async { 7 }, &signal).await.unwrap();
-        assert_eq!(value, 7);
     }
 
     #[tokio::test]
@@ -239,12 +237,5 @@ mod tests {
         )
         .await;
         assert!(is_abort_error(&result.unwrap_err()));
-    }
-
-    #[tokio::test]
-    async fn pre_aborted_signal_short_circuits() {
-        let controller = AbortController::new();
-        controller.abort();
-        assert!(throw_if_aborted(&controller.signal()).is_err());
     }
 }
