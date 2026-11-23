@@ -47,7 +47,6 @@ impl std::error::Error for CommandError {}
 pub struct GuestClient {
     reader: BufReader<Box<dyn AsyncReadHalf>>,
     writer: Box<dyn AsyncWriteHalf>,
-    hello: Value,
     next_id: u64,
 }
 
@@ -89,15 +88,8 @@ impl GuestClient {
         Ok(Self {
             reader,
             writer,
-            hello,
             next_id: 0,
         })
-    }
-
-    /// The guest daemon's hello frame.
-    #[must_use]
-    pub fn hello(&self) -> &Value {
-        &self.hello
     }
 
     /// Send one command and wait for its response data.
