@@ -116,15 +116,15 @@ async fn an_idle_success_is_held_and_delivers_at_the_hold_expiry() {
         "held, neither dropped nor delivered early"
     );
     tokio::time::advance(Duration::from_millis(1)).await;
-    let mut delivered = false;
-    for _ in 0..1_000 {
-        tokio::task::yield_now().await;
+    // The runner parks again after it takes the row; register before the
+    // check, so a park between the two still wakes this waiter.
+    loop {
+        let parked = worker.idle_notify.notified();
         if steering_rows(&worker).is_empty() {
-            delivered = true;
             break;
         }
+        parked.await;
     }
-    assert!(delivered, "the runner delivers the row at the hold expiry");
 }
 
 #[tokio::test(start_paused = true)]
