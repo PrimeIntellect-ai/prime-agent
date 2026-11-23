@@ -62,14 +62,19 @@ impl Shard {
         shard
     }
 
-    /// The session's own spend: its real rows, or the legacy snapshot while
-    /// none exist. The snapshot was the transcript's own usage when it was
-    /// captured, so the rows that replace it never sum to less.
+    /// The session's own spend: its real rows, or the legacy snapshot until
+    /// they bill at least as much. The snapshot was the transcript's own usage
+    /// when it was captured, so the transcript's rows catch up with it; a
+    /// worker's report that lands before them never lowers the spend.
     fn own(&self) -> Usage {
-        if self.ids.is_empty() {
-            self.snapshot.unwrap_or_default()
-        } else {
-            self.rows
+        match self.snapshot {
+            Some(snapshot)
+                if self.ids.is_empty()
+                    || self.rows.cost.total.as_f64() < snapshot.cost.total.as_f64() =>
+            {
+                snapshot
+            }
+            _ => self.rows,
         }
     }
 
@@ -355,10 +360,10 @@ impl UsageLedger {
             return Ok(Vec::new());
         }
         append_records(&self.shard_path(session_id), &fresh)?;
-        // The first real rows replace a legacy snapshot, whose input still
-        // holds the cache tokens: the totals over it refold from the shards
-        // instead of moving by a field-wise difference.
-        let replaces_snapshot = shard.ids.is_empty() && shard.snapshot.is_some();
+        // A legacy snapshot's input still holds the cache tokens: while a
+        // shard has one, the totals over it refold from the shards instead of
+        // moving by a field-wise difference.
+        let refold = shard.snapshot.is_some();
         let before = shard.own();
         for record in fresh {
             shard.add(record.id, &record.usage);
@@ -371,7 +376,7 @@ impl UsageLedger {
             if moved.contains(&member) {
                 break;
             }
-            if replaces_snapshot {
+            if refold {
                 state.totals.remove(&member);
             } else if let Some(total) = state.totals.get_mut(&member) {
                 add_assistant_usage(total, &added);
@@ -604,10 +609,11 @@ mod tests {
         assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
     }
 
-    /// A legacy child's delete snapshot bills until its transcript reappears;
-    /// the real rows then replace it without a double count or a drop (also of
-    /// the cache reads the snapshot folded into its input), and later rows add
-    /// exactly once.
+    /// A legacy child's delete snapshot bills until the reappearing
+    /// transcript's rows catch up with it: a worker's report that lands first
+    /// never lowers the total, the rows then replace the snapshot without a
+    /// double count (also of the cache reads the snapshot folded into its
+    /// input), and later rows add exactly once.
     #[test]
     fn real_rows_replace_a_legacy_delete_snapshot() {
         let home = home();
@@ -637,22 +643,28 @@ mod tests {
         assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
         assert_eq!(input_tokens(&ledger), 120);
 
+        // The transcript reappears with its older row, and the worker reports a
+        // new row before a reconcile brings the older one.
         let cache_split = Usage {
             cache_read: 100,
             total_tokens: 111,
             ..usage(0.5)
         };
         append_usage(&home.child, "c1", &cache_split);
-        ledger.reconcile_family(&home.root).unwrap();
+        append_turn(&home.child, "c2", 0.25);
+        ledger.record("child", "c2", usage(0.25)).unwrap();
         assert!((root_total(&home, &ledger) - 1.5).abs() < 1e-9);
         assert_eq!(input_tokens(&ledger), 120);
-        append_turn(&home.child, "c2", 0.25);
         ledger.reconcile_family(&home.root).unwrap();
         assert!((root_total(&home, &ledger) - 1.75).abs() < 1e-9);
         assert_eq!(input_tokens(&ledger), 130);
+        append_turn(&home.child, "c3", 0.125);
+        ledger.reconcile_family(&home.root).unwrap();
+        assert!((root_total(&home, &ledger) - 1.875).abs() < 1e-9);
+        assert_eq!(input_tokens(&ledger), 140);
         assert!(ledger.reconcile_family(&home.root).unwrap().is_empty());
         let restarted = UsageLedger::new(&home.agent, Arc::clone(&home.spawns));
-        assert!((root_total(&home, &restarted) - 1.75).abs() < 1e-9);
-        assert_eq!(input_tokens(&restarted), 130);
+        assert!((root_total(&home, &restarted) - 1.875).abs() < 1e-9);
+        assert_eq!(input_tokens(&restarted), 140);
     }
 }
