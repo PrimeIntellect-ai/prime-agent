@@ -128,7 +128,11 @@ impl SessionUi {
             self.stop_selection_auto_scroll();
             if left_press && !event.motion {
                 self.record_pressed_click(view, &event);
-                if !view.begin_frame_selection(row, col) {
+                // The full-height `/bots` page hides the transcript: a press off its text starts
+                // no transcript selection.
+                if !view.begin_frame_selection(row, col)
+                    && !matches!(view.overlay, Some(Overlay::Bots(_)))
+                {
                     view.begin_selection(row, col);
                 }
                 self.dirty = true;

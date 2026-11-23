@@ -749,7 +749,7 @@ impl AgentsViewMode {
                         bot.sandbox_id,
                         bot.checkpoint_id.as_deref().unwrap_or("none")
                     );
-                    vec![vec![self.theme.fg(ThemeColor::Dim, note)]]
+                    vec![vec![self.theme.fg(ThemeColor::Dim, truncate_text(&note, width))]]
                 })
                 .unwrap_or_default();
         }

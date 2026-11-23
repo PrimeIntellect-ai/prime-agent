@@ -135,9 +135,8 @@ fn saved_aliases(saved: &Value) -> Vec<String> {
     aliases
 }
 
-/// The SESSION column's width cap (TS `Math.min(28, ...)` originally; widened for the bot rows,
-/// whose `◈ bot ☁ remote` chips cut the name off at 28 cells): the widest the name column ever
-/// renders.
+/// The SESSION column's width cap: the widest the name column ever renders, wide enough for a bot
+/// row's `◈ bot ☁ remote` chips and its name.
 const SESSION_NAME_COLUMN_MAX_CELLS: usize = 40;
 
 /// The widest title the SESSION column renders: the column cap minus the two cells every agent

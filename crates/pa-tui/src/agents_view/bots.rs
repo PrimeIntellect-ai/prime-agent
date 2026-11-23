@@ -88,14 +88,19 @@ impl AgentsViewMode {
     }
 
     /// Merge the bot rows into `rows`. Unsearched, each bot closes its section (the bots come
-    /// ordered by section); a search keeps the matching bots after the ranked hits. A scoped
-    /// view lists no bots.
+    /// ordered by section); a name search keeps the matching bots after the ranked hits. A
+    /// scoped view and a message-content search list no bots.
     pub(super) fn merge_bot_rows(&self, rows: &mut Vec<AgentsViewRow>) {
         if self.scope_active {
             return;
         }
         let now = now_ms();
         let query = self.query.trim();
+        // A message-content search lists only sessions whose messages match: a bot's messages
+        // live in its sandbox, so no bot row matches.
+        if !query.is_empty() && self.content_search.enabled {
+            return;
+        }
         if !query.is_empty() {
             let parsed = parse_search_query(query);
             rows.extend(
