@@ -273,6 +273,33 @@ fn the_status_bar_counts_the_running_bots_and_opens_the_page() {
 }
 
 #[test]
+fn esc_from_the_bots_command_lands_on_the_dock_bots_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(json!({"bots": []}), Err("unused")),
+        vec![
+            HeadlessStep::Submit("/bots".into()),
+            wait("sandboxes this Mac owns"),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            HeadlessStep::WaitGone {
+                needle: "sandboxes this Mac owns".to_string(),
+                timeout_ms: 10_000,
+            },
+            // The exit focused the dock's bots group: Enter reopens the page.
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            wait("sandboxes this Mac owns"),
+        ],
+    );
+    assert!(!outcome.return_to_agents_view);
+    assert!(outcome
+        .frames
+        .last()
+        .is_some_and(|frame| frame.contains("sandboxes this Mac owns")));
+}
+
+#[test]
 fn an_answer_without_a_bots_list_is_an_error_on_the_page() {
     let dir = tempfile::tempdir().unwrap();
     let outcome = run(

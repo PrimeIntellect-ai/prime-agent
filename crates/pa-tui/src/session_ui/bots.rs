@@ -119,7 +119,9 @@ const LOCAL_ONLY_COMMANDS: &[&str] = &[
 impl SessionUi {
     /// Open the `/bots` page and fetch its rows in the background.
     pub(crate) fn open_bots_page(&mut self, view: &mut AgentView) {
-        // The page owns the frame: a focused dock under it would take the page's keys.
+        // The page owns the frame: a focused dock under it would take the page's keys. The dock
+        // selection moves to the bots group, so the page's exit lands there.
+        self.activity_group = crate::chrome::ActivityGroup::Bots;
         self.subagents_focused = false;
         self.update_subagent_summary(view);
         let mut page = BotsView::default();
