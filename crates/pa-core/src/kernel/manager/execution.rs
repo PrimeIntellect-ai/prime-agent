@@ -256,20 +256,11 @@ impl Inner {
                     result = Some(clipped);
                 }
             }
-            // The typed out-of-band stop: a user stop aborts the cell, and
-            // a cell that completed ok as its stop fired keeps its ok
-            // outcome.
-            let user_stopped = execution.stop_signal.is_aborted();
-            if user_stopped {
-                match execution.stop_cause() {
-                    Some(
-                        crate::kernel::shared::ExecutionStopCause::UserCancel
-                        | crate::kernel::shared::ExecutionStopCause::WriteCeiling,
-                    )
-                    | None => {
-                        status = ExecuteStatus::Aborted;
-                    }
-                }
+            // The out-of-band stop: a stopped cell reports the abort, even
+            // one that settled cooperatively on its interrupt. A cell whose
+            // `done` settled before any stop fired keeps its own outcome.
+            if execution.stop_signal.is_aborted() {
+                status = ExecuteStatus::Aborted;
             }
 
             let mut background_output = std::mem::take(&mut buffers.background_output);

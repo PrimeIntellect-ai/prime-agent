@@ -252,9 +252,9 @@ impl InternalExecuteResult {
     }
 
     /// The forced-stop completion of a captured execution whose kernel was
-    /// just retired: the partial output so far, and the typed outcome — a
-    /// user stop aborts, a hard-cap expiry is an error naming the cap and
-    /// the retirement's possible state loss.
+    /// just retired: the partial output so far, and an abort whose error
+    /// names the stop cause (an ignored user cancel or the write ceiling)
+    /// and the retirement's possible state loss.
     fn forced_stop(execution: &ActiveExecution) -> Self {
         let max_chars = execution.max_chars;
         let (stdout, stderr) = {
