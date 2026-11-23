@@ -158,6 +158,17 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         .await
         .unwrap();
     assert_eq!(collected[0].status, "done");
+    // A factory state cannot spawn a bot: its ledger edge would be lost.
+    let tagged = RlmSpawnRequest {
+        factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+            run_id: "run-1".to_string(),
+            spec_id: "spec-1".to_string(),
+            state_id: "state-1".to_string(),
+        }),
+        ..request("scout-2", RlmSpawnTarget::Sandbox)
+    };
+    let refused = sessions.spawn(tagged).await.expect_err("no factory bot");
+    assert!(refused.to_string().contains("factory"), "{refused}");
     // A local child cannot take the bot's name.
     let refused = sessions
         .spawn(request("scout", RlmSpawnTarget::Local))

@@ -1017,6 +1017,9 @@ async fn spawn_bot(
     if request.cwd.is_some() {
         bail!("rlm.spawn cwd is not supported for a sandbox target: a bot has no local directory");
     }
+    if request.factory.is_some() {
+        bail!("a factory state cannot spawn a sandbox target: the factory ledger tracks local children only");
+    }
     let Some(owner_session_id) = identity.session_id.clone() else {
         bail!("rlm.spawn target \"sandbox\" needs a saved parent session");
     };
