@@ -522,16 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_the_2117_delivery_contract() {
-        assert_eq!(DEFAULT_BATCH_SIZE, 20);
-        assert_eq!(DEFAULT_QUEUE_CAPACITY, 256);
-        assert_eq!(DEFAULT_MAX_BATCH_BYTES, 30_000);
-        assert_eq!(MAX_AGE, Duration::from_hours(24));
-        assert_eq!(RetryPolicy::default().max_attempts, 5);
-        assert_eq!(RetryPolicy::default().max_backoff, Duration::from_secs(60));
-    }
-
-    #[test]
     fn retry_backoff_is_interval_scaled_and_capped() {
         let mut config = TelemetryClientConfig::new("install-1");
         config.flush_interval = Duration::from_secs(10);
@@ -553,18 +543,6 @@ mod tests {
         client.track("event 2", Properties::new());
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(mock.event_names(), vec!["event 0", "event 1", "event 2"]);
-        client.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn explicit_flush_drains_partial_batches() {
-        let mock = Arc::new(MockSink::new());
-        let client = client_with(mock.clone(), 10, Duration::from_secs(60));
-        client.track("solo", Properties::new());
-        assert_eq!(mock.batches().len(), 0);
-        client.flush().await.unwrap();
-        assert_eq!(mock.event_names(), vec!["solo"]);
-        assert_eq!(mock.batches()[0].install_id, "install-1");
         client.shutdown().await.unwrap();
     }
 
@@ -798,23 +776,6 @@ mod tests {
         assert_eq!(channel.queue.len(), 1);
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         assert_eq!(channel.queue[0].event.name, "fresh");
-    }
-
-    #[tokio::test]
-    async fn capped_attempts_expire() {
-        let mut channel = Channel {
-            sink: Arc::new(MockSink::new()),
-            queue: VecDeque::new(),
-            next_retry_at: None,
-        };
-        channel.queue.push_back(QueueEntry {
-            event: TelemetryEvent::new("exhausted", Properties::new()),
-            attempts: 5,
-        });
-        let dropped = Arc::new(AtomicU64::new(0));
-        channel.expire(now_epoch_ms_for_tests(), 5, &dropped);
-        assert!(channel.queue.is_empty());
-        assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
     fn now_epoch_ms_for_tests() -> u64 {

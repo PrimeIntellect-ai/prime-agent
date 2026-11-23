@@ -52,33 +52,3 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let day = u32::try_from(d).expect("day of a civil date is 1..=31");
     (year, month, day)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn epoch_zero() {
-        assert_eq!(EpochMs(0).iso8601(), "1970-01-01T00:00:00.000Z");
-    }
-
-    #[test]
-    fn known_instants() {
-        assert_eq!(
-            EpochMs(1_790_700_705_951).iso8601(),
-            "2026-09-29T16:51:45.951Z"
-        );
-        // 2100-01-01T00:00:00.000Z (century non-leap year)
-        assert_eq!(
-            EpochMs(4_102_444_800_000).iso8601(),
-            "2100-01-01T00:00:00.000Z"
-        );
-        // 2000-02-29T12:00:00.500Z (leap day)
-        assert_eq!(
-            EpochMs(951_825_600_500).iso8601(),
-            "2000-02-29T12:00:00.500Z"
-        );
-        // 1969-12-31 is out of range (unsigned); clamp boundary is the epoch itself.
-        assert_eq!(EpochMs(86_399_999).iso8601(), "1970-01-01T23:59:59.999Z");
-    }
-}

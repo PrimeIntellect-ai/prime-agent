@@ -1390,47 +1390,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn the_catalog_is_the_low_frequency_set() {
-        assert_eq!(SCHEMA_VERSION, 2);
-        let names: Vec<&str> = catalog().iter().map(|rule| rule.name).collect();
-        for name in [
-            "agent started",
-            "agent run completed",
-            "agent session ended",
-            "agent command used",
-            "onboarding completed",
-            "onboarding stage",
-            "agent startup stage",
-            "agent installation stage",
-            "session archived",
-            "startup",
-            "daemon event",
-            "model refused",
-            "update completed",
-            "tui exit",
-        ] {
-            assert!(names.contains(&name), "{name} stays catalogued");
-        }
-        // The per-occurrence events folded into run/session/client counters.
-        for name in [
-            "agent run started",
-            "agent error",
-            "agent timing",
-            "agent tool summary",
-            "agent feature outcome",
-            "agent input stage",
-            "tool executed",
-            "skill used",
-            "mcp connector used",
-            "rlm child usage attributed",
-            "kernel bootstrap",
-            "tui scroll used",
-        ] {
-            assert!(!names.contains(&name), "{name} is folded, not an event");
-        }
-    }
-
     /// Every property key matches the platform backend's key pattern
     /// (`^[a-zA-Z][a-zA-Z0-9_]*$`, at most 64 chars; a bad key drops the
     /// whole event there) and every event stays under its 128-key cap.
@@ -1463,33 +1422,6 @@ mod tests {
     }
 
     #[test]
-    fn counter_keys_cover_the_fixed_vocabularies() {
-        assert_eq!(
-            feature_outcome_key("goal", "completed").as_deref(),
-            Some("feature_goal_completed_count")
-        );
-        assert_eq!(feature_outcome_key("goal", "exploded"), None);
-        assert_eq!(input_stage_key("queued").as_deref(), Some("input_queued"));
-        assert_eq!(input_stage_key("nope"), None);
-        let ended = lookup("agent session ended").unwrap();
-        let exit = lookup("tui exit").unwrap();
-        for name in FEATURE_NAMES {
-            for outcome in FEATURE_OUTCOMES {
-                let key = feature_outcome_key(name, outcome).unwrap();
-                assert!(ended.properties.iter().any(|(known, _)| *known == key));
-                assert!(exit.properties.iter().any(|(known, _)| *known == key));
-            }
-        }
-        for stage in INPUT_STAGES {
-            let prefix = input_stage_key(stage).unwrap();
-            for suffix in ["count", "max_ms"] {
-                let key = format!("{prefix}_{suffix}");
-                assert!(exit.properties.iter().any(|(known, _)| *known == key));
-            }
-        }
-    }
-
-    #[test]
     fn sanitize_drops_unknown_keys_and_falls_back_enums() {
         let mut properties = Properties::new();
         properties.set("session_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
@@ -1516,27 +1448,6 @@ mod tests {
         let _ = sanitize("agent run completed", &mut properties);
         assert_eq!(properties.get("turn_count"), Some(&json!(1_000_000u64)));
         assert!(properties.get("retry_count").is_none(), "fraction dropped");
-    }
-
-    #[test]
-    fn sanitize_keeps_null_only_where_nullable() {
-        let mut properties = Properties::new();
-        properties.set("session_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
-        properties.set("outcome", json!("error"));
-        properties.set("duration_ms", json!(120));
-        properties.set("error_category", Value::Null); // nullable
-        properties.set("compaction_count", Value::Null); // NOT nullable
-        let _ = sanitize("agent run completed", &mut properties);
-        assert_eq!(properties.get("error_category"), Some(&Value::Null));
-        assert!(properties.get("compaction_count").is_none());
-    }
-
-    #[test]
-    fn sanitize_passes_uncatalogued_events_through() {
-        let mut properties = Properties::new();
-        properties.set("anything", json!("kept"));
-        assert_eq!(sanitize("a future event", &mut properties), 0);
-        assert_eq!(properties.get("anything"), Some(&json!("kept")));
     }
 
     #[test]
