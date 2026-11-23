@@ -23,6 +23,7 @@ pub(crate) use summary::emit_action_update_fresh;
 
 mod queue;
 
+pub(crate) use queue::admit_inbox_notice_locked;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
@@ -705,7 +706,6 @@ impl Worker {
                                 fields,
                                 Lane::Steering,
                                 closed,
-                                |_, _| None,
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {

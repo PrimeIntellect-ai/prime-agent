@@ -516,7 +516,7 @@ fn build_tui_options(
         version: crate::config::version().to_string(),
         onboarding,
         telemetry_disabled: crate::mode::create_telemetry_disabled(config),
-        // `/mcp login` / `/mcp logout`: the client-side auth flows run in
+        // MCP connect flows opened from `/mcp` run in
         // this process (the TS interactive client's placement) and persist
         // through the shared auth store the daemon's sessions read.
         client_auth: Some(pa_tui::client_auth::ClientAuthCommandsHandle(

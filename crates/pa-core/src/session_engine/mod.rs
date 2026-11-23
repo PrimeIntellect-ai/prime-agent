@@ -28,6 +28,7 @@ pub mod inbox;
 pub mod ipython_state;
 pub mod late_sent_messages;
 pub mod messages;
+pub mod model_resolution_notice;
 pub mod model_usage;
 pub mod provider_adapter;
 pub mod provider_failover;

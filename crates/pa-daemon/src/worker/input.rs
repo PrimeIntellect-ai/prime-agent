@@ -175,9 +175,19 @@ impl Worker {
         if let Err(response) = self.require_created(lane.as_str()) {
             return response;
         }
+        // `requireBusy` admits only into a running turn the runner keeps
+        // feeding, so it never starts a turn and never resumes a suspension.
+        let require_busy = payload.get("requireBusy").and_then(Value::as_bool) == Some(true);
+        let command = if lane == Lane::Steering {
+            "steer"
+        } else {
+            "follow_up"
+        };
         // These commands are resume sites: an admitted turn with
         // `wake: "immediate"` resumes the suspension.
-        self.resume_queued_input();
+        if !require_busy {
+            self.resume_queued_input();
+        }
         let message = payload
             .get("message")
             .and_then(Value::as_str)
@@ -231,6 +241,9 @@ impl Worker {
             }
         }
         let mut core = self.core.lock().unwrap();
+        if require_busy && (!core.busy || core.queued_input_parked(&self.input_pauses)) {
+            return response_success(None, command, Some(json!({ "queued": false })));
+        }
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -268,11 +281,6 @@ impl Worker {
         });
         let _ = self.emit_action_update(&snapshot);
         self.work_notify.notify_one();
-        let command = if lane == Lane::Steering {
-            "steer"
-        } else {
-            "follow_up"
-        };
         response_success(None, command, Some(json!({ "queued": true })))
     }
 
@@ -310,7 +318,6 @@ impl Worker {
             fields,
             lane,
             closed,
-            |_, _| None,
             Some(engine.as_ref()),
         ) {
             Ok(_queued) => {
@@ -416,14 +423,31 @@ impl Worker {
                 .inbox()
                 .map(|inbox| (std::sync::Arc::clone(engine), inbox))
         });
+        // A closing session with the inbox on takes no delivery: no lane
+        // row or wake would announce it, so the sender sees the refusal
+        // instead of a receipt for a message nothing delivers. The check
+        // follows the store lookup: the closing paths mark the session
+        // closed before they retire its store, so a store missing because
+        // of a close is always seen as closed here (never a raw row on a
+        // retiring session).
+        if inbox_on
+            && self
+                .agent_engine
+                .as_ref()
+                .is_some_and(|engine| engine.session_is_closed())
+        {
+            return response_failure(
+                None,
+                "worker_deliver_message",
+                "Target session is closed",
+                None,
+            );
+        }
         if let Some((engine, inbox)) = inbox_route {
-            let (id, queued, target) = {
+            let (id, target) = {
                 let (core, inputs) = self.summary_inputs();
                 let id =
                     pa_core::session_engine::agent_messaging::create_agent_session_message_id();
-                // The closed-branch receipt's sample; the live path's
-                // receipt follows the admission's own under-lock sample.
-                let queued = core.busy;
                 let summary = self.summary_locked(&core, inputs);
                 // The receiving session's endpoint for the receipt's `target`.
                 let mut target = json!({
@@ -437,7 +461,7 @@ impl Worker {
                 if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
                     target["sessionName"] = json!(name);
                 }
-                (id, queued, target)
+                (id, target)
             };
             // The provenance the targeted reads filter on: the sender
             // name, the message id, and the family relationship.
@@ -446,72 +470,10 @@ impl Worker {
                 meta["relationship"] = json!(relationship.as_str());
             }
             let notice = pa_core::session_engine::inbox::InboxNotice {
-                class: pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE,
+                class: pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
                 sender: Some(sender_name),
                 text: prompt,
                 meta,
-            };
-            if engine.session_is_closed() {
-                // A closed session takes no lane row and no wake (the
-                // notice sink drops the same way): the message stays
-                // durable in the inbox, so a reopened session reads it.
-                // The same capacity bound holds (counted under the core
-                // lock, the store push riding the documented order).
-                {
-                    let core = self.core.lock().unwrap();
-                    let pending = pending_agent_messages(&inbox, &core.steering, &core.follow_up);
-                    if let Err(error) =
-                        pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
-                            pending,
-                            DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-                        )
-                    {
-                        return response_failure(
-                            None,
-                            "worker_deliver_message",
-                            &error.to_string(),
-                            None,
-                        );
-                    }
-                    // The append is atomic with the retire: the slot's own
-                    // mutex covers the identity re-check and the journal
-                    // append, so a `clear_inbox` racing this delivery either
-                    // waits for the append (the replacement's build opens
-                    // the journal only after the clear, with the record
-                    // already on disk) or lands first and refuses here —
-                    // two stores never race the same journal across the
-                    // swap.
-                    if engine
-                        .push_to_live_inbox(&inbox, notice, pa_core::autonomous::now_millis())
-                        .is_none()
-                    {
-                        drop(core);
-                        return response_failure(
-                            None,
-                            "worker_deliver_message",
-                            "Target session is closed",
-                            None,
-                        );
-                    }
-                }
-                let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
-                return response_success(None, "worker_deliver_message", Some(receipt));
-            }
-            // The capacity bound counts waiting inbox messages too, and
-            // it is re-checked inside the admission's critical section
-            // (the lane lengths read from the locked core): concurrent
-            // deliveries can never pass one stale sample together.
-            let capacity_error = {
-                let inbox = std::sync::Arc::clone(&inbox);
-                move |steering: &std::collections::VecDeque<QueuedItem>,
-                      follow_up: &std::collections::VecDeque<QueuedItem>| {
-                    pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
-                        pending_agent_messages(&inbox, steering, follow_up),
-                        DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-                    )
-                    .err()
-                    .map(|error| error.to_string())
-                }
             };
             let closed_engine = std::sync::Arc::clone(&engine);
             // The admission answers whether ITS busy sample parked the
@@ -526,7 +488,6 @@ impl Worker {
                 notice,
                 lane,
                 move || closed_engine.session_is_closed(),
-                capacity_error,
                 Some(engine.as_ref()),
             ) {
                 Ok(queued) => queued,
@@ -544,22 +505,6 @@ impl Worker {
             // the worker to deliver it (no client reopens the session).
             let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
             return response_success(None, "worker_deliver_message", Some(receipt));
-        }
-        // A retiring session with the inbox on but no store left takes
-        // no lane row either: refuse instead of injecting the raw row
-        // the kernel-notice sink would drop.
-        if inbox_on
-            && self
-                .agent_engine
-                .as_ref()
-                .is_some_and(|engine| engine.session_is_closed())
-        {
-            return response_failure(
-                None,
-                "worker_deliver_message",
-                "Target session is closed",
-                None,
-            );
         }
         let (id, queued, snapshot, target) = {
             let (mut core, inputs) = self.summary_inputs();
@@ -646,28 +591,6 @@ impl Worker {
         let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
         response_success(None, "worker_deliver_message", Some(receipt))
     }
-}
-
-/// The a2a pending count: waiting inbox agent messages plus queued
-/// direct-route marker rows. The coalesced wake rows ride one notice per
-/// batch, so they never consume the cap.
-fn pending_agent_messages(
-    inbox: &pa_core::session_engine::inbox::SessionInbox,
-    steering: &std::collections::VecDeque<QueuedItem>,
-    follow_up: &std::collections::VecDeque<QueuedItem>,
-) -> usize {
-    let waiting = inbox
-        .count()
-        .2
-        .get(pa_core::session_engine::inbox::INBOX_CLASS_AGENT_MESSAGE)
-        .copied()
-        .unwrap_or(0) as usize;
-    let queued = steering
-        .iter()
-        .chain(follow_up.iter())
-        .filter(|item| item.agent_message.is_some())
-        .count();
-    queued + waiting
 }
 
 /// The `worker_deliver_message` receipt for one accepted delivery (the

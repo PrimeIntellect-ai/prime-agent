@@ -738,8 +738,9 @@ impl RlmSubagentHost for InlineHost {
                     config.agent_dir.join("models.json"),
                 );
                 let all: Vec<Model> = registry.get_all().to_vec();
-                let resolved =
-                    pa_core::models::resolve_cli_model(/*cli_provider*/ None, &selector, &all);
+                let resolved = crate::print_runtime::resolve_cli_model_warning_to_stderr(
+                    /*cli_provider*/ None, &selector, &all,
+                );
                 if let Some(error) = resolved.error {
                     return Err(anyhow::Error::msg(error));
                 }

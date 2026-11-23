@@ -56,7 +56,7 @@ impl TurnRunner {
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
-                if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
+                if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     None
                 } else if core.steering.front().is_some() {
@@ -344,13 +344,6 @@ impl TurnRunner {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: first.custom_message.clone(),
-            // The lane the item rode is the sender's intent: a steering
-            // item interrupts a busy agent, a follow-up item queues at
-            // its boundary — the admission queues (never rejects) either.
-            streaming_behavior: Some(match lane {
-                Lane::Steering => pa_core::session_engine::StreamingBehavior::Steer,
-                Lane::FollowUp => pa_core::session_engine::StreamingBehavior::FollowUp,
-            }),
         };
         // `message_update` frames park in a single slot; other frames go
         // out direct, flushing the parked update first (wire order matches

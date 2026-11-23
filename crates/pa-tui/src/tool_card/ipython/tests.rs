@@ -171,6 +171,83 @@ fn sent_agent_messages_render_below_the_code() {
 }
 
 #[test]
+fn inbox_read_messages_render_with_their_transcript_rows() {
+    let details = json!({
+        "status": "ok",
+        "durationMs": 3,
+        "inboxMessages": [
+            {
+                "id": "inbox-1", "class": "agent-message", "arrivedAtMs": 1, "sender": "worker",
+                "text": "[agent-message from child:worker]\n\nDone.",
+                "meta": { "id": "agentmsg_1", "from": { "sessionName": "worker" } },
+            },
+            {
+                "id": "inbox-2", "class": "child-exited", "arrivedAtMs": 2, "sender": "probe",
+                "text": "[child-exited: child:probe] ended without a reply",
+                "meta": { "sessionName": "probe" },
+            },
+            {
+                "id": "inbox-3", "class": "bash-done", "arrivedAtMs": 3, "sender": "sleep 1",
+                "text": "[bash-done pid:7 exit:0] sleep 1",
+                "meta": { "pid": 7, "command": "sleep 1", "exitCode": 0, "exitClass": "success" },
+            },
+            {
+                "id": "inbox-4", "class": "heartbeat", "arrivedAtMs": 4, "sender": "job-1",
+                "text": "Check the run.",
+                "meta": { "schedule": "5m" },
+            },
+        ],
+    });
+    let card = cell_card("await rlm.inbox.read()", details, false, false);
+    let collapsed: Vec<String> = render_card(&card, Detail::Overview)
+        .iter()
+        .map(|row| text_of(row).trim_end().to_string())
+        .collect();
+    assert_eq!(
+        collapsed[1..],
+        [
+            " \u{2709} Agent message \u{b7} \u{2193} worker",
+            " \u{2709} Agent message \u{b7} \u{2193} probe",
+            " \u{2713} Background shell command finished",
+            "",
+            " \u{25f7} Heartbeat prompt \u{b7} every 5m",
+        ],
+        "summary rows only when collapsed: {collapsed:?}"
+    );
+
+    let expanded: Vec<String> = render_card(&card, Detail::All)
+        .iter()
+        .map(|row| text_of(row).trim_end().to_string())
+        .collect();
+    let body_after = |header: &str| {
+        let index = expanded
+            .iter()
+            .position(|row| row == header)
+            .unwrap_or_else(|| panic!("{header} in {expanded:?}"));
+        expanded[index + 1].clone()
+    };
+    assert_eq!(
+        body_after(" \u{2709} Agent message \u{b7} \u{2193} worker"),
+        " \u{2570}\u{2500} [agent-message from child:worker]"
+    );
+    assert_eq!(
+        body_after(" \u{2709} Agent message \u{b7} \u{2193} probe"),
+        " \u{2570}\u{2500} [child-exited: child:probe] ended without a reply"
+    );
+    assert!(body_after(" \u{2713} Background shell command finished")
+        .contains("[bash-done pid:7 exit:0]"));
+    assert!(body_after(" \u{25f7} Heartbeat prompt \u{b7} every 5m").contains("Check the run."));
+
+    for detail in [Detail::Overview, Detail::Details, Detail::All] {
+        assert_eq!(
+            count(&card, 0, detail, detail, &theme(), 100, true),
+            render_card(&card, detail).len(),
+            "count matches render at {detail:?}"
+        );
+    }
+}
+
+#[test]
 fn sent_agent_message_receipts_share_the_viewer_relative_arrow() {
     // Both receipt kinds render the shared `Agent message` label with
     // the outgoing `↑` arrow (the operator's 2026-09-25 directive).

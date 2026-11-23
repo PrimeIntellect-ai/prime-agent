@@ -241,14 +241,6 @@ impl pa_tui::client_auth::ClientAuthCommands for ScriptedClientAuth {
     ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
         Box::pin(async move { Ok("Saved API key.".to_string()) })
     }
-
-    fn logout(
-        &self,
-        server: &str,
-    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
-        let server = server.to_string();
-        Box::pin(async move { Ok(format!("{server} is not connected.")) })
-    }
 }
 
 fn mcp_child_options(socket: PathBuf) -> InteractiveOptions {
@@ -441,15 +433,15 @@ fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
     );
     assert!(
         find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_none(),
-        "the /mcp login never leaves the alternate screen"
+        "the /mcp connect flow never leaves the alternate screen"
     );
     assert!(
         find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_none(),
-        "the /mcp login never clears the screen"
+        "the /mcp connect flow never clears the screen"
     );
     assert!(
         find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_none(),
-        "the /mcp login never releases the mouse tracking (the old suspend bracket)"
+        "the /mcp connect flow never releases the mouse tracking (the old suspend bracket)"
     );
 
     harness.finish();
