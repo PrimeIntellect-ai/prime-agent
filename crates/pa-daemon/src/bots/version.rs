@@ -2,9 +2,9 @@
 //!
 //! [`INSTALL_SCRIPT`] installs that release in the guest from the GitHub release
 //! Linux tarball, verified against the release `SHA256SUMS`. A build with no
-//! published release (a dev build) cannot spawn bots unless
-//! [`TARBALL_OVERRIDE_ENV`] names a local Linux tarball, which the manager
-//! uploads through the exec stdin.
+//! published release (a dev build) installs a linux-x64 tarball of its own
+//! build instead: [`TARBALL_OVERRIDE_ENV`], or the tarball `make bot-tarball`
+//! puts next to the binary. The manager uploads it through the exec stdin.
 
 use std::path::PathBuf;
 
@@ -15,6 +15,13 @@ pub const TARBALL_OVERRIDE_ENV: &str = "PRIME_AGENT_BOT_TARBALL";
 
 /// The exit code [`INSTALL_SCRIPT`] returns when the release is not published.
 pub const UNPUBLISHED_EXIT_CODE: i32 = 3;
+
+/// The exit code [`INSTALL_SCRIPT`] returns when the local tarball is another version.
+pub const TARBALL_VERSION_EXIT_CODE: i32 = 4;
+
+/// The exit code [`INSTALL_SCRIPT`] returns when the installed build has no
+/// bot guest side (`prime-agent relay --probe` fails).
+pub const NO_GUEST_EXIT_CODE: i32 = 5;
 
 /// The product version of this binary (the version the daemon hello reports).
 #[must_use]
@@ -32,14 +39,25 @@ pub enum ReleaseSource {
 }
 
 impl ReleaseSource {
-    /// [`TARBALL_OVERRIDE_ENV`] when set, else the published release.
+    /// [`TARBALL_OVERRIDE_ENV`] when set, else [`tarball_name`] next to this
+    /// binary when it exists, else the published release.
     #[must_use]
-    pub fn from_env() -> Self {
-        match std::env::var_os(TARBALL_OVERRIDE_ENV) {
-            Some(path) if !path.is_empty() => Self::LocalTarball(PathBuf::from(path)),
-            _ => Self::Published,
+    pub fn resolve() -> Self {
+        if let Some(path) = std::env::var_os(TARBALL_OVERRIDE_ENV).filter(|path| !path.is_empty()) {
+            return Self::LocalTarball(PathBuf::from(path));
         }
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join(tarball_name(local_version()))))
+            .filter(|path| path.is_file())
+            .map_or(Self::Published, Self::LocalTarball)
     }
+}
+
+/// The linux-x64 release tarball name of `version`.
+#[must_use]
+pub fn tarball_name(version: &str) -> String {
+    format!("prime-agent-{version}-linux-x64.tar.gz")
 }
 
 /// One install run: the script env and the optional stdin payload.
@@ -70,24 +88,42 @@ impl Install {
     }
 }
 
-/// The message for a guest install that found no published release.
+/// The message for an [`INSTALL_SCRIPT`] exit code that names a known
+/// failure, `None` for any other exit code.
 #[must_use]
-pub fn unpublished_message(version: &str) -> String {
-    format!(
-        "prime-agent {version} has no published Linux release, so a bot cannot run it. \
-         Use a released build, or set {TARBALL_OVERRIDE_ENV} to a local linux-x64 release tarball."
-    )
+pub fn install_failure(exit_code: i32, version: &str) -> Option<String> {
+    let build_one = format!(
+        "run `make bot-tarball` in this build's checkout, or set {TARBALL_OVERRIDE_ENV} \
+         to a linux-x64 tarball of this build"
+    );
+    match exit_code {
+        UNPUBLISHED_EXIT_CODE => Some(format!(
+            "prime-agent {version} has no published Linux release, so a bot cannot run it. \
+             Use a released build, or {build_one}."
+        )),
+        TARBALL_VERSION_EXIT_CODE => Some(format!(
+            "the bot tarball is not prime-agent {version}: {build_one}."
+        )),
+        NO_GUEST_EXIT_CODE => Some(format!(
+            "the bot's prime-agent {version} has no bot guest support. \
+             Bots need a release that contains it; for this build, {build_one}."
+        )),
+        _ => None,
+    }
 }
 
-/// Prints the guest's `prime-agent --version`, or nothing when it is not installed.
+/// Prints the guest's `prime-agent --version` when it has the bot guest
+/// side, else nothing (the manager then installs).
 pub const GUEST_VERSION_SCRIPT: &str = r#"export PATH="$HOME/.local/bin:$PATH"
-command -v prime-agent >/dev/null 2>&1 && prime-agent --version || true
+command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2>&1 \
+  && prime-agent --version || true
 "#;
 
 /// Fetches the `$PA_VERSION` linux-x64 release tarball (or reads it from
 /// stdin), verifies it, and installs it with the release's own `install.sh
 /// --archive`. That installer writes the managed layout the self-update reads,
-/// installs uv, and stops a daemon that runs another version.
+/// installs uv, and stops a daemon that runs another version. The install
+/// fails when the build has no bot guest side.
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -98,6 +134,12 @@ cd "$work"
 if [ -n "${PA_TARBALL_BYTES:-}" ]; then
   head -c "$PA_TARBALL_BYTES" > "$asset"
   echo "${PA_TARBALL_SHA256}  $asset" | sha256sum -c - >/dev/null
+  tar -xzf "$asset" package.json
+  tarball_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+  if [ "$tarball_version" != "$PA_VERSION" ]; then
+    echo "the bot tarball is prime-agent ${tarball_version}, not ${PA_VERSION}" >&2
+    exit 4
+  fi
 else
   base="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PA_VERSION}"
   status="$(curl -sSL --retry 3 -o SHA256SUMS -w '%{http_code}' "$base/SHA256SUMS" || true)"
@@ -117,4 +159,8 @@ fi
 tar -xzf "$asset" install.sh
 sh ./install.sh --archive "$work/$asset" --force
 test "$(prime-agent --version)" = "$PA_VERSION"
+if ! prime-agent relay --probe >/dev/null 2>&1; then
+  echo "prime-agent ${PA_VERSION} has no bot guest support" >&2
+  exit 5
+fi
 "#;

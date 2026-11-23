@@ -1,0 +1,1 @@
+- Bots run on the owner's own build: `make bot-tarball` builds a linux-x64 tarball of the checkout next to the binary, and the daemon installs it in the bot. A bot whose prime-agent has no bot guest side now fails the spawn with a clear message, and a relay that ends before the hello reports its exit code and stderr.

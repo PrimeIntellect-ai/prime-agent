@@ -139,7 +139,7 @@ impl BotManager {
                 .ok()
                 .filter(|image| !image.is_empty())
                 .unwrap_or_else(|| DEFAULT_BOT_IMAGE.to_string()),
-            release: ReleaseSource::from_env(),
+            release: ReleaseSource::resolve(),
         })
     }
 
@@ -666,8 +666,8 @@ impl BotManager {
                     deadline,
                 )
                 .await?;
-            if output.exit_code == version::UNPUBLISHED_EXIT_CODE {
-                bail!(version::unpublished_message(local));
+            if let Some(message) = version::install_failure(output.exit_code, local) {
+                bail!(message);
             }
             check_exit("install prime-agent in the bot", &output)?;
         }

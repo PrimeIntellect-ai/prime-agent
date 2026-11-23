@@ -158,6 +158,28 @@ package:
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/package_release.py $(RELEASE_PACKAGE_FLAGS) $(CATALOG_ASSETS_FLAG)
 
+# A linux-x64 release tarball of this checkout for bots (docs/bots-page.md).
+# It lands next to target/release/prime-agent, where the daemon finds it.
+# Linux hosts only; an arm64 host cross-builds. Needs the x86_64 cross gcc
+# and binutils (Debian: gcc-x86-64-linux-gnu) and cargo-about on PATH.
+BOT_TARGET = x86_64-unknown-linux-gnu
+BOT_DIST = target/$(BOT_TARGET)/dist
+BOT_TOOLS = $(CURDIR)/$(BOT_DIST)/tools
+
+bot-tarball:
+	@command -v x86_64-linux-gnu-gcc >/dev/null 2>&1 || { echo "x86_64-linux-gnu-gcc not installed (apt-get install gcc-x86-64-linux-gnu)"; exit 1; }
+	@command -v cargo-about >/dev/null 2>&1 || { echo "cargo-about not installed (cargo install cargo-about --locked)"; exit 1; }
+	rustup target add $(BOT_TARGET)
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc cargo build --release --locked -p pa-cli --target $(BOT_TARGET)
+	mkdir -p $(BOT_TOOLS)
+	ln -sf "$$(command -v x86_64-linux-gnu-objcopy)" $(BOT_TOOLS)/objcopy
+	ln -sf "$$(command -v x86_64-linux-gnu-objdump)" $(BOT_TOOLS)/objdump
+	PATH="$(BOT_TOOLS):$$PATH" python3 scripts/release/split_debug.py --binary target/$(BOT_TARGET)/release/prime-agent --shipped $(BOT_DIST)/prime-agent --out $(BOT_DIST) --version "$(VERSION)" --target $(BOT_TARGET)
+	python3 scripts/release/bundle_catalog.py generate --network --out $(BOT_DIST)/catalog-assets
+	PATH="$(BOT_TOOLS):$$PATH" python3 scripts/release/assemble_artifacts.py --repo-root . --version "$(VERSION)" --target $(BOT_TARGET) --binary $(BOT_DIST)/prime-agent --decoder $(BOT_DIST)/prime-agent-$(VERSION)-linux-x64.debug.gz --catalog-assets $(BOT_DIST)/catalog-assets --out-dir $(BOT_DIST)
+	mkdir -p target/release
+	cp $(BOT_DIST)/prime-agent-$(VERSION)-linux-x64.tar.gz target/release/
+
 # Bundled-catalog gates (scripts/release/test_catalog_assets.py): the
 # offline fixture passes the full packer validation, the packer hard-fails
 # on missing/invalid assets, network mode is verified against a local HTTP
@@ -199,7 +221,7 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates perf
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package bot-tarball catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates perf
 
 # Offline packaging contract tests for updaters shipped since Prime Agent 0.6.
 legacy-upgrade-gates:
