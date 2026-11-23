@@ -33,12 +33,12 @@ factory_harness.create_factory('Recovery fixture', 'Actual factory output recove
                 'subagent': {'prompt': 'FACTORY_RECOVERY_CHILD_VERIFY'}}],
     'transitions': [{'from': 'work', 'to': 'verified',
         'when': {'output': 'data', 'path': 'ok', 'op': 'eq', 'value': True}}]})
-factory_started = await rlm.factory.run('recovery-fixture')
+factory_started = await rlm.machine.run('recovery-fixture')
 print('FACTORY_RECOVERY_RESULT=' + json.dumps(factory_started))'''
 NOTICE_CELL = '''import json
 from rlm import inbox
 messages = await inbox.read()
-print('FACTORY_NOTICES=' + json.dumps([m.text for m in messages if m.inbox_class == 'factory-progress']))'''
+print('FACTORY_NOTICES=' + json.dumps([m.text for m in messages if m.inbox_class == 'machine-progress']))'''
 
 
 class Provider(http.server.ThreadingHTTPServer):
@@ -136,7 +136,7 @@ def observe(binary, root, observed):
     env[TAG] = str(root)
     server = Provider()
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    (root / 'agent/settings.json').write_text(json.dumps({'factory': {'enabled': True},
+    (root / 'agent/settings.json').write_text(json.dumps({'machine': {'enabled': True},
         'prewarmPythonKernel': False, 'defaultProvider': 'parity-local', 'defaultModel': 'parity-1',
         'onboardingCompleted': True, 'onboardingShown': True, 'telemetry': {'noticeShown': True}}))
     (root / 'agent/models.json').write_text(json.dumps({'providers': {'parity-local': {
@@ -182,14 +182,14 @@ def observe(binary, root, observed):
             # The agent inbox routes factory milestones: the parent is woken
             # by the short steering notice, and the full text waits in the
             # durable inbox until the session reads it.
-            notice = f'[factory-progress run:{run_id}] {kind}:'
+            notice = f'[machine-progress run:{run_id}] {kind}:'
             deadline = time.monotonic() + 120
             last_probe = 0.0
             while time.monotonic() < deadline:
                 wake = [text for body in list(server.parent_requests)
                         for m in body.get('messages', []) if m.get('role') == 'user'
                         for text in texts(m.get('content'))
-                        if '[inbox ' in text and 'factory-progress' in text]
+                        if '[inbox ' in text and 'machine-progress' in text]
                 read = [line[len(NOTICES_MARKER):] for body in list(server.parent_requests)
                         for m in body.get('messages', []) if m.get('role') == 'tool'
                         for content in texts(m.get('content'))

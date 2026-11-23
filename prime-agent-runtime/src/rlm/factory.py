@@ -16,7 +16,7 @@ This module implements the write-time dry run for both forms -- the machine
 validator, the dag-to-machine compiler, the unified entry point
 (``validate_factory_spec`` detects the form), and a canonicalizer that
 applies defaults and returns the canonical MACHINE form -- plus the
-executor (``FactoryExecutor`` and the ``rlm.factory`` namespace:
+executor (``FactoryExecutor`` and the ``rlm.machine`` namespace:
 run/status/stop/resume) that runs canonicalized machines through the
 existing RLM supervisor: states are admitted with ``rlm.spawn``, settled
 through ``rlm.collect``, and cancelled with ``rlm.delete_subagent``. The
@@ -31,14 +31,14 @@ supervisor-owned and never depended on the kernel, so a finished child's
 emitted outputs are still collected after any restart.
 
 The full agent-facing reference — authoring rules, guards/joins/cycles,
-foreach, budgets, stall detectors, and the ``rlm.factory`` API with worked
+foreach, budgets, stall detectors, and the ``rlm.machine`` API with worked
 examples — is embedded in this module as ``FACTORY_HELP``;
 ``rlm.machine.help()`` returns it with no filesystem resolution, so
 packaged kernels (where the repo layout is not adjacent) see the same
 guide.
 
 The namespace is opt-in: while the ``machine.enabled`` setting is off (the
-default; the user turns it on with ``/machine on``), every ``rlm.factory``
+default; the user turns it on with ``/machine on``), every ``rlm.machine``
 call except ``help()`` and every factory harness write refuses with one
 clean message (``FACTORY_DISABLED_MESSAGE``), never a crash.
 """
@@ -6656,7 +6656,7 @@ def factory_enabled() -> bool:
 def require_factory_enabled() -> None:
     """Refuse with one clean error while the factory is disabled.
 
-    Every gated surface funnels through here -- the ``rlm.factory``
+    Every gated surface funnels through here -- the ``rlm.machine``
     namespace calls (``run``/``status``/``stop``/``resume``, and the later
     ``graph``/``watch``) and the factory harness writes -- so the refusal is
     one message at every seam. ``help()`` is deliberately exempt: the
@@ -6670,7 +6670,7 @@ _DEFAULT_EXECUTOR: FactoryExecutor | None = None
 
 
 def default_factory_executor() -> FactoryExecutor:
-    """The process-wide executor behind the ``rlm.factory`` namespace.
+    """The process-wide executor behind the ``rlm.machine`` namespace.
 
     Constructed once per kernel boot, and its registry rehydrated off the
     session artifact dir: runs this kernel's predecessors left behind are

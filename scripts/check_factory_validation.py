@@ -108,7 +108,7 @@ def observe(binary, root, observed):
     env[TAG] = str(root)
     server = Provider()
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    (root / 'agent/settings.json').write_text(json.dumps({'factory': {'enabled': True},
+    (root / 'agent/settings.json').write_text(json.dumps({'machine': {'enabled': True},
         'prewarmPythonKernel': False, 'defaultProvider': 'parity-local', 'defaultModel': 'parity-1'}))
     (root / 'agent/models.json').write_text(json.dumps({'providers': {'parity-local': {
         'api': 'openai-completions', 'apiKey': 'fixture-only',
