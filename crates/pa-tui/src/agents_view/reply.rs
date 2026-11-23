@@ -359,11 +359,6 @@ impl AgentsViewMode {
         was_delete_armed: Option<PendingDelete>,
         key: &str,
     ) {
-        // Every ctrl+c while armed counts as handled: the composer's cancel keys
-        // include it.
-        if key == "ctrl+c" {
-            self.exit_guard.note_ctrl_c_handled();
-        }
         // ctrl+c disarms — the composer's hints advertise it as cancel, never the
         // exit flow.
         if self.keybindings.matches(key, "app.clear") {
