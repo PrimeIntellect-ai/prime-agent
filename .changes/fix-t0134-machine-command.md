@@ -1,0 +1,1 @@
+- `prime-agent machine <...>` now exits at once with a pointer to `prime-agent factory <...>`, instead of starting a silent agent turn on those words.

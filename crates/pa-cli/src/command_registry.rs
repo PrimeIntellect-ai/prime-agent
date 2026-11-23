@@ -313,9 +313,18 @@ without its project Python code.",
     ]),
 ];
 
-/// Command names that once existed and now print removal guidance.
-pub const REMOVED_COMMAND_NAMES: &[&str] =
-    &["app", "daemon", "install", "manage", "remove", "uninstall"];
+/// Command names that print guidance instead of starting a session: names that
+/// once existed, and `machine`, which reads like the machine commands under
+/// `factory`.
+pub const REMOVED_COMMAND_NAMES: &[&str] = &[
+    "app",
+    "daemon",
+    "install",
+    "machine",
+    "manage",
+    "remove",
+    "uninstall",
+];
 
 pub fn public_command_names() -> Vec<&'static str> {
     COMMAND_SPECS

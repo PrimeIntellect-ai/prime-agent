@@ -254,6 +254,12 @@ fn reject_removed_command(args: &[String]) -> PublicCommandResult {
         ("install", _) => Some("Use \"prime-agent package install\".".to_string()),
         ("remove" | "uninstall", _) => Some("Use \"prime-agent package remove\".".to_string()),
         ("manage", _) => Some("Use \"prime-agent agents\".".to_string()),
+        ("machine", subcommand) => Some(format!(
+            "Use \"prime-agent factory{}\".",
+            subcommand
+                .map(|name| format!(" {name}"))
+                .unwrap_or_default()
+        )),
         _ => None,
     };
     let joined: Vec<&str> = args.iter().take(2).map(String::as_str).collect();
@@ -937,6 +943,16 @@ mod incident_dispatch_tests {
         ]));
         assert!(result.handled);
         assert_eq!(result.exit_code, None);
+        assert!(result.args.is_empty());
+    }
+
+    #[test]
+    fn the_machine_command_fails_fast_instead_of_starting_a_session() {
+        // `machine validate <dir>` once fell through as a prompt and ran a
+        // silent agent turn; it must exit with guidance instead.
+        let result = handle_public_command(&args(&["machine", "validate", "some/dir"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
         assert!(result.args.is_empty());
     }
 
