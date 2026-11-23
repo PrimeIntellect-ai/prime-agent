@@ -159,9 +159,14 @@ impl PrimePlatform {
             stdin: stdin.is_some(),
             session_uuid: session_uuid.clone(),
         };
+        // The stream does not reattach on its own: a silent reattach loses
+        // output, so the loop below reattaches and marks the run attached.
         let options = StartOptions {
+            stream: StreamOptions {
+                max_reconnects: Some(0),
+                ..StreamOptions::default()
+            },
             connect_timeout_ms: Some(EXEC_DEADLINE_MS),
-            ..StartOptions::default()
         };
         // A definitive answer fails now. Any other start fault may have
         // reached sandboxd, so attach to the session if it exists: a second
@@ -169,7 +174,7 @@ impl PrimePlatform {
         // earlier output is lost, so it runs again after it ends; the guest
         // scripts are safe to rerun in sequence. When the gateway cannot
         // confirm the session, the guest is not up yet.
-        let (mut stream, attached) = match sessions.start(&request, options).await {
+        let (mut stream, mut attached) = match sessions.start(&request, options).await {
             Ok(stream) => (stream, false),
             Err(error)
                 if matches!(
@@ -211,7 +216,19 @@ impl PrimePlatform {
         }
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         while let Some(event) = stream.next_event().await {
-            match event.map_err(|error| PlatformError::Other(error.to_string()))? {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) if !attached && error.is_recoverable_stream_fault() => {
+                    stream = sessions
+                        .connect(&session_uuid, StreamOptions::default())
+                        .await
+                        .map_err(|_| PlatformError::Transient(error.to_string()))?;
+                    attached = true;
+                    continue;
+                }
+                Err(error) => return Err(PlatformError::Other(error.to_string())),
+            };
+            match event {
                 CommandSessionEvent::Data { channel, data } => {
                     let buffer = if channel == OutputChannel::Stderr {
                         &mut stderr

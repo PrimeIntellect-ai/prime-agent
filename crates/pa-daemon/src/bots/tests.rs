@@ -384,6 +384,27 @@ async fn duplicates_are_deleted_and_lost_records_rebuilt() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn errored_sandboxes_are_deleted() {
+    let (_dir, platform, manager) = setup();
+    let status = |id: &str| platform.state().sandboxes[id].status;
+    let set_error = |id: &str| {
+        platform.state().sandboxes.get_mut(id).unwrap().status = BotStatus::Error;
+    };
+    let spawned = manager.spawn(&spec("bot-a")).await.unwrap();
+    let first = spawned.sandbox_id.unwrap();
+    set_error(&first);
+
+    manager.ensure_running("bot-a").await.unwrap();
+    assert_eq!(status(&first), BotStatus::Stopped);
+
+    // An errored sandbox the record does not track goes with the bot too.
+    let untracked = platform.add_sandbox("helper", vec![bot_label("bot-a")]);
+    set_error(&untracked);
+    manager.delete("bot-a").await.unwrap();
+    assert_eq!(status(&untracked), BotStatus::Stopped);
+}
+
+#[tokio::test(start_paused = true)]
 async fn refused_pause_checkpoints_and_restores() {
     let (_dir, platform, manager) = setup();
     let spawned = manager.spawn(&spec("bot-a")).await.unwrap();

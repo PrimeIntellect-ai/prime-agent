@@ -402,6 +402,10 @@ impl BotManager {
         if let Some(sandbox_id) = record.sandbox_id.clone() {
             match self.platform.get(&sandbox_id).await {
                 Ok(sandbox) if !sandbox.status.is_terminal() => return Ok(Some(sandbox)),
+                Ok(sandbox) if sandbox.status == BotStatus::Error => {
+                    retry(|| self.platform.delete(&sandbox_id)).await?;
+                    lose_sandbox(record);
+                }
                 Ok(_) | Err(PlatformError::NotFound(_)) => lose_sandbox(record),
                 Err(error) => return Err(error.into()),
             }
@@ -588,6 +592,7 @@ impl BotManager {
         if let Some(running) = self.poll_until_running(&created.id, deadline).await? {
             return Ok(running);
         }
+        retry(|| self.platform.delete(&created.id)).await?;
         lose_sandbox(record);
         self.save(record.clone())?;
         bail!("bot sandbox {} ended before it ran", created.id)
@@ -737,10 +742,11 @@ impl BotManager {
     async fn delete_locked(&self, bot_id: &str) -> Result<()> {
         let record = self.get(bot_id);
         let label = bot_label(bot_id);
+        // An errored sandbox still exists on the account, so it is deleted too.
         let mut sandbox_ids: Vec<String> = retry(|| self.platform.list(&label))
             .await?
             .into_iter()
-            .filter(|sandbox| !sandbox.status.is_terminal())
+            .filter(|sandbox| sandbox.status != BotStatus::Stopped)
             .map(|sandbox| sandbox.id)
             .collect();
         if let Some(cached) = record.as_ref().and_then(|record| record.sandbox_id.clone()) {
