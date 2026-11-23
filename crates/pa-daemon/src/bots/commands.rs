@@ -39,6 +39,35 @@ pub async fn admit_bot_spawn(agent_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Owner and name pairs with a spawn in flight: two concurrent spawns
+/// of one name for one owner never both provision.
+static SPAWNING: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+struct NameReservation((String, String));
+
+impl NameReservation {
+    fn take(owner_session_id: &str, name: &str) -> Result<Self> {
+        let key = (owner_session_id.to_string(), name.to_string());
+        let mut spawning = SPAWNING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !spawning.insert(key.clone()) {
+            bail!("a bot named \"{name}\" is already starting for this session");
+        }
+        Ok(Self(key))
+    }
+}
+
+impl Drop for NameReservation {
+    fn drop(&mut self) {
+        SPAWNING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 /// One bot as a `list_bots` row.
 #[must_use]
 pub fn bot_row(record: &BotRecord, attached: bool) -> Value {
@@ -100,6 +129,7 @@ impl Supervisor {
         let agent_dir = &self.options.agent_dir;
         admit_bot_spawn(agent_dir).await?;
         let manager = super::manager_for(agent_dir)?;
+        let _reservation = NameReservation::take(&spec.owner_session_id, &spec.name)?;
         if manager
             .list()
             .iter()

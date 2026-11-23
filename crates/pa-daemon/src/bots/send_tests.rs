@@ -120,6 +120,13 @@ async fn a_killed_send_is_never_resent() {
     );
     task.abort();
     let _ = task.await;
+    // The daemon that wrote the `sending` row is gone.
+    let path = dir.path().join("bots/ledger/bot-1.json");
+    let mut ledger_doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    ledger_doc["messages"]["m1"]["ownerPid"] = json!(0x7fff_fff0_u32);
+    ledger_doc["messages"]["m1"]["ownerStartId"] = json!("gone");
+    std::fs::write(&path, ledger_doc.to_string()).unwrap();
 
     // Step 2: killed after the receipt was written.
     let mut answering = client(Guest::Answer, &seen_tx).await;
@@ -133,7 +140,8 @@ async fn a_killed_send_is_never_resent() {
     );
     drop(answering);
 
-    // Restart: the boot recovery settles the interrupted send.
+    // Restart: the boot recovery settles the interrupted send. A live
+    // writer's rows stay as they are.
     assert_eq!(
         recover_all(dir.path()).unwrap(),
         vec![("bot-1".to_string(), "m1".to_string())]

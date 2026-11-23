@@ -123,14 +123,11 @@ impl GuestClient {
             .context("encode the bot command")
             .map_err(CommandError::NotSent)?;
         line.push(b'\n');
-        // From the first written byte on, the guest can have the command.
-        if let Err(error) = self.writer.write_all(&line).await {
-            return Err(CommandError::NoResponse(error.into()));
-        }
-        if let Err(error) = self.writer.flush().await {
-            return Err(CommandError::NoResponse(error.into()));
-        }
+        // From the first written byte on, the guest can have the command,
+        // so the budget covers the write as well as the response.
         let response = tokio::time::timeout(COMMAND_TIMEOUT, async {
+            self.writer.write_all(&line).await?;
+            self.writer.flush().await?;
             loop {
                 let frame = read_frame(&mut self.reader).await?;
                 if frame.get("type").and_then(Value::as_str) == Some("response")

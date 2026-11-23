@@ -33,6 +33,38 @@ pub enum MessageState {
 struct MessageRow {
     state: MessageState,
     updated_at_ms: u64,
+    /// The daemon process that wrote the row; recovery leaves a live
+    /// owner's `sending` row alone.
+    #[serde(default)]
+    owner_pid: u32,
+    #[serde(default)]
+    owner_start_id: Option<String>,
+}
+
+impl MessageRow {
+    fn new(state: MessageState) -> Self {
+        let pid = std::process::id();
+        Self {
+            state,
+            updated_at_ms: now_ms(),
+            owner_pid: pid,
+            owner_start_id: crate::protocol::process_start_id(pid),
+        }
+    }
+
+    /// Whether the process that wrote this row still runs.
+    fn owner_alive(&self) -> bool {
+        match (
+            &self.owner_start_id,
+            crate::protocol::process_start_id(self.owner_pid),
+        ) {
+            (Some(recorded), Some(current)) => *recorded == current,
+            (Some(_), None) => false,
+            (None, _) => {
+                pa_types::platform::process::is_process_alive(self.owner_pid).unwrap_or(false)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -83,13 +115,8 @@ impl BotLedger {
             if doc.messages.contains_key(msg_id) {
                 bail!("message {msg_id} was already handed to the bot; it is never sent again");
             }
-            doc.messages.insert(
-                msg_id.to_string(),
-                MessageRow {
-                    state: MessageState::Sending,
-                    updated_at_ms: now_ms(),
-                },
-            );
+            doc.messages
+                .insert(msg_id.to_string(), MessageRow::new(MessageState::Sending));
             Ok(())
         })
     }
@@ -101,20 +128,15 @@ impl BotLedger {
     /// Returns an error when the ledger cannot be read or written.
     pub fn finish_message(&self, msg_id: &str, state: MessageState) -> Result<()> {
         self.update(|doc| {
-            doc.messages.insert(
-                msg_id.to_string(),
-                MessageRow {
-                    state,
-                    updated_at_ms: now_ms(),
-                },
-            );
+            doc.messages
+                .insert(msg_id.to_string(), MessageRow::new(state));
             Ok(())
         })
     }
 
-    /// Mark every `sending` row as `uncertain` and return those ids.
-    /// Call this once per bot after a daemon start: a `sending` row
-    /// then belongs to a daemon that died mid-send.
+    /// Mark every `sending` row whose writer process is gone as
+    /// `uncertain`, and return those ids. Another live daemon on the same
+    /// agent directory keeps its rows.
     ///
     /// # Errors
     ///
@@ -123,7 +145,7 @@ impl BotLedger {
         let mut recovered = Vec::new();
         self.update(|doc| {
             for (msg_id, row) in &mut doc.messages {
-                if row.state == MessageState::Sending {
+                if row.state == MessageState::Sending && !row.owner_alive() {
                     row.state = MessageState::Uncertain;
                     row.updated_at_ms = now_ms();
                     recovered.push(msg_id.clone());
@@ -162,9 +184,9 @@ impl BotLedger {
     }
 }
 
-/// Boot recovery: mark every `sending` row of every bot ledger as
-/// `uncertain`. The supervisor runs it once at start, after the boot
-/// reap, so no live daemon still owns a `sending` row.
+/// Boot recovery: mark every `sending` row of every bot ledger whose
+/// writer process is gone as `uncertain`. The supervisor runs it once
+/// at start, after the boot reap.
 ///
 /// # Errors
 ///
