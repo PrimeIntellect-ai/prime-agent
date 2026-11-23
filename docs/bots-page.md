@@ -40,8 +40,8 @@ message each other.
 
 The `prime sandbox` CLI is the human and admin path only. A bot sandbox has the bot's name.
 It carries the labels `prime-agent-bot`, `prime-agent-bot:<id>`, and
-`prime-agent-bot-owner:<owner id>`, so an admin can find it with the CLI. Use the page or the owning agent to delete a
-bot, so the daemon also removes its checkpoints.
+`prime-agent-bot-owner:<owner id>`, so an admin can find it with the CLI. Delete a bot through its owning agent
+(`rlm.delete_subagent`), so the daemon also removes its checkpoints.
 
 ## Attach
 
