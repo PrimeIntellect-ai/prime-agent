@@ -398,6 +398,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                         | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
                         | super::skill_problems_notice::SKILL_PROBLEMS_CUSTOM_TYPE
+                        | super::model_resolution_notice::MODEL_RESOLUTION_WARNING_CUSTOM_TYPE
                 ) {
                     continue;
                 }

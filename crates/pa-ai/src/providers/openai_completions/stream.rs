@@ -41,7 +41,7 @@ struct StreamingState {
     tool_call_blocks_by_index: HashMap<u64, usize>,
     tool_call_blocks_by_id: HashMap<String, usize>,
     tool_call_partial_args: HashMap<usize, StreamingJsonAccumulator>,
-    reasoning_details_by_index: Vec<(u64, Map<String, Value>)>,
+    reasoning_details: Vec<(u64, Map<String, Value>)>,
     next_reasoning_details_index: u64,
     reasoning_details_block: Option<usize>,
     response_service_tier: Option<String>,
@@ -60,7 +60,7 @@ impl StreamingState {
             tool_call_blocks_by_index: HashMap::new(),
             tool_call_blocks_by_id: HashMap::new(),
             tool_call_partial_args: HashMap::new(),
-            reasoning_details_by_index: Vec::new(),
+            reasoning_details: Vec::new(),
             next_reasoning_details_index: 0,
             reasoning_details_block: None,
             response_service_tier: None,
@@ -368,10 +368,22 @@ fn handle_chunk(
             let explicit_index = detail.get("index").and_then(serde_json::Value::as_u64);
             let index = explicit_index.unwrap_or(state.next_reasoning_details_index);
             state.next_reasoning_details_index = state.next_reasoning_details_index.max(index + 1);
-            if let Some((_, merged)) = state
-                .reasoning_details_by_index
-                .iter_mut()
-                .find(|(existing, _)| *existing == index)
+            // Details are keyed by (type, index): Gemini streams a `reasoning.text` and a
+            // `reasoning.encrypted` detail both at index 0, and they must replay as two records.
+            // A fragment without a `type` continues the latest detail at its index.
+            let detail_type = detail.get("type").and_then(Value::as_str);
+            if let Some((_, merged)) =
+                state
+                    .reasoning_details
+                    .iter_mut()
+                    .rev()
+                    .find(|(existing_index, existing)| {
+                        let existing_type = existing.get("type").and_then(Value::as_str);
+                        *existing_index == index
+                            && (detail_type.is_none()
+                                || existing_type.is_none()
+                                || detail_type == existing_type)
+                    })
             {
                 for (key, value) in detail_object {
                     if let (
@@ -386,12 +398,10 @@ fn handle_chunk(
                     }
                 }
             } else {
-                state
-                    .reasoning_details_by_index
-                    .push((index, detail_object.clone()));
+                state.reasoning_details.push((index, detail_object.clone()));
             }
 
-            if detail.get("type").and_then(|value| value.as_str()) == Some("reasoning.encrypted") {
+            if detail_type == Some("reasoning.encrypted") {
                 if let (Some(id), Some(data)) = (
                     detail.get("id").and_then(|value| value.as_str()),
                     detail.get("data").filter(|value| !value.is_null()),
@@ -409,7 +419,7 @@ fn handle_chunk(
         }
         // The signature is encoded once at stream end (and on the error path) by
         // `encode_reasoning_details_signature`, not per delta.
-        if !state.reasoning_details_by_index.is_empty() && state.reasoning_details_block.is_none() {
+        if !state.reasoning_details.is_empty() && state.reasoning_details_block.is_none() {
             state
                 .output
                 .content
@@ -435,7 +445,7 @@ fn encode_reasoning_details_signature(state: &mut StreamingState) {
     let Some(block_index) = state.reasoning_details_block else {
         return;
     };
-    let mut sorted = state.reasoning_details_by_index.clone();
+    let mut sorted = state.reasoning_details.clone();
     sorted.sort_by_key(|(index, _)| *index);
     let details: Vec<Value> = sorted
         .into_iter()

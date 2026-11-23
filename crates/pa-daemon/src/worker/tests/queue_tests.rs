@@ -504,3 +504,73 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
         );
     }
 }
+
+/// `requireBusy` steering never starts a turn: an idle session queues
+/// nothing, while a running turn takes the message before it goes idle.
+#[tokio::test]
+async fn require_busy_steer_queues_only_into_a_running_turn() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-require-busy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "require-busy-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({
+            "engine": "faux",
+            "responses": [{ "text": "held reply", "delayMs": 3000 }, "steered reply"],
+        })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "require-busy" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let steer = |message: &str| json!({ "message": message, "requireBusy": true });
+
+    let idle = worker.dispatch("steer", &steer("idle note")).await;
+    assert!(idle.success, "idle steer failed: {idle:?}");
+    assert_eq!(idle.data, Some(json!({ "queued": false })));
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(core.steering.is_empty() && core.follow_up.is_empty());
+        assert!(!core.busy, "a refused steer must not start a turn");
+    }
+
+    let prompt = worker
+        .dispatch("prompt", &json!({ "message": "held turn" }))
+        .await;
+    assert!(prompt.success, "prompt failed: {prompt:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !worker.core.lock().unwrap().busy {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held turn was never admitted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let busy = worker.dispatch("steer", &steer("mid-turn note")).await;
+    assert_eq!(busy.data, Some(json!({ "queued": true })), "{busy:?}");
+
+    let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+    assert!(idle.success, "wait_for_idle failed: {idle:?}");
+    let messages = worker.dispatch("get_messages", &json!({})).await;
+    let texts: Vec<String> = messages
+        .data
+        .as_ref()
+        .and_then(|data| data.get("messages"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| crate::types::message_role(message) == Some("user"))
+        .map(crate::types::message_text)
+        .collect();
+    assert_eq!(texts, ["held turn", "mid-turn note"]);
+}
