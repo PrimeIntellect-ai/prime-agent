@@ -958,7 +958,6 @@ fn threshold_below_the_headroom_stays_silent() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
-            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {

@@ -2,7 +2,7 @@
 //! command-catalog refresh/fold, and the shared connection-state read.
 use super::{
     create_session, effort_picker, info_commands, terminal_columns, AgentView, AuthSelectorKind,
-    ChatEntry, CommandCatalogUpdate, DaemonCommand, DockFold, Duration, InfoContent, Map,
+    ChatEntry, CommandCatalogUpdate, DaemonCommand, DockFold, Duration, InfoContent, Map, Overlay,
     PendingConfirm, RebuildKind, Result, SessionUi, SlashCommandExecution, SlashCommandRegistry,
     StatusKind, SubmitBehavior, Value, UI_REQUEST_TIMEOUT_MS,
 };
@@ -224,7 +224,7 @@ impl SessionUi {
                     .map(str::to_string);
                 match effort_picker::effort_command(&levels, current.as_deref(), &resolved.args) {
                     effort_picker::EffortCommandOutcome::Open(picker) => {
-                        view.choice_picker = Some(picker);
+                        view.overlay = Some(Overlay::ChoicePicker(picker));
                         self.track_feature_outcome("effort", "initiated", None);
                     }
                     effort_picker::EffortCommandOutcome::Unsupported => {
@@ -534,11 +534,13 @@ impl SessionUi {
                 view.editor.set_text("");
                 // The message is hand-wrapped to fit the panel rows (the
                 // confirm renders each line truncated, never wrapped).
-                view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
-                    "Update Prime Agent",
-                    "Update installs the latest Prime Agent build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
-                ));
-                self.pending_confirm = Some(PendingConfirm::Update);
+                view.overlay = Some(Overlay::Confirm {
+                    panel: crate::confirm::ConfirmPanel::yes_no(
+                        "Update Prime Agent",
+                        "Update installs the latest Prime Agent build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
+                    ),
+                    pending: PendingConfirm::Update,
+                });
                 self.dirty = true;
             }
             // The auth flows run in the client process; other management subcommands
@@ -550,7 +552,7 @@ impl SessionUi {
                 self.open_mcp_view("/plugins", view, "").await?;
                 let search = resolved.args.trim();
                 if !search.is_empty() {
-                    if let Some(mcp) = view.mcp_view.as_mut() {
+                    if let Some(Overlay::Mcp(mcp)) = view.overlay.as_mut() {
                         mcp.paste(search);
                     }
                 }

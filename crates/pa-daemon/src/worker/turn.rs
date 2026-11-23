@@ -64,7 +64,7 @@ impl TurnRunner {
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
-                if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
+                if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     None
                 } else if core.steering.front().is_some() {
@@ -330,8 +330,8 @@ impl TurnRunner {
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The `[turn-held]` pacing window: one notice per non-pacing delivery
         // held busy past [`TURN_HELD_WINDOW`]. The admission's held gate
-        // (same delivery still busy, nothing queued to cut it already, not
-        // compacting or shutting down) runs inside its ONE lock section —
+        // (same delivery still busy with a tool call running, nothing queued
+        // to cut it already, not compacting or shutting down) runs inside its ONE lock section —
         // never through a re-locking closed-check closure, which would
         // self-deadlock the session. A queued row stops the held turn at
         // its next boundary (the queued-steering probe) and delivers as
@@ -394,13 +394,6 @@ impl TurnRunner {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: first.custom_message.clone(),
-            // The lane the item rode is the sender's intent: a steering
-            // item interrupts a busy agent, a follow-up item queues at
-            // its boundary — the admission queues (never rejects) either.
-            streaming_behavior: Some(match lane {
-                Lane::Steering => pa_core::session_engine::StreamingBehavior::Steer,
-                Lane::FollowUp => pa_core::session_engine::StreamingBehavior::FollowUp,
-            }),
         };
         // `message_update` frames park in a single slot; other frames go
         // out direct, flushing the parked update first (wire order matches

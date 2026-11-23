@@ -1,7 +1,6 @@
 # Review rules
 
-These rules mirror the repo standards in AGENTS.md - update both whenever
-either changes.
+These rules mirror the repo standards in AGENTS.md - update both whenever either changes.
 
 ## No legacy or migration scaffolding
 

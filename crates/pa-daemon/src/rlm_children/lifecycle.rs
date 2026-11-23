@@ -419,14 +419,16 @@ impl SupervisorChildSessionsInner {
         }
         // The child's own descendants keep it busy (`child_busy`), so the
         // wait holds until they settle too.
+        let timeout_ms = budget.as_millis().min(u128::from(u64::MAX)) as u64;
         let command = DaemonCommand::WaitForIdle {
             id: None,
             active_session_id: active_session_id.to_string(),
             wait_for_rlm_quiescence: Some(true),
+            timeout_ms: Some(timeout_ms),
             rest: Map::default(),
         };
         let _ = self
-            .command(&command, budget.as_millis() as u64 + IDLE_WAIT_GRACE_MS)
+            .command(&command, timeout_ms.saturating_add(IDLE_WAIT_GRACE_MS))
             .await;
     }
 
@@ -1240,6 +1242,69 @@ pub(super) mod exit_capture_tests {
         assert_eq!(
             final_turn_error_from_file("/nonexistent/pa-rlm-final-turn.jsonl"),
             None
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod wait_for_child_budget_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn wait_for_child_sends_the_bounded_idle_slice() {
+        let dir = tempfile::TempDir::new().expect("temporary directory");
+        let socket = dir.path().join("sup.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("listener");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("link connection");
+            let (reader, mut writer) = stream.into_split();
+            writer
+                .write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n")
+                .await
+                .expect("hello");
+            let mut lines = BufReader::new(reader);
+            let mut line = String::new();
+            lines.read_line(&mut line).await.expect("request line");
+            let request: Value = serde_json::from_str(&line).expect("request JSON");
+            let command = request["command"].clone();
+            let reply = crate::protocol::response_line(&crate::protocol::response_success(
+                request["id"].as_str(),
+                "wait_for_idle",
+                Some(json!({"timedOut": true})),
+            ));
+            writer
+                .write_all(serde_json::to_string(&reply).unwrap().as_bytes())
+                .await
+                .expect("response");
+            writer.write_all(b"\n").await.expect("response newline");
+            command
+        });
+        let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket.clone()));
+        let agent_dir = dir.path().join("agent");
+        let sessions = crate::rlm_children::SupervisorChildSessions::new(
+            link,
+            agent_dir.clone(),
+            "parent".to_string(),
+            Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+                agent_dir, true,
+            )),
+            String::new(),
+        );
+        sessions
+            .inner
+            .wait_for_child("child", Duration::from_millis(12_345))
+            .await;
+        let command = server.await.expect("server task");
+        assert_eq!(
+            command,
+            json!({
+                "type": "wait_for_idle",
+                "activeSessionId": "child",
+                "waitForRlmQuiescence": true,
+                "timeoutMs": 12_345,
+            }),
+            "the worker request must carry the same bound as the link slice"
         );
     }
 }
