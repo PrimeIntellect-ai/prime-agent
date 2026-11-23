@@ -1,9 +1,6 @@
-//! The #755 output-budget wire pins: the request body's output budget
-//! carries an explicitly configured `maxTokens` unchanged, a catalog
-//! value stays capped at the default 32000 ceiling, and a model with no
-//! declared max output sends no budget field at all (issue #755's
-//! captured bodies; the TS fix PR's `max-tokens.test.ts` behavior, pinned
-//! at the provider wire instead of the option assembly).
+//! The #755 output-budget wire pin: the request body carries an explicitly
+//! configured `maxTokens` unchanged (issue #755's captured bodies; the TS
+//! fix PR's `max-tokens.test.ts` behavior, pinned at the provider wire).
 
 use super::*;
 use std::sync::{Arc, Mutex};
@@ -12,17 +9,17 @@ use std::sync::{Arc, Mutex};
 /// models.json with `"maxTokens": 131072` and the OpenAI-completions
 /// compat the captured bodies show). The `maxTokensExplicit` flag is what
 /// the models.json parse attaches to a configured value.
-fn glm_model(max_tokens: u64, explicit: bool) -> Value {
+fn glm_model() -> Value {
     json!({
         "id": "glm-5.2", "name": "GLM 5.2", "api": "openai-completions",
         "provider": "glm-h200", "reasoning": true, "input": ["text"],
         "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0 },
-        "contextWindow": 393_216, "maxTokens": max_tokens,
+        "contextWindow": 393_216, "maxTokens": 131_072,
         "compat": {
             "supportsDeveloperRole": false, "supportsReasoningEffort": false,
             "maxTokensField": "max_tokens", "thinkingFormat": "qwen-chat-template"
         },
-        "maxTokensExplicit": explicit,
+        "maxTokensExplicit": true,
     })
 }
 
@@ -143,6 +140,6 @@ async fn an_explicitly_configured_max_tokens_reaches_the_wire_unchanged() {
     // Issue #755's exact configuration: a models.json entry asking for
     // `"maxTokens": 131072`. The configured cap reaches the provider
     // unchanged — the captured body must not show the silent 32000.
-    let body = wire_body_for(glm_model(131_072, true)).await;
+    let body = wire_body_for(glm_model()).await;
     assert_eq!(body["max_tokens"], json!(131_072));
 }
