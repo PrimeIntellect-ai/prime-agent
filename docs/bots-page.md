@@ -43,16 +43,23 @@ It carries the labels `prime-agent-bot`, `prime-agent-bot:<id>`, and
 `prime-agent-bot-owner:<owner id>`, so an admin can find it with the CLI. Delete a bot through its owning agent
 (`rlm.delete_subagent`), so the daemon also removes its checkpoints.
 
+## What it shows
+
+Each row shows a status dot, the bot's name and model, its version, and
+its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`,
+with the most recent activity first. `d` opens a detail pane with the bot
+id, sandbox id, checkpoint id, version, model, and timestamps.
+
 ## Attach
 
-`↑/↓` move the selection. `Enter` attaches to the selected bot. `Esc` (or
-`Ctrl+C`) closes the page.
+`↑/↓` move the selection, `Enter` attaches to the selected bot, `r`
+refreshes, and `Esc` closes the page.
 
 Attach opens the normal session view against the bot's daemon. Prompts,
 steering, scroll, and the model and effort pickers go to the bot
-unchanged. Commands that only work on the local machine (local shells,
-local file pickers) are refused with a clear message. Leaving the view
-closes the connection to the bot.
+unchanged. Slash commands that act on this machine (for example `/new`,
+`/fork`, `/login`, `/mcp`, `/update`) are refused with a clear message.
+Leaving the view closes the connection to the bot.
 
 ## Version match
 
