@@ -324,12 +324,20 @@ impl CommandSessionError {
             Code::SandboxNotFound => CommandSessionErrorCode::SandboxNotFound,
             Code::TerminalStatus => CommandSessionErrorCode::FailedPrecondition,
             Code::Conflict => CommandSessionErrorCode::Aborted,
+            // A REST 404 means the resource is gone; `from_status` reads a
+            // gateway 404 as a missing route instead.
+            Code::Http if error.status() == Some(404) => CommandSessionErrorCode::NotFound,
             Code::Http => error.status().map_or(
                 CommandSessionErrorCode::Unknown,
                 CommandSessionErrorCode::from_status,
             ),
         };
-        Self::new(code, message)
+        Self {
+            url: error.url().map(str::to_owned),
+            status: error.status(),
+            details: error.details().map(str::to_owned),
+            ..Self::new(code, message)
+        }
     }
 }
 
@@ -388,6 +396,26 @@ mod tests {
         assert_eq!(
             CommandSessionError::sandbox_not_found("gone").code(),
             CommandSessionErrorCode::SandboxNotFound
+        );
+    }
+
+    #[test]
+    fn a_rest_404_keeps_its_context_and_maps_to_not_found() {
+        let source = crate::SandboxError::http("HTTP 404").with_http_context(
+            crate::types::Method::Get,
+            "https://api.example/sandbox/sb-1/auth",
+            Some(404),
+            Some("missing".to_owned()),
+        );
+        let error = CommandSessionError::from_sandbox_error(&source);
+        assert_eq!(
+            (error.code(), error.status(), error.url(), error.details()),
+            (
+                CommandSessionErrorCode::NotFound,
+                Some(404),
+                Some("https://api.example/sandbox/sb-1/auth"),
+                Some("missing"),
+            )
         );
     }
 }
