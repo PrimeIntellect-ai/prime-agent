@@ -168,6 +168,9 @@ pub struct AgentView {
     /// Entries whose card a click flipped away from the level's
     /// tool-output expansion (see `view/expansion.rs`).
     toggled_cards: std::collections::BTreeSet<usize>,
+    /// The inbox-notice run head of each chat entry, filled lazily from the
+    /// front (see `view/inbox_run.rs`); a mutation at an index truncates it there.
+    inbox_run_heads: std::cell::RefCell<Vec<usize>>,
     /// Per-assistant-entry markdown block caches: a streaming message re-renders every frame, so
     /// settled blocks replay from the cache. `RefCell` because the layout pass borrows immutably.
     md_caches:
@@ -334,6 +337,7 @@ impl AgentView {
             sparse_enabled: true,
             sparse_entries: std::collections::BTreeSet::new(),
             toggled_cards: std::collections::BTreeSet::new(),
+            inbox_run_heads: std::cell::RefCell::new(Vec::new()),
             md_caches: std::cell::RefCell::new(std::collections::HashMap::new()),
             layout_width: 0,
             layout_options: None,
@@ -383,6 +387,7 @@ impl AgentView {
         self.md_caches.borrow_mut().remove(&index);
         self.sparse_entries.remove(&index);
         self.toggled_cards.remove(&index);
+        self.inbox_run_heads.get_mut().truncate(index);
         self.entry_heights.pop();
         self.entry_layout.pop();
         self.chat.pop()
@@ -577,7 +582,9 @@ impl AgentView {
             range.clone(),
             std::iter::repeat_n([None, None, None], inserted),
         );
+        self.inbox_run_heads.get_mut().truncate(range.start);
         self.chat.splice(range, entries);
+        self.follow_inbox_run_heads();
     }
 
     /// The first and last chat entries the last frame showed.
@@ -597,6 +604,7 @@ impl AgentView {
         self.sparse_enabled = true;
         self.sparse_entries.clear();
         self.toggled_cards.clear();
+        self.inbox_run_heads.get_mut().clear();
         self.sparse_window = None;
         self.chat.clear();
         self.entry_layout.clear();

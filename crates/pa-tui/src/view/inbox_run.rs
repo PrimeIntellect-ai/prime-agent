@@ -9,14 +9,46 @@ use crate::custom_message::InboxNoticeRow;
 use crate::Line;
 
 impl AgentView {
-    /// The first entry of the consecutive inbox-notice run holding `index`:
-    /// the entry that owns the run's expansion and its counter line.
+    /// The first entry of the consecutive inbox-notice run holding the
+    /// notice at `index`: the entry that owns the run's expansion and its
+    /// counter line. Memoized, so a long run costs one walk, not one per
+    /// member and repaint.
     pub(super) fn inbox_run_head(&self, index: usize) -> usize {
-        let mut head = index;
-        while head > 0 && matches!(self.chat[head - 1], ChatEntry::InboxNotice(_)) {
-            head -= 1;
+        let mut heads = self.inbox_run_heads.borrow_mut();
+        while heads.len() <= index {
+            let next = heads.len();
+            let joins = next > 0
+                && matches!(self.chat[next], ChatEntry::InboxNotice(_))
+                && matches!(self.chat[next - 1], ChatEntry::InboxNotice(_));
+            let head = if joins { heads[next - 1] } else { next };
+            heads.push(head);
         }
-        head
+        heads[index]
+    }
+
+    /// The chat range of the inbox-notice run holding the notice at `index`.
+    pub(super) fn inbox_run(&self, index: usize) -> std::ops::Range<usize> {
+        let head = self.inbox_run_head(index);
+        let len = self.chat[head..]
+            .iter()
+            .take_while(|entry| matches!(entry, ChatEntry::InboxNotice(_)))
+            .count();
+        head..head + len
+    }
+
+    /// Keep a run's expansion on its head when spliced entries join the
+    /// run from the front (older history that ends in inbox notices).
+    pub(super) fn follow_inbox_run_heads(&mut self) {
+        let moved: Vec<(usize, usize)> = self
+            .toggled_cards
+            .iter()
+            .map(|&index| (index, self.inbox_run_head(index)))
+            .filter(|(index, head)| index != head)
+            .collect();
+        for (index, head) in moved {
+            self.toggled_cards.remove(&index);
+            self.toggled_cards.insert(head);
+        }
     }
 
     pub(super) fn inbox_run_expanded(&self, index: usize) -> bool {
@@ -175,6 +207,74 @@ mod tests {
             expanded.matches("\u{2709} Agent inbox").count(),
             3,
             "{expanded}"
+        );
+    }
+
+    /// Older history that ends in inbox notices joins the run in front of
+    /// its head: the click-expanded run stays expanded.
+    #[test]
+    fn a_prepended_run_head_keeps_the_run_expanded() {
+        let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+        for index in 0..3 {
+            view.push_entry(notice(&format!("[inbox 19:1{index} UTC] newer")));
+        }
+        view.toggle_card_expansion(0);
+        assert!(view.inbox_run_expanded(2));
+        view.prepend_entries(vec![
+            ChatEntry::User {
+                text: "older".to_string(),
+            },
+            notice("[inbox 19:00 UTC] older"),
+        ]);
+        assert_eq!(view.inbox_run(4), 1..5);
+        assert!((1..5).all(|index| view.inbox_run_expanded(index)));
+    }
+
+    /// A click on a run in a paused, tail-anchored window folds every
+    /// member's row change: the window keeps its absolute scroll start,
+    /// like the full rebuild.
+    #[test]
+    fn a_run_toggle_keeps_a_paused_tail_window() {
+        let build = || {
+            let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+            view.splash_suppressed = true;
+            for index in 0..120 {
+                view.push_entry(ChatEntry::User {
+                    text: format!("before {index}"),
+                });
+            }
+            for index in 0..6 {
+                view.push_entry(notice(&format!(
+                    "[inbox 19:1{index} UTC] 1 new message (bash-done); total waiting: {index}."
+                )));
+            }
+            for index in 0..12 {
+                view.push_entry(ChatEntry::User {
+                    text: format!("after {index}"),
+                });
+            }
+            view
+        };
+        let mut sparse = build();
+        let mut full = build();
+        sparse.render_frame(37, 24);
+        full.render_frame(37, 24);
+        sparse.scroll_by(-30);
+        full.resolve_sparse_geometry();
+        full.sparse_enabled = false;
+        full.scroll_by(-30);
+        full.resolve_sparse_geometry();
+        full.sparse_enabled = false;
+        let frame = |view: &mut AgentView| rows_text(&view.render_frame(37, 24));
+        assert_eq!(frame(&mut sparse), frame(&mut full));
+        sparse.toggle_card_expansion(120);
+        full.toggle_card_expansion(120);
+        full.resolve_sparse_geometry();
+        full.sparse_enabled = false;
+        assert_eq!(
+            frame(&mut sparse),
+            frame(&mut full),
+            "the expanded run keeps the paused window"
         );
     }
 }
