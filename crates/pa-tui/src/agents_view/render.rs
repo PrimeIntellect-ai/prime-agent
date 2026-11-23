@@ -711,7 +711,9 @@ impl AgentsViewMode {
     /// The machine-child label for one spawned child id (the M1 note's
     /// `in factory: <run>/<state>` vocabulary).
     fn machine_children_label(&self, child: &str) -> Option<String> {
-        self.machine_children.get(child).cloned()
+        self.machine_children
+            .get(child)
+            .map(|marker| marker.label.clone())
     }
 
     /// The selected agent/subagent row's progress note: wrapped,
@@ -726,7 +728,7 @@ impl AgentsViewMode {
                 .summary
                 .get("rlmChildId")
                 .and_then(Value::as_str)
-                .and_then(|child| self.machine_children.get(child))
+                .and_then(|child| self.machine_children_label(child))
             {
                 let dim = self.theme.fg_style(ThemeColor::Dim);
                 return vec![vec![crate::Span::styled(

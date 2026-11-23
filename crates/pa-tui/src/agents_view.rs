@@ -500,8 +500,8 @@ struct AgentsViewMode {
     /// The activity polls' counts behind the shells and factory-run lines.
     session_activity: ActivityCounts,
     /// The machine children every live session's runs spawned (the M1
-    /// `⚙` marker's source): child id -> `<run>/<state>` label.
-    machine_children: std::collections::HashMap<String, String>,
+    /// `⚙` marker's source): child id -> its spawning session and `<run>/<state>` label.
+    machine_children: std::collections::HashMap<String, session_activity::MachineMarker>,
 }
 
 /// The press state of one left click, row-scoped: the release must land on the same row.

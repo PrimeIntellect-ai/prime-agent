@@ -14,8 +14,16 @@ pub(super) struct ActivityRead {
     pub(super) factory: Option<FactoryCounts>,
     /// The machine children this session's runs spawned (the M1 marker's
     /// source): each spawned child's rlm child id with its run and state
-    /// label, bounded by `MACHINE_CHILDREN_CAP`.
-    pub(super) machine_children: Vec<(String, String)>,
+    /// label, bounded by `MACHINE_CHILDREN_CAP`. `None` is a failed graph read, which keeps the
+    /// session's last markers like its factory count.
+    pub(super) machine_children: Option<Vec<(String, String)>>,
+}
+
+/// One machine child's marker: the session whose run spawned it and its `<run>/<state>` label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MachineMarker {
+    pub(super) session: String,
+    pub(super) label: String,
 }
 
 /// The per-session machine-children bound (Appendix B's proposal).
@@ -90,7 +98,7 @@ pub(super) fn spawn_session_activity_fetch(
                 };
                 let factory = async {
                     if !factory_supported {
-                        return (Some(FactoryCounts::default()), Vec::new());
+                        return (Some(FactoryCounts::default()), Some(Vec::new()));
                     }
                     let reply = client
                         .request_ok(DaemonCommand::FactoryActivity {
@@ -108,12 +116,12 @@ pub(super) fn spawn_session_activity_fetch(
                     match reply {
                         Ok(data) if crate::factory_view::factory_reply_lists_runs(&data) => {
                             let children = machine_children(&data);
-                            (Some(FactoryCounts::of(&data)), children)
+                            (Some(FactoryCounts::of(&data)), Some(children))
                         }
                         Err(error) if crate::daemon_client::is_kernel_not_running(&error) => {
-                            (Some(FactoryCounts::default()), Vec::new())
+                            (Some(FactoryCounts::default()), Some(Vec::new()))
                         }
-                        Ok(_) | Err(_) => (None, Vec::new()),
+                        Ok(_) | Err(_) => (None, None),
                     }
                 };
                 let (shells, (factory, machine_children)) = tokio::join!(shells, factory);
@@ -151,15 +159,30 @@ impl AgentsViewMode {
             .collect()
     }
 
-    /// Fold one cycle into the counts (a failed read keeps that session's last count) and
-    /// rebuild only when a count moved.
+    /// Fold one cycle into the counts and markers (a failed read keeps that session's last count
+    /// and markers) and rebuild only when one moved.
     pub(super) fn apply_session_activity(&mut self, reads: Vec<ActivityRead>) {
         let mut machine_children = std::collections::HashMap::new();
         let live = reads
             .into_iter()
             .map(|read| {
-                for (child, label) in &read.machine_children {
-                    machine_children.insert(child.clone(), label.clone());
+                match &read.machine_children {
+                    Some(children) => {
+                        for (child, label) in children {
+                            let marker = MachineMarker {
+                                session: read.active_session_id.clone(),
+                                label: label.clone(),
+                            };
+                            machine_children.insert(child.clone(), marker);
+                        }
+                    }
+                    None => {
+                        for (child, marker) in &self.machine_children {
+                            if marker.session == read.active_session_id {
+                                machine_children.insert(child.clone(), marker.clone());
+                            }
+                        }
+                    }
                 }
                 let last = self
                     .session_activity
