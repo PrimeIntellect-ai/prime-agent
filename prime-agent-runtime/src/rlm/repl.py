@@ -671,9 +671,9 @@ def _arm_span_guard(rid: str, budget: float) -> threading.Timer | None:
     """
     if budget <= 0:
         return None
-    from .bash import _completion_notices_are_wired
+    from .bash import _completion_notices_wired
 
-    if not _completion_notices_are_wired():
+    if not _completion_notices_wired:
         return None
 
     def fire() -> None:

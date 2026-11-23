@@ -78,12 +78,6 @@ def _set_completion_notices_wired(wired: bool) -> None:
     _completion_notices_wired = wired
 
 
-def _completion_notices_are_wired() -> bool:
-    """Read the wiring flag (module-attribute imports of `rlm.bash` bind the
-    `bash()` function, not the module, so the flag needs an importable seam)."""
-    return _completion_notices_wired
-
-
 # One stderr hint per degrade, budgeted per kernel (nano-rlm's
 # MAX_LONG_RUN_NOTES shape): the first few degrades teach the contract, later
 # ones stay quiet.
@@ -1351,7 +1345,7 @@ def bash(
             "launch the command (bash() returns immediately and "
             "auto-backgrounds it) and end the turn; a [bash-done] "
             "notification resumes you. An await always yields after 1 second."
-            if _completion_notices_are_wired()
+            if _completion_notices_wired
             else "launch the command (bash() returns immediately) and read "
             "the handle in a later cell; this session has no [bash-done] "
             "notice, so an await waits until the command finishes."
