@@ -5,7 +5,7 @@ use super::{
     key_event_to_id, mpsc, paused_heartbeat_count, picker_viewport_rows, tray_goal_label,
     AgentView, BashActivityUpdate, CommandCatalogUpdate, DaemonCommand, DockFocusSource,
     FactoryUpdate, GoalPanel, HeartbeatsUpdate, InfoContent, InfoPanelAction, KeyEvent, Map,
-    Result, SessionUi, Value,
+    Overlay, Result, SessionUi, Value,
 };
 
 pub(crate) struct ActivityUpdates {
@@ -101,7 +101,7 @@ impl SessionUi {
             focused: self.subagents_focused,
             ..dock
         });
-        if let Some(bash_view) = view.bash_view.as_mut() {
+        if let Some(Overlay::Bash(bash_view)) = view.overlay.as_mut() {
             bash_view.apply_activities(crate::bash_view::parse_bash_activities(
                 &self.bash_activities,
             ));
@@ -255,20 +255,24 @@ impl SessionUi {
         match panel {
             crate::interactive::SessionPanel::Shells { shell_id } => {
                 self.open_bash_view(view);
-                if let (Some(id), Some(bash_view)) = (shell_id, view.bash_view.as_mut()) {
+                if let (Some(id), Some(Overlay::Bash(bash_view))) =
+                    (shell_id, view.overlay.as_mut())
+                {
                     bash_view.select(&id);
                 }
             }
             crate::interactive::SessionPanel::FactoryRuns { row } => {
                 self.open_factory_page(view);
-                if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
+                if let (Some(row), Some(Overlay::Factory(factory_view))) =
+                    (row, view.overlay.as_mut())
+                {
                     factory_view.select(row);
                     self.sync_factory_selection(view);
                 }
             }
         }
-        self.panel_returns_to_agents_view =
-            closes_to_agents_view && (view.bash_view.is_some() || view.factory_view.is_some());
+        self.panel_returns_to_agents_view = closes_to_agents_view
+            && matches!(view.overlay, Some(Overlay::Bash(_) | Overlay::Factory(_)));
     }
 
     /// The close of a panel the agents view requested hands the pane back to it; returns whether
@@ -323,13 +327,13 @@ impl SessionUi {
     /// The dock's goal row opens the read-only goal panel (the operator's
     /// 2026-09-24 directive).
     fn open_goal_panel(&mut self, view: &mut AgentView) {
-        view.goal_panel = Some(GoalPanel {
+        view.overlay = Some(Overlay::Goal(GoalPanel {
             goal: self.goal_view.goal.clone(),
             // The panel renders inside this row budget: a multi-screen objective clips (with a
             // marker) instead of growing the dock past the frame, which would front-crop the title
             // away.
             viewport_rows: picker_viewport_rows(view.terminal_rows()),
-        });
+        }));
         self.subagents_focused = false;
         self.update_subagent_summary(view);
         self.dirty = true;
@@ -344,7 +348,9 @@ impl SessionUi {
         title: Option<String>,
         content: InfoContent,
     ) {
-        view.info_panel = Some(crate::info_panel::InfoPanel::new(title, content));
+        view.overlay = Some(Overlay::Info(crate::info_panel::InfoPanel::new(
+            title, content,
+        )));
         self.dirty = true;
     }
 
@@ -362,7 +368,7 @@ impl SessionUi {
             || view.editor.keybindings().matches(&id, "app.modal.back")
             || view.editor.keybindings().matches(&id, "app.clear")
         {
-            view.goal_panel = None;
+            view.overlay = None;
             // The exit restores the dock's own group (the operator's 2026-09-26
             // panel-exit ruling).
             self.focus_activity_dock(view);
@@ -381,10 +387,10 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        if view.info_panel.as_mut().is_some_and(|panel| {
-            panel.handle_key(&id, view.editor.keybindings()) == InfoPanelAction::Close
-        }) {
-            view.info_panel = None;
+        if let Some(Overlay::Info(panel)) = view.overlay.as_mut() {
+            if panel.handle_key(&id, view.editor.keybindings()) == InfoPanelAction::Close {
+                view.overlay = None;
+            }
         }
         self.dirty = true;
         Ok(())

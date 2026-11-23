@@ -1126,13 +1126,7 @@ async fn run_interactive_surface(
                     }
                     UiInput::Paste(text) => {
                         session.stop_selection_auto_scroll();
-                        // The inline auth panel owns the frame: the paste lands in its field, never
-                        // in the editor.
-                        if view.auth_panel.is_some() {
-                            session.paste_to_auth_panel(&text, &mut view);
-                        } else {
-                            session.handle_paste(&text, &mut view);
-                        }
+                        session.handle_paste(&text, &mut view);
                     }
                     // A mouse report reaches the transcript scroll dispatch's wheel branch;
                     // non-wheel reports are consumed inside.
@@ -1421,10 +1415,11 @@ async fn run_interactive_surface(
                 }
             }
             maybe_input = async {
-                // The headless driver drops its sender after HeadlessDone; a closed recv is
-                // always ready and would starve turn events while the final submitted prompt is
-                // still settling.
-                if headless_done {
+                // The headless driver drops its sender once it has queued its last step, while
+                // that step can still wait behind a barrier in `pending`. A closed recv is
+                // always ready: polling it would keep this loop from ever parking and starve the
+                // daemon reader that delivers the turn end the barrier waits for.
+                if ui_input_closed {
                     std::future::pending::<Option<UiInput>>().await
                 } else {
                     ui_rx.recv().await
@@ -1437,6 +1432,8 @@ async fn run_interactive_surface(
                         quiet_tick_deadline = None;
                     }
                     pending.push_back(input);
+                } else {
+                    ui_input_closed = true;
                 }
             }
             maybe_note = notes_rx.recv() => {
@@ -1718,7 +1715,7 @@ async fn run_interactive_surface(
         let animating = session.turn_active
             || view.retry.is_some()
             || view.compaction.is_some()
-            || view.share_loader.is_some();
+            || matches!(view.overlay, Some(crate::view::Overlay::ShareLoader(_)));
         if animating {
             let now = Instant::now();
             let started = *anim_started.get_or_insert(now);

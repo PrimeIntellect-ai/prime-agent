@@ -108,6 +108,15 @@ impl SessionCore {
         self.busy || self.compacting || !self.steering.is_empty() || !self.follow_up.is_empty()
     }
 
+    /// Whether the turn runner holds queued input instead of admitting it:
+    /// an input pause, the queued-input suspension, or a manual compaction.
+    pub(crate) fn queued_input_parked(
+        &self,
+        input_pauses: &crate::session_input_pause::InputPauseTable,
+    ) -> bool {
+        input_pauses.paused() || self.queued_input_suspended || self.compacting
+    }
+
     /// A created session core for command modules' unit tests (the private
     /// bookkeeping fields stay owned here).
     #[cfg(test)]

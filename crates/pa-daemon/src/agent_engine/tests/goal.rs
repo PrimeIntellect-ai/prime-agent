@@ -135,7 +135,6 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
-            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -817,7 +816,6 @@ fn injected_custom_turn_holds_one_representation() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: Some(notice),
-            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -1004,7 +1002,6 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
-                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
@@ -1145,7 +1142,6 @@ fn assert_turn_end_publishes_a_held_goal_change(message: &str, aborted: bool) {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
-                streaming_behavior: None,
             },
             &|| aborted,
             &mut |event| {
