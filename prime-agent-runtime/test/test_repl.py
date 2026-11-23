@@ -131,14 +131,14 @@ class ReplTest(unittest.TestCase):
     def enabled_factory_repl(self) -> ReplProcess:
         """One repl whose kernel runs with the factory opt-in gate enabled:
         the agent dir points at a temp dir whose settings.json carries the
-        enabled setting in the real shape (the same file `/factory on`
+        enabled setting in the real shape (the same file `/machine on`
         writes and the daemon's lane advertisement reads), so the
         out-of-band lane answers through the live gate instead of reading
         whatever the host machine's settings happen to say."""
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         with open(os.path.join(temp.name, "settings.json"), "w", encoding="utf-8") as handle:
-            json.dump({"factory": {"enabled": True}}, handle)
+            json.dump({"machine": {"enabled": True}}, handle)
         repl = ReplProcess(env={"PRIME_AGENT_CODING_AGENT_DIR": temp.name})
         self.addCleanup(repl.close)
         return repl
@@ -195,7 +195,7 @@ class ReplTest(unittest.TestCase):
         repl.send({"type": "factory_activity", "id": "w", "action": "watch", "runId": "nope", "timeoutMs": 100})
         missing = repl.until_done("w")[-1]
         self.assertEqual(missing["status"], "error")
-        self.assertIn("unknown factory run", missing["reason"])
+        self.assertIn("unknown machine run", missing["reason"])
         repl.send({"type": "interrupt", "id": "cell"})
         repl.until_done("cell")
 

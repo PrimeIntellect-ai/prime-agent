@@ -767,7 +767,7 @@ const FACTORY_PLAN: &str = r#"{"summary":"sweep","edits":[{"action":"create","ki
 
 #[tokio::test]
 async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
-    // The host /refine flow reads `factory.enabled` live from the session's
+    // The host /refine flow reads `machine.enabled` live from the session's
     // agent dir on every run — the same settings.json the kernel-side
     // factory gate reads — so a refinement cannot author factories the
     // user has not opted into. Without a wired agent dir (or with the
@@ -793,7 +793,7 @@ async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("settings.json"),
-        r#"{"factory": {"enabled": true}}"#,
+        r#"{"machine": {"enabled": true}}"#,
     )
     .unwrap();
     session.set_agent_dir(agent_dir);

@@ -145,7 +145,7 @@ pub struct SessionEngine {
     /// The kernel `rlm.spawn` handler registers spawn targets into it; the
     /// embedding wires the child-observation sink onto it after the build.
     pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
-    /// The factory host bridge (`/factory` view lane): the daemon/TUI
+    /// The factory host bridge (`/machine` view lane): the daemon/TUI
     /// request surface over the kernel's factory runs, built from the
     /// session facts captured in `create_session` (the #3184 capture
     /// pattern) and reached through [`SessionEngine::factory_activity`].
@@ -1122,7 +1122,7 @@ impl SessionEngine {
             .await;
     }
 
-    /// One factory activity over this session's live kernel: the `/factory`
+    /// One factory activity over this session's live kernel: the `/machine`
     /// view's bridge lane (graph/status/watch/run/stop/resume, plus the
     /// machine library's list/graph reads, and the arming-free `peek`
     /// the all-session overview polls through). A `run` prefights the spec's

@@ -76,7 +76,7 @@ impl Contract {
     /// # Errors
     /// Returns the first malformed part.
     pub fn from_json(value: &Value) -> Result<Self, String> {
-        let malformed = |what: &str| format!("malformed factory contract: {what}");
+        let malformed = |what: &str| format!("malformed machine contract: {what}");
         let mut outputs = Vec::new();
         for output in value
             .get("outputs")

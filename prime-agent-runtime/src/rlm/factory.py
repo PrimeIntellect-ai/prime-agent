@@ -33,12 +33,12 @@ emitted outputs are still collected after any restart.
 The full agent-facing reference — authoring rules, guards/joins/cycles,
 foreach, budgets, stall detectors, and the ``rlm.factory`` API with worked
 examples — is embedded in this module as ``FACTORY_HELP``;
-``rlm.factory.help()`` returns it with no filesystem resolution, so
+``rlm.machine.help()`` returns it with no filesystem resolution, so
 packaged kernels (where the repo layout is not adjacent) see the same
 guide.
 
-The namespace is opt-in: while the ``factory.enabled`` setting is off (the
-default; the user turns it on with ``/factory on``), every ``rlm.factory``
+The namespace is opt-in: while the ``machine.enabled`` setting is off (the
+default; the user turns it on with ``/machine on``), every ``rlm.factory``
 call except ``help()`` and every factory harness write refuses with one
 clean message (``FACTORY_DISABLED_MESSAGE``), never a crash.
 """
@@ -536,7 +536,7 @@ def validate_factory_machine(machine: Any) -> list[str]:
     state machines, including cycles, validate.
     """
     if not isinstance(machine, dict):
-        return ["factory machine must be a JSON object"]
+        return ["machine must be a JSON object"]
     errors: list[str] = []
     run = machine.get("run")
     if run is not None and not isinstance(run, dict):
@@ -555,10 +555,10 @@ def validate_factory_machine(machine: Any) -> list[str]:
 
     states = machine.get("states")
     if not isinstance(states, list):
-        errors.append("factory machine requires a states list")
+        errors.append("machine requires a states list")
         return errors
     if not 1 <= len(states) <= MAX_STATES:
-        errors.append(f"factory machine must declare between 1 and {MAX_STATES} states, got {len(states)}")
+        errors.append(f"machine must declare between 1 and {MAX_STATES} states, got {len(states)}")
         return errors
 
     seen_ids: set[str] = set()
@@ -670,13 +670,13 @@ def validate_factory_machine(machine: Any) -> list[str]:
     # only state failed its id check reports that problem alone, and a flag
     # that is not a boolean never counts as declaring an entry.
     if states_by_id and not any(state.get("entry") is True for state in states_by_id.values()):
-        errors.append("factory machine requires at least one entry state")
+        errors.append("machine requires at least one entry state")
 
     transitions = machine.get("transitions")
     if transitions is None:
         transitions = []
     if not isinstance(transitions, list):
-        errors.append("factory machine transitions must be a list")
+        errors.append("machine transitions must be a list")
         return errors
     for index, transition in enumerate(transitions):
         if not isinstance(transition, dict):
@@ -769,7 +769,7 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
     itself has no wait support.
     """
     if not isinstance(dag, dict):
-        return None, ["factory dag must be a JSON object"]
+        return None, ["machine dag must be a JSON object"]
     errors: list[str] = []
     run = dag.get("run")
     if run is not None and not isinstance(run, dict):
@@ -779,9 +779,9 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
 
     nodes = dag.get("nodes")
     if not isinstance(nodes, list):
-        return None, errors + ["factory dag requires a nodes list"]
+        return None, errors + ["machine dag requires a nodes list"]
     if not 1 <= len(nodes) <= MAX_NODES:
-        return None, errors + [f"factory dag must declare between 1 and {MAX_NODES} nodes, got {len(nodes)}"]
+        return None, errors + [f"machine dag must declare between 1 and {MAX_NODES} nodes, got {len(nodes)}"]
 
     seen_ids: set[str] = set()
     nodes_by_id: dict[str, dict[str, Any]] = {}
@@ -867,7 +867,7 @@ def validate_factory_spec(spec: Any) -> list[str]:
     is stored, so an invalid spec never reaches the store.
     """
     if not isinstance(spec, dict):
-        return ["factory dag must be a JSON object"]
+        return ["machine dag must be a JSON object"]
     if _is_machine_form(spec) and "nodes" in spec:
         return ["pass either dag or machine form, not both"]
     if _is_machine_form(spec):
@@ -1025,7 +1025,7 @@ def topological_order(nodes: list[dict[str, Any]]) -> list[str]:
                 heapq.heappush(ready, (index_of[dependent], dependent))
     if len(order) != len(index_of):
         stuck = sorted(node_id for node_id, count in remaining.items() if count > 0)
-        raise ValueError(f"the factory graph contains a cycle involving nodes: {', '.join(stuck)}")
+        raise ValueError(f"the machine graph contains a cycle involving nodes: {', '.join(stuck)}")
     return order
 
 
@@ -1055,7 +1055,7 @@ __all__ = [
     "resolve_machine",
     "resume_factory",
     "run_factory",
-    "FactoryEmitError",
+    "MachineEmitError",
     "emit_factory_outputs",
     "factory_inputs",
     "spec_to_mermaid",
@@ -1223,7 +1223,7 @@ memory: an operator reads a finished run's final status for a while, but
 a resident kernel that has run hundreds of machines keeps them all. Past
 this limit the OLDEST terminal runs are evicted from the registry —
 their files retired at the terminal persist already, so this is memory
-bookkeeping only; an evicted run answers ``unknown factory run`` exactly
+bookkeeping only; an evicted run answers ``unknown machine run`` exactly
 like a run of a previous boot (F-12's second half)."""
 
 PERSIST_MIN_INTERVAL = 1.0
@@ -1266,16 +1266,16 @@ REPAIR_POLL_SECONDS = 5.0
 """How often a repairing child's outputs file is re-read."""
 
 
-class FactoryEmitError(ValueError):
-    """``rlm.factory.emit`` refused a value: the message names every wrong
+class MachineEmitError(ValueError):
+    """``rlm.machine.emit`` refused a value: the message names every wrong
     field (``verdict.findings[0].severity: 'high' is not one of ...``)."""
 
 
 async def emit_factory_outputs(outputs: dict[str, Any]) -> dict[str, Any]:
-    """Hand this factory child's outputs to the factory (``rlm.factory.emit``).
+    """Hand this factory child's outputs to the factory (``rlm.machine.emit``).
 
     Every value is checked against the state's declared types before
-    anything is kept; a wrong value raises ``FactoryEmitError`` with the
+    anything is kept; a wrong value raises ``MachineEmitError`` with the
     exact field, so fix it and call again. A ``file`` output takes a path
     (``str`` or ``Path``), relative to the kernel's current directory, and
     the file is copied. Returns ``{"accepted": [...], "missing": [...]}``,
@@ -1287,7 +1287,7 @@ async def emit_factory_outputs(outputs: dict[str, Any]) -> dict[str, Any]:
     try:
         return await host_request("factory.emit", {"outputs": values, "cwd": os.getcwd()})
     except RuntimeError as error:
-        raise FactoryEmitError(_emit_error_text(str(error))) from None
+        raise MachineEmitError(_emit_error_text(str(error))) from None
 
 
 async def factory_inputs() -> dict[str, Any]:
@@ -1297,14 +1297,14 @@ async def factory_inputs() -> dict[str, Any]:
     try:
         reply = await host_request("factory.inputs", {})
     except RuntimeError as error:
-        raise FactoryEmitError(_emit_error_text(str(error))) from None
+        raise MachineEmitError(_emit_error_text(str(error))) from None
     return reply.get("inputs") or {}
 
 
 def _emit_error_text(error: str) -> str:
     if "is not available in this session" in error:
         return (
-            "rlm.factory.emit and rlm.factory.inputs work only in a child spawned by a "
+            "rlm.machine.emit and rlm.machine.inputs work only in a child spawned by a "
             "machine directory's state (machine.toml)"
         )
     return error
@@ -1817,7 +1817,7 @@ class _NodeInstance:
     error: str | None = None
     tool_uses: int = 0
     inputs: dict[str, Any] | None = None  # the bound inputs (plus params); a python
-    # call receives them, an emit child gets them from rlm.factory.inputs(), re-runs reuse them
+    # call receives them, an emit child gets them from rlm.machine.inputs(), re-runs reuse them
     session_dir: str | None = None  # the child's session dir: its emitted outputs live there
     child_name: str | None = None  # the child's session name (the repair message's receiver)
     repair_sent: bool = False  # the one "you still owe ..." message went to this child
@@ -2728,7 +2728,7 @@ class FactoryExecutor:
             import sys
 
             print(
-                f"the factory runs directory could not be read; every persisted "
+                f"the machine runs directory could not be read; every persisted "
                 f"run is lost for this boot (its children stay visible under the "
                 f"supervisor): {error}",
                 file=sys.stderr,
@@ -2761,7 +2761,7 @@ class FactoryExecutor:
                 # a non-dict journal line slipped past ValueError/
                 # KeyError/TypeError as AttributeError and killed the arm).
                 print(
-                    f"factory run snapshot {_shown(name)} is unreadable; the run is not "
+                    f"machine run snapshot {_shown(name)} is unreadable; the run is not "
                     f"rehydrated (its children stay visible under the supervisor): {error}",
                     file=sys.stderr,
                 )
@@ -2800,7 +2800,7 @@ class FactoryExecutor:
                 marker_text = "(the marker's text is unreadable)"
             if marker_text is not None:
                 print(
-                    f"factory run {_shown(name)}: a previous kernel could not persist "
+                    f"machine run {_shown(name)}: a previous kernel could not persist "
                     f"its registry snapshot — {marker_text or '(the marker is empty)'}",
                     file=sys.stderr,
                 )
@@ -2839,7 +2839,7 @@ class FactoryExecutor:
                 self._adopt_mutations(run, directory)
             except Exception as error:  # noqa: BLE001 - the same disk boundary
                 print(
-                    f"factory run snapshot {_shown(name)} is unreadable; the run is not "
+                    f"machine run snapshot {_shown(name)} is unreadable; the run is not "
                     f"rehydrated (its children stay visible under the supervisor): {error}",
                     file=sys.stderr,
                 )
@@ -2879,7 +2879,7 @@ class FactoryExecutor:
             if self._retired_record(stem) is not None:
                 continue
             print(
-                f"factory run {_shown(stem)}: a previous kernel could not write its first "
+                f"machine run {_shown(stem)}: a previous kernel could not write its first "
                 f"registry snapshot; the run is lost (its children stay visible "
                 f"under the supervisor; remove {_shown(marker_name)} "
                 f"to acknowledge the loss)",
@@ -3154,7 +3154,7 @@ class FactoryExecutor:
                 )
                 run.revision += 1
                 print(
-                    f"factory run {run_id} could not be re-armed after a kernel "
+                    f"machine run {run_id} could not be re-armed after a kernel "
                     f"restart (its children stay visible under the supervisor): {error}",
                     file=sys.stderr,
                 )
@@ -3179,7 +3179,7 @@ class FactoryExecutor:
         harness = self._resolve_harness()
         entry = harness.get("factory", spec_id)
         if entry is None:
-            raise ValueError(f"unknown factory spec {spec_id!r}")
+            raise ValueError(f"unknown machine spec {spec_id!r}")
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
         spec = arguments.get("machine")
         if spec is None:
@@ -3268,7 +3268,7 @@ class FactoryExecutor:
             retired = self._retired_record(run_id)
             if retired is not None:
                 return retired
-            raise ValueError(f"unknown factory run {run_id!r}")
+            raise ValueError(f"unknown machine run {run_id!r}")
         nodes = [self._state_report(run.states[state_id]) for state_id in run.order]
         for event in run.events:
             if event["stage"] in ("recorded", "arrived"):
@@ -3306,7 +3306,7 @@ class FactoryExecutor:
             if run.last_error is not None:
                 payload["last_error"] = run.last_error
                 payload["remedy"] = (
-                    f"resume with await rlm.factory.resume('{run.run_id}') to re-admit the "
+                    f"resume with await rlm.machine.resume('{run.run_id}') to re-admit the "
                     "failed state's entry as a fresh attempt (same rendered prompt, no extra "
                     "max_entries); author the state with failure_policy 'continue' to run its "
                     "dependents past a failure instead"
@@ -3346,11 +3346,11 @@ class FactoryExecutor:
         """
         if _daemonless_host() and (run_id not in self._runs or run_id in self._loaded):
             raise ValueError(
-                f"factory run {run_id!r} did not start in this process: {PRINT_RUNS_NOT_DURABLE}"
+                f"machine run {run_id!r} did not start in this process: {PRINT_RUNS_NOT_DURABLE}"
             )
         run = self._require_run(run_id)
         if run.state != "paused":
-            raise ValueError(f"factory run {run_id!r} is {run.state!r}, not paused")
+            raise ValueError(f"machine run {run_id!r} is {run.state!r}, not paused")
         # Bump the loop generation FIRST: the pause-path control-loop task
         # may still be winding down (an in-flight milestone await). Its
         # state re-checks would otherwise see "running" again and continue
@@ -3795,7 +3795,7 @@ class FactoryExecutor:
             # ``done``/``failed`` run whose instances are still in
             # flight (the resident lifecycle — admitted residents never
             # block completion, and the finished milestone tells the
-            # operator to ``rlm.factory.stop()`` them) is LIVE, so the
+            # operator to ``rlm.machine.stop()`` them) is LIVE, so the
             # page keeps the run and its stop control while any child
             # runs; the terminal history window holds only runs with no
             # child in flight.
@@ -3833,7 +3833,7 @@ class FactoryExecutor:
                     if run.run_id not in self._graph_guard_reported:
                         self._graph_guard_reported.add(run.run_id)
                         print(
-                            f"factory run {run.run_id} cannot render in the factory "
+                            f"machine run {run.run_id} cannot render in the machine "
                             f"view (its children stay visible under the supervisor): {error}",
                             file=sys.stderr,
                         )
@@ -3844,7 +3844,7 @@ class FactoryExecutor:
         harness = self._resolve_harness()
         entry = harness.get("factory", ref)
         if entry is None:
-            raise ValueError(f"unknown factory run or spec {ref!r}")
+            raise ValueError(f"unknown machine run or spec {ref!r}")
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
         spec = arguments.get("machine")
         if spec is None:
@@ -3852,7 +3852,7 @@ class FactoryExecutor:
         try:
             canonical = canonicalize_factory_spec(spec)
         except ValueError as exc:
-            raise ValueError(f"factory spec {ref!r} does not validate: {exc}") from exc
+            raise ValueError(f"machine spec {ref!r} does not validate: {exc}") from exc
         return self._spec_snapshot(entry.id, canonical, compact=compact)
 
     def _signature(self, run: FactoryRun) -> tuple[Any, ...]:
@@ -3947,11 +3947,11 @@ class FactoryExecutor:
         validation. The reply's result payload carries the WIRE's
         camelCase keys (``_wire_payload`` re-keys the snake_case rows: the
         protocol's request frame is camelCase end to end) — the
-        conversation API (``rlm.factory.graph()`` in-kernel) stays
+        conversation API (``rlm.machine.graph()`` in-kernel) stays
         snake_case.
         """
         # The lane rides the same opt-in gate as the namespace: while
-        # ``factory.enabled`` is off, every activity action -- ``run``
+        # ``machine.enabled`` is off, every activity action -- ``run``
         # included, which would otherwise bypass the namespace's gate --
         # refuses with the one refusal message.
         require_factory_enabled()
@@ -4092,7 +4092,7 @@ class FactoryExecutor:
     def _require_run(self, run_id: str) -> FactoryRun:
         run = self._runs.get(run_id)
         if run is None:
-            raise ValueError(f"unknown factory run {run_id!r}")
+            raise ValueError(f"unknown machine run {run_id!r}")
         return run
 
     def _resolve_subagents(
@@ -4238,7 +4238,7 @@ class FactoryExecutor:
 
         The terminal runs' files retired at their terminal persist, so
         this is registry bookkeeping only: an evicted run answers
-        ``unknown factory run`` exactly like a run of a previous boot.
+        ``unknown machine run`` exactly like a run of a previous boot.
         Live runs are never touched; the newest terminal runs stay (the
         operator reads the just-finished run's final status).
         """
@@ -4431,7 +4431,7 @@ class FactoryExecutor:
                 run,
                 "max_transitions_exceeded",
                 f"max_transitions {run.max_transitions} exceeded; no new entries; "
-                f"resume with await rlm.factory.resume('{run.run_id}')",
+                f"resume with await rlm.machine.resume('{run.run_id}')",
             )
             return "paused"
         if join_signature is not None:
@@ -4641,7 +4641,7 @@ class FactoryExecutor:
             run,
             "budget_exceeded",
             f"run budget_ms {run.run_budget_ms} exceeded after {int(elapsed_ms)}ms; no new spawns; "
-            f"resume with await rlm.factory.resume('{run.run_id}')",
+            f"resume with await rlm.machine.resume('{run.run_id}')",
         )
 
     def _children_budget_exceeded(self, run: FactoryRun) -> bool:
@@ -4667,7 +4667,7 @@ class FactoryExecutor:
             run,
             "max_children_exceeded",
             f"run max_children {run.max_children} exceeded after {run.spawn_count} children; "
-            f"no new spawns; resume with await rlm.factory.resume('{run.run_id}')",
+            f"no new spawns; resume with await rlm.machine.resume('{run.run_id}')",
         )
 
     async def _prepare_ready_entries(self, run: FactoryRun) -> None:
@@ -5240,8 +5240,8 @@ class FactoryExecutor:
             if fresh is None:
                 return  # a stop/fail_fast pass claimed it, or the worker answered
             result = fresh
-            if result.factory_task_busy is not None:
-                instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
+            if result.machine_task_busy is not None:
+                instance.factory_task_activity = "busy" if result.machine_task_busy else "idle"
             if (
                 entry.status == "running"
                 and not instance.infra_respawned
@@ -5595,7 +5595,7 @@ class FactoryExecutor:
         calls = ", ".join(f"{name}=..." for name in missing)
         message = (
             f"You ended your turn without handing back {', '.join(missing)}. "
-            f"Call `await rlm.factory.emit({calls})` from your Python REPL now; "
+            f"Call `await rlm.machine.emit({calls})` from your Python REPL now; "
             "the call checks each value and names any field to fix."
         )
         child_id = instance.child_id
@@ -5640,7 +5640,7 @@ class FactoryExecutor:
         run.state = "paused"
         self._mark_paused(run)
         run.pause_reason = (
-            f"factory task activity UNVERIFIED for {state.state_id}; "
+            f"machine task activity UNVERIFIED for {state.state_id}; "
             f"child ownership remains with {instance.child_id or 'this instance'}"
         )
         self._event(
@@ -5992,7 +5992,7 @@ class FactoryExecutor:
             await self._milestone(
                 run,
                 "paused",
-                f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}') "
+                f"state {state.state_id} failed: {reason}; resume with await rlm.machine.resume('{run.run_id}') "
                 "to re-admit the failed entry as a fresh attempt",
                 node=state.state_id,
             )
@@ -6228,7 +6228,7 @@ class FactoryExecutor:
         settle -- finalizing earlier orphaned them under the supervisor
         with no collector. Admitted resident instances are the one
         exception: they stay alive under the parent session until
-        rlm.factory.stop() or session teardown, so a resident entry's
+        rlm.machine.stop() or session teardown, so a resident entry's
         running instances never block completion -- but its still-queued
         (pending) instances do: the admission queue must drain before the
         run can end, or a resident left pending by max_parallel was
@@ -6274,7 +6274,7 @@ class FactoryExecutor:
         ]
         detail = f"run complete: {len(run.states)} state(s), {run.transitions_fired} transition(s) fired"
         if residents:
-            detail += f"; {len(residents)} resident state(s) still running (stop with await rlm.factory.stop('{run.run_id}'))"
+            detail += f"; {len(residents)} resident state(s) still running (stop with await rlm.machine.stop('{run.run_id}'))"
         await self._milestone(run, "finished", detail)
         self._evict_terminal_runs()
 
@@ -6391,12 +6391,12 @@ class FactoryExecutor:
                 if result is None:
                     continue
                 if not result.settled:
-                    if result.factory_task_busy is not None:
-                        instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
+                    if result.machine_task_busy is not None:
+                        instance.factory_task_activity = "busy" if result.machine_task_busy else "idle"
                     continue
                 instance.factory_task_activity = (
-                    "busy" if result.factory_task_busy is True else
-                    "idle" if result.factory_task_busy is False else
+                    "busy" if result.machine_task_busy is True else
+                    "idle" if result.machine_task_busy is False else
                     "unverified"
                 )
                 missing = (
@@ -6405,14 +6405,14 @@ class FactoryExecutor:
                     else None
                 )
                 if state.spec.get("emit") is not None and missing:
-                    if result.factory_task_busy is None and state.lifecycle != "resident":
+                    if result.machine_task_busy is None and state.lifecycle != "resident":
                         self._pause_for_unverified_task_activity(run, state, entry, instance)
                         return
-                    if result.factory_task_busy is True:
+                    if result.machine_task_busy is True:
                         task_work_waiting = True
                         continue
                 await self._apply_settlement(run, state, entry, instance, result)
-                if result.factory_task_busy is True and state.lifecycle != "resident":
+                if result.machine_task_busy is True and state.lifecycle != "resident":
                     task_work_waiting = True
                 if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
                     self._pause_for_unverified_task_activity(run, state, entry, instance)
@@ -6421,12 +6421,12 @@ class FactoryExecutor:
                 if run.loop_generation != generation:
                     return
                 result = results_by_child.get(instance.child_id or "")
-                if result is None or not result.settled or result.factory_task_busy is None:
+                if result is None or not result.settled or result.machine_task_busy is None:
                     instance.factory_task_activity = "unverified"
                     self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
-                instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
-                task_work_waiting = task_work_waiting or result.factory_task_busy
+                instance.factory_task_activity = "busy" if result.machine_task_busy else "idle"
+                task_work_waiting = task_work_waiting or result.machine_task_busy
             if task_work_waiting and not python_calls and not repairing:
                 await self._sleep_fn(REPAIR_POLL_SECONDS)
             for state, entry, instance in repairing:
@@ -6438,7 +6438,7 @@ class FactoryExecutor:
                     state,
                     entry,
                     instance,
-                    task_busy=None if result is None else result.factory_task_busy,
+                    task_busy=None if result is None else result.machine_task_busy,
                 )
             for state, entry, instance in python_calls:
                 if run.loop_generation != generation:
@@ -6586,12 +6586,12 @@ class FactoryExecutor:
 
 
 # ---------------------------------------------------------------------------
-# The opt-in gate: `factory.enabled` in the agent-dir settings file.
+# The opt-in gate: `machine.enabled` in the agent-dir settings file.
 # ---------------------------------------------------------------------------
 
 #: The single refusal every gated factory call raises while the setting is
 #: off. One exact message, so agents and tests can pin the refusal.
-FACTORY_DISABLED_MESSAGE = "the factory is disabled; run /factory on to enable it"
+FACTORY_DISABLED_MESSAGE = "machines are disabled; run /machine on to enable them"
 
 _SETTINGS_FILE_NAME = "settings.json"
 
@@ -6603,12 +6603,12 @@ _SETTINGS_READ_CACHE: tuple[tuple, bool] | None = None
 
 
 def factory_enabled() -> bool:
-    """Read the ``factory.enabled`` opt-in setting (default off).
+    """Read the ``machine.enabled`` opt-in setting (default off).
 
     The factory is opt-in: it ships disabled, and the user turns it on with
-    ``/factory on`` (the persisted setting is ``factory.enabled`` in the
+    ``/machine on`` (the persisted setting is ``machine.enabled`` in the
     agent dir's ``settings.json`` -- the same nested-camelCase document the
-    daemon and TUI settings surface write, e.g. ``{"factory": {"enabled":
+    daemon and TUI settings surface write, e.g. ``{"machine": {"enabled":
     true}}`` beside ``compaction``/``agentTraces``). The read mirrors the
     lenient settings loading on the Rust side: a missing file or key, a
     wrong-typed value, or a corrupt document all read as unset, and unset
@@ -6618,7 +6618,7 @@ def factory_enabled() -> bool:
     The read is cached by the document's stat identity (the resolved
     path, its size, and its nanosecond mtime): the boot arm asks on every
     executed command while it keeps declining, and every cell must not
-    re-open and re-parse the file. Any rewrite -- ``/factory on`` or
+    re-open and re-parse the file. Any rewrite -- ``/machine on`` or
     ``off`` -- moves the stat key, so the next call re-reads the new
     document; the cache holds no verdict across an observable change.
     """
@@ -6644,11 +6644,11 @@ def factory_enabled() -> bool:
         if not isinstance(document, dict):
             enabled = False
         else:
-            factory = document.get("factory")
-            if not isinstance(factory, dict):
+            machine = document.get("machine")
+            if not isinstance(machine, dict):
                 enabled = False
             else:
-                enabled = factory.get("enabled") is True
+                enabled = machine.get("enabled") is True
     _SETTINGS_READ_CACHE = (key, enabled)
     return enabled
 
@@ -6737,7 +6737,7 @@ def boot_arm_persisted_runs() -> bool:
             # can reach a human.
             import sys
 
-            print(f"factory boot arm failed: {error}", file=sys.stderr)
+            print(f"machine boot arm failed: {error}", file=sys.stderr)
 
     _BOOT_ARM_TASK = loop.create_task(_arm())
     return True
@@ -6793,13 +6793,13 @@ async def run_factory(
     instance) first; when no entry carries that id, it resolves a machine
     from the library (repo directory first, user second; within a level a
     machine directory wins over a MACHINE.md of the same name) and runs the
-    template directly: ``await rlm.factory.run("review-sweep")`` starts the
+    template directly: ``await rlm.machine.run("review-sweep")`` starts the
     library machine without creating a harness entry. Harness entries
     remain runtime instances; machines are templates.
 
     A machine directory is loaded, checked, and compiled by the session's
     Rust loader (the ``factory.compile`` host request, the same one
-    ``prime-agent factory validate`` uses) with ``params`` bound; params
+    ``prime-agent machine validate`` uses) with ``params`` bound; params
     apply to machine directories only.
     """
     require_factory_enabled()
@@ -6838,7 +6838,7 @@ async def run_factory(
                     f"the library machine {spec_id!r} exists but is broken ({error})"
                 ) from None
             raise ValueError(
-                f"unknown factory spec {spec_id!r}: no stored factory entry and "
+                f"unknown machine spec {spec_id!r}: no stored factory entry and "
                 f"no library machine with that name ({error})"
             ) from None
         except ValueError as error:
@@ -6849,7 +6849,7 @@ async def run_factory(
             # (unreadable, non-UTF-8, unparseable, spec-invalid) is a
             # MachineResolutionError in the first except arm.
             raise ValueError(
-                f"unknown factory spec {spec_id!r}: no stored factory entry, and "
+                f"unknown machine spec {spec_id!r}: no stored factory entry, and "
                 f"the id is not a valid machine name either ({error})"
             ) from None
         return await executor.run_machine(machine, machine_path=path, name=name)
@@ -7002,7 +7002,7 @@ def _wire_payload(value: Any) -> Any:
     comparison ``value`` mirrors the executor's declared condition
     exactly, so re-keying it would display a condition that no longer
     matches the machine. The in-kernel conversation API
-    (``rlm.factory.graph()`` and friends) stays snake_case.
+    (``rlm.machine.graph()`` and friends) stays snake_case.
     """
     if isinstance(value, dict):
         if "output" in value and "op" in value:
@@ -7119,7 +7119,7 @@ def _wire_run_row_is_live(row: Any) -> bool:
     """Whether a wire run row is LIVE in the dock/page sense — the same
     rule the TUI's ``is_live`` reads and the unscoped list builds (a live
     state, or children still in flight): the wire cap's eviction must
-    never silently drop a row the dock counts and the ``/factory off``
+    never silently drop a row the dock counts and the ``/machine off``
     guard trusts (every live run reports — the live-exactness contract)."""
     if not isinstance(row, dict):
         return False
@@ -7159,7 +7159,7 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
     the oldest end first; an all-runs reply sheds the same way — each
     row's event tail floors before any whole row drops, and the drop
     takes the oldest DROPPABLE row (a live row never silently drops: the
-    dock's count, the page's panels, and the ``/factory off`` guard read
+    dock's count, the page's panels, and the ``/machine off`` guard read
     this list, and every live run reports). A frame that still cannot fit
     fails loudly (a graph must never truncate silently)."""
     while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
@@ -7223,13 +7223,13 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
 # MACHINE.md (byte-pretty, stable formatting for diffs). Harness entries
 # remain runtime instances; machines in the library are templates, so
 # ``run_factory`` falls back to the library when its argument names no
-# stored entry: ``await rlm.factory.run("review-sweep")``.
+# stored entry: ``await rlm.machine.run("review-sweep")``.
 # ---------------------------------------------------------------------------
 
 MACHINE_FILE_NAME = "MACHINE.md"
 MACHINE_DIR_FILE_NAME = "machine.toml"
 """The file that makes a directory a machine directory (the format
-``prime-agent factory validate`` checks; loaded by the session's Rust
+``prime-agent machine validate`` checks; loaded by the session's Rust
 loader through the ``factory.compile`` host request)."""
 MACHINE_SPEC_FENCE = "machine-spec"
 MACHINES_DIR_NAME = "machines"
@@ -7965,7 +7965,7 @@ def _resolve_machine_dir(
     Levels resolve in order (repo, then user). Within a level a
     ``<name>/machine.toml`` directory wins over ``<name>/MACHINE.md``; a
     valid MACHINE.md machine at an earlier level keeps the name, the order
-    ``prime-agent factory list`` shows. The directory's own checks run in
+    ``prime-agent machine list`` shows. The directory's own checks run in
     the Rust loader, so a broken directory reports its exact errors when
     run instead of falling through to another level.
     """
@@ -8015,7 +8015,7 @@ def resolve_machine(
     parse, or carries a spec the write-time validator rejects, never
     claims its name on either surface: resolution falls through to the
     next level exactly like the listing does, so `factory list`,
-    ``rlm.factory.run``, and export can never disagree about a name. A
+    ``rlm.machine.run``, and export can never disagree about a name. A
     name whose only carriers are invalid files raises
     ``MachineResolutionError`` with ``broken=True`` and the first file's
     exact errors (in repo-to-user order) — broken, never missing; a name
@@ -8398,7 +8398,7 @@ def export_machine(
             raise ValueError(
                 "; ".join(errors + [f"the run's spec id {run.spec_id!r} cannot become a machine name"])
             )
-        description = _single_line(run.name) or f"factory run {run.run_id}"
+        description = _single_line(run.name) or f"machine run {run.run_id}"
         return export_factory_spec(
             run.machine, out_path, name=run.spec_id, description=description, overwrite=overwrite
         )
@@ -8408,7 +8408,7 @@ def export_machine(
 
 
 def cli_dispatch(payload: Any) -> "dict[str, Any]":
-    """JSON facade for the ``prime-agent factory`` subcommands.
+    """JSON facade for the ``prime-agent machine`` subcommands.
 
     The CLI resolves the kernel Python, feeds one JSON payload on stdin,
     and reads one JSON result from stdout: ``{"ok": true, ...}`` or
@@ -8416,7 +8416,7 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
     the exact validator sentences reach the command's output verbatim.
     The payload carries only what the user typed (an op, a path, a name,
     an out target); ``read`` answers one MACHINE.md machine's fields and
-    spec for ``prime-agent factory convert``, and ``list`` answers the
+    spec for ``prime-agent machine convert``, and ``list`` answers the
     library levels so the CLI can add machine directories (which the Rust
     loader checks); this process resolves every library directory itself,
     so the kernel is the single resolution contract for list, import, and
@@ -8482,11 +8482,11 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
     }
 
 
-FACTORY_HELP: str = r"""# Factory
+FACTORY_HELP: str = r"""# Machines
 
-The factory runs state-machine workflows of spawned child agents. A stored
-factory entry declares the machine — states, each backed by a subagent
-spec, plus guarded transitions between them. `await rlm.factory.run('<spec_id>')`
+A machine runs a state-machine workflow of spawned child agents. A stored
+machine entry declares the machine — states, each backed by a subagent
+spec, plus guarded transitions between them. `await rlm.machine.run('<spec_id>')`
 spawns each state's subagent as an ordinary child, feeds captured outputs
 into the successors' prompts, and drives the run to quiescence in a
 background kernel task; the call returns immediately and the run continues
@@ -8494,19 +8494,19 @@ after the model turn ends. Use it when a workflow needs shape: fan-out,
 bounded loops (review/fix until a verdict approves), joins, or one child
 per list item.
 
-The factory is opt-in: it ships disabled, and the user turns it on with
-`/factory on` (`/factory off` disables it again, `/factory status` reports
-it; the persisted setting is `factory.enabled` in the agent dir's
-settings.json). While it is disabled, every `rlm.factory` call except
+Machines are opt-in: they ship disabled, and the user turns them on with
+`/machine on` (`/machine off` disables them again, `/machine status` reports
+the gate; the persisted setting is `machine.enabled` in the agent dir's
+settings.json). While they are disabled, every `rlm.machine` call except
 `help()` — run, status, stop, and resume — plus every factory harness
 write (`create_factory` and updates of factory entries) refuses with one
 clean error:
-"the factory is disabled; run /factory on to enable it". `help()` answers
+"machines are disabled; run /machine on to enable them". `help()` answers
 while disabled, so this guide stays readable before opting in.
 
 ## Store the spec
 
-A factory spec is a continual-harness entry of kind `factory`.
+A machine spec is a continual-harness entry of kind `factory`.
 `rlm.harness.create_factory(...)` validates at write time; an invalid spec
 is never stored (generic `create`/`update` funnel through the same check).
 The spec rides `machine=` (the native form) or `dag=` (sugar that compiles
@@ -8831,11 +8831,11 @@ rlm.harness.create_factory(
 ## Run and steer
 
 ```python
-result = await rlm.factory.run("pr-manager")
+result = await rlm.machine.run("pr-manager")
 # {"run_id": "...", "spec_id": "pr-manager", "nodes": 4, "max_parallel": 8,
 #  "started": ["entry"], "pending": []}  — returns immediately.
 
-status = await rlm.factory.status(result["run_id"])
+status = await rlm.machine.status(result["run_id"])
 status["state"]    # running | stopping | paused | done | failed | stopped
 status["nodes"]    # per state: status, entries_used/max_entries, instances,
                    # latest answer_preview, error
@@ -8857,7 +8857,7 @@ status["last_error"]    # last admission/bind failure) and a one-line "remedy"
 ships alongside the stacked live-view PR's TUI page:
 
 ```python
-graph = await rlm.factory.graph(result["run_id"])
+graph = await rlm.machine.graph(result["run_id"])
 # {"run_id": "...", "spec_id": "pr-manager", "state": "running",
 #  "machine": {"order": [...], "states": [...],
 #              "transitions": [...], "run": {...}},
@@ -8865,10 +8865,10 @@ graph = await rlm.factory.graph(result["run_id"])
 #  "events": [...], "usage": {...}, "budget": {"limit_ms": ...,
 #  "consumed_ms": ...}}  — structure fused with live state.
 
-every = await rlm.factory.graph()        # every live run ({"runs": [...]})
-spec = await rlm.factory.graph("pr-manager")  # a stored spec's static graph
+every = await rlm.machine.graph()        # every live run ({"runs": [...]})
+spec = await rlm.machine.graph("pr-manager")  # a stored spec's static graph
 
-watched = await rlm.factory.watch(result["run_id"], 30)
+watched = await rlm.machine.watch(result["run_id"], 30)
 # the same fused snapshot plus "changed" — the call blocks until the
 # run's state/instance shape changes or the bounded timeout elapses,
 # so one call streams a run's progress without polling `status()`.
@@ -8896,15 +8896,15 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   after an escalate pause it first re-admits the failed entry.
 - The activity lane the daemon and TUI speak is camelCase on the wire
   (`runId`, `specId`, `timeoutMs`); the kernel API here
-  (`rlm.factory.*`) is snake_case.
+  (`rlm.machine.*`) is snake_case.
 
 ## Machine directories
 
 A machine can also be a directory: `machine.toml` for the graph, Markdown
 prompts, TOML rubrics, and `nodes/*.py` for python states. Nothing in it is
-generated, so it shares as-is. `prime-agent factory validate <dir>` checks
+generated, so it shares as-is. `prime-agent machine validate <dir>` checks
 it (types, ports, routes, joins, reachability, prompt placeholders) with
-the same Rust loader a session uses; `prime-agent factory convert <name>
+the same Rust loader a session uses; `prime-agent machine convert <name>
 --out <dir>` turns a MACHINE.md machine into one.
 
 ```toml
@@ -8941,13 +8941,13 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
 - Prompts insert params and inputs with `{{name}}`; `prompts/_context.md`
   is prepended to every agent state. The loader appends a generated
   Outputs section that spells out each port's type.
-- A child hands back its outputs with `await rlm.factory.emit(port=value,
+- A child hands back its outputs with `await rlm.machine.emit(port=value,
   ...)` from its REPL, never in its answer text. Each value is checked
   against the port's type before it is kept; a wrong one raises
-  `FactoryEmitError` with the exact field (`verdict.findings[0].severity:
+  `MachineEmitError` with the exact field (`verdict.findings[0].severity:
   'high' is not one of ...`), so the child fixes it in the same turn. A
   `file` port takes a path and the file is copied beside the child's
-  session. `await rlm.factory.inputs()` returns the bound inputs and params
+  session. `await rlm.machine.inputs()` returns the bound inputs and params
   as values. A child that ends its turn still owing a required output gets
   one message in its own session asking for it; if it still owes one ten
   minutes later the entry fails with `missing_output`. No fresh child is
@@ -8960,7 +8960,7 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   `next`. Any other condition is a python state that returns an enum.
 - A python state is `kind = "python"` with `run = "nodes/<file>.py:<fn>"`;
   the function receives the declared inputs plus the params.
-- `await rlm.factory.run("<name or path>", params={...})` runs one; a
+- `await rlm.machine.run("<name or path>", params={...})` runs one; a
   required param with no default must be given.
 
 ## Discovering machines
@@ -8971,11 +8971,11 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   in every install; `PRIME_AGENT_MACHINES_DIR` redirects the level at a
   team directory) first, the personal `machines/` library under the agent
   dir second; the earlier level wins on name conflicts. `prime-agent
-  factory list | import | export` manages them: list shows only what
+  machine list | import | export` manages them: list shows only what
   parses and validates (broken files print as warnings), import runs the same
   write-time validation as a stored spec so an invalid machine never
   persists, and export copies a library machine verbatim to a fresh path
-  (an existing target is refused, never overwritten). `rlm.factory.run('<name>')`
+  (an existing target is refused, never overwritten). `rlm.machine.run('<name>')`
   runs a library machine directly without creating a harness entry; a
   machine that exists but is broken names its errors
   instead of pretending the name is unknown. The bundled seeds are
@@ -8986,7 +8986,7 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   active runs under their machine, machines with a live run first, like
   the agents view nests subagents; runs of stored specs list in their
   own group. Open it from any session with the
-  activity dock's `⚙ N machines` group or a bare `/factory`, or from the
+  activity dock's `⚙ N machines` group or a bare `/machine`, or from the
   agents view with Ctrl+F (through the selected session). Enter on a
   machine shows its diagram, params, and its mermaid rendered as a
   diagram (a mermaid fence in a node's Markdown renders the same way;
@@ -9017,7 +9017,7 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
 - Runs survive kernel restarts: the registry snapshots to the session
   artifact dir (forced on state changes and settle evaluations, throttled
   otherwise, with a mutation journal for batches and admissions in
-  between), a restarted kernel rehydrates it on the next factory use, and
+  between), a restarted kernel rehydrates it on the next machine use, and
   the runs continue (a run that was stopping
   finishes its cancellations; a python call the restart orphaned fails
   through its state's `retries` and `failure_policy`; children, supervisor-
@@ -9029,7 +9029,7 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   process did not start refuses with "--print runs are not durable; run
   machines under the daemon for restart safety".
 - Residents outlive their run; stop the run (or tear down the session) to
-  retire them. Prefer `rlm.factory.stop(run_id)` over deleting a factory
+  retire them. Prefer `rlm.machine.stop(run_id)` over deleting a machine
   child by hand — the executor claims and cancels children itself, and a
   hand deletion surfaces as a child failure through the state's policy.
 """

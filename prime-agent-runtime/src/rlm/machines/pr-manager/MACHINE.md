@@ -24,9 +24,9 @@ after approval instead of ending the run.
 
 ## How to run it
 
-    result = await rlm.factory.run("pr-manager")
+    result = await rlm.machine.run("pr-manager")
 
-Then watch progress with `await rlm.factory.status(result["run_id"])`.
+Then watch progress with `await rlm.machine.status(result["run_id"])`.
 The alternation count is bounded by `max_transitions` and by each loop
 state's `max_entries`; the run pauses (escalates) instead of spinning.
 

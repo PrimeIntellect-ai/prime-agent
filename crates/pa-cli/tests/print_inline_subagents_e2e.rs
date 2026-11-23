@@ -545,7 +545,7 @@ fn print_inline_collect_reports_a_settled_factory_child_idle() {
         factory={\"runId\": \"run-1\", \"specId\": \"spec\", \"stateId\": \"plan\"})\n\
         p = await rlm.spawn(\"finish the task\", name=\"plain\")\n\
         done = await rlm.collect([f, p], timeout_ms=60000)\n\
-        print(\"TASK_BUSY\", [(r.settled, r.factory_task_busy) for r in done])";
+        print(\"TASK_BUSY\", [(r.settled, r.machine_task_busy) for r in done])";
     let script = serde_json::json!({
         "responses": [
             { "content": [

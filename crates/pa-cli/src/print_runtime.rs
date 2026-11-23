@@ -521,7 +521,7 @@ pub(crate) struct ChildEngineOverrides {
     /// The spawn carried a factory run tag.
     pub factory_child: bool,
     /// The factory state's output contract from the spawn's run tag: the
-    /// child's `rlm.factory.emit` checks against it.
+    /// child's `rlm.machine.emit` checks against it.
     pub factory_contract: Option<serde_json::Value>,
 }
 

@@ -16,13 +16,13 @@ collector child assembles the sections into a single markdown report.
 
 This is the fan-in example: `collect` waits on the joined `sections` text
 port until every writer settles, then merges them. No guards, no loops -
-the simplest multi-child shape the factory runs.
+the simplest multi-child shape a machine runs.
 
 ## How to run it
 
-    result = await rlm.factory.run("builder")
+    result = await rlm.machine.run("builder")
 
-Then watch progress with `await rlm.factory.status(result["run_id"])`. The
+Then watch progress with `await rlm.machine.status(result["run_id"])`. The
 collector's `merged` text is the latest settle answer of the `collect`
 state.
 

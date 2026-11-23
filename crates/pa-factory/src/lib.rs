@@ -1,4 +1,4 @@
-//! The factory machine directory format.
+//! The machine directory format.
 //!
 //! A machine is a directory: `machine.toml` for the graph, Markdown prompts,
 //! TOML rubrics, and Python files for deterministic states. This crate

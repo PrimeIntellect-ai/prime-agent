@@ -25,9 +25,9 @@ the `found` text port the aggregator reads.
 Store a copy of this machine as a runtime instance and run it, or run the
 template directly from the library:
 
-    result = await rlm.factory.run("review-sweep")
+    result = await rlm.machine.run("review-sweep")
 
-Then watch progress with `await rlm.factory.status(result["run_id"])`. The
+Then watch progress with `await rlm.machine.status(result["run_id"])`. The
 run finishes at quiescence; the aggregator's `issues` JSON is the latest
 settle answer of the `report` state.
 

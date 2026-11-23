@@ -108,7 +108,7 @@ const VERDICT_PORTS: &str = "- `verdict`: a verdict\n\nA verdict is an object wi
 /// The generated Outputs section for an `emit(<call>)` with `ports` lines.
 fn outputs(call: &str, ports: &str) -> String {
     format!(
-        "## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.factory.emit({call})\n\n{ports}\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it. Your inputs, as typed values, are `await rlm.factory.inputs()`."
+        "## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.machine.emit({call})\n\n{ports}\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it. Your inputs, as typed values, are `await rlm.machine.inputs()`."
     )
 }
 
@@ -213,9 +213,9 @@ fn a_state_without_outputs_still_carries_an_emit_contract() {
     assert_eq!(ship["emit"], json!({"outputs": [], "records": {}}));
     assert!(
         ship["subagent"]["prompt"].as_str().unwrap().ends_with(
-            "## Inputs\n\nYour inputs, as typed values, are `await rlm.factory.inputs()`."
+            "## Inputs\n\nYour inputs, as typed values, are `await rlm.machine.inputs()`."
         ),
-        "the no-output state's prompt must name factory.inputs: {}",
+        "the no-output state's prompt must name rlm.machine.inputs: {}",
         ship["subagent"]["prompt"]
     );
 }
@@ -267,7 +267,7 @@ fn a_python_state_cannot_declare_a_file_output() {
     assert_eq!(
         errors,
         vec![
-            "machine.toml: states.triage.outputs.report: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session".to_string()
+            "machine.toml: states.triage.outputs.report: a python state cannot return a file output; a file port needs an agent state's `rlm.machine.emit`, which copies it beside the session".to_string()
         ]
     );
 }

@@ -4,7 +4,7 @@
 //! Verifier: typed factory outputs over a REAL kernel and the full
 //! session-engine tool path. A factory child (a session created with an
 //! output contract) emits a wrong value, gets the exact field back as a
-//! `FactoryEmitError` in the same turn, emits the fixed value, and the
+//! `MachineEmitError` in the same turn, emits the fixed value, and the
 //! accepted outputs (with the file port copied) land beside its session
 //! file, where the parent's executor reads them. No model call: the
 //! `ScriptedProvider` answers from the pushed turns.
@@ -148,12 +148,12 @@ async fn a_child_fixes_a_rejected_emit_in_the_same_turn() {
             (
                 "call-1",
                 "python_repl",
-                json!({ "code": "from pathlib import Path\ntry:\n    await rlm.factory.emit(risk='medium', design=Path('DESIGN.md'))\nexcept Exception as error:\n    print('REFUSED', type(error).__name__, error)" }),
+                json!({ "code": "from pathlib import Path\ntry:\n    await rlm.machine.emit(risk='medium', design=Path('DESIGN.md'))\nexcept Exception as error:\n    print('REFUSED', type(error).__name__, error)" }),
             ),
             (
                 "call-2",
                 "python_repl",
-                json!({ "code": "print('INPUTS', await rlm.factory.inputs())\nprint('ACCEPTED', await rlm.factory.emit(risk='low', design=Path('DESIGN.md')))" }),
+                json!({ "code": "print('INPUTS', await rlm.machine.inputs())\nprint('ACCEPTED', await rlm.machine.emit(risk='low', design=Path('DESIGN.md')))" }),
             ),
         ],
     )));
@@ -217,7 +217,7 @@ async fn a_child_fixes_a_rejected_emit_in_the_same_turn() {
         serde_json::to_string(&entries).expect("entries json")
     };
     assert!(
-        serialized.contains(r#"REFUSED FactoryEmitError risk: \"medium\" is not one of low, high"#),
+        serialized.contains(r#"REFUSED MachineEmitError risk: \"medium\" is not one of low, high"#),
         "the wrong value must fail inside the child with the exact field: {serialized}"
     );
     assert!(
@@ -302,7 +302,7 @@ async fn a_daemon_worker_child_emits_from_its_conversation_log_path() {
         vec![(
             "call-1",
             "python_repl",
-            json!({ "code": "from pathlib import Path\nprint('ACCEPTED', await rlm.factory.emit(risk='low', design=Path('DESIGN.md')))" }),
+            json!({ "code": "from pathlib import Path\nprint('ACCEPTED', await rlm.machine.emit(risk='low', design=Path('DESIGN.md')))" }),
         )],
     )));
     provider.push_text_turn("done");

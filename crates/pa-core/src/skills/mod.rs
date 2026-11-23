@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn invalid_yaml_frontmatter_reports_the_parse_error() {
-        // An unquoted `: ` inside a plain scalar (the shipped factory skill's
+        // An unquoted `: ` inside a plain scalar (the shipped machine skill's
         // old description) is invalid YAML: the warning carries the parser's
         // error instead of a misleading missing-description complaint.
         let dir = tempfile::tempdir().expect("tempdir");

@@ -231,7 +231,7 @@ async fn busy_window_arrivals_coalesce_into_one_queued_row() {
     assert!(visible, "a busy session keeps a visible queued row");
     assert!(
         message.contains("3 new messages")
-            && message.contains("2 bash-done, 1 factory-progress")
+            && message.contains("2 bash-done, 1 machine-progress")
             && message.contains("total waiting: 3"),
         "the row covers the whole busy window: {message}"
     );
@@ -282,7 +282,7 @@ async fn a_delivered_row_starts_a_fresh_batch() {
     assert_eq!(rows.len(), 1, "a fresh row queued: {rows:?}");
     let (message, _, _) = &rows[0];
     assert!(
-        message.contains("1 new message (factory-progress)"),
+        message.contains("1 new message (machine-progress)"),
         "the fresh batch names only the new arrival: {message}"
     );
     assert!(
@@ -1086,7 +1086,7 @@ async fn a_withdrawal_reconciles_the_batch_against_the_live_waiting_set() {
     let rows = steering_rows(&worker);
     assert!(
         rows.iter()
-            .any(|(text, _, _)| text.contains("1 new message (factory-progress)")),
+            .any(|(text, _, _)| text.contains("1 new message (machine-progress)")),
         "the re-rendered arrival row counts the live batch only: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
@@ -2538,7 +2538,7 @@ async fn a_replace_of_an_arrival_row_is_refused_and_the_next_arrival_coalesces()
     );
     assert!(
         rows.iter().all(|(text, _, _)| text.starts_with("[inbox ")
-            && text.contains("2 new messages (1 bash-done, 1 factory-progress)")),
+            && text.contains("2 new messages (1 bash-done, 1 machine-progress)")),
         "the row stays the coalesced notice, never a user instruction: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
@@ -2688,8 +2688,8 @@ async fn the_wake_row_refresh_follows_the_live_store() {
     let rows = steering_rows(&worker);
     assert!(
         rows.iter().any(
-            |(text, preview, _)| text.contains("1 new message (factory-progress)")
-                && preview.as_deref() == Some("Inbox: 1 new message (factory-progress)")
+            |(text, preview, _)| text.contains("1 new message (machine-progress)")
+                && preview.as_deref() == Some("Inbox: 1 new message (machine-progress)")
         ),
         "the notice re-rendered over the surviving batch: {rows:?}"
     );
@@ -2740,7 +2740,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         let rows = steering_rows(&worker);
         assert!(
             rows.iter()
-                .any(|(text, _, _)| text.contains("1 new message (factory-progress)")),
+                .any(|(text, _, _)| text.contains("1 new message (machine-progress)")),
             "the recovered row survives with the waiting message: {rows:?}"
         );
     }

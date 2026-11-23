@@ -22,14 +22,14 @@ _previous_agent_dir: str | None = None
 
 def setUpModule() -> None:
     # The factory opt-in gate refuses every factory write while the
-    # `factory.enabled` setting is off (the default); the harness CRUD tests
+    # `machine.enabled` setting is off (the default); the harness CRUD tests
     # exercise the write paths with the setting on, written in the real
     # settings.json shape the daemon writes. The gate's own refusal pins
     # live in test_factory.py.
     global _factory_gate_dir, _previous_agent_dir
     _factory_gate_dir = tempfile.TemporaryDirectory(prefix="harness_test_agent_dir_")
     settings = Path(_factory_gate_dir.name) / "settings.json"
-    settings.write_text('{"factory": {"enabled": true}}', encoding="utf-8")
+    settings.write_text('{"machine": {"enabled": true}}', encoding="utf-8")
     _previous_agent_dir = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
     os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = _factory_gate_dir.name
 
@@ -189,10 +189,10 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(reloaded.refinements[0].id, event.id)
             self.assertIn("Prefer focused patches", reloaded.overview())
             self.assertIn("factory", reloaded.overview())
-            self.assertIn("await rlm.factory.run", reloaded.overview())
-            self.assertIn("await rlm.factory.status(run_id)", reloaded.overview())
-            self.assertIn("await rlm.factory.stop(run_id)", reloaded.overview())
-            self.assertIn("await rlm.factory.resume(run_id)", reloaded.overview())
+            self.assertIn("await rlm.machine.run", reloaded.overview())
+            self.assertIn("await rlm.machine.status(run_id)", reloaded.overview())
+            self.assertIn("await rlm.machine.stop(run_id)", reloaded.overview())
+            self.assertIn("await rlm.machine.resume(run_id)", reloaded.overview())
             self.assertIn("create_factory/update_factory/delete_factory", reloaded.overview())
             self.assertIn(
                 "Call contract: installed Python skills use await <skill_import>(...)",
@@ -1699,12 +1699,12 @@ class HarnessRefinementsSettingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
             settings = Path(tmp) / "settings.json"
-            settings.write_text('{"factory":{"enabled":true},"harnessRefinements":true}')
+            settings.write_text('{"machine":{"enabled":true},"harnessRefinements":true}')
             state = HarnessState(Path(tmp) / "harness_state.json")
             state.create_factory("Saved factory", "Saved spec", id="saved", dag=FACTORY_DAG)
             before = state.file_path.read_bytes()
             executor = factory.FactoryExecutor(harness=state)
-            settings.write_text('{"factory":{"enabled":true},"harnessRefinements":false}')
+            settings.write_text('{"machine":{"enabled":true},"harnessRefinements":false}')
             with patch.object(factory, "_DEFAULT_EXECUTOR", executor):
                 for name in ("saved", "review-sweep"):
                     with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):

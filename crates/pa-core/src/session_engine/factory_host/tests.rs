@@ -430,7 +430,7 @@ fn local_state_shadows_the_global_spec() {
     let with_local = host(dir.path(), None, None, true);
     let error = with_local.preflight_run("spec").unwrap_err().to_string();
     assert!(
-        error.starts_with("Requested factory model \"missingprov/model-x\" is unavailable"),
+        error.starts_with("Requested machine model \"missingprov/model-x\" is unavailable"),
         "{error}"
     );
 }
@@ -474,7 +474,7 @@ fn an_unknown_reference_skips_only_its_own_state() {
     );
     let error = bridge.preflight_run("mixed").unwrap_err().to_string();
     assert!(
-        error.starts_with("Requested factory model \"missingprov/model-x\" is unavailable"),
+        error.starts_with("Requested machine model \"missingprov/model-x\" is unavailable"),
         "{error}"
     );
     // A spec whose only reference is unknown stays best-effort clean: the
@@ -521,7 +521,7 @@ fn scoped_ids_preflight_their_own_store() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.starts_with("Requested factory model \"missingprov/model-x\" is unavailable"),
+        error.starts_with("Requested machine model \"missingprov/model-x\" is unavailable"),
         "{error}"
     );
     // The local-scoped id resolves the LOCAL store's spec.
@@ -559,7 +559,7 @@ fn preflight_resolves_exact_and_short_form_selectors() {
     // A bare id naming two models stays unresolved.
     let error = bridge.preflight_run("ambiguous").unwrap_err().to_string();
     assert!(
-        error.starts_with("Requested factory model \"shared-id\" is unavailable"),
+        error.starts_with("Requested machine model \"shared-id\" is unavailable"),
         "{error}"
     );
 }
@@ -582,7 +582,7 @@ fn the_allowlist_pin_refuses_a_resolved_declared_model() {
     let error = bridge.preflight_run("spec").unwrap_err().to_string();
     assert_eq!(
         error,
-        "Requested factory model \"testprov/declared-model\" is blocked by the model allowlist"
+        "Requested machine model \"testprov/declared-model\" is blocked by the model allowlist"
     );
     // A selector inside the pin resolves.
     let bridge = host(
@@ -617,7 +617,7 @@ fn the_session_model_fallback_gates_on_the_stale_provider() {
     let bridge = host(dir.path(), None, None, false);
     let error = bridge.preflight_run("named").unwrap_err().to_string();
     assert!(
-        error.starts_with("Requested factory model \"testprov/session-model\" is unavailable"),
+        error.starts_with("Requested machine model \"testprov/session-model\" is unavailable"),
         "{error}"
     );
 }
@@ -811,7 +811,7 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
                 "params": {"who": "World"},
                 "states": [{
                     "id": "greet", "entry": true,
-                    "subagent": {"prompt": "Greet {who}.\n\n## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.factory.emit(line=...)\n\n- `line`: text\n\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it."},
+                    "subagent": {"prompt": "Greet {who}.\n\n## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n    await rlm.machine.emit(line=...)\n\n- `line`: text\n\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it."},
                     "outputs": [{"name": "line", "type": "text"}],
                     "emit": {"outputs": [{"name": "line", "type": "text"}], "records": {}},
                 }],
@@ -989,7 +989,7 @@ async fn a_python_output_check_refuses_a_file_port() {
         .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "design: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"
+        "design: a python state cannot return a file output; a file port needs an agent state's `rlm.machine.emit`, which copies it beside the session"
     );
 }
 

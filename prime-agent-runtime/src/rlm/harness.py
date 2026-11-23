@@ -361,7 +361,7 @@ def _validate_entry_shape(
         # Every factory writer funnels through here, so the opt-in gate and
         # the spec dry run cover them all: create_factory validates, and the
         # generic create/update path (a refinement edit) gets the same
-        # treatment. The gate comes first: while `factory.enabled` is off
+        # treatment. The gate comes first: while `machine.enabled` is off
         # (the default) every factory write refuses with the one disabled
         # message, before any spec work. A
         # NEW factory requires its spec (an arguments-less factory would
@@ -1223,9 +1223,9 @@ class HarnessState:
             "Factory entries declare validated state-machine workflows of subagent states in arguments['machine'] "
             "(the original DAG sugar in arguments['dag'] compiles to machine form): manage them with "
             "create_factory/update_factory/delete_factory (create_factory validates either form at write time); run "
-            "them with await rlm.factory.run(\"<id>\"), watch with await rlm.factory.status(run_id), stop with "
-            "await rlm.factory.stop(run_id), and resume an escalate-paused run with "
-            "await rlm.factory.resume(run_id).",
+            "them with await rlm.machine.run(\"<id>\"), watch with await rlm.machine.status(run_id), stop with "
+            "await rlm.machine.stop(run_id), and resume an escalate-paused run with "
+            "await rlm.machine.resume(run_id).",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]

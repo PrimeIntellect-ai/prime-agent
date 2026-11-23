@@ -693,7 +693,7 @@ impl ReplKernelManager {
     }
 
     /// Run one out-of-band `factory_activity` request against the kernel's
-    /// factory executor: the `/factory` view's bridge lane. Like
+    /// factory executor: the `/machine` view's bridge lane. Like
     /// [`Self::bash_activity`] this bypasses the cell FIFO (a running turn
     /// must never delay the live view) and never boots an idle kernel.
     ///

@@ -333,7 +333,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         ));
         if options.factory_child {
             lines.push(
-                "Your final message is this state's output, which the factory reads; do not message the parent.".to_string(),
+                "Your final message is this state's output, which the machine reads; do not message the parent.".to_string(),
             );
         } else if has_ipython {
             lines.push(

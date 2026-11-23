@@ -38,7 +38,7 @@ pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
 /// The `bash.completed` notice class label.
 pub const INBOX_CLASS_BASH_DONE: &str = "bash-done";
 /// The `factory.progress` notice class label.
-pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "factory-progress";
+pub const INBOX_CLASS_FACTORY_PROGRESS: &str = "machine-progress";
 /// The agent-message class label: one delivered `agent_message.send`
 /// row (parent/sibling/child traffic) routed into the inbox.
 pub const INBOX_CLASS_AGENT_MESSAGE: &str = "agent-message";
@@ -104,7 +104,7 @@ pub struct InboxNotice {
 pub struct InboxReadFilter {
     /// Exact sender match (the command, the run id, or the agent name).
     pub sender: Option<String>,
-    /// Exact class match (`bash-done`, `factory-progress`, `agent-message`).
+    /// Exact class match (`bash-done`, `machine-progress`, `agent-message`).
     pub class: Option<String>,
     /// Arrival lower bound, inclusive (epoch milliseconds).
     pub since_ms: Option<u64>,
@@ -1553,7 +1553,7 @@ mod tests {
                 "run budget_ms 2000 exceeded",
                 1_000,
             ),
-            preview_label: "Factory progress",
+            preview_label: "Machine progress",
         };
         let fields = inbox_notice_fields(&progress).expect("the milestone routes");
         assert_eq!(fields.class, INBOX_CLASS_FACTORY_PROGRESS);
@@ -1593,11 +1593,11 @@ mod tests {
         let (preview, text) = arrival_notice(&batch, 3);
         assert_eq!(
             preview,
-            "Inbox: 3 new messages (2 bash-done, 1 factory-progress)"
+            "Inbox: 3 new messages (2 bash-done, 1 machine-progress)"
         );
         assert_eq!(
             text,
-            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 factory-progress); total waiting: 3. Read them with rlm.inbox.read()."
+            "[inbox 14:02-14:03 UTC] 3 new messages (2 bash-done, 1 machine-progress); total waiting: 3. Read them with rlm.inbox.read()."
         );
     }
 
@@ -2049,7 +2049,7 @@ mod tests {
             json!({
                 "count": 2,
                 "oldestArrivedAtMs": 1_000,
-                "classes": { "bash-done": 1, "factory-progress": 1 },
+                "classes": { "bash-done": 1, "machine-progress": 1 },
             })
         );
         let read = handlers

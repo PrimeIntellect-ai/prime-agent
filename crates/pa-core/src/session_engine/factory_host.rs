@@ -1,6 +1,6 @@
 //! The factory host bridge: the session seam that exposes the kernel's
 //! factory surface (`factory.graph/status/watch/run/stop/resume`) to the
-//! daemon and TUI, the `/factory` view's lane.
+//! daemon and TUI, the `/machine` view's lane.
 //!
 //! The factory itself lives in the kernel (`rlm/factory.py`, the Rust port's
 //! Python kernel architecture — the executor owns the run registry in kernel
@@ -272,7 +272,7 @@ impl FactoryHost {
                 let pinned = format!("{}/{}", model.provider, model.id).to_lowercase();
                 if !crate::models::model_allowed(&pinned, allowlist) {
                     anyhow::bail!(
-                        "Requested factory model \"{pinned}\" is blocked by the model allowlist"
+                        "Requested machine model \"{pinned}\" is blocked by the model allowlist"
                     );
                 }
             }
@@ -376,7 +376,7 @@ fn is_short_form_selector(reference: &str, selector: &str) -> bool {
 /// base wording).
 fn unavailable_error(reference: &str) -> anyhow::Error {
     anyhow!(
-        "Requested factory model \"{reference}\" is unavailable, unauthenticated, or expired; selectors use the form \"provider/model-id\" (e.g. \"prime-inference/internal/glm-5.3-fast\")"
+        "Requested machine model \"{reference}\" is unavailable, unauthenticated, or expired; selectors use the form \"provider/model-id\" (e.g. \"prime-inference/internal/glm-5.3-fast\")"
     )
 }
 
@@ -633,7 +633,7 @@ pub fn register_factory_check_host_handler(handlers: &mut HostRequestHandlers) {
                     slot.ty == pa_factory::types::Type::File && outputs.contains_key(port)
                 }) {
                     return Err(anyhow!(
-                        "{port}: a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"
+                        "{port}: a python state cannot return a file output; a file port needs an agent state's `rlm.machine.emit`, which copies it beside the session"
                     ));
                 }
                 Ok(json!({}))
@@ -677,14 +677,14 @@ pub fn register_factory_emit_host_handlers(
                     emit_outputs(&contract, &session_dir, &cwd, &payload.data)
                 })
                 .await
-                .map_err(|error| anyhow!("factory.emit stopped: {error}"))?
+                .map_err(|error| anyhow!("rlm.machine.emit stopped: {error}"))?
             })
         }),
     );
 }
 
 fn contract_from(value: Option<&Value>) -> anyhow::Result<pa_factory::Contract> {
-    let value = value.ok_or_else(|| anyhow!("the factory contract is missing"))?;
+    let value = value.ok_or_else(|| anyhow!("the machine contract is missing"))?;
     pa_factory::Contract::from_json(value).map_err(|error| anyhow!(error))
 }
 
@@ -746,10 +746,10 @@ fn emit_outputs(
     data: &Value,
 ) -> anyhow::Result<Value> {
     let contract = contract_from(Some(contract_json))?;
-    let mut outputs = outputs_from(data.get("outputs"), "factory.emit")?;
+    let mut outputs = outputs_from(data.get("outputs"), "rlm.machine.emit")?;
     if outputs.is_empty() {
         return Err(anyhow!(
-            "factory.emit needs at least one output, like emit(verdict=...)"
+            "rlm.machine.emit needs at least one output, like emit(verdict=...)"
         ));
     }
     let mut problems = contract.check(&outputs).err().unwrap_or_default();

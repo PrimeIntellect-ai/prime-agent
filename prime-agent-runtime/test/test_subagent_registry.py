@@ -114,9 +114,9 @@ class RlmSubagentRegistryTest(unittest.TestCase):
             self.assertFalse(hasattr(target, "run"))
 
     def test_package_module_resolves_namespace_attributes(self) -> None:
-        self.assertIs(rlm_module.factory, rlm_module.rlm.factory)
-        self.assertTrue(inspect.iscoroutinefunction(rlm_module.factory.run))
-        self.assertEqual(rlm_module.factory.help(), importlib.import_module("rlm.factory").FACTORY_HELP)
+        self.assertIs(rlm_module.machine, rlm_module.rlm.machine)
+        self.assertTrue(inspect.iscoroutinefunction(rlm_module.machine.run))
+        self.assertEqual(rlm_module.machine.help(), importlib.import_module("rlm.factory").FACTORY_HELP)
         session = object()
         with patch.object(type(rlm_module.rlm), "session", session, create=True):
             self.assertIs(rlm_module.session, session)

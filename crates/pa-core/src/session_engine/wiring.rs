@@ -141,7 +141,7 @@ impl AgentSession {
     }
 
     /// Bind the session's agent dir (the settings root). The refine flow
-    /// reads the `factory.enabled` opt-in from the agent dir's
+    /// reads the `machine.enabled` opt-in from the agent dir's
     /// settings.json on every run — the same live read the kernel-side
     /// factory gate performs — so a session without a wired agent dir
     /// keeps the fail-closed disabled default.

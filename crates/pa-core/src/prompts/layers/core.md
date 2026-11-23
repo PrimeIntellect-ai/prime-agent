@@ -186,9 +186,9 @@ prime-agent provides multiple executable skills, described by their SKILL.md and
 
 All programmatic tools described above except for `bash`, `rlm.*`, and `mcp.*` are implemented as executable skills and will be listed again in the dynamic tail of this prompt. Additional executable and non-executable skills may exist as well; non-executable (markdown) skills are documentation read from disk, and each skill is also available as a shell command by the same name.
 
-## Factory children
+## Machine children
 
-A factory machine run spawns one child session per machine state. A child whose state declares an `emit` contract sees two extra host tools, and its generated Outputs section asks for `factory.emit`; any other factory child hands its outputs back in a fenced JSON block in its final answer.
+A machine run spawns one child session per machine state. A child whose state declares an `emit` contract sees two extra host tools, and its generated Outputs section asks for `rlm.machine.emit`; any other machine child hands its outputs back in a fenced JSON block in its final answer.
 
-- `factory.emit(**outputs: Any) -> dict[str, Any]`: a factory child hands its state's outputs back with one call, one keyword per output port (`await rlm.factory.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `FactoryEmitError` naming the field — fix it and call again
-- `factory.inputs() -> dict[str, Any]`: this factory child's bound inputs (and the machine's params) as values
+- `rlm.machine.emit(**outputs: Any) -> dict[str, Any]`: a machine child hands its state's outputs back with one call, one keyword per output port (`await rlm.machine.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `MachineEmitError` naming the field — fix it and call again
+- `rlm.machine.inputs() -> dict[str, Any]`: this machine child's bound inputs (and the machine's params) as values

@@ -760,7 +760,7 @@ impl AgentSessionEngine {
         engine.bash_activity(action, activity_id, lines).await
     }
 
-    /// One factory activity over this session's kernel (the `/factory`
+    /// One factory activity over this session's kernel (the `/machine`
     /// view's lane). Only the machines page's `library` read builds the
     /// core session (like a prompt read), so the session can start its
     /// kernel; every other action never builds one.

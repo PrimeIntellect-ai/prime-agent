@@ -192,7 +192,7 @@ pub struct AgentSession {
     /// error (no fallback to the agent's id-carrying fn).
     side_question_stream_fn: std::sync::Mutex<Option<pa_agent::stream::StreamFn>>,
     /// The session's agent dir (the settings root): the refine flow
-    /// resolves the `factory.enabled` opt-in from its settings.json on
+    /// resolves the `machine.enabled` opt-in from its settings.json on
     /// every run, immediately before the plan applies, mirroring the
     /// kernel-side factory gate that reads the same file through
     /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring

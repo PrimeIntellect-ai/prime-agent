@@ -12,7 +12,7 @@ from typing import Any
 from .bash import BashHandle, BashResult, BashSnapshot, bash, persistent_shells, _set_completion_notices_wired
 from .factory import (
     FACTORY_HELP,
-    FactoryEmitError,
+    MachineEmitError,
     emit_factory_outputs,
     factory_inputs,
     graph_factory,
@@ -110,7 +110,7 @@ class RLMChildResult:
 
     `answer_text` is the child's full final answer (the settle-binding
     lane, host-bounded); `answer_preview` is the compact roster preview.
-    `factory_task_busy` reports factory-only background work separately from
+    `machine_task_busy` reports machine-only background work separately from
     turn settlement: `None` means the activity was not observed.
     """
 
@@ -125,17 +125,17 @@ class RLMChildResult:
     duration_ms: int | None = None
     tool_use_count: int | None = None
     replied_since_task: bool | None = None
-    factory_task_busy: bool | None = None
+    machine_task_busy: bool | None = None
 
 
 @dataclass(frozen=True)
 class RLMInboxMessage:
     """One machine-generated notice waiting in the session inbox.
 
-    `inbox_class` is `bash-done`, `factory-progress`, `agent-message`,
+    `inbox_class` is `bash-done`, `machine-progress`, `agent-message`,
     `child-exited`, `child-failed`, or `heartbeat`; `arrived_at_ms` is
     the epoch-ms arrival time; `sender` is the command for a bash
-    completion, the run id for a factory milestone, the agent name for
+    completion, the run id for a machine milestone, the agent name for
     an agent message, the child's session name for a child lifecycle
     notice, or the job id for a heartbeat fire; `meta` carries the
     notice's metadata (pid/command/exitCode/exitClass, the run's
@@ -504,7 +504,7 @@ def _child_result_from_payload(payload: Any) -> RLMChildResult:
         duration_ms=_optional_int("duration_ms"),
         tool_use_count=_optional_int("tool_use_count"),
         replied_since_task=replied,
-        factory_task_busy=factory_task_busy,
+        machine_task_busy=factory_task_busy,
     )
 
 
@@ -615,7 +615,7 @@ async def inbox_read(
     before_ms: int | None = None,
 ) -> list[RLMInboxMessage]:
     """Read and drain the session inbox: the waiting machine-generated
-    notices (bash completions, factory milestones, agent messages,
+    notices (bash completions, machine milestones, agent messages,
     child lifecycle terminals, heartbeat fires) return in arrival order
     with their arrival time, and the inbox empties.
 
@@ -623,7 +623,7 @@ async def inbox_read(
     everything. ``sender`` matches exactly (a command, a run id, an
     agent name, a child's session name, or a heartbeat job id);
     ``inbox_class`` matches the message class (``bash-done``,
-    ``factory-progress``, ``agent-message``, ``child-exited``,
+    ``machine-progress``, ``agent-message``, ``child-exited``,
     ``child-failed``, ``heartbeat``); ``since_ms`` is the inclusive
     arrival lower bound and ``before_ms`` the exclusive upper bound
     (epoch milliseconds). Only the matching messages leave the inbox.
@@ -659,7 +659,7 @@ async def inbox_read(
 async def inbox_count() -> RLMInboxCount:
     """Count the session inbox's waiting messages without draining them:
     the total, the oldest arrival's epoch-ms time, and the per-class
-    breakdown (`bash-done`, `factory-progress`, ...)."""
+    breakdown (`bash-done`, `machine-progress`, ...)."""
     payload = await host_request("rlm.inbox.count")
     count = payload.get("count")
     if not isinstance(count, int) or isinstance(count, bool):
@@ -800,23 +800,23 @@ class _RLMInboxNamespace:
         return await inbox_count()
 
 
-class _RLMFactoryNamespace:
-    """Run stored state-machine factories: rlm.factory.run/status/stop/resume,
+class _RLMMachineNamespace:
+    """Run stored machines: rlm.machine.run/status/stop/resume,
     plus graph/watch for live monitoring.
 
-    ``run('<spec_id>')`` validates a stored factory entry (machine form, or
-    dag sugar that compiles to one), enters the entry states up to the
-    spec's max_parallel, and returns immediately; a kernel asyncio task
+    ``run('<spec_id>')`` validates a stored machine entry (harness kind
+    ``factory``: machine form, or dag sugar that compiles to one), enters
+    the entry states up to the spec's max_parallel, and returns immediately; a kernel asyncio task
     continues the run (nonblocking control loop). Runs live in kernel
     memory only; children stay supervisor-owned. Every call is async, so
-    always await it: ``await rlm.factory.run('<id>')``.
+    always await it: ``await rlm.machine.run('<id>')``.
 
     When no stored entry carries the id, ``run`` falls back to the machine
     library: the bundled seeds ship inside the runtime (the personal
     library lives under the agent dir), and the template runs directly
     without creating a harness entry:
-    ``await rlm.factory.run('review-sweep')``.
-    ``prime-agent factory list | import | export`` manages the library (a
+    ``await rlm.machine.run('review-sweep')``.
+    ``prime-agent machine list | import | export`` manages the library (a
     broken machine names its exact errors; a missing one lists what the
     library has).
 
@@ -829,14 +829,14 @@ class _RLMFactoryNamespace:
     progress and drive orchestration programmatically, and the emitted
     graph model renders as ASCII or genuine Mermaid from one shape.
 
-    The factory is opt-in: while the ``factory.enabled`` setting is off (the
-    default; the user turns it on with ``/factory on``), every call above
+    Machines are opt-in: while the ``machine.enabled`` setting is off (the
+    default; the user turns it on with ``/machine on``), every call above
     refuses with one clean message and only ``help()`` answers, so the
     guide stays readable before opting in.
 
     ``help()`` returns the full embedded authoring reference and API guide
     (states, ports, guards, joins, foreach, budgets, the machine library,
-    and the API with worked examples): ``rlm.factory.help()``.
+    and the API with worked examples): ``rlm.machine.help()``.
     """
 
     async def run(
@@ -860,17 +860,17 @@ class _RLMFactoryNamespace:
         return await watch_factory(run_id, timeout)
 
     async def emit(self, **outputs: Any) -> dict[str, Any]:
-        """Hand this factory child's outputs back: ``await
-        rlm.factory.emit(verdict={...})``. A wrong value raises
-        ``FactoryEmitError`` naming the field; fix it and call again."""
+        """Hand this machine child's outputs back: ``await
+        rlm.machine.emit(verdict={...})``. A wrong value raises
+        ``MachineEmitError`` naming the field; fix it and call again."""
         return await emit_factory_outputs(outputs)
 
     async def inputs(self) -> dict[str, Any]:
-        """This factory child's bound inputs (and the machine's params) as values."""
+        """This machine child's bound inputs (and the machine's params) as values."""
         return await factory_inputs()
 
     def help(self) -> str:
-        """Return the embedded factory authoring reference and API guide."""
+        """Return the embedded machine authoring reference and API guide."""
         return FACTORY_HELP
 
 
@@ -1018,7 +1018,7 @@ class _RLMNamespace:
     async def end_turn(self) -> dict[str, Any]:
         return await end_turn()
 
-    factory = _RLMFactoryNamespace()
+    machine = _RLMMachineNamespace()
     inbox = _RLMInboxNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -1033,7 +1033,7 @@ class _RLMNamespace:
 
 rlm = _RLMNamespace()
 harness = _harness_state
-factory = rlm.factory
+machine = rlm.machine
 
 
 class _NotCallableModule(types.ModuleType):

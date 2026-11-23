@@ -46,7 +46,7 @@ pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finish
 /// the owning session's steering lane.
 pub const FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE: &str = "factory_progress_notice";
 /// The queue-strip label the factory progress notice's queued row carries.
-pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
+pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Machine progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
@@ -237,7 +237,7 @@ pub fn create_async_bash_completion_message(
     }
 }
 
-/// The factory run milestone notice: `[factory-progress run:<id>] <kind>: <detail>`,
+/// The factory run milestone notice: `[machine-progress run:<id>] <kind>: <detail>`,
 /// the kernel's `snake_case` kind rendered with hyphens (`budget_exceeded` reads
 /// `budget-exceeded`). The details keep the kernel's raw values.
 #[must_use]
@@ -257,7 +257,7 @@ pub fn create_factory_progress_message(
     pa_types::session::CustomMessage {
         custom_type: FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE.to_string(),
         content: UserContent::Text(format!(
-            "[factory-progress run:{header_run}] {header_kind}: {detail}"
+            "[machine-progress run:{header_run}] {header_kind}: {detail}"
         )),
         display: true,
         details: Some(details),

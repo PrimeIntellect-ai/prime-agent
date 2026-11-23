@@ -182,7 +182,7 @@ pub type BashNoticeAgentSlot = Arc<Mutex<Option<Weak<pa_agent::agent::Agent>>>>;
 
 /// The in-process sinks over one session's own agent (the daemonless
 /// embeddings): a notice steers its row (`[bash-done]` or
-/// `[factory-progress]`) onto the agent's steering queue and fires the
+/// `[machine-progress]`) onto the agent's steering queue and fires the
 /// embedding's wake (TS `queueIfBusy: true` + `resumeIfIdle: true` — the
 /// row rides the steering lane and the embedding resumes the idle run); a
 /// consumed notice withdraws the queued completion row.
@@ -421,7 +421,7 @@ mod tests {
             (
                 Some(&serde_json::json!("factory_progress_notice")),
                 Some(&serde_json::json!(
-                    "[factory-progress run:run-7] budget-exceeded: run budget_ms 2000 exceeded"
+                    "[machine-progress run:run-7] budget-exceeded: run budget_ms 2000 exceeded"
                 )),
                 Some(&serde_json::json!({
                     "runId": "run-7",

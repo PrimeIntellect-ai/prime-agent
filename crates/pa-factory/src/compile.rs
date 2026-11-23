@@ -293,13 +293,13 @@ fn assemble_prompt(machine: &Machine, state: &State, agent: &Agent) -> String {
         // No outputs: the empty contract exists so the child can still
         // read its bound inputs, so the prompt must say how.
         prompt.push_str(
-            "\n\n## Inputs\n\nYour inputs, as typed values, are `await rlm.factory.inputs()`.",
+            "\n\n## Inputs\n\nYour inputs, as typed values, are `await rlm.machine.inputs()`.",
         );
     }
     to_executor_placeholders(&prompt)
 }
 
-/// How a child hands back its outputs: one `rlm.factory.emit` call, with
+/// How a child hands back its outputs: one `rlm.machine.emit` call, with
 /// each port's type spelled out and checked when the call is made.
 fn outputs_section(machine: &Machine, state: &State) -> String {
     let mut section = String::from(
@@ -310,7 +310,7 @@ fn outputs_section(machine: &Machine, state: &State) -> String {
         .iter()
         .map(|output| format!("{}=...", output.name))
         .collect();
-    let _ = writeln!(section, "    await rlm.factory.emit({})\n", call.join(", "));
+    let _ = writeln!(section, "    await rlm.machine.emit({})\n", call.join(", "));
     let mut records: Vec<&str> = Vec::new();
     for output in &state.outputs {
         let _ = writeln!(
@@ -327,7 +327,7 @@ fn outputs_section(machine: &Machine, state: &State) -> String {
     }
     section.push_str("\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it.");
     if !state.inputs.is_empty() {
-        section.push_str(" Your inputs, as typed values, are `await rlm.factory.inputs()`.");
+        section.push_str(" Your inputs, as typed values, are `await rlm.machine.inputs()`.");
     }
     section
 }
