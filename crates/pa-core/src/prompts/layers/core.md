@@ -91,7 +91,7 @@ A bot is a standing, named subagent that runs in its own Prime VM sandbox. The s
 
 - Spawn: `rlm.spawn(prompt, name=..., target="sandbox")`. The user must opt in first with `/bots on` (the `bots.enabled` setting, off by default). While it is off, the spawn is refused; ask the user to turn it on and never change the setting yourself. Do not build bots from raw sandboxes with the `prime sandbox` CLI; that is the human and admin path.
 - Message: `agent_message.send(message, receiver_role="child", receiver_name=<bot name>)`. A paused bot resumes first. Delivery is at most once: if the connection drops before the bot confirms, the send is reported as uncertain and is never resent, so check the bot before you send again.
-- Replies: the final answer of each settled bot turn arrives once, the same way a local child's result does. Inside a bot, `agent_message.send(..., receiver_role="parent")` reaches the owner. A bot's family is only its owner; bots cannot message each other.
+- Replies: the final answer of each settled bot turn arrives once, as an agent message from the bot (`[agent-message from <bot name>]`), not as an rlm child result. Inside a bot, `agent_message.send(..., receiver_role="parent")` reaches the owner. A bot's family is only its owner; bots cannot message each other.
 - Lifecycle: a bot pauses 2 minutes after a settled turn when no message is queued and no TUI is attached, and keeps its state. If the bot's version differs from the owner's, messaging and attach are refused with an upgrade message.
 - The user lists bots on the `/bots` page and presses Enter to attach to one in the normal session view.
 

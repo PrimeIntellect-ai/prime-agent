@@ -33,13 +33,14 @@ opens the page.
 Agents make bots. An agent calls
 `rlm.spawn(prompt, name=..., target="sandbox")`, and messages the bot with
 `agent_message.send(..., receiver_role="child", receiver_name=...)`. The
-final answer of each settled bot turn comes back once as a child result.
-A bot can message its owner with `receiver_role="parent"`. Bots cannot
+final answer of each settled bot turn comes back once, as an agent
+message from the bot (`[agent-message from <bot name>]`). A bot can also
+message its owner with `receiver_role="parent"`. Bots cannot
 message each other.
 
-The `prime sandbox` CLI is the human and admin path only. Bot sandboxes
-carry the labels `prime-agent-bot` and `prime-agent-bot:<id>`, so an admin
-can find them with the CLI. Use the page or the owning agent to delete a
+The `prime sandbox` CLI is the human and admin path only. A bot sandbox has the bot's name.
+It carries the labels `prime-agent-bot`, `prime-agent-bot:<id>`, and
+`prime-agent-bot-owner:<owner id>`, so an admin can find it with the CLI. Use the page or the owning agent to delete a
 bot, so the daemon also removes its checkpoints.
 
 ## Attach
@@ -56,7 +57,9 @@ closes the connection to the bot.
 ## Version match
 
 A bot runs the same prime-agent version as the daemon that owns it. The
-daemon installs that exact release in the sandbox when it creates the bot,
+sandbox boots the public `python:3.12-bookworm` image (override it with
+`PRIME_AGENT_BOT_IMAGE`). The daemon installs that exact release in the
+sandbox when it creates the bot,
 and again on resume when the bot's version differs. If the versions still
 differ, attach and messaging are refused with a message that says which
 side to upgrade. A local build with no published Linux release cannot

@@ -13,7 +13,7 @@ await agent_message.send("Start with last night's run.", receiver_role="child", 
 
 - The user must opt in first with `/bots on` (the `bots.enabled` setting, off by default). Ask the user; do not change it yourself.
 - The bot runs the same prime-agent version as its owner. The daemon creates, pauses, resumes, and deletes its sandbox.
-- Bot replies arrive like any child result. The user attaches from the `/bots` page.
+- Bot replies arrive as agent messages from the bot, not as rlm child results. The user attaches from the `/bots` page.
 
 The CLI and SDK below are the human and admin path: one-off jobs, untrusted code, and cleanup.
 
