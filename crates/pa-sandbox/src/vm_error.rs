@@ -308,15 +308,28 @@ impl CommandSessionError {
     }
 
     /// Build from a [`crate::SandboxError`] delivered by the transport or
-    /// an auth source (TS `toVmProcessError`: transport-level failures keep
-    /// their class; any other failure is a network fault).
+    /// an auth source. Each failure keeps its class, so a definitive auth
+    /// answer (a bad key, a missing sandbox) does not retry as a network
+    /// fault.
     #[must_use]
     pub fn from_sandbox_error(error: &crate::SandboxError) -> Self {
-        match error.code() {
-            crate::SandboxErrorCode::Timeout => Self::timeout(error.to_string()),
-            crate::SandboxErrorCode::TooLarge => Self::too_large(error.to_string()),
-            _ => Self::network(error.to_string()),
-        }
+        use crate::SandboxErrorCode as Code;
+        let message = error.to_string();
+        let code = match error.code() {
+            Code::Network => CommandSessionErrorCode::Network,
+            Code::Timeout | Code::RequestTimeout => CommandSessionErrorCode::Timeout,
+            Code::TooLarge => CommandSessionErrorCode::TooLarge,
+            Code::InvalidRequest => CommandSessionErrorCode::InvalidRequest,
+            Code::InvalidResponse => CommandSessionErrorCode::InvalidResponse,
+            Code::SandboxNotFound => CommandSessionErrorCode::SandboxNotFound,
+            Code::TerminalStatus => CommandSessionErrorCode::FailedPrecondition,
+            Code::Conflict => CommandSessionErrorCode::Aborted,
+            Code::Http => error.status().map_or(
+                CommandSessionErrorCode::Unknown,
+                CommandSessionErrorCode::from_status,
+            ),
+        };
+        Self::new(code, message)
     }
 }
 

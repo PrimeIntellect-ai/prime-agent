@@ -32,7 +32,7 @@ use crate::proto::{
 };
 use crate::transport::{SandboxTransport, StreamedResponse, TransportRequest};
 use crate::types::Method;
-use crate::vm_error::CommandSessionError;
+use crate::vm_error::{CommandSessionError, CommandSessionErrorCode};
 use crate::vm_process::{with_auth_retry_on, ClientInner, GatewayAuthSource};
 use crate::vm_wire::{
     error_from_status_body, is_media_type, parse_end_of_stream, proto_fault, read_error_preview,
@@ -223,6 +223,10 @@ async fn pump<T, A>(
     let mut route_connect = config.initial_route_connect;
     let mut start_emitted = false;
     let mut reconnects = 0u32;
+    // A stream that reports `unauthenticated` (after its open succeeded)
+    // reopens once with refreshed credentials.
+    let mut auth_refreshed = false;
+    let mut refresh_auth = false;
     loop {
         if *release.borrow() {
             return;
@@ -230,14 +234,23 @@ async fn pump<T, A>(
         let outcome = attempt_stream(
             &inner,
             &config,
+            refresh_auth,
             &mut route_connect,
             &mut start_emitted,
             &events,
             &mut release,
         )
         .await;
+        refresh_auth = false;
         let recoverable = match outcome {
             Attempt::Released => return,
+            Attempt::Fault(fault)
+                if fault.code() == CommandSessionErrorCode::Unauthenticated && !auth_refreshed =>
+            {
+                auth_refreshed = true;
+                refresh_auth = true;
+                continue;
+            }
             Attempt::Ended(end) => {
                 if !send_item(&events, &mut release, StreamItem::End(end)).await {
                     return;
@@ -270,6 +283,7 @@ async fn pump<T, A>(
 async fn attempt_stream<T, A>(
     inner: &ClientInner<T, A>,
     config: &PumpConfig,
+    refresh_auth: bool,
     route_connect: &mut bool,
     start_emitted: &mut bool,
     events: &mpsc::Sender<StreamItem>,
@@ -287,6 +301,7 @@ where
             &config.connect_bytes,
             *route_connect,
             config.connect_timeout_ms,
+            refresh_auth,
         ) => match result {
             Ok(opened) => opened,
             Err(fault) => return Attempt::Fault(fault),
@@ -403,13 +418,14 @@ async fn open_event_stream<T, A>(
     connect_bytes: &[u8],
     route_connect: bool,
     connect_timeout_ms: Option<u64>,
+    refresh_auth: bool,
 ) -> Result<OpenedStream, CommandSessionError>
 where
     T: SandboxTransport,
     A: GatewayAuthSource,
 {
     let method: &'static str = if route_connect { "Connect" } else { "Start" };
-    with_auth_retry_on(inner, method, |auth| async move {
+    with_auth_retry_on(inner, method, refresh_auth, |auth| async move {
         let url = rpc_url(inner, &auth, method)?;
         let payload = if route_connect {
             connect_bytes

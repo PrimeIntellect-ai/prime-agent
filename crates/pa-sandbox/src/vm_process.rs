@@ -474,8 +474,21 @@ where
             max_pending_events,
         );
         // Resolve the start event before handing the stream out (TS
-        // `await stream.started`).
-        await_started(stream).await
+        // `await stream.started`). A positive Start deadline also bounds
+        // the wait, so a peer that stalls after its headers cannot hang
+        // the call; dropping the stream releases it.
+        match connect_timeout_ms.filter(|timeout_ms| *timeout_ms != 0) {
+            Some(timeout_ms) => {
+                tokio::time::timeout(Duration::from_millis(timeout_ms), await_started(stream))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(CommandSessionError::timeout(
+                            "Command session stream sent no start event before its deadline",
+                        ))
+                    })
+            }
+            None => await_started(stream).await,
+        }
     }
 
     async fn unary_with_retry(
@@ -529,7 +542,7 @@ where
         request_bytes: &[u8],
         timeout: Duration,
     ) -> Result<(), CommandSessionError> {
-        with_auth_retry_on(&self.inner, method, |auth| {
+        with_auth_retry_on(&self.inner, method, false, |auth| {
             let inner = &self.inner;
             async move {
                 let url = rpc_url(inner, &auth, method)?;
@@ -616,9 +629,12 @@ where
 
 /// Resolve auth, run `op`, and retry exactly once with a refreshed auth
 /// when the operation fails `unauthenticated` (TS `withAuthRetry`).
+/// `refresh_first` starts from a refreshed auth (the stream already saw
+/// its credentials refused) and then does not retry.
 pub(crate) async fn with_auth_retry_on<T, A, R, Fut>(
     inner: &ClientInner<T, A>,
     method: &'static str,
+    refresh_first: bool,
     op: impl Fn(GatewayAuth) -> Fut,
 ) -> Result<R, CommandSessionError>
 where
@@ -626,7 +642,7 @@ where
     A: GatewayAuthSource,
     Fut: Future<Output = Result<R, CommandSessionError>> + Send,
 {
-    let mut refreshed = false;
+    let mut refreshed = refresh_first;
     loop {
         let auth = if refreshed {
             inner.auth.refresh_auth().await

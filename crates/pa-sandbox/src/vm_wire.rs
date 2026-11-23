@@ -153,13 +153,9 @@ pub(crate) fn error_from_status_body(
     auth: &GatewayAuth,
 ) -> CommandSessionError {
     let secrets = [auth.token.as_str()];
-    let preview = if text.is_empty() {
-        None
-    } else {
-        Some(crate::SandboxError::bound_preview(
-            &crate::SandboxError::redact_secrets(text, &secrets),
-        ))
-    };
+    // Scrubs JSON string values after decoding, so an escaped token is
+    // caught too.
+    let preview = crate::SandboxError::preview_from_text(text, &secrets);
     let parsed = serde_json::from_str::<serde_json::Value>(text).ok();
     let generic = || CommandSessionErrorCode::from_status(status);
     let context = format!("Command session {method}");

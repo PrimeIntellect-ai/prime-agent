@@ -46,8 +46,8 @@ fn is_secret_name(name: &str) -> bool {
 #[derive(Deserialize)]
 struct SecretPage {
     data: Vec<PlatformSecret>,
-    #[serde(default)]
-    total_count: usize,
+    #[serde(default, alias = "totalCount")]
+    total_count: Option<usize>,
 }
 
 /// The create response (the platform's `GenericResponse`).
@@ -96,7 +96,11 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 .await?;
             let fetched = page.data.len();
             secrets.extend(page.data);
-            if fetched == 0 || secrets.len() >= page.total_count {
+            // A short page is the last one; the total, when present, ends
+            // the walk early.
+            if fetched < SECRETS_PAGE_LIMIT
+                || page.total_count.is_some_and(|total| secrets.len() >= total)
+            {
                 return Ok(secrets);
             }
         }

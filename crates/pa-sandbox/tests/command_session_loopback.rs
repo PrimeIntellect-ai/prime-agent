@@ -671,6 +671,45 @@ async fn a_stalled_unary_body_times_out_instead_of_hanging() {
 }
 
 #[tokio::test]
+async fn an_unauthenticated_stream_reopens_once_with_refreshed_credentials() {
+    let server = MockServer::start(Vec::new()).await;
+    server.push(connect_stream(vec![
+        start_frame(8),
+        eos_error_frame("unauthenticated", "token expired"),
+    ]));
+    server.push(connect_stream(vec![start_frame(8), end_frame()]));
+    let client = CommandSessionClient::with_transport(
+        ReqwestSandboxTransport::new(),
+        ToggleAuthSource {
+            primary: auth(server.url(""), "gw-token-1"),
+            refreshed: auth(server.url(""), "gw-token-2"),
+        },
+        CommandSessionOptions {
+            max_event_frame_bytes: None,
+            keepalive_interval_seconds: Some(90),
+            allow_insecure_localhost: true,
+            unary_retry_base_delay: Some(Duration::from_millis(1)),
+        },
+    )
+    .unwrap();
+    let mut stream = client
+        .start(&start_request(), StartOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream.next_event().await,
+        Some(Ok(CommandSessionEvent::End(_)))
+    ));
+    let requests = server.recorded_requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(
+        requests[1].contains("authorization: Bearer gw-token-2"),
+        "{}",
+        requests[1]
+    );
+}
+
+#[tokio::test]
 async fn unary_retries_transient_faults_with_identical_bytes() {
     let server = MockServer::start(Vec::new()).await;
     server.push_raw(json_response(
