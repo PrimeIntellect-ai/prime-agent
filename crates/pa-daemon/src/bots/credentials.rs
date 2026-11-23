@@ -116,7 +116,7 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
 }
 
 /// The API keys the platform can inject (stored, or from the environment
-/// for `required`), prime-inference first. OAuth logins are left out. A
+/// for `required`), `required` first, then prime-inference. OAuth logins are left out. A
 /// host an earlier provider holds (the platform never combines rules), or
 /// one past the platform's host limit, is left out.
 fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
@@ -125,7 +125,13 @@ fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
     if !providers.iter().any(|provider| provider == required) {
         providers.push(required.to_string());
     }
-    providers.sort_by_key(|provider| (provider != PRIME_INFERENCE_PROVIDER_ID, provider.clone()));
+    providers.sort_by_key(|provider| {
+        (
+            provider != required,
+            provider != PRIME_INFERENCE_PROVIDER_ID,
+            provider.clone(),
+        )
+    });
     let mut hosts = BTreeSet::new();
     let mut injections = Vec::new();
     for provider in providers {

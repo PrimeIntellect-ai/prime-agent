@@ -20,6 +20,9 @@ use super::{BotManager, BotRecord, GUEST_DAEMON_SOCKET};
 pub(crate) const RELAY_SCRIPT: &str =
     r#"export PATH="${HOME:-/root}/.local/bin:$PATH"; exec prime-agent relay"#;
 
+/// The longest hello line the link reads.
+const MAX_HELLO_BYTES: u64 = 64 * 1024;
+
 /// How long the guest daemon may take to say hello over the relay.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -128,7 +131,14 @@ where
 {
     let mut reader = BufReader::new(read);
     let mut line = String::new();
-    if reader.read_line(&mut line).await? == 0 {
+    let read = (&mut reader)
+        .take(MAX_HELLO_BYTES + 1)
+        .read_line(&mut line)
+        .await?;
+    if read as u64 > MAX_HELLO_BYTES {
+        anyhow::bail!("the bot's daemon hello is longer than {MAX_HELLO_BYTES} bytes");
+    }
+    if read == 0 {
         anyhow::bail!("the bot closed the link before its daemon said hello");
     }
     let hello: Value = serde_json::from_str(&line)

@@ -512,24 +512,23 @@ impl BotPlatform for PrimePlatform {
                 spawn_exec_halves(&source, &request, StartOptions::default()),
             )
             .await;
-            if let Ok(halves) = started {
-                halves.map_err(|error| PlatformError::Transient(format!("{error:#}")))
-            } else {
-                // The process may have started without its start event
-                // reaching us; do not leave it running.
-                if let Ok(client) = source.command_client() {
-                    let _ = client
-                        .send_signal(
-                            &session_uuid,
-                            VmSignal::Terminate,
-                            SendSignalOptions::default(),
-                        )
-                        .await;
-                }
-                Err(PlatformError::Transient(
-                    "the guest process sent no start event in time".into(),
-                ))
+            let error = match started {
+                Ok(Ok(halves)) => return Ok(halves),
+                Ok(Err(error)) => format!("{error:#}"),
+                Err(_) => "the guest process sent no start event in time".to_string(),
+            };
+            // The process may have started without its start event reaching
+            // us; do not leave it running.
+            if let Ok(client) = source.command_client() {
+                let _ = client
+                    .send_signal(
+                        &session_uuid,
+                        VmSignal::Terminate,
+                        SendSignalOptions::default(),
+                    )
+                    .await;
             }
+            Err(PlatformError::Transient(error))
         }
         .boxed()
     }
