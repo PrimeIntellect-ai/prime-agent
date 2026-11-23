@@ -353,7 +353,10 @@ mod tests {
 
     #[test]
     fn base_urls_normalize_and_reject_unsafe_origins() {
-        for good in ["https://api.example.com/", "https://api.example.com/api/v1/"] {
+        for good in [
+            "https://api.example.com/",
+            "https://api.example.com/api/v1/",
+        ] {
             assert_eq!(
                 normalize_base_url(good, false).unwrap(),
                 "https://api.example.com"
