@@ -218,7 +218,6 @@ impl IpythonKernelProvisioner {
     }
 
     /// The Python skills pre-imported at kernel bootstrap.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn python_skills(&self) -> &[KernelPythonSkill] {
         &self.inner.options.python_skills
