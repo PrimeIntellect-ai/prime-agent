@@ -11,6 +11,7 @@
 //! - `{base}/api/v1/sandbox/{id}/checkpoints` and
 //!   `{base}/api/v1/sandbox/checkpoints/{id}` — filesystem checkpoints.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::error::SandboxError;
@@ -53,7 +54,6 @@ pub struct PrimeSandboxClient<T: SandboxTransport = ReqwestSandboxTransport> {
     pub(crate) base_url: String,
     pub(crate) team_id: Option<String>,
     pub(crate) request_timeout: Duration,
-    pub(crate) allow_insecure_localhost: bool,
 }
 
 impl<T: SandboxTransport + std::fmt::Debug> std::fmt::Debug for PrimeSandboxClient<T> {
@@ -64,7 +64,6 @@ impl<T: SandboxTransport + std::fmt::Debug> std::fmt::Debug for PrimeSandboxClie
             .field("base_url", &self.base_url)
             .field("team_id", &self.team_id)
             .field("request_timeout", &self.request_timeout)
-            .field("allow_insecure_localhost", &self.allow_insecure_localhost)
             .finish()
     }
 }
@@ -113,7 +112,6 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             base_url,
             team_id: options.team_id.filter(|team_id| !team_id.is_empty()),
             request_timeout,
-            allow_insecure_localhost: options.allow_insecure_localhost,
         })
     }
 
@@ -206,11 +204,13 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// # Errors
     ///
     /// Returns a status-mapped error for non-2xx responses and
-    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed page.
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed page or
+    /// pagination that does not advance.
     pub async fn list_sandboxes(&self, labels: &[String]) -> Result<Vec<Sandbox>, SandboxError> {
         let mut sandboxes = Vec::new();
         let mut page: u64 = 1;
         let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
         loop {
             let mut url = url::Url::parse(&format!("{}/api/v1/sandbox", self.base_url))
                 .map_err(|_| SandboxError::invalid_request("Sandbox list URL is invalid"))?;
@@ -242,12 +242,17 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 )
                 .await?;
             sandboxes.extend(result.sandboxes);
-            if let Some(next) = result.next_cursor {
-                cursor = Some(next);
-            } else if result.has_next && cursor.is_none() {
-                page = result.page + 1;
-            } else {
+            if !result.has_next {
                 return Ok(sandboxes);
+            }
+            match result.next_cursor {
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                None if cursor.is_none() && result.page >= page => page = result.page + 1,
+                Some(_) | None => {
+                    return Err(SandboxError::invalid_response(
+                        "Sandbox list pagination did not advance",
+                    ));
+                }
             }
         }
     }
@@ -389,7 +394,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     /// The shared JSON request pipeline: typed transport errors, status
     /// mapping with a bounded redacted `details` preview, and strict
     /// response parsing.
-    // Gateway calls pass their own headers, deadline, and redaction set.
+    // Each argument is part of the request; bundling them would add a single-use struct.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn request_json<R, Parse>(
         &self,
@@ -421,8 +426,6 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 &url,
                 response.status,
                 &response.body,
-                // The redaction set is per call: platform calls redact the
-                // API key, gateway calls also redact the sandbox token.
                 &secrets,
                 context,
             ));

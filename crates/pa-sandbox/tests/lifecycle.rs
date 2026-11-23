@@ -261,6 +261,19 @@ async fn list_by_label_follows_every_page() {
 }
 
 #[tokio::test]
+async fn list_by_label_rejects_a_repeated_cursor() {
+    let page = json!({
+        "sandboxes": [sandbox_with_id("sb-1", "RUNNING")],
+        "total": null, "page": 1, "per_page": 1, "has_next": true, "next_cursor": "c1",
+    });
+    let transport = ScriptedTransport::new(vec![ok(page.clone()), ok(page)]);
+    let client = test_client(&transport);
+    let error = client.list_sandboxes(&[]).await.unwrap_err();
+    assert_eq!(error.code(), SandboxErrorCode::InvalidResponse);
+    assert_eq!(transport.recorded().len(), 2);
+}
+
+#[tokio::test]
 async fn pause_returns_the_checkpoint_and_resume_answers_the_record() {
     let mut paused = sandbox_wire("RUNNING");
     paused["checkpoint_id"] = json!("ckpt-1");
