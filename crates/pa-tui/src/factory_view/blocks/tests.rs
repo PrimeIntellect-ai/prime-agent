@@ -118,7 +118,7 @@ fn dense_diagrams_do_not_allocate_an_unbounded_canvas() {
         None,
     );
     assert_eq!(diagram.lines.len(), 1);
-    assert!(diagram.node_rows.is_empty());
+    assert_eq!(diagram.node_rows, vec![0; states.len()]);
     assert!(plain(&diagram).contains("40 states, 780 transitions"));
 }
 

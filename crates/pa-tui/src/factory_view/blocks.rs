@@ -468,7 +468,9 @@ pub(crate) fn block_diagram(
                 transitions.len()
             ),
         )]],
-        node_rows: Vec::new(),
+        // Every state points at the notice row, so a selected state still
+        // resolves its row.
+        node_rows: vec![0; states.len()],
     };
     // Each back edge costs at least a departure row, an arrival row, and
     // two gutter columns, so 4 * backs^2 cells is a floor. Reject before

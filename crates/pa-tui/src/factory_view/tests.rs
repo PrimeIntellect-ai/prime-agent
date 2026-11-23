@@ -2823,3 +2823,28 @@ fn compound_flowchart_shapes_keep_only_their_label() {
         ]
     );
 }
+
+/// A run too large to draw keeps its size notice while a state is
+/// selected: the selection resolves to the notice row, never past it.
+#[test]
+fn an_oversized_run_keeps_its_notice_with_a_state_selected() {
+    let mut snapshot = scripted_snapshot();
+    let ids: Vec<String> = (0..40).map(|index| format!("s{index}")).collect();
+    snapshot["machine"]["states"] = json!(ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| json!({"id": id, "entry": index == 0}))
+        .collect::<Vec<_>>());
+    snapshot["machine"]["transitions"] = json!((0..ids.len())
+        .flat_map(|from| (from + 1..ids.len()).map(move |to| (from, to)))
+        .map(|(from, to)| json!({"from": ids[from], "to": ids[to]}))
+        .collect::<Vec<_>>());
+    snapshot["machine"]["order"] = json!(ids);
+    snapshot["nodes"] = json!([]);
+    snapshot["activeNodes"] = json!([]);
+    snapshot["lastFired"] = json!([]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let _ = view.handle_key("down", &kb());
+    let text = frame_text(&mut view).join("\n");
+    assert!(text.contains("diagram too large to render"), "{text}");
+}
