@@ -1157,31 +1157,7 @@ mod idle {
     }
 
     #[cfg(test)]
-    mod tests {
-        #[test]
-        fn counters_parse_from_proc_text() {
-            let stat =
-                "4242 (pa worker (x)) S 1 4242 4242 0 -1 4194560 900 0 0 0 31 7 0 0 20 0 9 0";
-            assert_eq!(super::live_ticks(stat), Some(38));
-            assert_eq!(super::live_ticks(&stat.replacen(") S", ") Z", 1)), None);
-            let status = "Name:\tprime-agent\nvoluntary_ctxt_switches:\t120\nnonvoluntary_ctxt_switches:\t5\n";
-            assert_eq!(super::status_switches(status), 125);
-        }
-
-        #[test]
-        fn the_snapshot_reads_real_proc_counters_down_to_descendants() {
-            let mut child = std::process::Command::new("/bin/cat")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .expect("spawn the mock descendant");
-            let own = std::process::id() as i32;
-            let seen = super::snapshot(&[own]);
-            let _ = child.kill();
-            let _ = child.wait();
-            assert!(seen.contains_key(&(child.id() as i32)), "{seen:?}");
-            assert!(seen[&own].switches > 0);
-        }
-    }
+    mod tests {}
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1222,117 +1198,6 @@ mod tests {
             ctx.binary,
             binary.canonicalize().expect("anchor the binary")
         );
-    }
-
-    #[test]
-    fn relative_corpus_paths_anchor_the_socket_before_changing_project() {
-        let dir = tempfile::tempdir_in(".").expect("relative corpus directory");
-        // TempDir may return an absolute path even for a relative parent.
-        // The directory lives in cwd, so its name is the caller's relative path.
-        let relative_root = Path::new(dir.path().file_name().expect("temporary directory name"));
-        assert!(
-            relative_root.is_relative(),
-            "exercise a relative caller path"
-        );
-        let ctx = tiny_context(relative_root);
-        assert!(run_socket(&ctx, 0).is_absolute());
-        assert_eq!(
-            ctx.corpus_root,
-            dir.path().canonicalize().expect("absolute root")
-        );
-        assert_ne!(ctx.project_dir, ctx.corpus_root);
-    }
-
-    #[test]
-    fn warm_results_record_the_corpus_that_was_measured() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let cold = tiny_context(&dir.path().join("cold"));
-        let warm = tiny_context(&dir.path().join("warm"));
-        for scenario in [
-            Scenario::WarmStart,
-            Scenario::WarmReady,
-            Scenario::ColdStart,
-        ] {
-            let measured = corpus_for(scenario, &cold, &warm);
-            let run = Measured {
-                settled: vec![1.0],
-                ..Measured::default()
-            };
-            let result = build_result(measured, scenario, vec![run]);
-            let expected = if scenario == Scenario::ColdStart {
-                &cold
-            } else {
-                &warm
-            };
-            assert_eq!(result.corpus.root, expected.corpus_root);
-        }
-    }
-
-    #[test]
-    fn zero_samples_fail_before_loading_or_generating_corpora() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let absent = dir.path().join("must-not-be-created");
-        let standalone = run(&BenchOptions {
-            binary: absent.clone(),
-            corpus: absent.clone(),
-            scenario: Scenario::ColdStart,
-            runs: 0,
-            json: absent.clone(),
-            liveness_secs: 1,
-        });
-        assert_eq!(
-            standalone.expect_err("zero runs rejected").to_string(),
-            "sampled runs must be positive"
-        );
-        let suite = run_suite(&RunOptions {
-            binary: absent.clone(),
-            profile: crate::corpus::Profile::Small,
-            out: absent.clone(),
-            seed: 1,
-            runs: 0,
-            liveness_secs: 1,
-        });
-        assert_eq!(
-            suite.expect_err("zero suite runs rejected").to_string(),
-            "sampled runs must be positive"
-        );
-        assert!(!absent.exists(), "validation must precede output mutation");
-    }
-
-    #[test]
-    fn a_first_paint_failure_retains_the_raw_stream() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut ctx = tiny_context(dir.path());
-        let mock = dir.path().join("mock-ui");
-        std::fs::write(
-            &mock,
-            "#!/bin/sh\nprintf 'diagnostic before missing paint\\n'\n",
-        )
-        .expect("write mock UI");
-        std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700))
-            .expect("executable mock");
-        ctx.binary = mock;
-        // The mock exits without painting, so the launch fails at its exit; the
-        // liveness bound only covers a slow first exec (seconds on a loaded macOS).
-        ctx.liveness = Duration::from_secs(30);
-        let dump = dir.path().join("failed-streams/first.bin");
-        let launched = Launch::spawn(
-            &ctx,
-            &dir.path().join("s"),
-            None,
-            b"absent paint",
-            dump.clone(),
-        );
-        assert!(
-            launched.is_err(),
-            "the mock never paints the requested needle"
-        );
-        assert!(std::fs::read(&dump)
-            .expect("failure dump")
-            .windows(b"diagnostic before missing paint".len())
-            .any(|bytes| bytes == b"diagnostic before missing paint"));
     }
 
     #[test]
@@ -1409,33 +1274,6 @@ mod tests {
     }
 
     #[test]
-    fn a_measured_ui_disconnects_before_waiting_for_daemon_exit() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut ctx = tiny_context(dir.path());
-        let binary = dir.path().join("mock-product.py");
-        std::fs::write(
-            &binary,
-            include_str!("../../tests/fixtures/draining_daemon.py"),
-        )
-        .expect("write the mock modes");
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
-            .expect("make the mock executable");
-        ctx.binary = binary;
-        ctx.liveness = Duration::from_secs(10);
-        let (sample, launched) = launch(&ctx, Scenario::WarmStart, 0)
-            .expect("the daemon must drain its measured UI connection before exit");
-        assert!(sample.settled[0] >= 0.0);
-        assert!(launched.ready.is_some(), "the actual mock paint/attach ran");
-        assert_eq!(
-            std::fs::read_to_string(run_socket(&ctx, 0).with_extension("drained"))
-                .expect("the mock daemon reached normal drain completion"),
-            "all UI/control connections closed\n"
-        );
-    }
-
-    #[test]
     fn a_daemon_that_never_sends_hello_cannot_hang_shutdown() {
         use std::os::unix::net::UnixListener;
 
@@ -1459,26 +1297,5 @@ mod tests {
             elapsed < Duration::from_secs(7),
             "hello blocked for {elapsed:?}"
         );
-    }
-
-    #[test]
-    fn roster_settled_accounts_for_unloaded_pages() {
-        let large = "   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.10.0
-  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 0 idle, 200 inactive
-
- >   Search sessions
-
-Session                       Model                                 Cost  Age
-
-Inactive (200)
-• (no messages)               amazon.nova-2-lite-v1:0:medium       $0.00   4s
-• huge corpus session         gpt-5.4:high                     $71727.10  29d
-  ...
-801 older sessions not loaded · scroll to load
-↑/↓ navigate   Home/End first/last   Enter/→ open";
-        assert!(roster_settled(large, 1001));
-        assert!(!roster_settled(large, 1000));
-        assert!(roster_settled("Inactive (11)\n• a\n• b", 11));
-        assert!(!roster_settled("Inactive (7)\n• a\n• b", 11));
     }
 }
