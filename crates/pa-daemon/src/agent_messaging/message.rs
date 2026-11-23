@@ -39,8 +39,8 @@ impl LinkAgentMessageController {
     }
 }
 
-/// Budget for a supervisor-routed send to a bot: the bot may resume or
-/// boot first. It outlasts the supervisor's own deadline for the send.
+/// Budget for a supervisor-routed send. A bot target may resume or boot
+/// first, so it outlasts the supervisor's own deadline for a bot send.
 const BOT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(15);
 
 /// Budget for the peer-ticket request on the supervisor link (the TS
@@ -364,18 +364,8 @@ impl LinkAgentMessageController {
         &self,
         input: AgentMessageSendInput,
     ) -> anyhow::Result<AgentMessageReceipt> {
-        // A bot may have to resume from a pause before it takes the
-        // message, so a bot target gets minutes, not seconds.
-        let identity = self.family_identity();
-        let budget = if super::owned_bot_rows(&self.link, identity.session_id.as_deref())
-            .await
-            .iter()
-            .any(|bot| bot.get("botId").and_then(Value::as_str) == Some(input.target.as_str()))
-        {
-            BOT_SEND_TIMEOUT
-        } else {
-            std::time::Duration::from_secs(30)
-        };
+        // The supervisor bounds every send itself; a bot send may first
+        // resume the bot, so the wait always covers the bot deadline.
         let data = self
             .link
             .request_success(
@@ -387,7 +377,7 @@ impl LinkAgentMessageController {
                     "agentOrigin": true,
                     "deliveryMode": input.delivery_mode,
                 }),
-                budget,
+                BOT_SEND_TIMEOUT,
             )
             .await?;
         receipt_from_wire(&data, input)

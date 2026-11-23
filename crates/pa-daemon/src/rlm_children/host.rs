@@ -976,7 +976,7 @@ fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: 
 /// Budget for `spawn_bot`: provisioning, the version install, and the
 /// first prompt.
 const SPAWN_BOT_TIMEOUT: Duration = Duration::from_mins(15);
-/// Budget for the supervisor's bot list and delete.
+/// Budget for the supervisor's bot delete.
 const BOT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `rlm.spawn(target="sandbox")`: a bot. The worker checks the name and
@@ -1057,18 +1057,7 @@ async fn owned_bots(
     this: &SupervisorChildSessionsInner,
     identity: &super::ParentIdentity,
 ) -> Vec<Value> {
-    let Some(owner) = identity.session_id.as_deref() else {
-        return Vec::new();
-    };
-    this.link
-        .request_success(
-            json!({ "type": "list_bots", "ownerSessionId": owner }),
-            BOT_COMMAND_TIMEOUT,
-        )
-        .await
-        .ok()
-        .and_then(|data| data.get("bots").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
+    crate::agent_messaging::owned_bot_rows(&this.link, identity.session_id.as_deref()).await
 }
 
 /// The owned bot `selector` names (its id or its name).
