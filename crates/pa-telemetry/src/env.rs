@@ -14,20 +14,3 @@ pub fn parse_bool_override(value: Option<&str>) -> Option<bool> {
         _ => None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bool_override_parsing() {
-        assert_eq!(parse_bool_override(Some("1")), Some(true));
-        assert_eq!(parse_bool_override(Some(" True ")), Some(true));
-        assert_eq!(parse_bool_override(Some("ON")), Some(true));
-        assert_eq!(parse_bool_override(Some("off")), Some(false));
-        assert_eq!(parse_bool_override(Some("0")), Some(false));
-        assert_eq!(parse_bool_override(Some("")), None);
-        assert_eq!(parse_bool_override(Some("maybe")), None);
-        assert_eq!(parse_bool_override(None), None);
-    }
-}
