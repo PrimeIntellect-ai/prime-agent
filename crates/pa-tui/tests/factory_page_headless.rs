@@ -5,7 +5,7 @@
 //! `overview` action) and the attached session's finished runs
 //! (retained from the `graph` cache the dock polls) nested under their
 //! machine. Enter on a machine drills into
-//! its ANSI diagram and its mermaid rendered as a diagram; Enter on a run
+//! its ANSI diagram (the machine's one rendering); Enter on a run
 //! opens the run
 //! page, whose Esc returns to the factory page; Esc backs out of the
 //! drill-in before it closes the page. A daemon that advertises no lane
@@ -341,8 +341,20 @@ impl MockSupervisor {
 fn write_json(writer: &mut UnixStream, value: &Value) {
     let mut line = serde_json::to_string(value).expect("serialize mock frame");
     line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
+    // A held overview reply can outlive the plan: the client closed the socket, so the reply
+    // has no reader and the serve loop ends at the next read.
+    match writer
+        .write_all(line.as_bytes())
+        .and_then(|()| writer.flush())
+    {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) => {}
+        Err(error) => panic!("write mock frame: {error}"),
+    }
 }
 
 /// The slim attach result: one empty session, its display name the
@@ -865,11 +877,6 @@ fn dock_right() -> KeyEvent {
     KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
 }
 
-/// One page-down key event (`tui.select.pageDown`: the drill-in scrolls).
-fn page_down() -> KeyEvent {
-    KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)
-}
-
 /// One down-arrow key event (the page's `tui.select.down`).
 fn down() -> KeyEvent {
     KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
@@ -890,9 +897,8 @@ fn escape() -> KeyEvent {
 /// The lane-advertised battery: the dock mounts the `☰ machines` group,
 /// the dock's arrows reach it, Enter opens the page, and the open
 /// fetch lists every machine; the arrows walk the list, Enter drills
-/// into `pr-manager` for its ANSI diagram and its mermaid panel (the
-/// arrows scroll the document to the second rendering below the fold),
-/// and Esc backs out of the drill-in before the second Esc closes the
+/// into `pr-manager` for its ANSI diagram (the reply's mermaid is not
+/// drawn a second time, and never as source text), and Esc backs out of the drill-in before the second Esc closes the
 /// page (the activity pages' picker grammar, end to end).
 #[test]
 fn factory_page_lists_machines_with_runs_drills_in_and_escs_back() {
@@ -922,7 +928,7 @@ fn factory_page_lists_machines_with_runs_drills_in_and_escs_back() {
             timeout_ms: 15_000,
         },
         // ↓ walks to the reviewing node; Enter opens its files; Esc
-        // returns to the diagram; PgDn scrolls the drilled-in page.
+        // returns to the diagram.
         HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
@@ -930,9 +936,6 @@ fn factory_page_lists_machines_with_runs_drills_in_and_escs_back() {
             timeout_ms: 15_000,
         },
         HeadlessStep::Key(escape()),
-        HeadlessStep::Key(page_down()),
-        HeadlessStep::Key(page_down()),
-        HeadlessStep::WaitMs(200),
         // Esc backs out of the drill-in to the list.
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitRender {
