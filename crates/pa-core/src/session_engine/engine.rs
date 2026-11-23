@@ -240,12 +240,15 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // A factory child's accepted outputs live beside its session file,
     // where the parent's executor reads them. A daemon worker's engine
     // session is not persisted (the worker owns the durable file), so the
-    // conversation-log path gives the directory there.
+    // conversation-log path gives the directory there. A `--no-session`
+    // print child has neither; its in-memory manager is pinned to the
+    // child's own directory, the spawn handle's `session_dir`.
     let factory_outputs_dir = session_manager
         .get_session_file()
         .or(config.conversation_log_path.as_deref())
         .and_then(Path::parent)
-        .map(Path::to_path_buf);
+        .unwrap_or_else(|| session_manager.get_session_dir())
+        .to_path_buf();
     let mut wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
@@ -259,10 +262,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.queued_goal_context_purge.clone(),
         config.cron_store.clone(),
     );
-    if let (Some(contract), Some(dir)) = (config.factory_contract.clone(), factory_outputs_dir) {
+    if let Some(contract) = config.factory_contract.clone() {
         super::factory_host::register_factory_emit_host_handlers(
             contract,
-            dir,
+            factory_outputs_dir,
             config.cwd.clone(),
             &mut wiring.handlers,
         );
