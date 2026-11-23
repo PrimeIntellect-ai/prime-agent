@@ -63,7 +63,7 @@ Add the servers to `mcpServers` in the user-level settings file `~/.prime/agent/
 - `scopes` is space-separated. Without it, Prime Agent requests every scope the server advertises, which includes full `drive` access.
 - `callTimeoutMs` raises the default 60 s tool-call timeout for large writes.
 
-Then run `/mcp login google-drive` and `/mcp login google-sheets` inside Prime Agent and finish Google's consent screen in the browser. Prime Agent asks Google for offline access, so the stored grant includes a refresh token and renews itself. The client secret stays in settings (it is not copied into the stored login grant) and is sent to Google only on token requests. For SSH sessions, forward the callback port or paste the final redirect URL into the auth panel.
+Then open `/mcp`, select Google Drive and Google Sheets, and finish Google's consent screen in the browser. Prime Agent asks Google for offline access, so the stored grant includes a refresh token and renews itself. The client secret stays in settings (it is not copied into the stored login grant) and is sent to Google only on token requests. For SSH sessions, forward the callback port or paste the final redirect URL into the auth panel.
 
 ## Tools
 
@@ -92,4 +92,4 @@ Each cell's `effectiveValue` carries `numberValue`, `stringValue`, or `boolValue
 
 For large or exact payloads, follow the "Large or integrity-critical payloads" section of the `mcp` skill (`skills/mcp/SKILL.md`): load the arguments from a file in the Python kernel, write results to a file, and verify them in code.
 
-Disconnect with `/mcp logout google-drive` (or `google-sheets`).
+Disconnect by running `/logout` and selecting google-drive (or google-sheets).
