@@ -38,11 +38,15 @@ pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
 
 /// The `factory_activity` out-of-band frame's action vocabulary, mirroring
-/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge).
-/// `peek` is the supervisor overview's non-arming read of the unscoped
-/// graph; it takes no target.
-pub const FACTORY_ACTIVITY_ACTIONS: [&str; 7] =
-    ["graph", "status", "watch", "run", "stop", "resume", "peek"];
+/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge):
+/// one run's graph/status/watch/stop/resume, a run by spec id, the machine
+/// library's list/graph reads (the `/factory` view's library page),
+/// `peek` (the all-session overview's foreign live read: the unscoped
+/// graph minus the rehydration re-arm), and `node` (one run state's detail
+/// for the node view).
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 9] = [
+    "graph", "status", "watch", "run", "stop", "resume", "library", "peek", "node",
+];
 
 /// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel
 /// caps its own at 60s; the host bridge pins the view's polling cadence

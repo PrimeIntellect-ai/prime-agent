@@ -688,6 +688,47 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             timeout_ms: None,
         }
     );
+    // the library action's target-free pair: the list takes no target,
+    // and the graph read names the machine through `specId` (never a
+    // `runId`, which the library never reads).
+    assert_eq!(
+        parse("library", None, None, None).unwrap(),
+        FactoryActivityRequest {
+            action: "library",
+            run_id: None,
+            spec_id: None,
+            timeout_ms: None,
+        }
+    );
+    assert_eq!(
+        parse("library", None, Some("pr-manager"), None)
+            .unwrap()
+            .spec_id
+            .as_deref(),
+        Some("pr-manager")
+    );
+    // the node view's read names the run and its state (`specId`).
+    assert_eq!(
+        parse("node", Some("run-1"), Some("review"), None).unwrap(),
+        FactoryActivityRequest {
+            action: "node",
+            run_id: Some("run-1".to_string()),
+            spec_id: Some("review".to_string()),
+            timeout_ms: None,
+        }
+    );
+    assert_eq!(
+        parse("node", None, Some("review"), None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity node requires runId"
+    );
+    assert_eq!(
+        parse("node", Some("run-1"), None, None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity node requires specId"
+    );
     // unknown action
     assert_eq!(
         parse("bogus", None, None, None).unwrap_err().to_string(),
