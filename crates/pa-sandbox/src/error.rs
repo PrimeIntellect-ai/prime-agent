@@ -269,6 +269,32 @@ impl SandboxError {
         redacted
     }
 
+    /// Redact known secrets inside every decoded string of a JSON value.
+    fn redact_json_strings(value: &serde_json::Value, secrets: &[&str]) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(Self::redact_secrets(text, secrets))
+            }
+            serde_json::Value::Array(entries) => serde_json::Value::Array(
+                entries
+                    .iter()
+                    .map(|entry| Self::redact_json_strings(entry, secrets))
+                    .collect(),
+            ),
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, entry)| {
+                        (
+                            Self::redact_secrets(key, secrets),
+                            Self::redact_json_strings(entry, secrets),
+                        )
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     /// Bound a preview to [`MAX_RESPONSE_PREVIEW_CHARS`].
     #[must_use]
     pub fn bound_preview(text: &str) -> String {
@@ -286,19 +312,18 @@ impl SandboxError {
     }
 
     /// Build a bounded, secret-scrubbed preview from an error-response body:
-    /// JSON bodies are key-scrubbed and re-serialized, plain bodies are
-    /// string-redacted, and known secret strings are redacted either way
-    ///.
+    /// JSON bodies are key-scrubbed, redacted inside their decoded strings
+    /// (so an escaped secret still matches), and re-serialized; plain bodies
+    /// are string-redacted.
     #[must_use]
     pub fn preview_from_text(text: &str, secrets: &[&str]) -> Option<String> {
         if text.is_empty() {
             return None;
         }
         match serde_json::from_str::<serde_json::Value>(text) {
-            Ok(parsed) => Some(Self::bound_preview(&Self::redact_secrets(
-                &Self::scrub_json_secrets(&parsed).to_string(),
-                secrets,
-            ))),
+            Ok(parsed) => Some(Self::bound_preview(
+                &Self::scrub_json_secrets(&Self::redact_json_strings(&parsed, secrets)).to_string(),
+            )),
             Err(_) => Some(Self::bound_preview(&Self::redact_secrets(text, secrets))),
         }
     }
@@ -338,6 +363,14 @@ mod tests {
         assert!(!preview.contains("sk-live-abcdef"));
         // Field order is preserved (serde_json preserve_order).
         assert!(preview.starts_with("{\"detail\":"));
+    }
+
+    #[test]
+    fn json_previews_redact_secrets_that_need_escaping() {
+        let secret = "sk-\"quoted\\key\n";
+        let body = serde_json::json!({ "detail": format!("bad {secret}") }).to_string();
+        let preview = SandboxError::preview_from_text(&body, &[secret]).unwrap();
+        assert_eq!(preview, r#"{"detail":"bad [redacted]"}"#);
     }
 
     #[test]
