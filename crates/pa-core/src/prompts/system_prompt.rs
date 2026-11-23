@@ -302,7 +302,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         let agent_inbox = !options.daemonless && options.settings.get_agent_inbox_enabled();
         if agent_inbox {
             lines.push(
-                "This session has an agent inbox: bash completions, agent messages, child exits, heartbeats, and factory milestones wait in it, and a short `[inbox …]` notice announces new ones. The notice means unread messages are waiting; read them with `msgs = await rlm.inbox.read()`."
+                "This session has an agent inbox: bash completions, agent messages, child exits, heartbeats, and factory milestones wait in it, and a short `[inbox …]` notice announces new ones. When the notice says messages are waiting, read them with `msgs = await rlm.inbox.read()`. Your own `bash-done` messages need no reply; when nothing else needs action, end the turn silently."
                     .to_string(),
             );
         }

@@ -229,9 +229,11 @@ fn serve(
     )
 }
 
-/// The stage-1 script: the inbox turn (start two detached handles, count
+/// The stage-1 script: the inbox turn (start three detached handles, count
 /// mid-turn, read and drain), its settle, the notice's wake, then the
-/// kill-switch turn and ITS full-row wake.
+/// kill-switch turn and ITS full-row wake. Three failed commands make a
+/// row that only counts them, so the read (not the delivery) consumes
+/// them.
 fn inbox_script(request: usize) -> Vec<String> {
     match request {
         0 => [
@@ -244,7 +246,7 @@ fn inbox_script(request: usize) -> Vec<String> {
                         "id": "call-inbox-1",
                         "type": "function",
                         "function": python_cell(
-                            "from rlm import bash\nh1 = bash('sleep 2; echo INBOX_E2E_ONE')\nh2 = bash('sleep 3; echo INBOX_E2E_TWO')\nprint('two handles started')"
+                            "from rlm import bash\nh1 = bash('sleep 2; echo INBOX_E2E_ONE; exit 1')\nh2 = bash('sleep 3; echo INBOX_E2E_TWO; exit 1')\nh3 = bash('sleep 3; echo INBOX_E2E_THREE; exit 1')\nprint('three handles started')"
                         )
                     }]
                 }),
@@ -252,7 +254,7 @@ fn inbox_script(request: usize) -> Vec<String> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ].to_vec(),
-        // The arrivals' window: both detached commands finish while this
+        // The arrivals' window: the three detached commands finish while this
         // model call is held open behind the readiness gate (a busy
         // window with no cell running, so the notices coalesce into ONE
         // queued wake). The count cell that follows runs with the batch
@@ -428,7 +430,7 @@ fn agent_message_script(request: usize) -> Vec<String> {
                         "id": "call-am-1",
                         "type": "function",
                         "function": python_cell(
-                            "from rlm import bash\nh = bash('sleep 1; echo AM_E2E_BASH')\nprint('AM_E2E_BASH_STARTED')"
+                            "from rlm import bash\nh = bash('sleep 1; echo AM_E2E_BASH; exit 1')\nh2 = bash('sleep 1; echo AM_E2E_BASH_TWO; exit 1')\nprint('AM_E2E_BASH_STARTED')"
                         )
                     }]
                 }),
@@ -446,7 +448,7 @@ fn agent_message_script(request: usize) -> Vec<String> {
                         "id": "call-am-1b",
                         "type": "function",
                         "function": python_cell(
-                            "from rlm import inbox\nimport asyncio\nfor _ in range(80):\n    c = await inbox.count()\n    if c.count >= 2:\n        break\n    await asyncio.sleep(0.25)\nprint(('AM_E2E_BUSY', c.count, tuple(sorted(c.classes))))"
+                            "from rlm import inbox\nimport asyncio\nfor _ in range(80):\n    c = await inbox.count()\n    if c.count >= 3:\n        break\n    await asyncio.sleep(0.25)\nprint(('AM_E2E_BUSY', c.count, tuple(sorted(c.classes))))"
                         )
                     }]
                 }),
@@ -729,8 +731,8 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
         .expect("active session id")
         .to_string();
 
-    // THE INBOX TURN: two detached commands start; both finish inside the
-    // same busy turn, so both notices land in the inbox while the session
+    // THE INBOX TURN: three detached commands start; all finish inside the
+    // same busy turn, so their notices land in the inbox while the session
     // is busy. The turn runs on its own connection while the barrier
     // waits for the coalesced row to park: the gate opens only on the
     // worker's own queue report (observable readiness), and the count
@@ -743,7 +745,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
                 &json!({
                     "type": "prompt_and_wait",
                     "activeSessionId": turn_session,
-                    "message": "run the two detached commands, count, read, and finish",
+                    "message": "run the three detached commands, count, read, and finish",
                 }),
             );
             (turn, client)
@@ -760,7 +762,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
             .is_some_and(|rows| {
                 rows.iter().any(|row| {
                     row.as_str()
-                        .is_some_and(|text| text.contains("2 new bash-done messages"))
+                        .is_some_and(|text| text.contains("3 new bash-done messages"))
                 })
             })
             .then_some(true)
@@ -774,7 +776,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     let _settled_cut = wait_until(Duration::from_secs(120), || {
         let messages = client.transcript(&active_id);
         messages
-            .contains("2 new bash-done messages")
+            .contains("3 new bash-done messages")
             .then_some(messages)
     });
     // The count cell answered its own tool result mid-turn: the parked
@@ -783,8 +785,8 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     // to answer).
     let after_cut_turn = client.transcript(&active_id);
     assert!(
-        after_cut_turn.contains("(2, True, {'bash-done': 2})"),
-        "the mid-turn count saw both arrivals in the inbox: {after_cut_turn}"
+        after_cut_turn.contains("(3, True, {'bash-done': 3})"),
+        "the mid-turn count saw all three arrivals in the inbox: {after_cut_turn}"
     );
     assert!(
         !after_cut_turn.contains("auto-backgrounded"),
@@ -803,16 +805,16 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
         "the read returned the notice text: {after_woken}"
     );
     assert!(
-        after_woken.contains("(2, 'bash-done', '[bash-done pid:")
-            && after_woken.contains("exit:0]', True, 0, {})"),
-        "the read drained both bash-done messages (count 0 after): {after_woken}"
+        after_woken.contains("(3, 'bash-done', '[bash-done pid:")
+            && after_woken.contains("exit:1]', True, 0, {})"),
+        "the read drained all three messages (count 0 after): {after_woken}"
     );
     let rows = client.messages(&active_id);
     let delivered = delivered_rows(&rows);
     let notice_at = delivered
         .iter()
         .position(|(text, _)| {
-            text.starts_with("[inbox ") && text.contains("2 new bash-done messages")
+            text.starts_with("[inbox ") && text.contains("3 new bash-done messages")
         })
         .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
     let notice_text = delivered[notice_at].0.clone();
@@ -899,8 +901,10 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     let journal = std::fs::read_to_string(&inbox_journal)
         .unwrap_or_else(|error| panic!("read {}: {error}", inbox_journal.display()));
     assert!(
-        journal.contains("INBOX_E2E_ONE") && journal.contains("INBOX_E2E_TWO"),
-        "the journal holds both message records: {journal}"
+        journal.contains("INBOX_E2E_ONE")
+            && journal.contains("INBOX_E2E_TWO")
+            && journal.contains("INBOX_E2E_THREE"),
+        "the journal holds the three message records: {journal}"
     );
     assert!(
         journal.contains("\"kind\":\"drained\""),
@@ -1184,8 +1188,9 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
         .expect("active session id")
         .to_string();
 
-    // THE BUSY WINDOW: the turn holds until both a delivered agent
-    // message and a detached completion wait in the inbox.
+    // THE BUSY WINDOW: the turn holds until a delivered agent message and
+    // two failed detached commands wait in the inbox (three items the row
+    // only counts, so the reads below, not the delivery, consume them).
     let accepted = client.request(
         "p1",
         &json!({
@@ -1209,9 +1214,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     wait_until(Duration::from_secs(120), || {
         let journal =
             inbox_journal_path(&sessions).and_then(|path| std::fs::read_to_string(path).ok())?;
-        journal
-            .contains("\"class\":\"bash-done\"")
-            .then_some(journal)
+        (journal.matches("\"class\":\"bash-done\"").count() >= 2).then_some(journal)
     });
     let delivered = client.request(
         "m1",
@@ -1260,7 +1263,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     // drain's tolerance for that late cell-done lives in MID_OK's
     // after.count in (0, 1).
     assert!(
-        transcript.contains("('AM_E2E_READ', 1, 'bash-done', True,")
+        transcript.contains("('AM_E2E_READ', 2, 'bash-done', True,")
             && transcript.contains("'agent-message', True, True)"),
         "the targeted read took the shell output first and drained the message: {transcript}"
     );
@@ -1282,7 +1285,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     // pins that coalescing), so the pin is the meaning: the notice names
     // both intended classes and teaches the read.
     assert!(
-        notice_text.contains("1 bash-done")
+        notice_text.contains("2 bash-done")
             && notice_text.contains("1 agent-message")
             && notice_text.contains("rlm.inbox.read()"),
         "the notice covers both classes and teaches the read: {notice_text}"
@@ -1290,7 +1293,7 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
     assert!(
         !notice_candidates
             .iter()
-            .any(|(text, _)| text.contains("[agent-message from")),
+            .any(|(text, _)| text.starts_with("[agent-message from")),
         "no full agent-message row steers while the inbox is on: {notice_candidates:?}"
     );
 
@@ -1385,7 +1388,8 @@ fn agent_messages_route_into_the_inbox_and_targeted_reads_pull_them_back() {
 /// The child-lifecycle script: the parent spawns a worker through the
 /// kernel, the child finishes its task with a plain answer (no message
 /// back), the settle watcher routes its terminal notice into the
-/// parent's inbox, and the woken parent reads it.
+/// parent's inbox, and the woken parent finds it already consumed (the
+/// wake row showed it inline).
 fn child_lifecycle_script(request: usize) -> Vec<String> {
     match request {
         0 => [
@@ -1416,7 +1420,7 @@ print('CHILD_SPAWNED ' + h.rlm_child_id)"
             chunk(&json!({}), Some("stop")),
         ]
         .to_vec(),
-        // The woken parent turn reads the lifecycle notice.
+        // The woken parent turn counts what still waits.
         3 => [
             chunk(
                 &json!({
@@ -1428,10 +1432,8 @@ print('CHILD_SPAWNED ' + h.rlm_child_id)"
                         "type": "function",
                         "function": python_cell(
                             "from rlm import inbox
-msgs = await inbox.read()
 after = await inbox.count()
-entry = [(m.inbox_class, m.sender, m.meta.get('kind', '')) for m in msgs]
-print(('CHILD_NOTICE_READ', entry, after.count, msgs[0].text.split(chr(10))[0]))"
+print(('CHILD_NOTICE_READ', after.count))"
                         )
                     }]
                 }),
@@ -1454,8 +1456,9 @@ print(('CHILD_NOTICE_READ', entry, after.count, msgs[0].text.split(chr(10))[0]))
 /// The agent-lifecycle class: a settled child's terminal notice lands in
 /// the parent's durable inbox (class `child-exited`, sender = the child
 /// name, status in the metadata), ONE coalesced short notice wakes the
-/// parent, the read drains it, no full `rlm_child_terminal_notice` row
-/// steers, and the journal keeps the record.
+/// parent and shows the entry inline, its delivery consumes the record,
+/// no full `rlm_child_terminal_notice` row steers, and the journal keeps
+/// the record and its withdrawal.
 #[test]
 fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     static NEXT_CHILD: AtomicUsize = AtomicUsize::new(0);
@@ -1541,16 +1544,8 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
         "the spawn admission answered the handle: {after_read}"
     );
     assert!(
-        after_read.contains("('child-exited', 'f20-worker', 'completed_without_reply')"),
-        "the read returned the lifecycle entry (class, sender, kind): {after_read}"
-    );
-    assert!(
-        after_read.contains("[child-exited: no-reply child:f20-worker]"),
-        "the read returned the notice text: {after_read}"
-    );
-    assert!(
-        after_read.contains(", 0, '"),
-        "the read drained the record (count 0 after): {after_read}"
+        after_read.contains("('CHILD_NOTICE_READ', 0)"),
+        "the inline delivery consumed the record (count 0 after): {after_read}"
     );
 
     // The wake: ONE short coalesced notice steers, no full terminal row.
@@ -1562,8 +1557,10 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
         .unwrap_or_else(|| panic!("the coalesced short notice never steered: {delivered:?}"));
     let notice_text = delivered[notice_at].0.clone();
     assert!(
-        notice_text.contains("1 new message (child-exited)"),
-        "the wake counts the class: {notice_text}"
+        notice_text.contains(
+            "1 new message (child-exited); shown below and marked read; total waiting: 0."
+        ) && notice_text.contains("[child-exited: no-reply child:f20-worker]"),
+        "the wake counts the class and shows the entry: {notice_text}"
     );
     let reply_at = delivered
         .iter()
@@ -1612,8 +1609,14 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
         "the journal holds the lifecycle record: {journal}"
     );
     assert!(
-        journal.contains("\"class\":\"child-exited\""),
-        "the journal names the class: {journal}"
+        journal.contains("\"class\":\"child-exited\"")
+            && journal.contains("\"sender\":\"f20-worker\"")
+            && journal.contains("completed_without_reply"),
+        "the journal names the class, the sender, and the kind: {journal}"
+    );
+    assert!(
+        journal.contains("\"kind\":\"withdrawn\""),
+        "the delivery journaled its consumption: {journal}"
     );
 
     // Teardown: stop the session through the live supervisor so the

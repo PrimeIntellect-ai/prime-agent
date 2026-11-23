@@ -33,16 +33,14 @@ pub struct KernelNotice {
 }
 
 impl KernelNotice {
-    /// The `[bash-done]` notice for one finished detached command, with the
-    /// command's capped output tail riding the wake.
+    /// The `[bash-done]` notice for one finished detached command.
     #[must_use]
-    pub fn bash_completion(pid: u32, command: &str, exit_code: i64, output: Option<&str>) -> Self {
+    pub fn bash_completion(pid: u32, command: &str, exit_code: i64) -> Self {
         Self {
             row: messages::create_async_bash_completion_message(
                 pid,
                 command,
                 exit_code,
-                output,
                 crate::autonomous::now_millis(),
             ),
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
@@ -180,25 +178,23 @@ pub fn register_kernel_notice_host_handlers(
 }
 
 /// TS `createAsyncBashCompletionHostHandler` validation: a positive
-/// integer pid, a non-empty string command, an integer exit code.
+/// integer pid, a non-empty string command, an integer exit code. The
+/// optional `outputTail` rides into the row's details, so an inbox wake
+/// row can show it.
 fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
     let consumed = validate_consumed(data)?;
     let exit_code = data
         .get("exitCode")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("bash.completed exitCode must be an integer"))?;
-    // The output tail is optional (silent commands send the empty string;
-    // older kernels omit the key) and must be a string when present.
-    let output = data
-        .get("output")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    Ok(KernelNotice::bash_completion(
-        consumed.pid,
-        &consumed.command,
-        exit_code,
-        output.as_deref(),
-    ))
+    let mut notice = KernelNotice::bash_completion(consumed.pid, &consumed.command, exit_code);
+    if let (Some(details), Some(tail)) = (
+        notice.row.details.as_mut(),
+        data.get("outputTail").and_then(Value::as_str),
+    ) {
+        details["outputTail"] = tail.into();
+    }
+    Ok(notice)
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
@@ -477,13 +473,29 @@ mod tests {
     /// wait; the other notice classes do.
     #[test]
     fn only_foreign_notices_wake_a_running_cell() {
-        assert!(KernelNotice::bash_completion(7, "sleep 1", 0, None).wakes_cell_wait());
+        assert!(KernelNotice::bash_completion(7, "sleep 1", 0).wakes_cell_wait());
         assert!(!KernelNotice::background_cell_completion(&outcome(
             "cell-1",
             crate::kernel::shared::DetachReason::Interrupted,
             settled_result(crate::kernel::shared::ExecuteStatus::Ok, 1_200, ""),
         ))
         .wakes_cell_wait());
+    }
+
+    #[test]
+    fn completed_details_carry_the_output_tail() {
+        let mut payload = completed_payload(4321, "make", 0);
+        payload["outputTail"] = "done\n".into();
+        let notice = validate_completion(&payload).expect("a valid completion");
+        assert_eq!(
+            notice.row.details,
+            Some(serde_json::json!({
+                "pid": 4321,
+                "command": "make",
+                "exitCode": 0,
+                "outputTail": "done\n",
+            }))
+        );
     }
 
     #[tokio::test]

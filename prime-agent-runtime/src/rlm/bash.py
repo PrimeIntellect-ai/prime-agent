@@ -48,10 +48,8 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
-# The completion notice's output tail: the last lines are the result the
-# wake should deliver — a pointer-only notice costs the model a retrieval
-# turn (await handle -> stale-snapshot confusion) after every completion.
-_COMPLETION_NOTICE_OUTPUT_CAP = 2000
+# The output tail a [bash-done] wake row shows (the daemon caps it further).
+_COMPLETION_NOTICE_TAIL_CAP = 400
 # Display MIME the host aggregates into a per-cell summary of the bash()
 # commands the cell ran (first capped command, count, line total).
 _BASH_COMMAND_MIME = "application/vnd.prime-agent.bash-command+json"
@@ -185,12 +183,6 @@ def _capped(command: str) -> str:
     return command
 
 
-def _notice_output_tail(output: str) -> str:
-    """The completion notice's output payload: the tail, capped — the final
-    lines are what a wake needs to deliver the result in the wake turn."""
-    if len(output) > _COMPLETION_NOTICE_OUTPUT_CAP:
-        return "... [output truncated at the head]\n" + output[-_COMPLETION_NOTICE_OUTPUT_CAP:]
-    return output
 
 
 def _completion_reaches(
@@ -895,9 +887,7 @@ class BashHandle:
                     "pid": self._pid,
                     "command": command,
                     "exitCode": result.exit_code,
-                    # The result rides the wake: a completion notice that
-                    # only points makes every wake cost a retrieval turn.
-                    "output": _notice_output_tail(result.output),
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
                 }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
@@ -1357,7 +1347,13 @@ class PersistentBashHandle(BashHandle):
                 return
             command = _capped(self.command)
             reply = await repl.host_request(
-                {"type": "bash.completed", "pid": self._pid, "command": command, "exitCode": result.exit_code}
+                {
+                    "type": "bash.completed",
+                    "pid": self._pid,
+                    "command": command,
+                    "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
+                }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
                 self._arm_consumed_notice(command)

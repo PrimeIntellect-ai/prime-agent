@@ -1218,7 +1218,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.05; printf detached",
                 "exitCode": 0,
-                "output": "detached",
+                "outputTail": "detached",
             },
         )
         reply_ok(self.repl, request)
@@ -1249,7 +1249,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
-                "output": "degraded",
+                "outputTail": "degraded",
             },
         )
         reply_ok(self.repl, request)
@@ -1286,6 +1286,7 @@ class ReplTest(unittest.TestCase):
                 "pid": int(pid),
                 "command": "sleep 1.5; printf persisted",
                 "exitCode": 0,
+                "outputTail": "persisted",
             },
         )
         reply_ok(repl, request)
@@ -1409,7 +1410,7 @@ class ReplTest(unittest.TestCase):
                 "pid": notice["pid"],
                 "command": "sleep 0.05; exit 3",
                 "exitCode": 3,
-                "output": "",
+                "outputTail": "",
             },
         )
         probe = self.repl.execute("failed-probe", "await asyncio.sleep(0.05)")
@@ -3387,26 +3388,6 @@ class ProtocolFrameAtomicityTest(unittest.TestCase):
         self.assertEqual(error["ename"], "KeyboardInterrupt")
         events = repl.execute("after", "6 * 7")
         self.assertEqual(one(events, "result")["text"], "42")
-
-
-class CompletionNoticeOutputTest(unittest.TestCase):
-    """The bash.completed host request carries the command's output tail: a
-    wake that delivers the result instead of a pointer the model must
-    retrieve."""
-
-    def test_completion_notice_carries_the_output_tail(self):
-        repl = ReplProcess()
-        self.addCleanup(repl.close)
-        repl.ready()
-        repl.execute(
-            "launch",
-            "from rlm import bash\nh = bash('sleep 0.2; echo RESULT-LINE')\nprint('launched', h.pid)",
-        )
-        done = wait_for_host_request_of_type(repl, "bash.completed")
-        data = done["data"]
-        self.assertIn("RESULT-LINE", data["output"], f"payload: {data}")
-        self.assertEqual(data["exitCode"], 0)
-        reply_ok(repl, done)
 
 
 if __name__ == "__main__":
