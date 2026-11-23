@@ -493,9 +493,6 @@ impl AgentsViewMode {
     /// dispatch order, so a user override moves both the handler and the hint — the same contract
     /// as the session view (#184).
     pub(super) fn handle_key(&mut self, key: &str) {
-        // Every key that reaches the view is handled, whichever surface consumes it (the
-        // force-quit guard counts the Ctrl+C presses; an exit re-arms it from the loop's break).
-        self.exit_guard.note_key_handled(key);
         // A sticky line clears on any keypress (the transient lines ride their own
         // expiry).
         self.clear_sticky_status();
@@ -530,8 +527,12 @@ impl AgentsViewMode {
             Composer::Search => {}
         }
         // `app.clear` (default ctrl+c): the first press arms the exit hint, a second press while
-        // armed exits.
+        // armed exits. One handled Ctrl+C press: the force-quit guard disarms once the whole
+        // observed pair was handled; an exit re-arms from the run loop's break.
         if self.keybindings.matches(key, "app.clear") {
+            if key == "ctrl+c" {
+                self.exit_guard.note_ctrl_c_handled();
+            }
             if was_armed {
                 self.running = false;
             } else {
@@ -621,6 +622,12 @@ impl AgentsViewMode {
         // row's target spawn program.
         if !has_query && self.keybindings.matches(key, "app.agents.program") {
             self.cycle_program_for_selected();
+            return;
+        }
+        // `app.agents.factory` (default ctrl+f, empty editor only): open the factory page through
+        // the selected row's session.
+        if !has_query && self.keybindings.matches(key, "app.agents.factory") {
+            self.open_factory_for_selected();
             return;
         }
         // `app.agents.expand` (default alt+right, search empty): toggle the selected parent's

@@ -9,12 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// The double-press window (TS `EXIT_HINT_DURATION_MS`).
 pub(crate) const CTRL_C_WINDOW_MS: u64 = 2_000;
-/// The key id the guard counts: the reader observes and the loop reports the same key.
-const CTRL_C: &str = "ctrl+c";
 /// Hard ceiling from the second Ctrl+C to process exit: the watchdog fires
 /// 500ms inside the 2s contract so the exit (best-effort restore plus
 /// `process::exit`) is observed within the window once teardown and
@@ -135,7 +133,10 @@ impl ExitGuard {
     /// window of the previous press arms the force-quit deadline (runs on the
     /// reader thread, independent of the UI loop).
     pub(crate) fn observe_key(&self, key: &KeyEvent) {
-        if crate::keys::key_event_to_id(key).as_deref() != Some(CTRL_C) {
+        let is_press = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+        if !is_press {
             return;
         }
         self.state.observed_ctrl_c.fetch_add(1, Ordering::SeqCst);
@@ -146,15 +147,11 @@ impl ExitGuard {
         }
     }
 
-    /// The UI loop's key-dispatch entry reports every key it dispatches: a Ctrl+C
-    /// that reached the loop is handled, whichever surface consumes it. Once
+    /// The UI loop handled one Ctrl+C key (every consumer reports). Once
     /// every observed press is handled and the loop did not exit, the pair
     /// was consumed with TS semantics: the deadline clears. A queued press
     /// keeps its deadline.
-    pub(crate) fn note_key_handled(&self, id: &str) {
-        if id != CTRL_C {
-            return;
-        }
+    pub(crate) fn note_ctrl_c_handled(&self) {
         let handled = self.state.handled_ctrl_c.fetch_add(1, Ordering::SeqCst) + 1;
         if handled >= self.state.observed_ctrl_c.load(Ordering::SeqCst) {
             self.disarm();
@@ -259,7 +256,6 @@ fn force_quit() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     /// Serializes the tests that touch the process-global progress stamp:
     /// a reader must hold it across its whole observation window.
@@ -366,13 +362,13 @@ mod tests {
             u64::MAX
         );
         // The first handled press still has its partner queued: the deadline must survive.
-        guard.note_key_handled(CTRL_C);
+        guard.note_ctrl_c_handled();
         assert_ne!(
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
             u64::MAX,
             "a handled press never clears the deadline of a queued one"
         );
-        guard.note_key_handled(CTRL_C);
+        guard.note_ctrl_c_handled();
         assert_eq!(
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
             u64::MAX
@@ -384,7 +380,7 @@ mod tests {
     fn a_new_pair_re_arms_after_a_consumed_one() {
         let guard = ExitGuard::new();
         guard.observe_key(&ctrl_c());
-        guard.note_key_handled(CTRL_C);
+        guard.note_ctrl_c_handled();
         assert_eq!(
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
             u64::MAX

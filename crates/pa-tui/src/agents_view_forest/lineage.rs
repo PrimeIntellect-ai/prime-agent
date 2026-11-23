@@ -222,9 +222,20 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
             if !is_subagent_descendant(&records[*child], &records[*position]) {
                 continue;
             }
+            // Spend covers every descendant, the Decision API child included
+            // (its own cost and its children's fold in unconditionally);
+            // only the user-facing count skips the hidden System 1 child
+            // (`decisionChild`), so `N subagents` never counts servers the
+            // user cannot see or manage.
+            let decision_child = records[*child]
+                .daemon
+                .as_ref()
+                .is_some_and(crate::subagents::is_decision_child_summary);
             rollup.cost += rollups[*child].cost;
             rollup.descendants += rollups[*child].cost;
-            rollup.descendant_count += 1 + rollups[*child].descendant_count;
+            if !decision_child {
+                rollup.descendant_count += 1 + rollups[*child].descendant_count;
+            }
         }
         rollups[*position] = rollup;
     }

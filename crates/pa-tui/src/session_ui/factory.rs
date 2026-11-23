@@ -1,7 +1,6 @@
-//! The factory page's session surface: the page open (the activity
-//! dock's factory group's destination), the view's key loop, the
-//! refresh cadence, and the daemon `factory_activity` lane the page's
-//! actions ride.
+//! The run page's session surface: the page open (the machines page's
+//! run rows), the view's key loop, the refresh cadence, and the daemon
+//! `factory_activity` lane the page's actions ride.
 
 use std::time::Duration;
 
@@ -13,8 +12,8 @@ use pa_types::daemon::DaemonCommand;
 use super::AgentView;
 
 use crate::factory_view::{
-    factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryView, FactoryViewAction,
-    FACTORY_WATCH_TICK_MS,
+    factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryRow, FactoryView,
+    FactoryViewAction, FACTORY_WATCH_TICK_MS,
 };
 use crate::interactive::{SelectionOrigin, SessionPanel, SessionSelection};
 use crate::session_ui::{picker_viewport_rows, UI_REQUEST_TIMEOUT_MS};
@@ -41,6 +40,25 @@ pub(crate) enum FactoryUpdate {
         message: String,
         tone: crate::agents_view::StatusTone,
     },
+    /// One `node` action reply (the node view's document): the run and
+    /// state it answers, the request epoch that rejects older selector
+    /// replies, and the reply payload or its request error.
+    Node {
+        session: String,
+        run_id: String,
+        state_id: String,
+        request_epoch: u64,
+        result: Result<Value, String>,
+    },
+    /// The node view's template-files fetch (the machine's `library`
+    /// payload): the run and state whose node view is open, and the
+    /// payload (or its independent files-fetch error).
+    NodeFiles {
+        session: String,
+        run_id: String,
+        state_id: String,
+        result: Result<Value, String>,
+    },
 }
 
 impl super::SessionUi {
@@ -58,17 +76,16 @@ impl super::SessionUi {
             })
     }
 
-    /// Open the factory page: the activity dock's factory group's
-    /// destination (the subagents/heartbeats/shells pages' navigation
-    /// family — the dock's Enter and the click both dispatch here). The
-    /// keypress never waits on the daemon (the heartbeats/bash page
-    /// pattern): the poll cycle's cached graph mounts at once and the
-    /// refresh cadence keeps it current; a daemon without the lane
-    /// reports exactly that instead of mounting nothing silently.
-    pub(crate) fn open_factory_page(&mut self, view: &mut AgentView) {
+    /// Open the run page (the machines page's run rows, and a return from
+    /// a state's child session), on `row` when given. The keypress never
+    /// waits on the daemon (the heartbeats/bash page pattern): the poll
+    /// cycle's cached graph mounts at once and the refresh cadence keeps
+    /// it current; a daemon without the lane reports exactly that instead
+    /// of mounting nothing silently.
+    pub(crate) fn open_factory_runs(&mut self, view: &mut AgentView, row: Option<FactoryRow>) {
         if !self.factory_activity_supported() {
             self.note(
-                "The factory page needs a daemon that advertises the factory lane",
+                "The run page needs a daemon that advertises the factory lane",
                 view,
             );
             return;
@@ -83,9 +100,142 @@ impl super::SessionUi {
             &self.factory_graph,
             picker_viewport_rows(view.terminal_rows()),
         ));
+        if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
+            factory_view.select(row);
+        }
         self.sync_factory_selection(view);
         self.dirty = true;
         self.spawn_factory_refresh();
+    }
+
+    /// Open the node view on one state: mount the (loading) view and
+    /// fetch the node document (the realized prompt, the inputs, the
+    /// answer, the instance list) through the `node` action. The
+    /// selectors pick one instance when the walk moves (`entry` +
+    /// `instance`, both or neither).
+    pub(crate) fn open_factory_node(
+        &mut self,
+        view: &mut AgentView,
+        run_id: &str,
+        state_id: &str,
+        selector: Option<(u64, u64)>,
+    ) {
+        if !self.factory_activity_supported() {
+            self.note(
+                "The node view needs a daemon that advertises the factory lane",
+                view,
+            );
+            return;
+        }
+        self.factory_node_epoch += 1;
+        let request_epoch = self.factory_node_epoch;
+        let mut fetch_files = false;
+        let mut spec_id = None;
+        if let Some(factory_view) = view.factory_view.as_mut() {
+            if factory_view.node.is_none() {
+                factory_view.node = Some(crate::factory_view::node::NodeView::loading(
+                    run_id, state_id,
+                ));
+            }
+            fetch_files = factory_view
+                .node
+                .as_ref()
+                .is_some_and(|node| node.files.is_none());
+            if fetch_files {
+                // The machine's spec id rides the focused run: the node's
+                // template files fetch (the library payload) needs it.
+                spec_id = factory_view
+                    .focused_run()
+                    .map(|run| run.spec_id.clone())
+                    .filter(|spec| !spec.is_empty());
+            }
+        }
+        if let Some(node) = view
+            .factory_view
+            .as_mut()
+            .and_then(|factory_view| factory_view.node.as_mut())
+        {
+            node.set_request_epoch(request_epoch);
+        }
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let run_id = run_id.to_string();
+        let state_id = state_id.to_string();
+        let tx = self.factory_updates.clone();
+        // The files fetch's own copies (the node fetch's spawn below
+        // moves the originals).
+        let files_run_id = run_id.clone();
+        let files_state_id = state_id.clone();
+        tokio::spawn(async move {
+            let mut rest = Map::default();
+            if let Some((entry, instance)) = selector {
+                rest.insert("entry".to_string(), Value::from(entry));
+                rest.insert("instance".to_string(), Value::from(instance));
+            }
+            let fetched = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(DaemonCommand::FactoryActivity {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    action: "node".to_string(),
+                    run_id: Some(run_id.clone()),
+                    spec_id: Some(state_id.clone()),
+                    timeout_ms: None,
+                    rest,
+                }),
+            )
+            .await;
+            let result = match fetched {
+                Ok(Ok(data)) => Ok(data),
+                Ok(Err(error)) => Err(format!("{error:#}")),
+                Err(_) => Err("the node request timed out".to_string()),
+            };
+            let _ = tx.send(FactoryUpdate::Node {
+                session: active_session_id,
+                run_id,
+                state_id,
+                request_epoch,
+                result,
+            });
+        });
+        // The node's template files (the machine's library payload) are
+        // fetched until a snapshot lands; this also retries a request lost
+        // when a same-session reattach replaced its active worker.
+        if let Some(spec_id) = spec_id.filter(|_| fetch_files) {
+            let client = self.client.clone();
+            let session = self.active_session_id.clone();
+            let run_id = files_run_id;
+            let state_id = files_state_id;
+            let tx = self.factory_updates.clone();
+            tokio::spawn(async move {
+                let request = DaemonCommand::FactoryActivity {
+                    id: None,
+                    active_session_id: session.clone(),
+                    action: "library".to_string(),
+                    run_id: None,
+                    spec_id: Some(spec_id),
+                    timeout_ms: None,
+                    rest: Map::default(),
+                };
+                let fetched = tokio::time::timeout(
+                    Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                    client.request_ok(request),
+                )
+                .await;
+                let result = match fetched {
+                    Ok(Ok(data)) => Ok(data),
+                    Ok(Err(error)) => Err(format!("{error:#}")),
+                    Err(_) => Err("the library request timed out".to_string()),
+                };
+                let _ = tx.send(FactoryUpdate::NodeFiles {
+                    session,
+                    run_id,
+                    state_id,
+                    result,
+                });
+            });
+        }
+        self.dirty = true;
     }
 
     /// One key press while the view is open: the view resolves the key;
@@ -100,21 +250,48 @@ impl super::SessionUi {
         let Some(id) = super::key_event_to_id(&key) else {
             return Ok(());
         };
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
         let action = view
             .factory_view
             .as_mut()
             .map(|factory_view| factory_view.handle_key(&id, view.editor.keybindings()));
         self.sync_factory_selection(view);
+        // The node view's walk: a selection that moved off the fetched
+        // instance refetches the document with the instance selector
+        // (fetch-on-walk, one request per instance mounted).
+        if let Some((run_id, state_id, selector)) =
+            view.factory_view.as_ref().and_then(|factory_view| {
+                factory_view.node.as_ref().and_then(|node| {
+                    let selected = node.selected_selector()?;
+                    let fetched = node.document_selector();
+                    if fetched.is_some_and(|fetched| fetched == selected) {
+                        return None;
+                    }
+                    Some((node.run_id.clone(), node.state_id.clone(), selected))
+                })
+            })
+        {
+            self.open_factory_node(view, &run_id, &state_id, Some(selector));
+        }
         match action {
             Some(FactoryViewAction::None) | None => {}
             Some(FactoryViewAction::Close) => {
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 view.factory_view = None;
-                self.close_panel_to_agents_view();
+                // The run page opened from the machines page closes back
+                // to it; the machines page's own close leaves.
+                if view.library_view.is_none() {
+                    self.close_panel_to_agents_view();
+                }
                 self.dirty = true;
             }
             Some(FactoryViewAction::Open { child_id }) => self.open_factory_child(view, &child_id),
+            Some(FactoryViewAction::OpenNode { run_id, state_id }) => {
+                self.open_factory_node(view, &run_id, &state_id, None);
+            }
             Some(FactoryViewAction::Stop { run_id }) => {
                 self.factory_control(view, "stop", run_id).await?;
             }
@@ -146,6 +323,13 @@ impl super::SessionUi {
                         .as_ref()
                         .and_then(FactoryView::selected_row)
                         .cloned(),
+                    // A jump from the node view returns to the node view,
+                    // on the instance it jumped from.
+                    node: view
+                        .factory_view
+                        .as_ref()
+                        .and_then(|factory_view| factory_view.node.as_ref())
+                        .map(super::super::factory_view::node::NodeView::target),
                 },
                 closes_to_agents_view: self.panel_returns_to_agents_view,
             });
@@ -410,6 +594,51 @@ impl super::SessionUi {
     /// reports it on its error line instead of painting a fake empty
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
+        let update = match update {
+            FactoryUpdate::Node {
+                session,
+                run_id,
+                state_id,
+                request_epoch,
+                result,
+            } => {
+                if session == self.active_session_id {
+                    let node = view
+                        .factory_view
+                        .as_mut()
+                        .and_then(|factory_view| factory_view.node.as_mut())
+                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                    self.dirty |=
+                        node.is_some_and(|node| node.apply_request_result(request_epoch, result));
+                }
+                return;
+            }
+            FactoryUpdate::NodeFiles {
+                session,
+                run_id,
+                state_id,
+                result,
+            } => {
+                if session == self.active_session_id {
+                    let node = view
+                        .factory_view
+                        .as_mut()
+                        .and_then(|factory_view| factory_view.node.as_mut())
+                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                    if let Some(node) = node {
+                        match result {
+                            Ok(data) => {
+                                node.set_files(crate::factory_view::node::NodeFiles::parse(&data));
+                            }
+                            Err(message) => node.set_files_error(&message),
+                        }
+                    }
+                    self.dirty = true;
+                }
+                return;
+            }
+            other => other,
+        };
         let (session, epoch, payload) = match update {
             FactoryUpdate::Snapshot {
                 session,
@@ -421,6 +650,11 @@ impl super::SessionUi {
                 epoch,
                 message,
             } => (session, epoch, Err(message)),
+            FactoryUpdate::Node { .. } | FactoryUpdate::NodeFiles { .. } => {
+                // Handled above (the node documents' early return); the
+                // arm exists so this match stays exhaustive.
+                return;
+            }
             FactoryUpdate::ChildStop {
                 session,
                 message,
@@ -457,6 +691,14 @@ impl super::SessionUi {
         match payload {
             Ok(data) => match Self::fold_factory_reply(&mut self.factory_graph, data) {
                 Some(runs) => {
+                    // The scoped graph feeds the local run detail and
+                    // the dock; the machines page reads the same cache
+                    // only through its own seams (the mount seed's
+                    // merge, the overview fold's uncarried-row fill, and
+                    // the version-skew fallback's rows), never through this
+                    // fold — this seam never repaints the page (a late
+                    // scoped graph must not erase the all-session rows
+                    // with the attached session's own list).
                     if let Some(factory_view) = view.factory_view.as_mut() {
                         factory_view.set_error(None);
                         factory_view.apply_runs(runs);

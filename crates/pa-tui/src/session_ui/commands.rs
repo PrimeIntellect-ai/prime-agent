@@ -398,7 +398,7 @@ impl SessionUi {
                             return Ok(());
                         }
                         self.note(
-                            "The factory is enabled. Restart the client to surface the factory group (the factory page and the agent-side factory API follow the same gate).",
+                            "The factory is enabled. Restart the client to surface the machines group (the machines page and the agent-side factory API follow the same gate).",
                             view,
                         );
                     }
@@ -439,7 +439,7 @@ impl SessionUi {
                                 let them = if live == 1 { "it" } else { "them" };
                                 self.error_row(
                                     &format!(
-                                        "Cannot disable the factory while {live} {runs} still live — stop {them} first (the factory page's stop action or rlm.factory.stop), then /factory off."
+                                        "Cannot disable the factory while {live} {runs} still live — stop {them} first (the run page's stop action or rlm.factory.stop), then /factory off."
                                     ),
                                     view,
                                 );
@@ -463,9 +463,14 @@ impl SessionUi {
                             return Ok(());
                         }
                         self.note(
-                            "The factory is disabled. The factory group and page disappear on the next client start.",
+                            "The factory is disabled. The machines group and page disappear on the next client start.",
                             view,
                         );
+                    }
+                    // Bare `/factory` opens the machines page wherever the
+                    // daemon advertises the lane; without it, the status.
+                    "" if self.factory_activity_supported() => {
+                        self.open_factory_page(view, /*user_initiated*/ true);
                     }
                     "" | "status" => {
                         let Some(settings) = &self.client_settings else {
@@ -515,8 +520,10 @@ impl SessionUi {
             // update replaces only the on-disk binary, so the new build
             // takes effect on restart and nothing here blocks or tears
             // down; there is no busy guard to keep). The confirm carries
-            // the preserve invariant: sessions and configuration
-            // (~/.prime/agent) are never touched.
+            // the preserve invariant: the update uninstalls the
+            // TypeScript version and installs the latest Rust build;
+            // sessions and configuration (~/.prime/agent) are never
+            // touched.
             "update" => {
                 if !resolved.args.trim().is_empty() {
                     view.editor.set_text(text);
@@ -536,7 +543,7 @@ impl SessionUi {
                 // confirm renders each line truncated, never wrapped).
                 view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
                     "Update Prime Agent",
-                    "Update installs the latest Prime Agent build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
+                    "Update uninstalls the TypeScript version and installs the latest Rust build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
                 ));
                 self.pending_confirm = Some(PendingConfirm::Update);
                 self.dirty = true;

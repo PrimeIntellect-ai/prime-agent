@@ -39,14 +39,14 @@ use render::{
     TerminalHandoff,
 };
 
-pub(crate) mod reconnect;
+mod reconnect;
 
 use reconnect::{
-    Connection, ConnectionEffect, ConnectionEvent, ReconnectConnect,
+    arm_shutdown_recovery, ReconnectConnect, ReconnectLoop, SessionReconnect,
     SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
 };
 #[cfg(test)]
-use reconnect::{ReconnectLoop, DAEMON_SHUTDOWN_RECONNECT_WINDOW, SHUTDOWN_RECONNECT_RETRY};
+use reconnect::{DAEMON_SHUTDOWN_RECONNECT_WINDOW, SHUTDOWN_RECONNECT_RETRY};
 
 mod run;
 
@@ -101,9 +101,12 @@ impl SessionSelection {
 pub enum SessionPanel {
     /// The Bash panel, on `shell_id`'s row when a persistent shell row opened it.
     Shells { shell_id: Option<String> },
-    /// The factory page, on `row` when a return from a state's session reopened it.
+    /// The factory page, on `row` when a return from a state's session reopened it; `node`
+    /// remounts the node view (a return from a node's child session reopens the node it
+    /// jumped from, on the instance it had selected).
     FactoryRuns {
         row: Option<crate::factory_view::FactoryRow>,
+        node: Option<crate::factory_view::node::NodeTarget>,
     },
 }
 
@@ -284,9 +287,9 @@ pub trait InteractionTelemetry: Send + Sync {
         action: &'static str,
         scoped: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// An agents-view action ran (`tui agents action`): `action` is `program_shown` (the ctrl+o
-    /// toggle turned a spawn program on), `renamed`, or `content_search` (ctrl+f switched the
-    /// search to message text) — primitives only.
+    /// An agents-view action ran. Actions include `program_shown`, `renamed`, and
+    /// `content_search` (ctrl+f switched the search to message text). Only adoption counts are
+    /// recorded.
     fn agents_view_action(
         &self,
         action: &'static str,

@@ -370,6 +370,9 @@ enum SelectionEdge {
 struct AgentsViewMode {
     options: AgentsViewOptions,
     theme: Theme,
+    /// The daemon advertises the factory lane: `app.agents.factory` opens
+    /// the factory page through the selected session.
+    factory_supported: bool,
     roster: Vec<Value>,
     saved: Vec<Value>,
     rows: Vec<AgentsViewRow>,
@@ -496,6 +499,9 @@ struct AgentsViewMode {
     pending_shell_open: Option<String>,
     /// The activity polls' counts behind the shells and factory-run lines.
     session_activity: ActivityCounts,
+    /// The machine children every live session's runs spawned (the M1
+    /// `⚙` marker's source): child id -> `<run>/<state>` label.
+    machine_children: std::collections::HashMap<String, String>,
 }
 
 /// The press state of one left click, row-scoped: the release must land on the same row.
@@ -599,6 +605,8 @@ impl AgentsViewMode {
             pending_shell_open: None,
             session_activity: ActivityCounts::default(),
             content_search: content_search::ContentSearch::default(),
+            machine_children: std::collections::HashMap::new(),
+            factory_supported: false,
         }
     }
 }
@@ -809,6 +817,7 @@ async fn run_agents_view_surface(
     mode.content_search.enabled = mode.content_search.supported && content_search_carried;
     mode.content_search
         .arm(mode.query.trim(), tokio::time::Instant::now());
+    mode.factory_supported = client.supports_server_capability("factory_activity");
     mode.rebuild_rows();
     // The notice from the log's bounded tail paints on the FIRST frame, before the interval's
     // first tick.

@@ -34,6 +34,12 @@ pub struct FactoryState {
     pub subagent: Option<String>,
     /// A python state's `<import>.<callable>`; such a state has no subagent.
     pub python: Option<String>,
+    /// The agent's model selector, when the graph names one.
+    pub model: Option<String>,
+    /// A mermaid node's shape label: the box's second line, empty when
+    /// the node carries none. Machine states never carry one, and their
+    /// box keeps its own model/python detail.
+    pub label: Option<String>,
 }
 
 impl FactoryState {
@@ -58,6 +64,12 @@ impl FactoryState {
                 .and_then(Value::as_str)
                 .map(scrubbed)
                 .filter(|text| !text.is_empty()),
+            model: value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(scrubbed)
+                .filter(|text| !text.is_empty()),
+            label: None,
         })
     }
 }
@@ -405,39 +417,6 @@ pub fn run_state_color(state: Option<&str>) -> ThemeColor {
         _ => ThemeColor::Muted,
     }
 }
-
-/// The connector marker for one transition row: the last edge under a
-/// source uses the elbow (`└`), joins use the crossbar (`╪`), and a back
-/// edge (re-entry, a target earlier in the machine's declared order)
-/// carries the return marker (`↩`).
-#[must_use]
-pub fn edge_marker(
-    transition: &FactoryTransition,
-    order: &[&str],
-    position: impl Fn(&str) -> Option<usize>,
-) -> (&'static str, ThemeColor) {
-    let back_edge = position(&transition.to)
-        .zip(transition.from.first().map(String::as_str))
-        .is_some_and(|(target, source)| {
-            position(source).is_some_and(|source_position| target < source_position)
-        });
-    let color = if back_edge {
-        ThemeColor::Muted
-    } else {
-        ThemeColor::BorderMuted
-    };
-    let marker = if transition.from.len() > 1 {
-        "├╪"
-    } else if back_edge {
-        "├↩"
-    } else if order.last().is_some_and(|last| *last == transition.from[0]) {
-        "└"
-    } else {
-        "├"
-    };
-    (marker, color)
-}
-
 /// The compact guard rendering: `verdict.approved eq false`.
 #[must_use]
 pub fn format_guard(when: &Value) -> Option<String> {

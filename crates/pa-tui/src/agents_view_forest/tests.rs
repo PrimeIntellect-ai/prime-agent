@@ -239,6 +239,39 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
     assert_eq!(rows[4].title, "grandchild");
 }
 
+/// A Decision API child (`decisionChild`) renders no row and never counts in
+/// the user-facing subagent readout; its spend still rolls into the parent's
+/// cost, so the hidden System 1 server stays paid for.
+#[test]
+fn a_decision_child_hides_but_its_spend_still_rolls_up() {
+    let mut decision = child_summary("dc", "p", "system 1");
+    decision["decisionChild"] = json!(true);
+    decision["usage"] = json!({ "cost": 0.5 });
+    let mut worker = child_summary("c", "p", "worker one");
+    worker["usage"] = json!({ "cost": 0.25 });
+    let roster = vec![
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &worker),
+        roster_entry("dc", "running", &decision),
+    ];
+    let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+    assert!(
+        !rows.iter().any(|row| row.title == "system 1"),
+        "the decision child renders no row"
+    );
+    assert!(rows.iter().any(|row| row.title == "worker one"));
+    let summary = rows
+        .iter()
+        .find(|row| row.kind == RowKind::SubagentSummary)
+        .expect("the summary row");
+    assert_eq!(summary.title, "1 subagent · 1 running");
+    let parent = rows
+        .iter()
+        .find(|row| row.kind == RowKind::Agent)
+        .expect("the agent row");
+    assert!((parent.cost - 0.75).abs() < 1e-9, "cost {}", parent.cost);
+}
+
 /// The summary row's title is count-only (the operator's 2026-09-26 follow-up): `"{total}
 /// subagents · {running} running"`, no model mix.
 #[test]
@@ -1326,7 +1359,7 @@ fn activity_lines_follow_each_nodes_subagents_block() {
             (
                 RowKind::FactoryRuns,
                 1,
-                "\u{2699} 0 factories \u{b7} 1 running"
+                "\u{2699} 0 machines \u{b7} 1 running"
             ),
         ]
     );
@@ -1359,7 +1392,7 @@ fn activity_lines_without_subagents_and_without_counts() {
         .iter()
         .position(|title| *title == "a name")
         .expect("a row");
-    assert_eq!(titles[a + 1], "\u{2699} 2 factories \u{b7} 0 running");
+    assert_eq!(titles[a + 1], "\u{2699} 2 machines \u{b7} 0 running");
     assert_eq!(
         rows.len(),
         3,
@@ -1490,7 +1523,7 @@ fn an_inactive_node_shows_its_stored_factory_specs() {
         factory_lines,
         vec![(
             "factory:file:/x/gone.jsonl",
-            "\u{2699} 2 factories \u{b7} 0 running"
+            "\u{2699} 2 machines \u{b7} 0 running"
         )]
     );
 }
@@ -1514,11 +1547,11 @@ fn the_factory_line_counts_paused_runs_apart_from_running_ones() {
     };
     assert_eq!(
         line(0, 1),
-        vec!["\u{2699} 0 factories \u{b7} 0 running \u{b7} 1 paused"]
+        vec!["\u{2699} 0 machines \u{b7} 0 running \u{b7} 1 paused"]
     );
     assert_eq!(
         line(2, 1),
-        vec!["\u{2699} 0 factories \u{b7} 2 running \u{b7} 1 paused"]
+        vec!["\u{2699} 0 machines \u{b7} 2 running \u{b7} 1 paused"]
     );
-    assert_eq!(line(1, 0), vec!["\u{2699} 0 factories \u{b7} 1 running"]);
+    assert_eq!(line(1, 0), vec!["\u{2699} 0 machines \u{b7} 1 running"]);
 }

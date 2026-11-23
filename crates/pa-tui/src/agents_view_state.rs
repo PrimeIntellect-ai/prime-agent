@@ -135,9 +135,10 @@ fn saved_aliases(saved: &Value) -> Vec<String> {
     aliases
 }
 
-/// The SESSION column's width cap (TS `Math.min(28, ...)`, which `build_layout` mirrors): the
-/// widest the name column ever renders.
-const SESSION_NAME_COLUMN_MAX_CELLS: usize = 28;
+/// The SESSION column's width cap (TS `Math.min(28, ...)` originally; widened for the agents
+/// view's machine rows, whose chip-prefixed names — `⚙` machine children — cut off at 28
+/// cells): the widest the name column ever renders.
+const SESSION_NAME_COLUMN_MAX_CELLS: usize = 40;
 
 /// The widest title the SESSION column renders: the column cap minus the two cells every agent
 /// row spends on its icon and gap.
@@ -682,11 +683,7 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .max()
         .unwrap_or(0)
         .max(12);
-    let model_width = desired_model.min(
-        available
-            .saturating_sub(SESSION_NAME_COLUMN_MAX_CELLS)
-            .max(available / 2),
-    );
+    let model_width = desired_model.min(32).min(available.saturating_sub(12));
     let name_width = (available.saturating_sub(model_width)).min(SESSION_NAME_COLUMN_MAX_CELLS);
     let detail_line = |cost: &str, age: &str| {
         format!(

@@ -16,6 +16,9 @@ impl AgentView {
     /// Compose the fullscreen frame: top bar, transcript window, dock —
     /// exactly `height` rows.
     pub fn render_frame(&mut self, width: usize, height: usize) -> Vec<Line> {
+        if self.terminal_rows != height as u16 {
+            self.set_terminal_rows(height as u16);
+        }
         // The fullscreen compose forces image components to their textual fallback: re-emitting
         // an image placement each repaint would corrupt the display.
         let frame = crate::image_component::with_fullscreen_image_fallback(|| {
@@ -38,6 +41,44 @@ impl AgentView {
             let mut frame = screen.render(&self.theme, width, height, kb);
             self.frame_rows = frame.len();
             self.apply_frame_selection(&mut frame, 0, width);
+            return frame;
+        }
+        // The factory and machine-library pages claim the main area under the top bar (the
+        // agents-view precedent: full-height layout, no empty transcript band above the page).
+        if let Some(factory_view) = self.factory_view.as_mut() {
+            let top = render_top_bar(&self.chrome, &self.theme, width);
+            let available = height.saturating_sub(1);
+            factory_view.set_viewport_rows(available);
+            let mut frame = Vec::with_capacity(height);
+            frame.push(pad_row(top, width));
+            for line in factory_view.render(&self.theme, width, self.editor.keybindings()) {
+                if frame.len() < height {
+                    frame.push(pad_row(line, width));
+                }
+            }
+            while frame.len() < height {
+                frame.push(vec![Span::raw(" ".repeat(width))]);
+            }
+            self.frame_rows = frame.len();
+            self.apply_frame_selection(&mut frame, 1, width);
+            return frame;
+        }
+        if let Some(library_view) = self.library_view.as_mut() {
+            let top = render_top_bar(&self.chrome, &self.theme, width);
+            let available = height.saturating_sub(1);
+            library_view.set_viewport_rows(available);
+            let mut frame = Vec::with_capacity(height);
+            frame.push(pad_row(top, width));
+            for line in library_view.render(&self.theme, width, self.editor.keybindings()) {
+                if frame.len() < height {
+                    frame.push(pad_row(line, width));
+                }
+            }
+            while frame.len() < height {
+                frame.push(vec![Span::raw(" ".repeat(width))]);
+            }
+            self.frame_rows = frame.len();
+            self.apply_frame_selection(&mut frame, 1, width);
             return frame;
         }
         // The `/model` and `/effort` pickers mount in the editor dock
@@ -72,10 +113,6 @@ impl AgentView {
         } else if let Some(mcp_view) = self.mcp_view.as_mut() {
             let mut dock = prompt_context;
             dock.extend(mcp_view.render(&self.theme, width, self.editor.keybindings()));
-            Some(dock)
-        } else if let Some(factory_view) = self.factory_view.as_ref() {
-            let mut dock = prompt_context;
-            dock.extend(factory_view.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
         } else if let Some(picker) = &self.heartbeats_picker {
             let mut dock = prompt_context;
@@ -278,8 +315,10 @@ impl AgentView {
     /// Hardware cursor position within the last composed frame, when the
     /// editor surface drew the cursor.
     pub fn frame_cursor(&self) -> Option<(usize, usize)> {
-        if self.onboarding.is_some()
-            || self.model_picker.is_some()
+        if self.onboarding.is_some() || self.factory_view.is_some() || self.library_view.is_some() {
+            return None;
+        }
+        if self.model_picker.is_some()
             || self.choice_picker.is_some()
             || self.heartbeats_picker.is_some()
             || self.goal_panel.is_some()
@@ -293,7 +332,6 @@ impl AgentView {
             || self.auth_panel.is_some()
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
-            || self.factory_view.is_some()
         {
             return None;
         }

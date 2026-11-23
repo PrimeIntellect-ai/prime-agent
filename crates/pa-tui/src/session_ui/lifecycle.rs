@@ -149,11 +149,17 @@ impl SessionUi {
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
             factory_graph: serde_json::json!({"runs": []}),
+            factory_overview: serde_json::json!({"runs": []}),
             factory_view_session: None,
             factory_refresh_in_flight: false,
             factory_refresh_queued: false,
             factory_list_epoch: 0,
+            factory_node_epoch: 0,
             factory_updates: activity_updates.factory,
+            library_updates: activity_updates.library,
+            library_list_epoch: 0,
+            library_overview_in_flight: false,
+            library_overview_epoch: 0,
             factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
@@ -182,8 +188,11 @@ impl SessionUi {
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
-            connection: crate::interactive::reconnect::Connection::Connected,
+            reconnect: None,
+            daemon_closing_notice: None,
+            transport_lost: None,
             pending_rebind: None,
+            reconnection_failed: None,
             exit_guard: crate::exit_guard::ExitGuard::new(),
             escape_repeat_action: None,
             escape_repeat_until: None,
@@ -429,8 +438,9 @@ impl SessionUi {
         // keeps a cursor-less attach from stashing a handoff.
         self.last_event_sequence = reconstructed.last_event_sequence;
         self.attach_cursor_present = reconstructed.cursor_present;
-        self.connection
-            .on(crate::interactive::reconnect::ConnectionEvent::Attached);
+        // The closing notice is per-connection: it clears on every attach, so a later bare session
+        // stop must not route into a stale shutdown recovery's reconnect hang.
+        self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         self.pending_model_fallback_message = reconstructed.model_fallback_message;
@@ -615,6 +625,26 @@ impl SessionUi {
                 self.factory_view_session = None;
                 self.factory_graph = serde_json::json!({"runs": []});
             }
+            // A same-session reattach replaces the worker but keeps this
+            // mounted page, so retarget its outstanding node request to the
+            // new active-session id. The epoch drops any reply from before
+            // the reattach instead of leaving the page blank.
+            let reattached_node = self
+                .factory_view_session
+                .as_deref()
+                .filter(|session| *session == self.session_id.as_str())
+                .and(view.factory_view.as_ref())
+                .and_then(|factory_view| factory_view.node.as_ref())
+                .map(|node| {
+                    (
+                        node.run_id.clone(),
+                        node.state_id.clone(),
+                        node.selected_selector(),
+                    )
+                });
+            if let Some((run_id, state_id, selector)) = reattached_node {
+                self.open_factory_node(view, &run_id, &state_id, selector);
+            }
             // An agents-view panel the rebind tore down takes its return-to-agents-view flag
             // with it; a kept factory page keeps it.
             self.panel_returns_to_agents_view &= view.factory_view.is_some();
@@ -624,6 +654,11 @@ impl SessionUi {
             // owning the frame over the rebind with stale content.
             view.goal_panel = None;
             view.info_panel = None;
+            // The machine library page dies the same death: its open
+            // fetch is session-addressed (the lane rides the attached
+            // session's kernel), so the page reopens on the new session
+            // instead of keeping the old one's list.
+            view.library_view = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -885,6 +920,7 @@ mod backfill_tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             backfill_tx,
@@ -995,29 +1031,6 @@ mod backfill_tests {
         .expect("mock session open and both panel opens complete within ten seconds");
     }
 
-    /// Every successful attach clears an expired re-attach window's failure: the flag is
-    /// per-connection, so a recovered connection must not keep refusing submits.
-    #[tokio::test]
-    async fn an_attach_clears_the_reconnection_failure() {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let dir = tempfile::tempdir().unwrap();
-            let socket = dir.path().join("reconnect.sock");
-            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
-            session.connection = crate::interactive::reconnect::Connection::SessionPlaneFailed(
-                "the session worker is gone".to_string(),
-            );
-            session.attach_session("s1", DockFold::Held).await.unwrap();
-            assert!(matches!(
-                session.connection,
-                crate::interactive::reconnect::Connection::Connected
-            ));
-            drop(session);
-            server.abort();
-        })
-        .await
-        .expect("mock session open and re-attach complete within ten seconds");
-    }
-
     #[tokio::test]
     async fn an_attach_summary_model_fallback_warns_at_the_session_open() {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1078,6 +1091,7 @@ mod backfill_tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             mpsc::unbounded_channel().0,

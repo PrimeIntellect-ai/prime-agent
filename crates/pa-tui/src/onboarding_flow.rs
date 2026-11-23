@@ -14,16 +14,10 @@ use crate::{Line, Span};
 use ratatui::style::Modifier;
 use tokio::sync::oneshot;
 
-// The picker's prompt and continue row when the flow made Prime Inference the default model.
-pub(crate) const PRIME_DEFAULT_PROMPT: &str =
-    "Prime Inference is your default. Connect other providers, or continue.";
-pub(crate) const PRIME_DEFAULT_CONTINUE_LABEL: &str = "Continue with Prime Inference (default)";
-// The picker's prompt and continue row when the session keeps the model it started with.
-pub(crate) const CURRENT_MODEL_PROMPT: &str =
-    "Signed in to Prime Inference. Connect other providers, or continue.";
-pub(crate) const CURRENT_MODEL_CONTINUE_LABEL: &str = "Continue with your current model";
+pub(crate) const PROVIDERS_PROMPT: &str = "Connect other providers, or continue.";
 pub(crate) const PROVIDERS_SEARCH_PLACEHOLDER: &str = "Search providers";
 pub(crate) const PROVIDERS_NOTE: &str = "You can add providers anytime with /login.";
+pub(crate) const CONTINUE_LABEL: &str = "Continue";
 pub(crate) const LOGIN_ACTION_LABEL: &str = "Log in with Prime Intellect";
 /// The Prime Inference login's heading: the panel that owns the block names itself in place of the
 /// brand line.
@@ -76,8 +70,6 @@ pub enum ProviderPick {
 #[derive(Debug)]
 pub struct ProviderPicker {
     options: Vec<ProviderPickerOption>,
-    /// Whether the flow made Prime Inference the default model (no startup model was set).
-    prime_default: bool,
     search: SearchInput,
     /// The selected row: 0 is the continue action, 1.. the visible rows.
     selected: usize,
@@ -86,10 +78,9 @@ pub struct ProviderPicker {
 
 impl ProviderPicker {
     #[must_use]
-    pub fn new(options: Vec<ProviderPickerOption>, prime_default: bool) -> Self {
+    pub fn new(options: Vec<ProviderPickerOption>) -> Self {
         ProviderPicker {
             options,
-            prime_default,
             search: SearchInput::new(),
             selected: 0,
             scroll_top: 0,
@@ -181,7 +172,7 @@ impl ProviderPicker {
         let scroll_top = self.scroll_top.min(max_scroll);
         let row_width = self.row_width(width);
         let mut lines: Vec<Line> = vec![padded(width)];
-        lines.push(indented(theme, width, self.prompt(), ThemeColor::Text));
+        lines.push(indented(theme, width, PROVIDERS_PROMPT, ThemeColor::Text));
         lines.push(padded(width));
         lines.push(search_field_plain_row(
             theme,
@@ -196,7 +187,7 @@ impl ProviderPicker {
             theme,
             width,
             row_width,
-            self.continue_label(),
+            CONTINUE_LABEL,
             RowMarks {
                 connected: false,
                 selected: self.selected == 0,
@@ -293,24 +284,7 @@ impl ProviderPicker {
         pad_to(line, width)
     }
 
-    fn prompt(&self) -> &'static str {
-        if self.prime_default {
-            PRIME_DEFAULT_PROMPT
-        } else {
-            CURRENT_MODEL_PROMPT
-        }
-    }
-
-    fn continue_label(&self) -> &'static str {
-        if self.prime_default {
-            PRIME_DEFAULT_CONTINUE_LABEL
-        } else {
-            CURRENT_MODEL_CONTINUE_LABEL
-        }
-    }
-
-    /// The longest label (the continue row's, or a provider's plus its check) under the width
-    /// budget, floored at the minimum.
+    /// The longest label (plus its check) under the width budget, floored at the minimum.
     fn row_width(&self, width: usize) -> usize {
         let longest = self
             .options
@@ -318,7 +292,6 @@ impl ProviderPicker {
             .map(|option| {
                 crate::width::str_width(&option.name) + if option.connected { 3 } else { 0 }
             })
-            .chain([crate::width::str_width(self.continue_label())])
             .max()
             .unwrap_or(0);
         (MARKER_WIDTH + longest + ROW_TRAILING)
@@ -577,28 +550,24 @@ mod tests {
 
     #[test]
     fn the_picker_pins_the_continue_row_and_marks_connected() {
-        let picker = ProviderPicker::new(
-            vec![
-                ProviderPickerOption {
-                    id: "one".to_string(),
-                    name: "One".to_string(),
-                    connected: true,
-                    available: true,
-                },
-                ProviderPickerOption {
-                    id: "two".to_string(),
-                    name: "Two".to_string(),
-                    connected: false,
-                    available: true,
-                },
-            ],
-            true,
-        );
+        let picker = ProviderPicker::new(vec![
+            ProviderPickerOption {
+                id: "one".to_string(),
+                name: "One".to_string(),
+                connected: true,
+                available: true,
+            },
+            ProviderPickerOption {
+                id: "two".to_string(),
+                name: "Two".to_string(),
+                connected: false,
+                available: true,
+            },
+        ]);
         let rows = picker.render(&theme(), 60);
         let text: Vec<String> = rows.iter().map(row_text).collect();
         assert!(
-            text.iter()
-                .any(|row| row.contains(PRIME_DEFAULT_CONTINUE_LABEL)),
+            text.iter().any(|row| row.contains(CONTINUE_LABEL)),
             "the continue row: {text:?}"
         );
         assert!(
@@ -612,15 +581,12 @@ mod tests {
     /// Enter is inert — no after-selection error wall.
     #[test]
     fn the_picker_marks_unavailable_rows_inert() {
-        let mut picker = ProviderPicker::new(
-            vec![ProviderPickerOption {
-                id: "anthropic".to_string(),
-                name: "Anthropic".to_string(),
-                connected: false,
-                available: false,
-            }],
-            true,
-        );
+        let mut picker = ProviderPicker::new(vec![ProviderPickerOption {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            connected: false,
+            available: false,
+        }]);
         let rows = picker.render(&theme(), 60);
         let text: Vec<String> = rows.iter().map(row_text).collect();
         assert!(
@@ -638,7 +604,7 @@ mod tests {
 
     #[test]
     fn the_picker_answers_the_three_row_kinds() {
-        let mut picker = ProviderPicker::new(options(1), true);
+        let mut picker = ProviderPicker::new(options(1));
         let kb = kb();
         // Enter on the pinned continue row.
         assert_eq!(
@@ -660,7 +626,7 @@ mod tests {
 
     #[test]
     fn a_typed_query_filters_the_rows_and_resets_the_scroll() {
-        let mut picker = ProviderPicker::new(options(10), true);
+        let mut picker = ProviderPicker::new(options(10));
         let kb = kb();
         // Scroll down past the viewport, then type a matching query: the filter
         // re-clamps the selection and resets the scroll to the top.

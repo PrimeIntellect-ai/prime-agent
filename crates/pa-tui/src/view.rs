@@ -21,7 +21,7 @@ mod layout;
 pub(crate) mod lazy;
 mod panels;
 mod restyle;
-mod rows;
+pub(crate) mod rows;
 
 use layout::EntryLayout;
 
@@ -94,6 +94,10 @@ pub struct AgentView {
     /// inline pickers (one panel per live factory run) — the activity
     /// dock's factory group's destination.
     pub factory_view: Option<crate::factory_view::FactoryView>,
+    /// The machine library page: while set, it owns the editor dock the
+    /// same way (every library machine listed, one drill-in per machine)
+    /// — the activity dock's machine-library group's destination.
+    pub library_view: Option<crate::factory_view::LibraryView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
@@ -214,17 +218,10 @@ fn chunk_selection(
 }
 
 impl AgentView {
-    /// Agent messages, tool calls, bash executions, shell completions, and
-    /// the inbox notices render flush against each other.
+    /// Agent messages, tool calls, bash executions, and shell completions
+    /// render flush against each other.
     pub(super) fn is_compact_neighbor(entry: &ChatEntry) -> bool {
-        matches!(
-            entry,
-            ChatEntry::Tool(_)
-                | ChatEntry::AgentMessage(_)
-                | ChatEntry::InboxNotice(_)
-                | ChatEntry::ShellCompletion(_)
-                | ChatEntry::BashExecution(_)
-        )
+        rows::ChatRowCtx::is_compact_neighbor(entry)
     }
 
     /// One paste routed by the open overlay, the key dispatch's order:
@@ -257,13 +254,11 @@ impl AgentView {
             return true;
         }
         // The input-less frame owners (the key dispatch's same set): the
-        // factory page, the heartbeats picker, the bash view, the
-        // read-only goal and info panels, the fork selector, the pending
-        // confirm, the share loader, the reload box, and the auth panel
-        // (its own channel drives it). None of them leaves a paste to the
-        // editor behind.
-        if self.factory_view.is_some()
-            || self.heartbeats_picker.is_some()
+        // heartbeats picker, the bash view, the read-only goal and info
+        // panels, the fork selector, the pending confirm, the share
+        // loader, the reload box, and the auth panel (its own channel
+        // drives it). None of them leaves a paste to the editor behind.
+        if self.heartbeats_picker.is_some()
             || self.bash_view.is_some()
             || self.goal_panel.is_some()
             || self.info_panel.is_some()
@@ -308,6 +303,7 @@ impl AgentView {
             choice_picker: None,
             mcp_view: None,
             factory_view: None,
+            library_view: None,
             heartbeats_picker: None,
             goal_panel: None,
             bash_view: None,
