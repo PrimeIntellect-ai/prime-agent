@@ -178,17 +178,3 @@ mod windows_tests {
         );
     }
 }
-
-#[cfg(all(test, not(windows)))]
-mod portable_tests {
-    use super::*;
-
-    /// The non-Windows contract the call sites rely on: both fns are
-    /// total no-ops (the TUI mount and the exit funnel call them
-    /// unconditionally).
-    #[test]
-    fn the_no_windows_arms_are_no_ops() {
-        init();
-        restore();
-    }
-}

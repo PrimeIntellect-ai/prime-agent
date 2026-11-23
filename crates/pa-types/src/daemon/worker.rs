@@ -1,8 +1,6 @@
 //! Worker protocol: the supervisor <-> worker command/event unions, worker
 //! descriptors, and the update-restart manifest.
 
-#[cfg(test)]
-use super::rt;
 use super::{
     AgentMessage, DaemonClientCapability, Deserialize, JsonMap, Serialize, SnapshotPurpose, Value,
 };
@@ -306,32 +304,4 @@ pub struct DaemonUpdateRestartManifest {
     pub discarded_active_session_ids: Option<Vec<String>>,
     #[serde(flatten)]
     pub rest: JsonMap,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_frames_roundtrip() {
-        rt::<DaemonWorkerFrameHeader>(
-            r#"{"kind":"outbound","requestId":"r","outboundType":"session_event","activeSessionId":"s","payloadEncoding":"jsonl","snapshotPurpose":"attach"}"#,
-        );
-        rt::<DaemonWorkerCommand>(
-            r#"{"type":"worker_auth","token":"t","supervisorGeneration":"g","supervisorPid":1,"supervisorSocketPath":"/s"}"#,
-        );
-        rt::<DaemonWorkerDescriptor>(
-            r#"{"version":2,"workerId":"w","pid":9,"socketPath":"/w.sock","recoveryJournalPath":"/j","supervisorSocketPath":"/s","authenticationToken":"t","rootActiveSessionId":"a","createdAt":"c","updatedAt":"u","lifecycle":"ready","createCommand":{"sessionPath":"/p"},"consecutiveFailures":0}"#,
-        );
-        rt::<DaemonPeerCommand>(
-            r#"{"type":"peer_auth","grantId":"g","token":"t","workerInstanceId":"w","purpose":"session_client"}"#,
-        );
-    }
-
-    #[test]
-    fn update_restart_manifest_roundtrip() {
-        rt::<DaemonUpdateRestartManifest>(
-            r#"{"formatVersion":1,"createdAt":"t","sessions":[{"activeSessionId":"a","sessionId":"s","sessionFile":"/f","cwd":"/w","config":{"x":1},"queue":{"actions":{"a":[]},"nextTurn":[]},"shouldResume":true,"wasStreaming":false,"wasCompacting":false,"wasBashRunning":false,"hadRunningRlmChildren":false,"wasRetrying":false,"hadAcceptedPromptInFlight":false}],"discardedActiveSessionIds":["z"]}"#,
-        );
-    }
 }

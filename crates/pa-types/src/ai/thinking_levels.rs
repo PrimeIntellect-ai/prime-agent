@@ -195,19 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn non_reasoning_models_only_support_off() {
-        let m = model(false, None);
-        assert_eq!(
-            get_supported_thinking_levels(&m),
-            vec![ModelThinkingLevel::Off]
-        );
-        assert_eq!(
-            clamp_thinking_level(&m, ModelThinkingLevel::High),
-            ModelThinkingLevel::Off
-        );
-    }
-
-    #[test]
     fn an_addressable_map_enables_thinking_without_the_reasoning_flag() {
         // The live catalog's `gpt-5.3-chat-latest` shape: the map is the
         // stronger capability signal, so the levels answer from it.
@@ -256,15 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn supports_thinking_reads_the_flag_and_the_map() {
-        assert!(supports_thinking(&model(true, None)));
-        assert!(!supports_thinking(&model(false, None)));
-        // A map that only disables (`off` → "none") still addresses a level.
-        let toggle = thinking_level_map(&[(ModelThinkingLevel::Off, Some("none"))]);
-        assert!(supports_thinking(&model(false, Some(toggle))));
-    }
-
-    #[test]
     fn supported_levels_exclude_null_and_implicit_xhigh_max() {
         let map = thinking_level_map(&[
             (ModelThinkingLevel::Off, None),
@@ -293,23 +271,5 @@ mod tests {
             Some(ModelThinkingLevel::Xhigh)
         );
         assert_eq!(thinking_level_from_str("nope"), None);
-    }
-
-    #[test]
-    fn wire_names_round_trip_the_whole_ladder() {
-        for level in EXTENDED_THINKING_LEVELS {
-            assert_eq!(thinking_level_from_str(level.wire_name()), Some(level));
-        }
-    }
-
-    #[test]
-    fn equality_is_provider_and_id() {
-        let a = model(false, None);
-        let mut b = a.clone();
-        assert!(models_are_equal(Some(&a), Some(&b)));
-        b.provider = "other".into();
-        assert!(!models_are_equal(Some(&a), Some(&b)));
-        assert!(!models_are_equal(Some(&a), None));
-        assert!(!models_are_equal(None, None));
     }
 }

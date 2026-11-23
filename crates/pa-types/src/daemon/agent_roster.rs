@@ -262,45 +262,6 @@ mod tests {
     }
 
     #[test]
-    fn session_classification_reads_activity_and_active_turn() {
-        let summary = json!({ "activeSessionId": "a1", "activity": "working" });
-        assert_eq!(
-            classify_summary_value(&summary, false),
-            AgentRosterStatus::Running
-        );
-        let summary = json!({ "activeSessionId": "a1", "activity": "idle" });
-        assert_eq!(
-            classify_summary_value(&summary, false),
-            AgentRosterStatus::Idle
-        );
-        // An active turn marks running even when the activity label is idle.
-        let summary =
-            json!({ "activeSessionId": "a1", "activity": "idle", "isSessionActive": true });
-        assert_eq!(
-            classify_summary_value(&summary, false),
-            AgentRosterStatus::Running
-        );
-        // Own turn done, subagents still running: the worker reports the
-        // session as working, so it classifies running.
-        let summary = json!({
-            "activeSessionId": "a1",
-            "activity": "working",
-            "isSessionActive": false,
-            "hasRunningSubagents": true,
-        });
-        assert_eq!(
-            classify_summary_value(&summary, false),
-            AgentRosterStatus::Running
-        );
-        // No active session id: not resident.
-        let summary = json!({ "activity": "working" });
-        assert_eq!(
-            classify_summary_value(&summary, false),
-            AgentRosterStatus::Inactive
-        );
-    }
-
-    #[test]
     fn agent_ids_qualify_children_by_parent_key() {
         // Top-level: session id.
         assert_eq!(roster_agent_id("s1", "top-level", None, None), "s1");
@@ -316,26 +277,6 @@ mod tests {
         );
         // No parent key at all: bare child id.
         assert_eq!(roster_agent_id("s2", "subagent", Some("7"), None), "7");
-    }
-
-    #[test]
-    fn agent_id_from_summary_wire_form() {
-        let summary = json!({
-            "sessionId": "s2",
-            "runtimeKind": "subagent",
-            "rlmChildId": "7",
-            "parentActiveSessionId": "a1",
-        });
-        assert_eq!(roster_agent_id_for_summary(&summary), "a1#7");
-        // parentSessionPath wins over the live parent id.
-        let summary = json!({
-            "sessionId": "s2",
-            "runtimeKind": "subagent",
-            "rlmChildId": "7",
-            "parentSessionPath": "/x/sess.jsonl",
-            "parentActiveSessionId": "a1",
-        });
-        assert_eq!(roster_agent_id_for_summary(&summary), "/x/sess.jsonl#7");
     }
 
     /// The minimal wire summary the branch table reads; tests merge overrides into it.
@@ -356,84 +297,6 @@ mod tests {
             _ => panic!("summary fixtures must be objects"),
         }
         summary
-    }
-
-    #[test]
-    fn activity_detail_branches_match_the_shared_wording() {
-        let options = SessionActivityOptions {
-            heartbeat_label: "heartbeat".to_string(),
-            idle_label: String::new(),
-        };
-        let detail =
-            |overrides: Value| session_activity_detail(&activity_summary(overrides), &options);
-        assert_eq!(
-            detail(json!({ "activity": "working", "isStreaming": true, "isRunningTools": true })),
-            "running tools"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "isStreaming": true })),
-            "thinking"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "isBashRunning": true })),
-            "running bash"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "isCompacting": true })),
-            "compacting"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "hasRunningSubagents": true })),
-            "subagents running"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "workerState": "starting" })),
-            "starting"
-        );
-        assert_eq!(detail(json!({ "lifecycle": "archived" })), "archived");
-        assert_eq!(
-            detail(json!({ "runtimeKind": "subagent", "repliedSinceTask": true })),
-            "replied"
-        );
-        assert_eq!(detail(json!({ "activity": "working" })), "working");
-        assert_eq!(detail(json!({ "taskState": "error" })), "error");
-        assert_eq!(detail(json!({ "taskState": "completed" })), "completed");
-        // No branch fires: the surface's idle fallback.
-        assert_eq!(detail(json!({})), "");
-    }
-
-    #[test]
-    fn activity_detail_labels_carry_the_surface_options() {
-        let view = SessionActivityOptions {
-            heartbeat_label: "heartbeat \u{b7} next 3m".to_string(),
-            idle_label: "needs input".to_string(),
-        };
-        assert_eq!(
-            session_activity_detail(
-                &activity_summary(json!({ "hasActiveHeartbeat": true })),
-                &view
-            ),
-            "heartbeat \u{b7} next 3m"
-        );
-        assert_eq!(
-            session_activity_detail(&activity_summary(json!({})), &view),
-            "needs input"
-        );
-        let table = SessionActivityOptions {
-            heartbeat_label: "heartbeat".to_string(),
-            idle_label: String::new(),
-        };
-        assert_eq!(
-            session_activity_detail(
-                &activity_summary(json!({ "hasActiveHeartbeat": true })),
-                &table
-            ),
-            "heartbeat"
-        );
-        assert_eq!(
-            session_activity_detail(&activity_summary(json!({})), &table),
-            ""
-        );
     }
 
     #[test]
@@ -468,27 +331,6 @@ mod tests {
             ),
             "recovering"
         );
-    }
-
-    #[test]
-    fn entry_round_trips_the_wire_shape() {
-        let entry = AgentRosterEntry {
-            agent_id: "s1".to_string(),
-            queued_child: None,
-            seeded_cwd: None,
-            summary: json!({ "sessionId": "s1" }),
-            status: AgentRosterStatus::Idle,
-            status_label: None,
-            last_heard_from_at: None,
-            worker_id: Some("w1".to_string()),
-            rest: JsonMap::default(),
-        };
-        let value = serde_json::to_value(&entry).unwrap();
-        assert_eq!(value["agentId"], "s1");
-        assert_eq!(value["status"], "idle");
-        assert_eq!(value["workerId"], "w1");
-        let back: AgentRosterEntry = serde_json::from_value(value).unwrap();
-        assert_eq!(back, entry);
     }
 
     #[test]

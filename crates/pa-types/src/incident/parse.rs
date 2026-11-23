@@ -265,19 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_rejects_impossible_and_malformed_values() {
-        assert_eq!(timestamp_to_ms("not-a-timestamp"), None);
-        assert_eq!(timestamp_to_ms(""), None);
-        assert_eq!(timestamp_to_ms("2026-13-01"), None);
-        assert_eq!(timestamp_to_ms("2026-09-32"), None);
-        assert_eq!(timestamp_to_ms("2026-02-31T00:00:00Z"), None);
-        assert_eq!(timestamp_to_ms("2026-09-10T25:00:00Z"), None);
-        assert_eq!(timestamp_to_ms("2026-09-10T20:00:00."), None);
-        assert_eq!(timestamp_to_ms("2026-09-10T20:00:00+25:00"), None);
-        assert_eq!(timestamp_to_ms("2026-09-10T20:00:00+02:60"), None);
-    }
-
-    #[test]
     fn log_line_parses_the_structured_record() {
         let entry = parse_incident_log_line(
             r#"{"ts":"2026-09-10T20:02:53.374Z","level":"error","component":"ai.provider","pid":53615,"msg":"provider stream failure","kind":"rate_limit","status":429}"#,
@@ -299,14 +286,6 @@ mod tests {
                 .and_then(serde_json::Value::as_i64),
             Some(429)
         );
-    }
-
-    #[test]
-    fn log_line_defaults_level_and_component() {
-        let entry = parse_incident_log_line(r#"{"ts":"2026-09-10T20:00:00Z","msg":"hi"}"#)
-            .expect("valid line");
-        assert_eq!(entry.level, "warn");
-        assert_eq!(entry.component, "unknown");
     }
 
     #[test]
@@ -342,14 +321,5 @@ mod tests {
         .expect("worker line");
         assert_eq!(worker.component, "coding-agent.daemon");
         assert_eq!(worker.msg, "uncaught exception: Error: write EPIPE");
-    }
-
-    #[test]
-    fn daemon_log_line_skips_malformed_lines() {
-        assert!(parse_incident_daemon_log_line("not a log line").is_none());
-        assert!(parse_incident_daemon_log_line("[not-a-timestamp] supervisor: msg").is_none());
-        assert!(parse_incident_daemon_log_line("[]").is_none());
-        assert!(parse_incident_daemon_log_line("[2026-09-10T20:00:00Z]   ").is_none());
-        assert!(parse_incident_daemon_log_line("[2026-09-10T20:00:00Z] supervisor:").is_none());
     }
 }

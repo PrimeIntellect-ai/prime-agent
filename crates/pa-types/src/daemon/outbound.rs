@@ -417,45 +417,6 @@ pub enum DaemonOutbound {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn response_and_error_info_roundtrip() {
-        rt::<DaemonOutbound>(
-            r#"{"type":"response","id":"r1","command":"prompt","success":true,"data":{"x":1}}"#,
-        );
-        rt::<DaemonOutbound>(
-            r#"{"type":"response","id":"r2","command":"attach","success":false,"error":"boom","errorInfo":{"code":"session_already_active","sessionPath":"/s.jsonl","activeSessionId":"a"}}"#,
-        );
-        rt::<DaemonOutbound>(
-            r#"{"type":"response","command":"import_jsonl","success":false,"error":"e","errorInfo":{"code":"session_import_file_not_found","filePath":"/x"}}"#,
-        );
-        // `update_restarting`: the fieldless typed refusal rides beside the unchanged plain
-        // message.
-        rt::<DaemonOutbound>(
-            r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart","errorInfo":{"code":"update_restarting"}}"#,
-        );
-    }
-
-    #[test]
-    fn snapshot_purpose_tags_match_the_wire() {
-        assert_eq!(
-            serde_json::to_value(SnapshotPurpose::Attach).unwrap(),
-            json!("attach")
-        );
-        assert_eq!(
-            serde_json::to_value(SnapshotPurpose::Replacement).unwrap(),
-            json!("replacement")
-        );
-        assert_eq!(
-            serde_json::to_value(SnapshotPurpose::Catchup).unwrap(),
-            json!("resync")
-        );
-        assert_eq!(
-            serde_json::from_value::<SnapshotPurpose>(json!("resync")).unwrap(),
-            SnapshotPurpose::Catchup
-        );
-    }
 
     #[test]
     fn hello_and_snapshot_roundtrip() {

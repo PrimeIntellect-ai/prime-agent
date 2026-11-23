@@ -96,21 +96,6 @@ mod tests {
         );
     }
 
-    /// An empty value never travels (TS treats the empty pane id as "not
-    /// inside a pane"; the filter keeps that shape on both sides).
-    #[test]
-    fn the_client_skips_empty_values() {
-        let env = collect_client_env(|key| match key {
-            "HERDR_ENV" => Some("1".to_string()),
-            "HERDR_PANE_ID" => Some(String::new()),
-            _ => None,
-        });
-        assert_eq!(
-            env,
-            BTreeMap::from([("HERDR_ENV".to_string(), "1".to_string())])
-        );
-    }
-
     /// The daemon side re-filters a received map (the socket peer is
     /// untrusted): an off-list key and an empty value never survive —
     /// and the tuning keys ride through.

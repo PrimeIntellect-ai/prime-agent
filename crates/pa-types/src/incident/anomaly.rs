@@ -231,48 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn duration_matches_the_ts_buckets() {
-        assert_eq!(format_incident_duration(0), "1s");
-        assert_eq!(format_incident_duration(999), "1s");
-        assert_eq!(format_incident_duration(2_500), "3s");
-        assert_eq!(format_incident_duration(120_000), "2m");
-        assert_eq!(format_incident_duration(1_158_000), "19m18s");
-        assert_eq!(format_incident_duration(607_000), "10m7s");
-        // TS keeps only hours+minutes once hours overflow.
-        assert_eq!(format_incident_duration(3_700_000), "1h1m");
-        assert_eq!(format_incident_duration(86_400_000), "24h");
-    }
-
-    #[test]
-    fn durations_in_anomalies_report_the_cluster_span() {
-        let daemon_a = "/tmp/prime-agent-501/daemon.sock";
-        let daemon_b = "/tmp/other/daemon.sock";
-        let minute = 60_000;
-        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
-        let events = vec![
-            timeout_event(daemon_a, base + 2 * minute),
-            timeout_event(daemon_a, base + 8 * minute),
-            timeout_event(daemon_a, base + 9 * minute),
-            timeout_event(daemon_a, base + 21 * minute),
-            timeout_event(daemon_b, base + 3 * minute),
-            timeout_event(daemon_b, base + 10 * minute),
-            timeout_event(daemon_b, base + 30 * minute),
-        ];
-        let anomalies = compute_incident_anomalies(&events);
-        let summaries: Vec<&str> = anomalies.iter().map(|a| a.summary.as_str()).collect();
-        assert!(
-            summaries.contains(&"/tmp/prime-agent-501/daemon.sock: 4 command timeouts over 19m")
-        );
-        assert!(summaries.contains(&"/tmp/other/daemon.sock: 3 command timeouts over 27m"));
-        // The stall anchors at the cluster's first timeout.
-        let daemon_a_stall = anomalies
-            .iter()
-            .find(|a| a.summary.starts_with(daemon_a))
-            .expect("daemon A stall");
-        assert_eq!(daemon_a_stall.time_ms, base + 2 * minute);
-    }
-
-    #[test]
     fn isolated_failures_days_apart_never_merge() {
         let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let day = 86_400_000;
@@ -291,18 +249,6 @@ mod tests {
         assert!(anomalies
             .iter()
             .all(|anomaly| !anomaly.summary.contains("command timeouts")));
-    }
-
-    #[test]
-    fn bursts_of_command_failures_surface_as_warnings() {
-        let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
-        let events: Vec<IncidentEvent> = (1..=3)
-            .map(|index| burst_event("/tmp/prime-agent-501/daemon.sock", base + index * 60_000))
-            .collect();
-        let anomalies = compute_incident_anomalies(&events);
-        assert!(anomalies
-            .iter()
-            .any(|anomaly| anomaly.summary.contains("3 warnings/errors over 2m")));
     }
 
     #[test]

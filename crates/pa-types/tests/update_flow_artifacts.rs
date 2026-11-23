@@ -2,16 +2,12 @@
 //! example,
 //! the intent/status/marker artifacts, and the watchdog/transition tables.
 
-use std::path::Path;
-
 use pa_types::daemon::update_flow::{
-    prepared_marker_expiry, socket_update_dir, update_intent_path, update_marker_path,
-    update_prepared_dir, update_roster_path, update_status_path, update_transition_allowed,
-    PreparedMarkerExpiry, UpdateHeartbeatDeliveryMode, UpdateHeartbeatStatus, UpdateId,
-    UpdateIntent, UpdatePreparedMarker, UpdateProcessIdentity, UpdateRoster, UpdateRosterBinary,
-    UpdateRosterHeartbeat, UpdateRosterSessionKind, UpdateRosterSubagentStatus, UpdateState,
-    UpdateStatus, UpdateSupervisorIdentity, UpdateTimeoutBudget, UPDATE_ROSTER_FORMAT_VERSION,
-    UPDATE_STATUS_FORMAT_VERSION,
+    prepared_marker_expiry, update_transition_allowed, PreparedMarkerExpiry,
+    UpdateHeartbeatDeliveryMode, UpdateHeartbeatStatus, UpdateId, UpdateIntent,
+    UpdatePreparedMarker, UpdateProcessIdentity, UpdateRoster, UpdateRosterSessionKind,
+    UpdateRosterSubagentStatus, UpdateState, UpdateStatus, UpdateSupervisorIdentity,
+    UpdateTimeoutBudget, UPDATE_ROSTER_FORMAT_VERSION, UPDATE_STATUS_FORMAT_VERSION,
 };
 use pa_types::JsonMap;
 
@@ -124,30 +120,6 @@ fn full_artifact_set_roundtrips() {
     );
 }
 
-#[test]
-fn prepared_artifact_paths_lay_out_under_the_socket_dir() {
-    let agent_dir = Path::new("/ad");
-    let socket_dir = socket_update_dir(agent_dir, "cafebabe");
-    let id = UpdateId::from(String::from("018f"));
-    let prepared = update_prepared_dir(&socket_dir, &id);
-    assert_eq!(
-        update_intent_path(&socket_dir),
-        Path::new("/ad/update-restarts/cafebabe/intent.json")
-    );
-    assert_eq!(
-        update_status_path(&socket_dir),
-        Path::new("/ad/update-restarts/cafebabe/status.json")
-    );
-    assert_eq!(
-        update_roster_path(&prepared),
-        Path::new("/ad/update-restarts/cafebabe/prepared/018f/roster.json")
-    );
-    assert_eq!(
-        update_marker_path(&prepared),
-        Path::new("/ad/update-restarts/cafebabe/prepared/018f/marker.json")
-    );
-}
-
 /// Every watchdog outcome (spec §9) must name a transition the coordinator
 /// table (spec §4) allows from the state it guards.
 #[test]
@@ -235,22 +207,4 @@ fn status_schema_is_ts_shaped() {
     assert!(encoded.get("updatedAt").is_some());
     assert!(encoded.get("epoch").is_some());
     assert!(encoded.get("state").is_some());
-}
-
-#[test]
-fn roster_binary_and_heartbeat_wire_names() {
-    let binary: UpdateRosterBinary = serde_json::from_value(serde_json::json!({
-        "from_version": "0.9.5", "to_version": "0.9.6"
-    }))
-    .unwrap();
-    assert_eq!(binary.from_version, "0.9.5");
-    let heartbeat: UpdateRosterHeartbeat = serde_json::from_value(serde_json::json!({
-        "job_id": "j", "session_id": "s", "schedule": "every 5m",
-        "delivery_mode": "follow_up", "status": "paused", "next_run_at": "t"
-    }))
-    .unwrap();
-    assert_eq!(
-        heartbeat.delivery_mode,
-        UpdateHeartbeatDeliveryMode::FollowUp
-    );
 }

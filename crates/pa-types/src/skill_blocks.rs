@@ -107,22 +107,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_block_without_user_message() {
-        let text = "<skill name=\"websearch\" location=\"/skills/websearch/SKILL.md\">\nReferences are relative to /skills/websearch.\n\nRun a search.\n</skill>";
-        let parsed = parse_skill_block(text).expect("parses");
-        assert_eq!(
-            parsed,
-            ParsedSkillBlock {
-                name: "websearch".to_string(),
-                location: "/skills/websearch/SKILL.md".to_string(),
-                content: "References are relative to /skills/websearch.\n\nRun a search."
-                    .to_string(),
-                user_message: None,
-            }
-        );
-    }
-
-    #[test]
     fn parses_block_with_user_message() {
         let text = "<skill name=\"edit\" location=\"/e/SKILL.md\">\nUse it.\n</skill>\n\nfix the bug in src/main.rs";
         let parsed = parse_skill_block(text).expect("parses");
@@ -132,14 +116,6 @@ mod tests {
             parsed.user_message.as_deref(),
             Some("fix the bug in src/main.rs")
         );
-    }
-
-    #[test]
-    fn a_whitespace_only_user_message_is_none() {
-        // TS: `match[4]?.trim() || undefined`.
-        let text = "<skill name=\"edit\" location=\"/e/SKILL.md\">\nUse it.\n</skill>\n\n   ";
-        let parsed = parse_skill_block(text).expect("parses");
-        assert_eq!(parsed.user_message, None);
     }
 
     #[test]

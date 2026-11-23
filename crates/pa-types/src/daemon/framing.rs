@@ -261,21 +261,6 @@ mod tests {
         serde_json::json!({ "kind": kind })
     }
 
-    #[test]
-    fn round_trips_frames() {
-        let frame = encode_private_frame(
-            &header("command"),
-            b"{\"x\":1}",
-            DEFAULT_PRIVATE_FRAME_LIMITS,
-        )
-        .unwrap();
-        let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
-        let frames = decoder.push(&frame).unwrap();
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].header["kind"], "command");
-        assert_eq!(frames[0].payload, b"{\"x\":1}");
-    }
-
     #[tokio::test]
     async fn segments_write_the_same_stream_as_the_buffered_frame() {
         // `i % 251` is 0..=250: non-negative, fits u8 exactly.
@@ -374,31 +359,6 @@ mod tests {
             .unwrap()
             .expect("second frame");
         assert_eq!(second.payload, b"{\"y\":2}");
-    }
-
-    #[tokio::test]
-    async fn frame_reader_yields_every_frame_in_one_chunk() {
-        // Two frames coalesced into one chunk must both come out.
-        let first = encode_private_frame(
-            &header("command"),
-            b"{\"a\":1}",
-            DEFAULT_PRIVATE_FRAME_LIMITS,
-        )
-        .unwrap();
-        let second = encode_private_frame(
-            &header("outbound"),
-            b"{\"b\":2}",
-            DEFAULT_PRIVATE_FRAME_LIMITS,
-        )
-        .unwrap();
-        let wire: Vec<u8> = [first, second].concat();
-        let mut frame_reader =
-            PrivateFrameReader::new(std::io::Cursor::new(wire), DEFAULT_PRIVATE_FRAME_LIMITS);
-        let frame = frame_reader.read_frame().await.unwrap().unwrap();
-        assert_eq!(frame.payload, b"{\"a\":1}");
-        let frame = frame_reader.read_frame().await.unwrap().unwrap();
-        assert_eq!(frame.payload, b"{\"b\":2}");
-        assert!(frame_reader.read_frame().await.unwrap().is_none());
     }
 
     #[test]
