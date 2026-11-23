@@ -2,6 +2,7 @@
 //! shows the owner as the one parent; a send to it is queued in the durable
 //! outbox, and `read_remote_parent` serves it, also after a guest restart.
 //! Linux-only e2e (`AF_UNIX` sockets), like the other pa-daemon verifiers.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
 #![cfg(unix)]
 

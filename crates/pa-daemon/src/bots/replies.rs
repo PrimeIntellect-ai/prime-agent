@@ -323,10 +323,13 @@ impl Supervisor {
     }
 
     /// Note a send to the bot before it starts: a running follower then
-    /// syncs again instead of pausing.
+    /// syncs again and waits the full grace instead of pausing.
     pub(crate) fn touch_bot(bot_id: &str) {
         if let Some(follow) = follows().lock().unwrap().get_mut(bot_id) {
-            follow.again |= follow.running;
+            if follow.running {
+                follow.again = true;
+                follow.grace = follow.grace.max(PAUSE_GRACE);
+            }
         }
     }
 
@@ -372,7 +375,6 @@ impl Supervisor {
         let this = Arc::clone(self);
         let bot_id = bot_id.to_string();
         tokio::spawn(async move {
-            let mut failed_pause_steps = 0;
             loop {
                 this.sync_with_retries(&bot_id).await;
                 if take_again(&bot_id) {
@@ -387,29 +389,29 @@ impl Supervisor {
                 if wait_grace(&bot_id, grace).await {
                     continue;
                 }
-                let round_again = match this.pause_step(&bot_id).await {
-                    Ok(again) => {
-                        failed_pause_steps = 0;
-                        again
-                    }
-                    // An unreachable guest is tried again; after that the
-                    // bot is paused anyway, so it does not run unwatched.
-                    Err(error) if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS => {
-                        failed_pause_steps += 1;
-                        eprintln!(
-                            "pa-daemon: bots: {bot_id}: pause after settle failed: {error:#}"
-                        );
-                        true
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "pa-daemon: bots: {bot_id}: pause after settle failed; pausing anyway: {error:#}"
-                        );
-                        // An attached TUI or a failed pause keeps watching.
-                        this.pause_unwatched(&bot_id).await.unwrap_or_else(|error| {
-                            eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
-                            true
-                        })
+                let mut failed_pause_steps = 0;
+                let round_again = loop {
+                    match this.pause_step(&bot_id).await {
+                        Ok(again) => break again,
+                        // An unreachable guest is tried again soon; after that
+                        // the bot is paused anyway, so it does not run unwatched.
+                        Err(error) if failed_pause_steps + 1 < PAUSE_STEP_ATTEMPTS => {
+                            failed_pause_steps += 1;
+                            eprintln!(
+                                "pa-daemon: bots: {bot_id}: pause after settle failed: {error:#}"
+                            );
+                            tokio::time::sleep(SYNC_RETRY).await;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "pa-daemon: bots: {bot_id}: pause after settle failed; pausing anyway: {error:#}"
+                            );
+                            // An attached TUI or a failed pause keeps watching.
+                            break this.pause_unwatched(&bot_id).await.unwrap_or_else(|error| {
+                                eprintln!("pa-daemon: bots: {bot_id}: pause failed: {error:#}");
+                                true
+                            });
+                        }
                     }
                 };
                 if round_again {

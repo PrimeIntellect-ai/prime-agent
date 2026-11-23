@@ -7,7 +7,7 @@ use anyhow::Result;
 use pa_types::daemon::DaemonCommand;
 use serde_json::{json, Value};
 
-use super::{pause_verdict, sync_deliveries, GuestCommands, PauseVerdict};
+use super::{follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, PAUSE_GRACE};
 use crate::bots::ledger::{recover_all, BotLedger, DeliveryState};
 
 /// The guest's bot session: its transcript rows and its owner outbox.
@@ -176,4 +176,20 @@ async fn a_settled_idle_bot_pauses_after_its_turn() {
         .await
         .unwrap();
     assert_eq!(busy, PauseVerdict::FollowAgain);
+}
+
+#[test]
+fn a_send_during_a_boot_catch_up_waits_the_full_grace() {
+    follows().lock().unwrap().insert(
+        "bot-boot".to_string(),
+        Follow {
+            running: true,
+            again: false,
+            grace: std::time::Duration::ZERO,
+        },
+    );
+    crate::supervisor::Supervisor::touch_bot("bot-boot");
+    let follows = follows().lock().unwrap();
+    let follow = &follows["bot-boot"];
+    assert_eq!((follow.again, follow.grace), (true, PAUSE_GRACE));
 }
