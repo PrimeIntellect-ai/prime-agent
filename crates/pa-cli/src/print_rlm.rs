@@ -855,7 +855,10 @@ impl RlmSubagentHost for InlineHost {
             // (TS `spawnMessage`), delivered through the one steer path.
             let kickoff_content = format!("[task from parent]\n\n{}", request.prompt);
             let kickoff_row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
-                id: &format!("spawn:{child_id}"),
+                id: &format!(
+                    "{}{child_id}",
+                    pa_core::session_engine::agent_messaging::SPAWN_KICKOFF_ID_PREFIX
+                ),
                 prompt: &kickoff_content,
                 message: &request.prompt,
                 from: &node.endpoint(),

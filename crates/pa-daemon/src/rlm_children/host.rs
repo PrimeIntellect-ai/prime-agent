@@ -3,7 +3,7 @@
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
 use super::retirement::{Retirement, RetirementEvent, RetirementIntent};
-use super::run_state::RunState;
+use super::run_state::{RunEvent, RunState};
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_cwd, resolve_child_model, rlm_child_label, rlm_depth_limit_error,
@@ -14,6 +14,59 @@ use super::{
     SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
     RENAME_TIMEOUT_MS, STATE_TIMEOUT_MS,
 };
+
+#[derive(Clone, Copy)]
+pub(super) enum PromptWait {
+    Release,
+    Admission,
+}
+
+impl PromptWait {
+    fn satisfied(self, run: &RunState) -> bool {
+        match self {
+            Self::Release => run.prompt_released(),
+            Self::Admission => run.prompt_admitted(),
+        }
+    }
+}
+
+pub(super) async fn wait_for_prompt_state(
+    record: &Arc<Mutex<ChildRecord>>,
+    wait_for: PromptWait,
+    deadline: Option<Instant>,
+) -> bool {
+    loop {
+        let signal = record.lock().await.run.notifier();
+        let wake = signal.notified();
+        tokio::pin!(wake);
+        let _ = wake.as_mut().enable();
+        {
+            let record = record.lock().await;
+            if wait_for.satisfied(&record.run) {
+                return true;
+            }
+            let stopped = match wait_for {
+                PromptWait::Release => false,
+                PromptWait::Admission => {
+                    !record.run.is_running()
+                        || record.retirement.closed_by_parent()
+                        || record.retirement.retiring()
+                }
+            };
+            if stopped {
+                return false;
+            }
+        }
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if tokio::time::timeout(remaining, wake).await.is_err() {
+                return wait_for.satisfied(&record.lock().await.run);
+            }
+        } else {
+            wake.await;
+        }
+    }
+}
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
 /// the typed error and the `model refused` event; the settings read runs on the blocking pool.
@@ -217,7 +270,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
-                    run: RunState::running(),
+                    run: RunState::held(),
                     decision_child: request.kind
                         == pa_core::session_engine::rlm_host::RlmSpawnKind::Decision,
                     answer_preview: None,
@@ -230,7 +283,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     factory: request.factory.is_some(),
-                    prompt_admitted: false,
                     retirement: Retirement::live(),
                     usage_registration_forgotten: false,
                     session_file: created.session_file.clone(),
@@ -250,9 +302,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
             }
             .await;
             let (record, created, model) = admission?;
-            // The task prompt runs detached from the spawn admission: the
-            // handle returns at registration and the child's first turn
-            // starts after the parent's continuation request is in flight.
+            // The handle returns at registration. A positive collect can
+            // release this child before the parent turn boundary.
             let watcher_this = Arc::clone(&this);
             let watcher_record = Arc::clone(&record);
             // TS `spawnMessage`: the kickoff rides prompt admission as
@@ -297,26 +348,47 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
-            // Capture the spawning turn before detaching: a spawn admitted
-            // mid-turn prompts after that turn completes, so the parent's
-            // continuation request reaches the provider first (see
-            // `wait_turn_done`). A spawn admitted while the parent is idle
-            // (a background kernel task, e.g. a factory run) has no turn
-            // to wait for.
+            // Capture the spawning turn before detaching. A normal mid-turn
+            // spawn waits for this boundary, unless a positive collect releases
+            // this child first. An idle parent has no turn to wait for.
             let spawning_turn = {
                 let turn = *this.parent_turn.borrow();
                 turn.running.then_some(turn.completed)
             };
             tokio::spawn(async move {
                 if let Some(generation) = spawning_turn {
-                    watcher_this.wait_turn_done(generation).await;
+                    tokio::select! {
+                        () = watcher_this.wait_turn_done(generation) => {}
+                        _ = wait_for_prompt_state(
+                            &watcher_record,
+                            PromptWait::Release,
+                            /*deadline*/ None,
+                        ) => {}
+                    }
                 }
-                // The parent closed before the prompt admitted: the
-                // child is closed with it, so the detached task prompt
-                // never fires.
-                if watcher_record.lock().await.retirement.closed_by_parent() {
-                    return;
-                }
+                // Share the rename/delete gate through prompt admission. A
+                // delete that wins this gate must finish (or refuse its kill)
+                // before a queued kickoff can reach the worker.
+                let rename_lock = watcher_record.lock().await.rename_lock.clone();
+                let prompt_guard = loop {
+                    let signal = watcher_record.lock().await.run.notifier();
+                    let wake = signal.notified();
+                    tokio::pin!(wake);
+                    let _ = wake.as_mut().enable();
+                    let guard = rename_lock.lock().await;
+                    let record = watcher_record.lock().await;
+                    if record.retirement.closed_by_parent() {
+                        return;
+                    }
+                    if !record.retirement.retiring() {
+                        break guard;
+                    }
+                    // An interrupted delete still owns admission. A later
+                    // refused kill wakes this sender and leaves it runnable.
+                    drop(record);
+                    drop(guard);
+                    wake.await;
+                };
                 if let Err(error) = watcher_this
                     .prompt_child(
                         &child_active_session_id,
@@ -345,6 +417,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .await
                     };
                     if let Err(retry_error) = retried {
+                        drop(prompt_guard);
                         eprintln!(
                             "pa-daemon: RLM child task prompt failed for {child_log_id}: {error:#}; retry failed: {retry_error:#}"
                         );
@@ -359,7 +432,12 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 }
                 // The worker accepted the task: from here an idle read is a
                 // finished run, never the pre-prompt idle worker.
-                watcher_record.lock().await.prompt_admitted = true;
+                watcher_record
+                    .lock()
+                    .await
+                    .run
+                    .apply(RunEvent::PromptAdmitted);
+                drop(prompt_guard);
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
             Ok(RlmSpawnHandle {
@@ -587,8 +665,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // leaves its return alone.
                 let mut row = record.lock().await;
                 let was_running = row.run.is_running();
-                if was_running {
-                    row.retirement.apply(RetirementEvent::BeginDelete);
+                if was_running && row.retirement.apply(RetirementEvent::BeginDelete) {
+                    row.run.notifier().notify_waiters();
                 }
                 was_running
             };
@@ -604,11 +682,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     // The kill never landed: clear the mark so the
                     // still-live child stays watchable and a later cancel
                     // can still record the parent -> child edge.
-                    record
-                        .lock()
-                        .await
-                        .retirement
-                        .apply(RetirementEvent::KillRefused);
+                    let mut record = record.lock().await;
+                    if record.retirement.apply(RetirementEvent::KillRefused) {
+                        record.run.notifier().notify_waiters();
+                    }
                     return Err(error);
                 }
                 this.retain_retired_usage(&record, RetirementIntent::Delete { was_running })
@@ -676,26 +753,43 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 records.push(record);
             }
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-            let mut results = Vec::with_capacity(records.len());
-            for record in &records {
-                this.refresh_record(record).await;
-                // A settled child that is busy again runs a follow-up turn:
-                // re-arm usage observation (the task-run watcher retired at
-                // its settle).
-                if !record.lock().await.run.is_running() {
-                    let active_session_id = record.lock().await.active_session_id.clone();
-                    if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
-                        SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
+            if timeout_ms > 0 {
+                // Resolve every selector before this point, then release the
+                // selected live prompts as one batch before waiting on a child.
+                for record in &records {
+                    let mut record = record.lock().await;
+                    if record.run.is_running()
+                        && !record.retirement.closed_by_parent()
+                        && !record.retirement.retiring()
+                    {
+                        record.run.apply(RunEvent::ReleasePrompt);
                     }
                 }
-                let still_running = record.lock().await.run.is_running();
-                if still_running {
-                    // Wait inside the shared budget, then re-read the child:
-                    // a timeout yields the current snapshot, never an error.
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let active_session_id = record.lock().await.active_session_id.clone();
-                    this.wait_for_child(&active_session_id, remaining).await;
+            }
+            let mut results = Vec::with_capacity(records.len());
+            for record in &records {
+                let admission_ready = timeout_ms == 0
+                    || wait_for_prompt_state(record, PromptWait::Admission, Some(deadline)).await;
+                if admission_ready {
                     this.refresh_record(record).await;
+                    // A settled child that is busy again runs a follow-up turn:
+                    // re-arm usage observation (the task-run watcher retired at
+                    // its settle).
+                    if !record.lock().await.run.is_running() {
+                        let active_session_id = record.lock().await.active_session_id.clone();
+                        if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
+                            SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
+                        }
+                    }
+                    let still_running = record.lock().await.run.is_running();
+                    if still_running {
+                        // Wait inside the shared budget, then re-read the child:
+                        // a timeout yields the current snapshot, never an error.
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let active_session_id = record.lock().await.active_session_id.clone();
+                        this.wait_for_child(&active_session_id, remaining).await;
+                        this.refresh_record(record).await;
+                    }
                 }
                 let result = {
                     let record = record.lock().await;

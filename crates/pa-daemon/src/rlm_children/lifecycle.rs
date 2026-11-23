@@ -446,7 +446,7 @@ impl SupervisorChildSessionsInner {
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         {
             let record = record.lock().await;
-            if !record.prompt_admitted {
+            if !record.run.prompt_admitted() {
                 return false;
             }
         }
