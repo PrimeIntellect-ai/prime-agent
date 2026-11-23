@@ -39,8 +39,10 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
         }
         crate::telemetry_notice::print_if_due(&options.config);
         let (_cwd, create) = crate::print_runtime::headless_daemon_create(options)?;
-        // TS `assertWorkerCreateOwner` (B-11): the run-owned session never
-        // takes over a file a live daemon worker already hosts.
+        // B-11: the run-owned session never takes over a file a live daemon
+        // worker already hosts. The daemon enforces it atomically on the
+        // client-owned create (TS `assertWorkerCreateOwner`); this roster
+        // check only gives the common case the descriptive refusal.
         if let DaemonCommand::Create {
             session_path: Some(session_path),
             ..
@@ -201,9 +203,7 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
             Ok(exit_code)
         }
         .await;
-        // The run's session ends with it. A reused session another client
-        // created is not this client's to stop: the daemon refuses, and
-        // that session keeps running.
+        // The run's session ends with it.
         let _ = client
             .request(DaemonCommand::CompleteOwnedSession {
                 id: None,

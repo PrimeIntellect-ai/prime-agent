@@ -116,6 +116,8 @@ fn serve(
     )
 }
 
+// zombie_processes: the returned `Daemon` reaps the child on drop; only the
+// readiness panic abandons it, and that fails the test anyway.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, home: &Path, agent_dir: &Path) -> Daemon {
     let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
@@ -146,17 +148,20 @@ fn spawn_daemon(socket: &Path, home: &Path, agent_dir: &Path) -> Daemon {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    // `bind(2)` creates the socket file before the supervisor listens, so
+    // readiness is a successful connect, not the file.
     let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
+    loop {
+        match UnixStream::connect(socket) {
+            Ok(_) => break,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => panic!("the daemon never accepted a connection: {error}"),
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("daemon socket never appeared");
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
+    }
 }
 
 struct Client {
@@ -216,22 +221,117 @@ impl Client {
         }
     }
 
-    fn create(&mut self, id: &str, name: &str, cwd: &Path, sessions: &Path) -> Value {
+    fn create(&mut self, id: &str, name: &str, config: &Value) -> Value {
         let created = self.request(
             id,
-            &json!({
-                "type": "create",
-                "name": name,
-                "config": {
-                    "cwd": cwd.to_string_lossy(),
-                    "sessionDir": sessions.to_string_lossy(),
-                    "provider": "prime-inference",
-                    "model": "mock-1",
-                },
-            }),
+            &json!({ "type": "create", "name": name, "config": config }),
         );
         assert_eq!(created["success"], true, "create {name} failed: {created}");
         created["data"].clone()
+    }
+
+    fn prompt(&mut self, id: &str, active_session_id: &str, message: &str) {
+        let prompted = self.request(
+            id,
+            &json!({ "type": "prompt_and_wait", "activeSessionId": active_session_id, "message": message }),
+        );
+        assert_eq!(prompted["success"], true, "prompt {id} failed: {prompted}");
+    }
+}
+
+/// An isolated daemon over a loopback provider mock that holds the turn
+/// carrying [`HOLD_MARKER`] until the test opens `gate`.
+struct Fixture {
+    home: PathBuf,
+    agent_dir: PathBuf,
+    sessions: PathBuf,
+    work: PathBuf,
+    socket: PathBuf,
+    gate: Gate,
+    held: mpsc::Receiver<()>,
+    // Dropped before the temp dir: the daemon stops before its files go.
+    _daemon: Daemon,
+    _dir: tempfile::TempDir,
+}
+
+impl Fixture {
+    fn start() -> Self {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let home = dir.path().canonicalize().expect("canonical temp dir");
+        let agent_dir = home.join("agent");
+        let sessions = agent_dir.join("sessions");
+        let work = home.join("work");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        std::fs::create_dir_all(&work).expect("work dir");
+        // The direct delivery path keeps the delivered row in the transcript.
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            json!({ "agentInbox": { "enabled": false } }).to_string(),
+        )
+        .expect("settings");
+        let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (held_tx, held) = mpsc::channel();
+        let url = spawn_mock("mock reply", &gate, held_tx);
+        std::fs::write(
+            agent_dir.join("models.json"),
+            json!({
+                "providers": {
+                    "prime-inference": {
+                        "api": "openai-completions",
+                        "baseUrl": url,
+                        "apiKey": "sk-print-daemon",
+                        "models": [{
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("models.json");
+        let socket = home.join("daemon.sock");
+        let daemon = spawn_daemon(&socket, &home, &agent_dir);
+        Fixture {
+            home,
+            agent_dir,
+            sessions,
+            work,
+            socket,
+            gate,
+            held,
+            _daemon: daemon,
+            _dir: dir,
+        }
+    }
+
+    fn config(&self) -> Value {
+        json!({
+            "cwd": self.work.to_string_lossy(),
+            "sessionDir": self.sessions.to_string_lossy(),
+            "provider": "prime-inference",
+            "model": "mock-1",
+        })
+    }
+
+    /// One turn on a daemon session, then stopped, so its file is a saved
+    /// session. Returns its session id.
+    fn saved_session(&self, client: &mut Client) -> String {
+        let target = client.create("c-target", "target", &self.config());
+        let target_active = target["activeSessionId"].as_str().expect("active id");
+        client.prompt("p-seed", target_active, "seed");
+        let killed = client.request(
+            "k-target",
+            &json!({ "type": "kill", "activeSessionId": target_active }),
+        );
+        assert_eq!(killed["success"], true, "kill failed: {killed}");
+        target["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string()
     }
 }
 
@@ -240,82 +340,26 @@ impl Client {
 /// daemon cannot wake.
 #[test]
 fn a_peer_message_reaches_a_resumed_print_session_mid_turn() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let home = dir.path().canonicalize().expect("canonical temp dir");
-    let agent_dir = home.join("agent");
-    let sessions = agent_dir.join("sessions");
-    let work = home.join("work");
-    std::fs::create_dir_all(&sessions).expect("sessions dir");
-    std::fs::create_dir_all(&work).expect("work dir");
-    // The direct delivery path keeps the delivered row in the transcript.
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        json!({ "agentInbox": { "enabled": false } }).to_string(),
-    )
-    .expect("settings");
-    let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let (held_tx, held_rx) = mpsc::channel();
-    let url = spawn_mock("mock reply", &gate, held_tx);
-    std::fs::write(
-        agent_dir.join("models.json"),
-        json!({
-            "providers": {
-                "prime-inference": {
-                    "api": "openai-completions",
-                    "baseUrl": url,
-                    "apiKey": "sk-print-daemon",
-                    "models": [{
-                        "id": "mock-1",
-                        "name": "Mock 1",
-                        "api": "openai-completions",
-                        "contextWindow": 128_000,
-                        "maxTokens": 4096
-                    }]
-                }
-            }
-        })
-        .to_string(),
-    )
-    .expect("models.json");
-    let socket = home.join("daemon.sock");
-    let _daemon = spawn_daemon(&socket, &home, &agent_dir);
-    let mut client = Client::connect(&socket);
-
-    // The target: one turn on a daemon session, then stopped, so its file
-    // is a saved session the print run resumes.
-    let target = client.create("c-target", "target", &work, &sessions);
-    let target_active = target["activeSessionId"].as_str().expect("active id");
-    let session_id = target["sessionId"]
-        .as_str()
-        .expect("session id")
-        .to_string();
-    let seeded = client.request(
-        "p-seed",
-        &json!({ "type": "prompt_and_wait", "activeSessionId": target_active, "message": "seed" }),
-    );
-    assert_eq!(seeded["success"], true, "seed turn failed: {seeded}");
-    let killed = client.request(
-        "k-target",
-        &json!({ "type": "kill", "activeSessionId": target_active }),
-    );
-    assert_eq!(killed["success"], true, "kill failed: {killed}");
-    let peer = client.create("c-peer", "peer", &work, &sessions);
+    let fixture = Fixture::start();
+    let mut client = Client::connect(&fixture.socket);
+    let session_id = fixture.saved_session(&mut client);
+    let peer = client.create("c-peer", "peer", &fixture.config());
     let peer_active = peer["activeSessionId"].as_str().expect("peer active id");
 
     let mut print = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
         .args(["--daemon-socket"])
-        .arg(&socket)
+        .arg(&fixture.socket)
         .args(["--provider", "prime-inference", "--model", "mock-1"])
         .args(["-r", &session_id, "-p", &format!("resume {HOLD_MARKER}")])
-        .current_dir(&work)
-        .env("HOME", &home)
-        .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
+        .current_dir(&fixture.work)
+        .env("HOME", &fixture.home)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &fixture.agent_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the print run");
-    if held_rx.recv_timeout(Duration::from_secs(90)).is_err() {
+    if fixture.held.recv_timeout(Duration::from_secs(90)).is_err() {
         let _ = print.kill();
         let output = print.wait_with_output().expect("print output");
         panic!(
@@ -334,7 +378,7 @@ fn a_peer_message_reaches_a_resumed_print_session_mid_turn() {
         }),
     );
     {
-        let (released, wake) = &*gate;
+        let (released, wake) = &*fixture.gate;
         *released.lock().unwrap() = true;
         wake.notify_all();
     }
@@ -349,10 +393,108 @@ fn a_peer_message_reaches_a_resumed_print_session_mid_turn() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let transcript =
-        std::fs::read_to_string(sessions.join(format!("{session_id}.jsonl"))).expect("transcript");
+    let transcript = std::fs::read_to_string(fixture.sessions.join(format!("{session_id}.jsonl")))
+        .expect("transcript");
     assert!(
         transcript.contains("peer hello"),
         "the delivery is in the session transcript: {transcript}"
     );
+}
+
+/// The live rows that serve `session_file`, from a `list` that includes
+/// client-owned sessions.
+fn live_rows_for(client: &mut Client, id: &str, session_file: &Path) -> Vec<Value> {
+    let listed = client.request(id, &json!({ "type": "list", "includeClientOwned": true }));
+    assert_eq!(listed["success"], true, "list failed: {listed}");
+    listed["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter(|row| {
+            row["sessionFile"].as_str().is_some_and(|file| {
+                Path::new(file).canonicalize().ok().as_deref() == Some(session_file)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// The print run's handshake is `list`, then a client-owned `create`. A
+/// resident client that opens the same saved session between the two keeps
+/// it: the daemon refuses the client-owned create atomically, so the file
+/// has exactly one live owner, and both clients stay usable.
+#[test]
+fn a_session_opened_between_list_and_create_keeps_one_owner() {
+    let fixture = Fixture::start();
+    let mut setup = Client::connect(&fixture.socket);
+    let session_id = fixture.saved_session(&mut setup);
+    let session_file = fixture
+        .sessions
+        .join(format!("{session_id}.jsonl"))
+        .canonicalize()
+        .expect("saved session file");
+    let mut runner = Client::connect(&fixture.socket);
+    let mut resident = Client::connect(&fixture.socket);
+    let open = |lifecycle: Option<&str>| {
+        let mut command = json!({
+            "type": "create",
+            "sessionPath": session_file.to_string_lossy(),
+            "config": fixture.config(),
+        });
+        if let Some(lifecycle) = lifecycle {
+            command["lifecycle"] = json!(lifecycle);
+        }
+        command
+    };
+
+    // The runner's `list`: the stopped session's worker has left the roster.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !live_rows_for(&mut runner, "l-runner", &session_file).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the stopped session never left the roster"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let opened = resident.request("o-resident", &open(None));
+    assert_eq!(opened["success"], true, "resident open failed: {opened}");
+    let resident_active = opened["data"]["activeSessionId"]
+        .as_str()
+        .expect("resident active id")
+        .to_string();
+    let claimed = runner.request("c-runner", &open(Some("client_owned")));
+    assert_eq!(
+        claimed["success"], false,
+        "the client-owned create took a live session: {claimed}"
+    );
+    let error = claimed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(&format!("Session is already active in {resident_active}")),
+        "the refusal names the live session: {claimed}"
+    );
+
+    let rows = live_rows_for(&mut runner, "l-after", &session_file);
+    assert_eq!(rows.len(), 1, "exactly one live owner: {rows:?}");
+    assert_eq!(rows[0]["activeSessionId"], resident_active.as_str());
+    resident.prompt("p-resident", &resident_active, "still mine");
+
+    // Once the resident lets go, the runner's client-owned create claims it.
+    let killed = resident.request(
+        "k-resident",
+        &json!({ "type": "kill", "activeSessionId": resident_active }),
+    );
+    assert_eq!(killed["success"], true, "kill failed: {killed}");
+    let claimed = runner.request("c-runner-2", &open(Some("client_owned")));
+    assert_eq!(
+        claimed["success"], true,
+        "the free file is claimable: {claimed}"
+    );
+    let runner_active = claimed["data"]["activeSessionId"]
+        .as_str()
+        .expect("runner active id")
+        .to_string();
+    runner.prompt("p-runner", &runner_active, "now mine");
+    let rows = live_rows_for(&mut runner, "l-claimed", &session_file);
+    assert_eq!(rows.len(), 1, "exactly one live owner: {rows:?}");
+    assert_eq!(rows[0]["activeSessionId"], runner_active.as_str());
 }
