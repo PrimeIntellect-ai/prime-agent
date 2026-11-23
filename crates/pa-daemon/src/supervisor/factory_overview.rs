@@ -474,7 +474,11 @@ impl Supervisor {
         // An owner keeps its residency only while it stays on the same
         // worker; one that (re-)enters or moved gets a new generation,
         // which gates the fold: a read issued under an earlier residency
-        // never restamps or warns for the current one.
+        // never restamps or warns for the current one. A new residency
+        // also drops the previous one's cached rows, read time, and
+        // warning: they came from another worker's kernel, so serving
+        // them until the new read lands would show runs that worker
+        // owned as this owner's live runs.
         let previous = std::mem::take(&mut cache.resident);
         for owner in owners {
             let residency = match previous.get(&owner.id) {
@@ -482,6 +486,9 @@ impl Supervisor {
                     residency.clone()
                 }
                 Some(_) | None => {
+                    cache.rows.remove(&owner.id);
+                    cache.read_at.remove(&owner.id);
+                    cache.warnings.remove(&owner.id);
                     cache.last_generation += 1;
                     Residency {
                         worker_id: owner.resident.worker_id.clone(),
@@ -1542,6 +1549,22 @@ mod tests {
                 .rows
                 .insert("stays".to_string(), vec![json!({ "runId": "run-stays" })]);
             cache.read_at.insert("stays".to_string(), Instant::now());
+            // Rows exist only under a residency: the refresh that cached them.
+            cache.last_generation = 2;
+            cache.resident.insert(
+                "gone".to_string(),
+                Residency {
+                    worker_id: "w-gone".to_string(),
+                    generation: 1,
+                },
+            );
+            cache.resident.insert(
+                "stays".to_string(),
+                Residency {
+                    worker_id: "w-stays".to_string(),
+                    generation: 2,
+                },
+            );
         }
         let stays = memory_only_resident("w-stays", "stays");
         supervisor.registry.insert(Arc::clone(&stays)).await;
@@ -1702,6 +1725,58 @@ mod tests {
         );
     }
 
+    /// An owner re-admitted under a different worker starts a new
+    /// residency with an empty live half: the first overview after the
+    /// re-admission serves none of the previous worker's cached rows
+    /// (not as saved, not as live) before the new worker's read lands.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the async overview read
+    #[tokio::test]
+    async fn a_readmitted_owner_serves_no_rows_from_its_previous_residency() {
+        let _env = without_session_dir_override();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir,
+            })
+            .expect("supervisor"),
+        );
+        // The previous residency on `w-old` cached one fresh live run.
+        {
+            let mut cache = supervisor.factory_live.lock().unwrap();
+            cache.last_generation = 1;
+            cache.resident.insert(
+                "owner".to_string(),
+                Residency {
+                    worker_id: "w-old".to_string(),
+                    generation: 1,
+                },
+            );
+            cache.rows.insert(
+                "owner".to_string(),
+                live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
+                    .expect("the snapshot reply folds"),
+            );
+            cache.read_at.insert("owner".to_string(), Instant::now());
+        }
+        // The owner is re-admitted on `w-new`.
+        supervisor
+            .registry
+            .insert(memory_only_resident("w-new", "owner"))
+            .await;
+        let response = supervisor.factory_overview("c1", "factory_activity").await;
+        assert!(response.success, "the overview answered: {response:?}");
+        assert_eq!(
+            response.data,
+            Some(json!({ "runs": [], "warnings": [] })),
+            "the previous residency's cached rows never reach the overview"
+        );
+        let cache = supervisor.factory_live.lock().unwrap();
+        assert_ne!(cache.resident["owner"].generation, 1);
+    }
+
     /// A memory-only resident (no session file: the saved catalog never
     /// lists it, no ledger edge reaches it) joins the overview through
     /// the resident push alone, and its cached live rows — the
@@ -1736,6 +1811,14 @@ mod tests {
             cache
                 .read_at
                 .insert("mem-owner".to_string(), Instant::now());
+            cache.last_generation = 1;
+            cache.resident.insert(
+                "mem-owner".to_string(),
+                Residency {
+                    worker_id: "w-mem".to_string(),
+                    generation: 1,
+                },
+            );
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
         assert!(response.success, "the overview answered: {response:?}");
@@ -1812,6 +1895,14 @@ mod tests {
                 Instant::now()
                     .checked_sub(FACTORY_LIVE_FRESH_WINDOW + Duration::from_millis(500))
                     .expect("a read stamp past the fresh window"),
+            );
+            cache.last_generation = 1;
+            cache.resident.insert(
+                "stale-owner".to_string(),
+                Residency {
+                    worker_id: "w-stale".to_string(),
+                    generation: 1,
+                },
             );
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
