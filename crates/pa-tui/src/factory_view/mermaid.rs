@@ -431,7 +431,13 @@ pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
 }
 
 fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
-    let line = line.trim_start();
+    // CommonMark: a fence takes at most three spaces of indent; a deeper
+    // line is an indented code block's text, never a fence.
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let line = &line[indent..];
     let delimiter = line.chars().next()?;
     if !matches!(delimiter, '`' | '~') {
         return None;
@@ -547,6 +553,17 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(2),
             "decode took {:?}",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_four_space_indented_fence_never_swallows_a_live_mermaid_block() {
+        let text = "    ```markdown\n    example\n\n```mermaid\nflowchart TB\nA --> B\n```\n";
+        let segments = super::split_mermaid_fences(text);
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Text(_), super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n"),
+            "{}",
+            segments.len()
         );
     }
 }
