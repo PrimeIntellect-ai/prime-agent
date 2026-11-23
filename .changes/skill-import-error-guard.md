@@ -1,0 +1,1 @@
+- A `python_repl` cell that imports a Python skill missing from the kernel (for example after `PRIME_AGENT_KERNEL_PYTHON` points at a Python without the bundled skills) now fails the call with `Python skill <name> is not installed in the Python kernel.`, instead of returning a normal-looking `ModuleNotFoundError` cell result that counted as a success.
