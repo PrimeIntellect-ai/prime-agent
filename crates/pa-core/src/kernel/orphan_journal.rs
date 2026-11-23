@@ -166,8 +166,7 @@ pub fn read_active_orphan_processes(
 /// ([`LiveBackgroundShellJournal`]); the liveness filter runs on every
 /// read, never on the cache (a record alive at one boundary may die before
 /// the next).
-#[must_use]
-pub fn read_active_shell_records(path: &Path, owner_pid: i64) -> Vec<ActiveOrphanProcess> {
+fn read_active_shell_records(path: &Path, owner_pid: i64) -> Vec<ActiveOrphanProcess> {
     let Ok(orphans) = read_active_orphan_processes(path, owner_pid) else {
         return Vec::new();
     };

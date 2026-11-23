@@ -216,10 +216,10 @@ impl AgentSessionEngine {
         let Some(wiring) = self.cron_wiring() else {
             return;
         };
-        // The cancel is DURABLE-JOB-RECOVERING: a worker rebuild loses the
-        // in-memory slot, so the store itself is scanned for the session's
-        // still-Active goal-backoff-wake jobs (a fired job stays untouched);
-        // the scan needs the session binding, else it would match EVERY
+        // The cron store is the only record of the wake, so the cancel
+        // scans it for the session's still-Active wake jobs of both labels
+        // (a rebuilt worker finds the wakes its predecessor armed); the
+        // scan needs the session binding, else it would match EVERY
         // session's jobs.
         let Some(binding) = self.kernel_cron_binding() else {
             return;
