@@ -162,11 +162,13 @@ impl PrimePlatform {
             ..StartOptions::default()
         };
         // A definitive answer fails now. Any other start fault may have
-        // reached sandboxd, so attach to the session if it exists: a retry
-        // with a fresh session would run the script twice. When the
-        // gateway cannot confirm the session, the guest is not up yet.
-        let mut stream = match sessions.start(&request, options).await {
-            Ok(stream) => stream,
+        // reached sandboxd, so attach to the session if it exists: a second
+        // session would run the script twice at once. An attached command's
+        // earlier output is lost, so it runs again after it ends; the guest
+        // scripts are safe to rerun in sequence. When the gateway cannot
+        // confirm the session, the guest is not up yet.
+        let (mut stream, attached) = match sessions.start(&request, options).await {
+            Ok(stream) => (stream, false),
             Err(error)
                 if matches!(
                     error.code(),
@@ -179,10 +181,13 @@ impl PrimePlatform {
             {
                 return Err(PlatformError::Other(error.to_string()));
             }
-            Err(error) => sessions
-                .connect(&session_uuid, StreamOptions::default())
-                .await
-                .map_err(|_| PlatformError::Transient(error.to_string()))?,
+            Err(error) => {
+                let stream = sessions
+                    .connect(&session_uuid, StreamOptions::default())
+                    .await
+                    .map_err(|_| PlatformError::Transient(error.to_string()))?;
+                (stream, true)
+            }
         };
         for chunk in stdin.unwrap_or_default().chunks(MAX_PROCESS_INPUT_BYTES) {
             sessions
@@ -193,7 +198,14 @@ impl PrimePlatform {
                     SendInputOptions::default(),
                 )
                 .await
-                .map_err(|error| PlatformError::Other(error.to_string()))?;
+                .map_err(|error| {
+                    // An attached command may have ended before it got input.
+                    if attached {
+                        PlatformError::Transient(error.to_string())
+                    } else {
+                        PlatformError::Other(error.to_string())
+                    }
+                })?;
         }
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         while let Some(event) = stream.next_event().await {
@@ -206,6 +218,11 @@ impl PrimePlatform {
                     };
                     let room = MAX_EXEC_OUTPUT_BYTES.saturating_sub(buffer.len());
                     buffer.extend_from_slice(&data[..data.len().min(room)]);
+                }
+                CommandSessionEvent::End(_) if attached => {
+                    return Err(PlatformError::Transient(
+                        "the guest command ran without its output".into(),
+                    ));
                 }
                 CommandSessionEvent::End(end) => {
                     return Ok(ExecOutput {
