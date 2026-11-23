@@ -102,8 +102,8 @@ impl DecisionEngine {
     /// the target is the parent id the worker already knows — the durable
     /// parent edge in its pushed session summary — so a reply never
     /// fetches the family roster just to find it. The reply rides the
-    /// follow-up lane: it lands as a queued row the parent reads at its
-    /// next wake instead of steering (interrupting) its running turn.
+    /// follow-up lane: its arrival queues behind the parent's running turn
+    /// instead of steering (interrupting) it.
     /// Delivery is cancellation-aware: a cancel that lands after the
     /// turn's last check still stops the send before either delivery leg,
     /// including the supervisor fallback after a refused direct ticket.
@@ -489,15 +489,19 @@ impl SessionEngine for DecisionEngine {
                     "seq": seq,
                     "error": format!("{error:#}"),
                 });
-                let reply = self.send_reply(&reply, aborted);
+                let delivery = self.send_reply(&reply, aborted);
                 if aborted() {
                     emit(cancelled());
                     return;
                 }
-                let _ = reply;
-                emit(EngineEvent::Done(Err(format!(
-                    "the decision failed: {error:#}"
-                ))));
+                let failure = match delivery {
+                    Ok(()) => format!("the decision failed: {error:#}"),
+                    Err(delivery) => format!(
+                        "the decision failed: {error:#}; its error reply could not reach the \
+                         parent: {delivery:#}"
+                    ),
+                };
+                emit(EngineEvent::Done(Err(failure)));
             }
         }
     }
@@ -1523,9 +1527,12 @@ mod tests {
             events.push(event);
             true
         });
+        // The fixture engine has no parent edge, so the error reply cannot
+        // be delivered: the turn's error says so next to the refusal.
         assert!(
             matches!(events.last(), Some(EngineEvent::Done(Err(error)))
-                if error.contains("not one of the requested actions")),
+                if error.contains("not one of the requested actions")
+                    && error.contains("its error reply could not reach the parent")),
             "the refused reply must settle with the refusal: {events:?}"
         );
         let row = events
