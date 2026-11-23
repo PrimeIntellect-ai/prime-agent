@@ -1415,6 +1415,7 @@ async fn a_decision_child_keeps_its_display_running_through_the_watcher_settle()
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        parent_delivery_admission: None,
     }));
     sessions
         .inner
@@ -3616,6 +3617,7 @@ async fn a_failed_spawn_admission_closes_its_pending_count() {
             cwd: Some("no-such-directory".to_string()),
             spawned_by_request_id: None,
             factory: None,
+            kind: RlmSpawnKind::Subagent,
         })
         .await;
     assert!(failed.is_err(), "the nonexistent cwd fails the admission");

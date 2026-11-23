@@ -253,6 +253,7 @@ async fn idle_barrier(
             id: None,
             active_session_id: session_id.clone(),
             wait_for_rlm_quiescence: None,
+            timeout_ms: None,
             rest: Map::default(),
         }) {
             Ok(pending) => match pending.wait(&link).await {
