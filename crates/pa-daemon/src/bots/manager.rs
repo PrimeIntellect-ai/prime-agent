@@ -4,7 +4,7 @@
 //! pause with a checkpoint (checkpoint and delete when pause is refused);
 //! delete everything the labels name. One async mutex per bot serializes it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -308,21 +308,31 @@ impl BotManager {
     /// # Errors
     /// Returns an error when listing or a duplicate delete fails.
     pub async fn reconcile_on_boot(&self) -> Result<()> {
-        let mut by_bot: BTreeMap<String, Vec<BotSandbox>> = BTreeMap::new();
+        let mut bot_ids = BTreeSet::new();
         for sandbox in retry(|| self.platform.list(BOT_LABEL)).await? {
             if sandbox.status.is_terminal() {
                 continue;
             }
             if let Some(bot_id) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
-                by_bot.entry(bot_id).or_default().push(sandbox);
+                bot_ids.insert(bot_id);
             }
         }
         // Wakes and deletes may run meanwhile: each bot is settled under its
-        // lock, against a fresh read of its record and chosen sandbox.
-        for (bot_id, mut sandboxes) in by_bot.clone() {
+        // lock, against a fresh listing and a fresh read of its record.
+        let mut settled = BTreeSet::new();
+        for bot_id in bot_ids {
             let bot_lock = self.lock_for(&bot_id);
             let _held = bot_lock.lock().await;
+            let label = bot_label(&bot_id);
+            let mut sandboxes: Vec<BotSandbox> = retry(|| self.platform.list(&label))
+                .await?
+                .into_iter()
+                .filter(|sandbox| !sandbox.status.is_terminal() && sandbox.labels.contains(&label))
+                .collect();
             sort_newest_first(&mut sandboxes);
+            let Some(chosen) = sandboxes.first() else {
+                continue;
+            };
             for extra in &sandboxes[1..] {
                 eprintln!(
                     "pa-daemon: bot {bot_id}: deleting duplicate sandbox {}",
@@ -330,20 +340,16 @@ impl BotManager {
                 );
                 retry(|| self.platform.delete(&extra.id)).await?;
             }
-            let chosen = match self.platform.get(&sandboxes[0].id).await {
-                Ok(sandbox) if !sandbox.status.is_terminal() => sandbox,
-                Ok(_) | Err(PlatformError::NotFound(_)) => continue,
-                Err(error) => return Err(error.into()),
-            };
             let mut record = self
                 .get(&bot_id)
-                .unwrap_or_else(|| rebuilt_record(&bot_id, &chosen));
+                .unwrap_or_else(|| rebuilt_record(&bot_id, chosen));
             record.sandbox_id = Some(chosen.id.clone());
             record.status = chosen.status;
             self.save(record)?;
+            settled.insert(bot_id);
         }
         for listed in self.list() {
-            if by_bot.contains_key(&listed.bot_id) {
+            if settled.contains(&listed.bot_id) {
                 continue;
             }
             let bot_lock = self.lock_for(&listed.bot_id);
