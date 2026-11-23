@@ -929,8 +929,9 @@ async fn refinement_and_auto_review_send_the_session_request_identity() {
         .expect("the refinement task joined")
         .unwrap();
     session
-        .review_compact_auto_refine(&model, None, 5, 0)
+        .start_auto_refine_after_compaction(model.clone(), None, 5, 0)
         .await
+        .expect("the review task joined")
         .unwrap();
     assert_eq!(
         *observed.lock().unwrap(),
@@ -989,8 +990,9 @@ async fn the_compact_review_prompt_reads_the_sessions_local_store() {
     )]);
     let model = registration.get_model();
     session
-        .review_compact_auto_refine(&model, None, 5, 0)
+        .start_auto_refine_after_compaction(model.clone(), None, 5, 0)
         .await
+        .expect("the review task joined")
         .unwrap();
     let prompt = observed
         .lock()
@@ -1428,6 +1430,29 @@ async fn closing_session_cancels_background_planning_without_committing() {
         .unwrap_err();
     assert!(pa_agent::abort::is_abort_error(&error));
     assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+}
+
+/// A refinement child's prepared flight counts in `refine.status` until it
+/// is applied or dropped.
+#[tokio::test]
+async fn a_prepared_child_refinement_counts_as_in_flight() {
+    let (session, tmp) = refine_test_session().await;
+    let (prepared, _prompt) = session
+        .prepare_refinement(
+            &refine::RefineOptions::default(),
+            &session_ai_model(),
+            &tmp.path().join("harness"),
+        )
+        .await
+        .unwrap();
+    let in_flight = || {
+        session
+            .refinements_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+    };
+    assert_eq!(in_flight(), 1);
+    drop(prepared);
+    assert_eq!(in_flight(), 0);
 }
 
 /// The background funnel (the auto-refine and requested-refinement paths)

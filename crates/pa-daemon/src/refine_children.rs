@@ -430,6 +430,9 @@ mod tests {
                 requested_scope: HarnessScope::Local,
                 baseline_state: empty_harness_state(),
                 id: "refine_1".to_string(),
+                in_flight: pa_core::session_engine::refine::RefinementFlightGuard::enter(
+                    std::sync::Arc::default(),
+                ),
             },
             source,
             global_harness_dir: dir.join("harness"),

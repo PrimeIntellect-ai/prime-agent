@@ -6,10 +6,9 @@
 //! spawns the child; the child-reply wake finishes the round.
 
 use super::refine::{
-    auto_refine_instructions, now_millis, RefineOptions, AUTO_REFINE_COMPACT_REASON,
+    now_millis, unreviewed_auto_refine_instructions, RefineOptions, AUTO_REFINE_COMPACT_REASON,
 };
 use super::AgentSession;
-use crate::refinement::executor::AutoRefineReview;
 
 /// The boundary a pending trigger is serviced at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,16 +150,8 @@ impl AgentSession {
         state.last_review_at = Some(now_millis());
         Some(RefineOptions {
             global: false,
-            // The child self-reviews: no retained review rides the round,
-            // so the instruction line is the TS text for the compaction
-            // reason alone (the reviewer's detail stays empty).
-            instructions: Some(auto_refine_instructions(
+            instructions: Some(unreviewed_auto_refine_instructions(
                 AUTO_REFINE_COMPACT_REASON,
-                &AutoRefineReview {
-                    should_refine: true,
-                    rationale: String::new(),
-                    instructions: None,
-                },
             )),
             rollback_id: None,
         })
@@ -321,11 +312,12 @@ mod tests {
             .take_compact_auto_refine_round(CompactAutoRefineSurface::Checkpoint)
             .expect("the round is due");
         assert!(!options.global);
-        assert!(options
-            .instructions
-            .as_deref()
-            .is_some_and(|instructions| instructions
-                .starts_with("Automatic refine review triggered by compact.")));
+        let instructions = options.instructions.as_deref().unwrap_or_default();
+        assert!(instructions.starts_with("Automatic refinement triggered by compact."));
+        assert!(
+            !instructions.contains("Reviewer"),
+            "no review ran: {instructions}"
+        );
         assert!(
             !session.compact_auto_refine_pending(),
             "the take consumed the trigger"

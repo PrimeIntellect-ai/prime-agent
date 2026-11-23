@@ -230,9 +230,19 @@ impl RefineEngine {
                 max_tokens: output_budget,
                 api_key,
                 headers,
+                // The parent's own one-off requests: the parent's session id
+                // keeps the cache key and routing, and SSE never touches a
+                // Codex WebSocket.
+                session_id: request
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                transport: Some(pa_ai::types::Transport::Sse),
                 ..Default::default()
             });
-        stream_options.reasoning = self.requested_reasoning(&model);
+        // Planning runs at the model's minimum reasoning, as every refiner
+        // call does; the parent's thinking level does not apply.
+        stream_options.reasoning = pa_types::ai::minimum_reasoning(&model);
         // The failure surface names the budget the wire request actually
         // carries — after the facade's input clamp and the budget-folding
         // providers' thinking fold — read from pa-ai's own helper, never
@@ -274,19 +284,6 @@ impl RefineEngine {
             "the refinement model returned no proposal text"
         );
         Ok((text, reply.usage, reply.stop_reason))
-    }
-
-    /// The create selection's thinking level, defaulting to the model's
-    /// minimum reasoning level (the refiner's standard posture).
-    fn requested_reasoning(
-        &self,
-        model: &pa_types::ai::Model,
-    ) -> Option<pa_types::ai::ModelThinkingLevel> {
-        self.selection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .thinking
-            .or_else(|| pa_types::ai::minimum_reasoning(model))
     }
 
     /// Resolve the spawn's model through the registry (the create command's

@@ -93,7 +93,7 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
-        let consumption = {
+        let compaction = {
             let engine = self.session.blocking_lock().clone();
             let Some(engine) = engine else {
                 self.clear_auto_compaction_abort(&controller);
@@ -101,7 +101,7 @@ impl AgentSessionEngine {
             };
             let consumed = self.runtime.block_on(async {
                 engine
-                    .consume_turn_boundary_requests(&model, api_key, Some(&signal))
+                    .consume_pending_compaction(&model, api_key, Some(&signal))
                     .await
             });
             self.clear_auto_compaction_abort(&controller);
@@ -141,7 +141,7 @@ impl AgentSessionEngine {
         }
         let mut stopped_for_compaction = false;
         let mut compacted = false;
-        match consumption.compaction {
+        match compaction {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the settled end;
                 // its pair precedes `compaction_end`.

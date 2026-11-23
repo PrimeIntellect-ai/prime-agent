@@ -178,6 +178,9 @@ pub struct RefinementRequest {
     /// daemon's engine session is in-memory, so the rows can only reach
     /// the child through the prompt.
     pub session_history: Vec<RefinementResult>,
+    /// The parent's session id: the planning request carries it, as the
+    /// parent's own one-off requests do.
+    pub session_id: String,
 }
 
 /// The planning conversation's tail cap, in chars — the old in-process
@@ -213,6 +216,7 @@ pub fn refinement_spawn_prompt(
         "type": REFINEMENT_REQUEST_TYPE,
         "scope": if request.global { "global" } else { "local" },
         "globalHarnessDir": request.global_harness_dir,
+        "sessionId": request.session_id,
     });
     if let Some(instructions) = &request.instructions {
         envelope["instructions"] = serde_json::json!(instructions);
@@ -284,37 +288,6 @@ pub fn refinement_user_prompt(
 /// truncated reply.
 pub fn parse_child_proposal(text: &str) -> anyhow::Result<RefinementProposal> {
     super::planner::parse_proposal(text).map_err(anyhow::Error::msg)
-}
-
-/// The mechanical rollback plan: no model pass, only the inversion of the
-/// target refinement's applied edits. `Ok(None)` when `rollback_id` is
-/// absent; the caller runs the planning child instead.
-///
-/// # Errors
-///
-/// Error on an unknown rollback id.
-pub fn rollback_plan(
-    history: &[RefinementResult],
-    options: &RefineOptions,
-) -> anyhow::Result<Option<RefinementPlan>> {
-    let id = generate_refinement_id();
-    let Some(rollback_id) = &options.rollback_id else {
-        return Ok(None);
-    };
-    let Some(target) = history.iter().find(|item| &item.id == rollback_id) else {
-        anyhow::bail!("Refinement {rollback_id} not found");
-    };
-    let fallback_scope = if options.global {
-        HarnessScope::Global
-    } else {
-        HarnessScope::Local
-    };
-    Ok(Some(RefinementPlan {
-        proposal: rollback_proposal(target),
-        id,
-        rollback_of: Some(target.id.clone()),
-        rollback_scope: Some(infer_refinement_result_scope(target).unwrap_or(fallback_scope)),
-    }))
 }
 
 /// Apply a plan to the (re-read) harness state. `factory_enabled` is the
@@ -617,47 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn rollback_plan_inverts_the_target_or_refuses() {
-        let mut history_state = super::super::empty_harness_state();
-        let result = super::super::planner::apply_refinement_proposal(
-            &mut history_state,
-            &RefinementProposal {
-                summary: "add".to_string(),
-                ..Default::default()
-            },
-            super::super::planner::ApplyOptions {
-                id: "refine_target".to_string(),
-                rollback_of: None,
-                scope: Some(HarnessScope::Local),
-                baseline_state: None,
-                factory_enabled: false,
-            },
-        );
-        let plan = rollback_plan(
-            &[result],
-            &RefineOptions {
-                rollback_id: Some("refine_target".to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .expect("the rollback plan exists");
-        assert_eq!(plan.rollback_of.as_deref(), Some("refine_target"));
-        assert_eq!(plan.proposal.edits.len(), 0); // the seeded result applied no edits, so nothing inverts
-        let missing = rollback_plan(
-            &[],
-            &RefineOptions {
-                rollback_id: Some("nope".to_string()),
-                ..Default::default()
-            },
-        );
-        assert!(missing.is_err());
-        assert!(rollback_plan(&[], &RefineOptions::default())
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
     fn spawn_prompt_trims_the_conversation_to_the_model_window() {
         let request = RefinementRequest {
             global: false,
@@ -674,6 +606,7 @@ mod tests {
                 rollback_of: None,
                 scope: Some(HarnessScope::Local),
             }],
+            session_id: "session-1".to_string(),
         };
         let conversation = "x".repeat(200_000);
         let prompt = refinement_spawn_prompt(&request, 100_000, &conversation);
@@ -683,6 +616,7 @@ mod tests {
         assert_eq!(parsed["instructions"], "prefer small edits");
         assert_eq!(parsed["localHarnessDir"], "/local/harness");
         assert_eq!(parsed["globalHarnessDir"], "/global/harness");
+        assert_eq!(parsed["sessionId"], "session-1");
         // The parent's in-session audit rows ride the envelope (the daemon's
         // in-memory session has no file for the child to read).
         assert_eq!(parsed["refinementHistory"][0]["summary"], "note it");
@@ -714,6 +648,7 @@ mod tests {
             local_harness_dir: None,
             global_harness_dir: "/global/harness".to_string(),
             session_history: vec![],
+            session_id: "session-1".to_string(),
         };
         // A 1M-window model: the window trim never fires, so the 80k char
         // cap is the only bound — the cap the old in-process refiner kept

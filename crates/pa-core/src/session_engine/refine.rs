@@ -11,8 +11,8 @@ use super::model_usage::ModelUsage;
 use super::AgentSession;
 use crate::refinement::executor::{
     apply_refinement_plan, generate_refinement_id, parse_child_proposal, plan_refinement,
-    refinement_spawn_prompt, review_auto_refine, rollback_plan, AutoRefineReview,
-    AutoRefineReviewContext, RefineOptions as CoreRefineOptions, RefinementPlan, RefinementRequest,
+    refinement_spawn_prompt, review_auto_refine, AutoRefineReview, AutoRefineReviewContext,
+    RefineOptions as CoreRefineOptions, RefinementPlan, RefinementRequest,
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
@@ -66,6 +66,14 @@ impl AutoRefineGates {
     }
 }
 
+const AUTO_REFINE_GUIDANCE: &str = "Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested.";
+
+/// The instructions of an automatic round that ran no review.
+#[must_use]
+pub fn unreviewed_auto_refine_instructions(reason: &str) -> String {
+    format!("Automatic refinement triggered by {reason}. {AUTO_REFINE_GUIDANCE}")
+}
+
 /// The instructions an approved review carries into the run.
 #[must_use]
 pub fn auto_refine_instructions(reason: &str, review: &AutoRefineReview) -> String {
@@ -81,7 +89,7 @@ Reviewer instructions: {instructions}"
         })
         .unwrap_or_default();
     format!(
-        "Automatic refine review triggered by {reason}. Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested. Reviewer rationale: {}{detail}",
+        "Automatic refine review triggered by {reason}. {AUTO_REFINE_GUIDANCE} Reviewer rationale: {}{detail}",
         review.rationale
     )
 }
@@ -313,14 +321,15 @@ pub async fn execute_refinement(
     .result)
 }
 
-/// Counts the refinement runs currently planning or committing — the
-/// counter `refine.status` answers `in_flight` from. The guard spans a
-/// run's whole body, so every source reports its flight at the one
-/// shared start.
-struct RefinementFlightGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+/// Counts the refinements currently planning or committing — the counter
+/// `refine.status` answers `in_flight` from. The guard spans a run's whole
+/// body; a refinement child's guard rides its `PreparedRefinement` until
+/// the reply applies or the flight drops.
+pub struct RefinementFlightGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl RefinementFlightGuard {
-    fn enter(in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+    #[must_use]
+    pub fn enter(in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
         in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Self(in_flight)
     }
@@ -901,46 +910,6 @@ impl AgentSession {
             .ok_or_else(refinement_stores_missing_error)
     }
 
-    /// The compact-trigger review: an LLM call over the conversation, the
-    /// merged harness state, and the refinement history. `Ok(None)` is the
-    /// decline; `Ok(Some(review))` a fresh approval.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the conversation history cannot be read or
-    /// when the review request fails; a decline is `Ok(None)`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the billed-call slot's mutex is poisoned.
-    pub async fn review_compact_auto_refine(
-        &self,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        turns_since_last_review: u32,
-        branch_version: u64,
-    ) -> anyhow::Result<Option<AutoRefineReview>> {
-        if !self.harness_refinements_enabled() {
-            return Ok(None);
-        }
-        let stores = self.refinement_stores()?;
-        pa_agent::abort::race_with_abort(
-            review_compact_refinement(
-                &self.session,
-                &self.compact_auto_refine,
-                self.auxiliary_model.clone(),
-                std::sync::Arc::clone(&self.usage_store),
-                model,
-                api_key,
-                &stores,
-                turns_since_last_review,
-                branch_version,
-            ),
-            &self.refinement_signal(),
-        )
-        .await?
-    }
-
     /// Review a compacted conversation and plan its refinement in the background.
     /// The returned task follows the same disposal and full-run commit boundary
     /// as [`Self::start_refinement`].
@@ -1058,11 +1027,13 @@ pub struct PreparedRefinement {
     /// The refinement id the applied result carries (minted before the
     /// child, so history and rows agree).
     pub id: String,
+    /// Counts this refinement in `refine.status` until it is applied or
+    /// dropped.
+    pub in_flight: RefinementFlightGuard,
 }
 
-/// The refinement child's session-side surface: prepare the planning request,
-/// apply the child's proposal on the wake, and run the mechanical rollback
-/// inline.
+/// The refinement child's session-side surface: prepare the planning request
+/// and apply the child's proposal on the wake.
 impl AgentSession {
     /// Prepare one refinement for the child: the gate check, the local-store
     /// requirement, the trimmed conversation, and the baseline capture. The
@@ -1101,7 +1072,13 @@ impl AgentSession {
         };
         // The transcript's conversation is extracted under this first lock
         // straight from the retained rows; the child runs without the lock.
-        let parts = self.session.lock().await.refine_transcript_parts();
+        let (parts, session_id) = {
+            let session = self.session.lock().await;
+            (
+                session.refine_transcript_parts(),
+                session.get_session_id().to_string(),
+            )
+        };
         let crate::session::manager::RefineTranscriptParts {
             messages,
             refinement_history,
@@ -1125,6 +1102,7 @@ impl AgentSession {
             // engine session is in-memory (no session file for the child
             // to read), and the planner always saw this history.
             session_history: refinement_history,
+            session_id,
         };
         let prompt = refinement_spawn_prompt(&request, model.context_window, &conversation);
         let prepared = PreparedRefinement {
@@ -1132,6 +1110,7 @@ impl AgentSession {
             requested_scope,
             baseline_state,
             id: generate_refinement_id(),
+            in_flight: RefinementFlightGuard::enter(self.refinements_in_flight.clone()),
         };
         Ok((prepared, prompt))
     }
@@ -1163,69 +1142,6 @@ impl AgentSession {
             .await
     }
 
-    /// Run the mechanical rollback inline (no child, no model pass): the
-    /// plan inverts the target refinement's applied edits.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the rollback id is absent (the planning
-    /// refinement is the refinement child's), when the rollback id is
-    /// unknown, or when the apply or persist fails.
-    pub async fn run_rollback_refinement(
-        &self,
-        options: &RefineOptions,
-        source: RefinementSource,
-        global_harness_dir: &Path,
-    ) -> anyhow::Result<RefinementResult> {
-        anyhow::ensure!(
-            self.harness_refinements_enabled(),
-            "Harness refinements are disabled in /settings"
-        );
-        let stores = self.refinement_stores()?;
-        let global = load_global_refinement_history(&stores.global_dir);
-        let session_history = {
-            let parts = self.session.lock().await.refine_transcript_parts();
-            parts.await?.refinement_history
-        };
-        let history = crate::refinement::merge_refinement_history(&global, &session_history);
-        let core_options = CoreRefineOptions {
-            global: options.global,
-            instructions: options.instructions.clone(),
-            rollback_id: options.rollback_id.clone(),
-        };
-        let Some(plan) = rollback_plan(&history, &core_options)? else {
-            anyhow::bail!("the mechanical rollback requires a rollbackId; every planning refinement is the refinement child's");
-        };
-        let target_scope = plan.rollback_scope.unwrap_or(if options.global {
-            HarnessScope::Global
-        } else {
-            HarnessScope::Local
-        });
-        let baseline_dir = match target_scope {
-            HarnessScope::Global => global_harness_dir.to_path_buf(),
-            HarnessScope::Local => {
-                self.refinement_stores()?.local_dir.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Local harness refinement requires a persisted session; use global refinement instead."
-                    )
-                })?
-            }
-        };
-        let baseline_state = load_harness_state(&baseline_dir, target_scope);
-        let prepared = PreparedRefinement {
-            options: options.clone(),
-            requested_scope: if options.global {
-                HarnessScope::Global
-            } else {
-                HarnessScope::Local
-            },
-            baseline_state,
-            id: plan.id.clone(),
-        };
-        self.apply_prepared_refinement(plan, prepared, source, global_harness_dir)
-            .await
-    }
-
     /// The apply core: the compaction flight, the fresh re-read, the
     /// factory gate, the stale-baseline apply, and the durable rows, with
     /// this run's live-context rows pushed under one agent-state lock.
@@ -1250,6 +1166,7 @@ impl AgentSession {
             requested_scope,
             baseline_state,
             id: _,
+            in_flight: _in_flight,
         } = prepared;
         let core_options = CoreRefineOptions {
             global: options.global,

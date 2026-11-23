@@ -342,6 +342,9 @@ mod tests {
                     requested_scope: pa_core::refinement::HarnessScope::Global,
                     baseline_state: pa_core::refinement::empty_harness_state(),
                     id: "refine_1".to_string(),
+                    in_flight: pa_core::session_engine::refine::RefinementFlightGuard::enter(
+                        std::sync::Arc::default(),
+                    ),
                 },
                 source: pa_core::session_engine::refine::RefinementSource::User,
                 global_harness_dir: dir.path().join("harness"),

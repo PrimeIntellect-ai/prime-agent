@@ -1279,26 +1279,30 @@ impl SessionEngine for AgentSessionEngine {
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
     ) -> anyhow::Result<Value> {
-        // The one mechanical path (no model pass, no child): the rollback
-        // applies inline through the existing apply machinery.
+        // The rollback plans without a model call; the commit waits for
+        // the session to go idle.
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
-        let global_harness_dir = self.config.agent_dir.clone();
+        let (model, api_key) = self.resolve_request_target(model);
+        // The lock covers the clone only; the commit below must not ride it.
         let core = self
             .session
             .blocking_lock()
             .clone()
             .expect("session built by ensure_core_session");
-        let result = self.runtime.block_on(async {
-            core.session
-                .run_rollback_refinement(
-                    &options,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                    &global_harness_dir,
-                )
+        let committed = self.runtime.block_on(async {
+            let pending = core.session.start_refinement(
+                options,
+                pa_core::session_engine::refine::RefinementSource::User,
+                model,
+                api_key,
+            );
+            drop(core);
+            pending
                 .await
+                .map_err(|error| anyhow::anyhow!("refinement task failed: {error}"))?
         })?;
-        serde_json::to_value(&result)
+        serde_json::to_value(&committed.result)
             .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
     }
 
