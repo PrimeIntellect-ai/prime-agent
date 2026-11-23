@@ -107,8 +107,8 @@ pub(crate) struct SessionCore {
     /// transcript row withdraws them, so a turn that never accepts the row
     /// leaves them waiting.
     pub(crate) inbox_shown_unaccepted: std::collections::BTreeSet<String>,
-    /// The last run's final turn ran tools: a queued steer stopped it at a
-    /// tool boundary, so the row that stopped it continues the turn at once.
+    /// The last run ended at a tool boundary with a steer queued: that steer
+    /// cut it, so the row that cut it continues the turn at once.
     pub(crate) run_cut_at_tool_boundary: bool,
 }
 
