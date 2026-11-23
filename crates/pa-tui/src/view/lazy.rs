@@ -185,20 +185,17 @@ impl AgentView {
         let Some(mut window) = self.sparse_window.take() else {
             return;
         };
-        let seam_after = if self.chat.len() > count {
-            self.count_entry_rows(count, self.layout_width)
-        } else {
-            0
-        };
-        window.cursor = match window.cursor.take() {
-            Some((0, _)) if self.chat.len() > count => {
-                Some((count + 1, seam_after.saturating_sub(seam_before)))
+        // The old first entry's rows: a collapsed inbox run it joined paints
+        // them on the run's new head.
+        let seam = (self.chat.len() > count).then(|| self.painting_entry(count));
+        let seam_after = seam.map_or(0, |index| self.count_entry_rows(index, self.layout_width));
+        window.cursor = match (window.cursor.take(), seam) {
+            (Some((0, _)), Some(seam)) => Some((seam + 1, seam_after.saturating_sub(seam_before))),
+            (Some((0, row)), None) => Some((0, row)),
+            (Some((1, row)), Some(seam)) => {
+                Some((seam + 1, (row + seam_after).saturating_sub(seam_before)))
             }
-            Some((0, row)) => Some((0, row)),
-            Some((1, row)) if self.chat.len() > count => {
-                Some((count + 1, (row + seam_after).saturating_sub(seam_before)))
-            }
-            Some((section, row)) => {
+            (Some((section, row)), _) => {
                 let row = match cursor_spacing_before.zip(cursor_spacing_after) {
                     Some((before, after)) => {
                         (row + usize::from(after)).saturating_sub(usize::from(before))
@@ -207,7 +204,7 @@ impl AgentView {
                 };
                 Some((section + count, row))
             }
-            None => None,
+            (None, _) => None,
         };
         self.sparse_window = Some(window);
     }

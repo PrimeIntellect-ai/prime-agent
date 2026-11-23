@@ -543,7 +543,14 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
     }
 
     // THE HEADLESS RENDER: the TUI attaches to the live session and
-    // paints the transcript the real daemon delivered.
+    // paints the transcript the real daemon delivered. Each inbox run
+    // starts collapsed to its one dim counter line; Ctrl+O steps the chat
+    // detail to details, then to all, which expands the runs back into
+    // the per-notice rows.
+    let ctrl_o = HeadlessStep::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('o'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
     let mut options = chat_options(supervisor.socket.clone(), dir.clone());
     options.session = SessionSelection::Attach(active_id.clone());
     let outcome = run_interactive(
@@ -552,12 +559,23 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
             steps: vec![
                 HeadlessStep::WaitIdle { timeout_ms: 30_000 },
                 HeadlessStep::WaitRender {
-                    needle: "Agent inbox".to_string(),
+                    needle: "\u{2709} Agent inbox \u{b7} 3 waiting".to_string(),
+                    timeout_ms: 15_000,
+                },
+                ctrl_o.clone(),
+                HeadlessStep::WaitRender {
+                    needle: "Details mode".to_string(),
+                    timeout_ms: 15_000,
+                },
+                ctrl_o,
+                HeadlessStep::WaitRender {
+                    needle: "\u{2709} Agent inbox \u{b7} 3 unread messages".to_string(),
                     timeout_ms: 15_000,
                 },
             ],
             width: 100,
-            height: 34,
+            // Tall enough to hold the expanded transcript in one frame.
+            height: 90,
         }),
     )
     .await
@@ -566,9 +584,21 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
         outcome.active_session_id, active_id,
         "the attach held the live session"
     );
+    // The collapsed runs: one counter line per run, the arrival's new
+    // messages by class and the reminder's waiting count.
+    let collapsed = outcome
+        .frames
+        .iter()
+        .find(|frame| frame.contains("\u{2709} Agent inbox \u{b7} 3 waiting"))
+        .expect("a collapsed frame");
+    assert!(
+        collapsed.contains("\u{2709} Agent inbox \u{b7} 3 new (3 bash-done)"),
+        "the arrival run's counter line renders: {collapsed}"
+    );
     let last = outcome.frames.last().expect("a settled frame");
-    // The envelope summary lines: the inbox system's own row class, both
-    // notice classes delivered by the real admission, each with its count.
+    // The expanded envelope summary lines: the inbox system's own row
+    // class, both notice classes delivered by the real admission, each
+    // with its count.
     assert!(
         last.contains("\u{2709} Agent inbox \u{b7} 3 new messages"),
         "the arrival summary line renders: {last}"
@@ -577,8 +607,8 @@ async fn admitted_notices_render_as_their_own_rows_never_user_messages() {
         last.contains("\u{2709} Agent inbox \u{b7} 3 unread messages"),
         "the reminder summary line renders: {last}"
     );
-    // The bodies stay visible under the gutter: the counts and the read
-    // call-to-action never hide behind a collapsed-only shape.
+    // The expanded bodies render under the gutter: the counts and the
+    // read call-to-action.
     assert!(
         last.contains(&guttered_head(arrival_text)),
         "the arrival body renders guttered: {last}"
