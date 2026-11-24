@@ -4974,6 +4974,12 @@ class FactoryExecutor:
             )
         except RuntimeError as exc:
             instance.ownership_change_in_progress = False
+            if run.state != "running":
+                # stop() ran while the spawn was in flight and waited for it;
+                # no child came of it, so the stop can finish now.
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
+                return "stopped"
             last_error = str(exc)
             if _is_rate_limit_error(last_error):
                 if allow_backoff:

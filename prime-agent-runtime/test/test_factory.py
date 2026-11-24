@@ -5244,6 +5244,24 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertNotIn("spawned", kinds[kinds.index("run_stopped") + 1 :])
 
     @async_test
+    async def test_stop_during_an_in_flight_admission_that_fails_finishes_the_stop(self) -> None:
+        # stop() waits for the in-flight spawn; when that spawn fails, no
+        # child exists and the run must not stay stopping.
+        self.host.rate_limit_first["a"] = 2
+        spawn_gate = self.host.gate("rlm.run", 2)
+        gate_entered = self.host.gate_entered("rlm.run", 2)
+        self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
+        result = await self.start()
+        await gate_entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopping")
+        spawn_gate.set()  # the admission fails into a stopping run
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(self.host.deleted_targets(), [])
+
+    @async_test
     async def test_stop_during_admission_backoff_cancels_the_instance(self) -> None:
         # stop() lands while the loop waits out a rate-limit backoff
         # deadline: waking must not retry the spawn; the instance is
