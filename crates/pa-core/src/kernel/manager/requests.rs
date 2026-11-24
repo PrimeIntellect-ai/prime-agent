@@ -511,6 +511,7 @@ for line in sys.stdin:
         };
         let request = crate::kernel::protocol::Request::Execute {
             code: "1 + 1".to_string(),
+            runtime_bootstrap: false,
         };
         manager
             .enqueue_request(
