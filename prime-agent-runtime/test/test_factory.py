@@ -8010,22 +8010,22 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertNotIn("child-1", self.host.children)
 
     @async_test
-    async def test_active_repair_is_not_failed_at_the_wall_deadline(self) -> None:
+    async def test_a_repair_turn_that_runs_long_is_decided_only_when_it_ends(self) -> None:
         self.host.emitted["design"] = {"design": "the design"}
         self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
 
         def repair(payload: dict[str, Any]) -> None:
-            self.host.outcomes["design"]["factory_task_busy"] = True
+            self.host.outcomes["design"]["factory_task_busy"] = True  # the repair turn runs
 
         self.host.on_message = repair
         started = await self.start()
         run = self.executor._runs[started["run_id"]]
-        deadline = self.clock.now + factory_module.REPAIR_WAIT_SECONDS
-        await self.wait_until(lambda: self.clock.now >= deadline or run.state != "running")
+        hour_later = self.clock.now + 3600
+        await self.wait_until(lambda: self.clock.now >= hour_later or run.state != "running")
 
         self.assertEqual(run.state, "running", run.last_error)
         self.assertEqual(len(self.host.spawn_calls("design")), 1)
-        self.host.outcomes["design"]["factory_task_busy"] = False
+        self.host.outcomes["design"]["factory_task_busy"] = False  # the repair turn ended
         await run.task
         status = await rlm_module.rlm.factory.status(started["run_id"])
         self.assertEqual(status["state"], "paused")
@@ -8035,7 +8035,12 @@ class FactoryEmitTest(_ExecutorTestCase):
     @async_test
     async def test_a_child_still_owing_after_the_repair_fails_without_a_new_child(self) -> None:
         self.host.emitted["design"] = {"design": "the design"}
+        started_at = self.clock.now
         status = await self.finish()
+
+        # The repair turn ended (the child reads idle), so the verdict
+        # comes at the next read, not after a fixed wait.
+        self.assertLess(self.clock.now - started_at, 2 * factory_module.REPAIR_POLL_SECONDS)
 
         self.assertEqual(status["state"], "paused")
         self.assertEqual(len(self.host.spawn_calls("design")), 1)

@@ -1251,12 +1251,9 @@ RUN_LOST_PYTHON_CALL = (
 mid-flight when the kernel restarted: honest about the loss, routed
 through the state's own retry/policy path."""
 
-REPAIR_WAIT_SECONDS = 600.0
-"""How long a child that settled owing outputs has, after the one repair
-message, to emit them before its entry fails with ``missing_output``."""
-
 REPAIR_POLL_SECONDS = 5.0
-"""How often a repairing child's outputs file is re-read."""
+"""How often a settled child is re-read while its repair turn or its
+background work runs (its collect answers at once)."""
 
 
 class FactoryEmitError(ValueError):
@@ -1824,9 +1821,8 @@ class _NodeInstance:
     # call receives them, an emit child gets them from rlm.factory.inputs(), re-runs reuse them
     session_dir: str | None = None  # the child's session dir: its emitted outputs live there
     child_name: str | None = None  # the child's session name (the repair message's receiver)
-    repair_sent: bool = False  # the one "you still owe ..." message went to this child
-    awaiting_outputs_until: float | None = None  # repairing: the child is re-polled
-    # for its emitted outputs until this deadline
+    repair_sent: bool = False  # the one "you still owe ..." message went to this child;
+    # while the instance is running again, the repair turn decides it
     ownership_change_in_progress: bool = False  # an admission or deletion owns the actor slot
     factory_task_activity: str | None = None  # busy, idle, or unverified for factory children
     process: "_PythonProcess | None" = None  # a python state's running call
@@ -2107,7 +2103,6 @@ def _instance_json(instance: _NodeInstance) -> dict[str, Any]:
         "child_name": instance.child_name,
         "factory_task_activity": instance.factory_task_activity,
         "repair_sent": instance.repair_sent,
-        "awaiting_outputs_until": instance.awaiting_outputs_until,
         "deadline": instance.deadline,
     }
 
@@ -2118,7 +2113,7 @@ def _instance_from_json(data: dict[str, Any]) -> _NodeInstance:
         "status", "attempt", "retry_base", "infra_respawned", "capture_failed",
         "rate_limit_streak", "child_id", "spawned_at", "duration_ms", "answer",
         "provisional", "error", "tool_uses", "inputs", "session_dir",
-        "child_name", "factory_task_activity", "repair_sent", "awaiting_outputs_until", "deadline",
+        "child_name", "factory_task_activity", "repair_sent", "deadline",
     ):
         setattr(instance, field, data.get(field))
     instance.attempt = data.get("attempt") or 0
@@ -2239,7 +2234,6 @@ def rebase_run_clocks(
         for entry in state.entries:
             for instance in entry.instances:
                 instance.spawned_at = shift(instance.spawned_at)
-                instance.awaiting_outputs_until = shift(instance.awaiting_outputs_until)
                 instance.deadline = shift(instance.deadline)
 
 
@@ -5025,7 +5019,6 @@ class FactoryExecutor:
         instance.child_name = handle.name
         instance.factory_task_activity = None
         instance.repair_sent = False
-        instance.awaiting_outputs_until = None
         instance.spawned_at = self._now_fn()
         instance.status = "running"
         instance.rate_limit_streak = 0
@@ -5542,10 +5535,10 @@ class FactoryExecutor:
 
         Settled means told: every required port carries an accepted value.
         A child that ended its turn still owing a port gets one repair
-        message in the same session and is re-polled for its outputs; it
-        is never replaced by a fresh child (two writers in one worktree).
-        A child that still owes a port after the repair window fails the
-        entry with ``missing_output``, without a retry.
+        message in the same session; it is never replaced by a fresh child
+        (two writers in one worktree). When that repair turn ends, a child
+        that still owes a port fails the entry with ``missing_output``,
+        without a retry.
         """
         owed = self._emitted_outputs(state, entry)
         if not owed:
@@ -5611,7 +5604,6 @@ class FactoryExecutor:
             return None
         instance.repair_sent = True
         instance.status = "running"
-        instance.awaiting_outputs_until = self._now_fn() + REPAIR_WAIT_SECONDS
         self._event(
             run,
             "repair_requested",
@@ -5658,12 +5650,13 @@ class FactoryExecutor:
         *,
         task_busy: bool | None,
     ) -> None:
-        """Re-read a repairing child's outputs, failing only after it is idle."""
+        """Decide a repair when its turn ends: the child reads idle again
+        (the queued repair message keeps it busy until its turn starts).
+        Emitted means done; anything still owed fails with ``missing_output``."""
         if (
             instance.status != "running"
             or instance.ownership_change_in_progress
             or run.state in ("stopping", "stopped")
-            or instance.awaiting_outputs_until is None
         ):
             return
         instance.factory_task_activity = (
@@ -5671,7 +5664,6 @@ class FactoryExecutor:
         )
         owed = self._emitted_outputs(state, entry).get(instance.index)
         if owed is None:
-            instance.awaiting_outputs_until = None
             instance.status = "done"
             self._event(run, "repaired", node=state.state_id, entry=entry.index, instance=instance.index)
             if entry.status == "running" and all(i.status == "done" for i in entry.instances):
@@ -5680,8 +5672,7 @@ class FactoryExecutor:
         if task_busy is None:
             await self._pause_for_unverified_task_activity(run, state, entry, instance)
             return
-        if not task_busy and self._now_fn() >= instance.awaiting_outputs_until:
-            instance.awaiting_outputs_until = None
+        if not task_busy:
             await self._apply_instance_failure(
                 run,
                 state,
@@ -6339,11 +6330,9 @@ class FactoryExecutor:
             task_owners = self._factory_task_owners(run)
             owner_polls = [item for item in task_owners if item[2].status != "running"]
             active_work = in_flight + owner_polls
-            repairing = [item for item in in_flight if item[2].awaiting_outputs_until is not None]
+            repairing = [item for item in in_flight if item[2].repair_sent]
             children = [
-                item
-                for item in in_flight
-                if item[2].child_id is not None and item[2].awaiting_outputs_until is None
+                item for item in in_flight if item[2].child_id is not None and not item[2].repair_sent
             ]
             python_calls = [item for item in in_flight if item[2].process is not None]
             results_by_child: dict[str, Any] = {}
