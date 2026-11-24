@@ -417,13 +417,13 @@ impl Worker {
         let summary = self.summary_locked(&core, inputs);
         drop(core);
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
-        // The background-work count rides every state read: a settling child
-        // with a live background cell (or a queued completion) is not idle,
-        // and the parent's settle watcher needs the count.
+        // The owed background completions ride every state read: a child
+        // with a detached cell (or a queued completion) is not idle, and the
+        // parent's busy check reads the count.
         if let Some(object) = data.as_object_mut() {
             object.insert(
-                "outstandingBackgroundJobs".to_string(),
-                json!(self.outstanding_background_jobs()),
+                "pendingBackgroundCompletions".to_string(),
+                json!(self.pending_background_completions()),
             );
         }
         response_success(None, "get_state", Some(data))

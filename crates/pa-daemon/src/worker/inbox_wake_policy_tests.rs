@@ -32,7 +32,7 @@ fn bash_done(pid: u32, exit_code: i64) -> InboxNotice {
 
 fn admit(
     worker: &Worker,
-    notify: &Arc<Notify>,
+    notify: &Arc<crate::worker::WorkNotify>,
     inbox: &Arc<SessionInbox>,
     arrivals: &InboxArrivals,
     notice: InboxNotice,
@@ -42,7 +42,7 @@ fn admit(
 
 fn admit_on(
     worker: &Worker,
-    notify: &Arc<Notify>,
+    notify: &Arc<crate::worker::WorkNotify>,
     inbox: &Arc<SessionInbox>,
     arrivals: &InboxArrivals,
     notice: InboxNotice,

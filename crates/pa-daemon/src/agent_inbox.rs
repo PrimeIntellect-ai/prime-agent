@@ -7,8 +7,6 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
-use tokio::sync::Notify;
-
 use pa_core::session_engine::inbox::SessionInbox;
 
 use crate::agent_engine::AgentSessionEngine;
@@ -184,7 +182,7 @@ pub(crate) fn reminder_interval_ms(cwd: &Path, agent_dir: &Path) -> u64 {
 pub(crate) fn spawn_inbox_reminder(
     engine: Weak<AgentSessionEngine>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<crate::worker::WorkNotify>,
     recovery: &Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     agent_dir: &std::path::Path,
 ) {
@@ -238,18 +236,14 @@ pub(crate) fn spawn_inbox_reminder(
                 let engine = std::sync::Arc::clone(&engine);
                 move || engine.session_is_closed()
             };
-            // An admitted reminder rides the steering lane: it must reach a
-            // sleeping turn too. A cycle that admits nothing wakes nothing.
-            if crate::worker::admit_inbox_reminder(
+            crate::worker::admit_inbox_reminder(
                 &recovery,
                 &core,
                 &work_notify,
                 &inbox,
                 closed,
                 Some(engine.as_ref()),
-            ) {
-                engine.fire_cell_wake();
-            }
+            );
         }
     });
 }
