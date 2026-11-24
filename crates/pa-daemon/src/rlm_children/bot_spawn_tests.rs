@@ -158,6 +158,8 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         .await
         .unwrap();
     assert_eq!(collected[0].status, "done");
+    let roster = sessions.list_subagents().await.unwrap();
+    assert_eq!(roster[0].status, "paused");
     // A factory state cannot spawn a bot: its ledger edge would be lost.
     let tagged = RlmSpawnRequest {
         factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {

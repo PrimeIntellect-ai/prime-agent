@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,7 +30,8 @@ const OPERATION_BUDGET: Duration = Duration::from_mins(15);
 /// error: about 30 s of backoff, so a busy account's rate limit passes.
 const RETRY_ATTEMPTS: u32 = 10;
 
-/// Starts the guest daemon when it is not up, then opens the bot session. It
+/// Writes the owner's `factory.enabled` into the guest settings, starts the
+/// guest daemon when it is not up, then opens the bot session. It
 /// reopens `BOT_SESSION_FILE`, or the file a marker on the guest disk names, so
 /// a registry rebuilt from labels still finds the session. Prints the session ids as JSON.
 const BOOTSTRAP_SCRIPT: &str = r#"set -euo pipefail
@@ -41,7 +42,21 @@ mkdir -p "$(dirname "$PRIME_AGENT_DAEMON_SOCKET")"
 if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
+python3 - <<'PY'
+import json, os
+path = os.path.join(os.environ["HOME"], ".prime/agent/settings.json")
+try:
+    settings = json.load(open(path))
+except (OSError, ValueError):
+    settings = {}
+settings.setdefault("factory", {})["enabled"] = os.environ["BOT_FACTORY_ENABLED"] == "true"
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as file:
+    json.dump(settings, file)
+PY
 if ! python3 -c "$BOT_CLIENT" probe; then
+  # `uv pip install <pkg>` in the bot's shell installs into its kernel venv.
+  export VIRTUAL_ENV="$HOME/.prime/agent/kernel-venv"
   nohup setsid prime-agent --mode daemon --daemon-socket "$PRIME_AGENT_DAEMON_SOCKET" \
     </dev/null >>"$HOME/.prime-agent-bot.log" 2>&1 &
   for _ in $(seq 1 150); do
@@ -122,6 +137,8 @@ pub struct BotManager {
     guest_auth: Mutex<HashMap<String, Value>>,
     image: String,
     release: ReleaseSource,
+    /// The owner's agent dir: its `factory.enabled` carries into the bot.
+    agent_dir: PathBuf,
 }
 
 impl BotManager {
@@ -141,6 +158,7 @@ impl BotManager {
                 .filter(|image| !image.is_empty())
                 .unwrap_or_else(|| DEFAULT_BOT_IMAGE.to_string()),
             release: ReleaseSource::resolve(),
+            agent_dir: agent_dir.to_path_buf(),
         })
     }
 
@@ -674,6 +692,16 @@ impl BotManager {
         }
         record.version = local.to_string();
         let mut env = bootstrap_env(record);
+        let agent_dir = self.agent_dir.clone();
+        let factory_enabled = tokio::task::spawn_blocking(move || {
+            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_factory_enabled()
+        })
+        .await
+        .context("the factory.enabled read failed")?;
+        env.insert(
+            "BOT_FACTORY_ENABLED".to_string(),
+            factory_enabled.to_string(),
+        );
         // A sandbox created by this process gets the auth that matches its
         // header rules. Any other sandbox keeps its auth.json, and gets one
         // only when it has none (its create ran before a restart).

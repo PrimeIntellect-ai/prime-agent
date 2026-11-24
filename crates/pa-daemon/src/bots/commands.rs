@@ -163,13 +163,12 @@ impl Supervisor {
                 .map_err(|error| {
                     anyhow::anyhow!("the bot did not take its depth limit: {error}")
                 })?;
-            super::send::send_message(
+            super::send::send_task(
                 &super::ledger::BotLedger::new(agent_dir, &record.bot_id),
                 &mut client,
                 &record.guest_session_id,
                 &format!("spawn-{}", record.bot_id),
                 &spec.prompt,
-                None,
             )
             .await
             .map_err(|error| anyhow::anyhow!("the bot did not get its task: {error}"))?;

@@ -1,7 +1,8 @@
 //! `attach_bot`: hand a bot's guest daemon connection to a local TUI. The daemon opens the
 //! link (which checks the guest's version and keeps its hello first), then serves it on a
 //! single-use local endpoint: the first client gets the raw bytes both ways. The attach guard
-//! lives as long as the pipe, so the pause policy sees the attach.
+//! lives as long as the pipe, so the pause policy sees the attach. When the attach ends,
+//! `on_end` runs: the attach may have resumed the bot, and only a follower pauses it again.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use pa_types::platform::transport::{bind_transport, TransportStream};
 
-use super::BotManager;
+use super::{AttachGuard, BotManager};
 
 /// How long an endpoint waits for its one client before the link closes.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -22,23 +23,48 @@ pub struct BotAttach {
 }
 
 /// Resume the bot when needed, open its link, and serve the link on a fresh endpoint under
-/// `agent_dir`.
+/// `agent_dir`. Once the bot runs, `on_end` is called after the attach ends: when the pipe
+/// closes, no client connects, or the link fails to open.
 ///
 /// # Errors
 ///
 /// Returns `Err` when the bot cannot run, the link cannot open (a guest on another version
 /// fails with the link's `VersionMismatch`), or the endpoint cannot bind.
-pub async fn attach_bot(manager: &BotManager, agent_dir: &Path, bot_id: &str) -> Result<BotAttach> {
+pub async fn attach_bot(
+    manager: &BotManager,
+    agent_dir: &Path,
+    bot_id: &str,
+    on_end: impl FnOnce() + Send + 'static,
+) -> Result<BotAttach> {
     // The guard comes first: the pause policy must not pause the bot between its resume and
     // the link.
     let guard = manager.attach_guard(bot_id);
     let record = manager.ensure_running(bot_id).await?;
+    let end = AttachEnd {
+        guard: Some(guard),
+        on_end: Some(on_end),
+    };
     let stream = manager.open_link(&record).await?;
-    let endpoint = serve_link(stream, &endpoint_dir(agent_dir)?, guard).await?;
+    let endpoint = serve_link(stream, &endpoint_dir(agent_dir)?, end).await?;
     Ok(BotAttach {
         endpoint,
         guest_session_id: record.guest_session_id,
     })
+}
+
+/// Holds the attach; on drop it releases the guard, then calls `on_end`.
+struct AttachEnd<F: FnOnce()> {
+    guard: Option<AttachGuard>,
+    on_end: Option<F>,
+}
+
+impl<F: FnOnce()> Drop for AttachEnd<F> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        if let Some(on_end) = self.on_end.take() {
+            on_end();
+        }
+    }
 }
 
 /// The private directory the endpoints live in (owner-only on Unix, like the daemon socket).
@@ -85,6 +111,7 @@ async fn serve_link<G: Send + 'static>(
 mod tests {
     use super::super::link::VersionMismatch;
     use super::super::tests::{setup, spec};
+    use super::super::BotStatus;
     use super::*;
     use pa_types::platform::transport::connect_transport;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -94,21 +121,28 @@ mod tests {
         let (dir, platform, manager) = setup();
         let bot = manager.spawn(&spec("bot-a")).await.unwrap();
         platform.state().guest_app_version = Some("0.0.1".into());
-        let error = attach_bot(&manager, dir.path(), &bot.bot_id)
-            .await
-            .unwrap_err();
+        let (ended, end) = std::sync::mpsc::channel();
+        let error = attach_bot(&manager, dir.path(), &bot.bot_id, move || {
+            ended.send(()).unwrap();
+        })
+        .await
+        .unwrap_err();
         assert!(
             error.downcast_ref::<VersionMismatch>().is_some(),
             "{error:#}"
         );
         assert!(!manager.attached(&bot.bot_id));
+        // The attach may have resumed the bot, so its end still re-arms the pause.
+        end.try_recv().unwrap();
     }
 
     #[tokio::test]
     async fn the_endpoint_pipes_the_link_once_and_holds_the_attach() {
         let (dir, platform, manager) = setup();
         let bot = manager.spawn(&spec("bot-a")).await.unwrap();
-        let attach = attach_bot(&manager, dir.path(), &bot.bot_id).await.unwrap();
+        let attach = attach_bot(&manager, dir.path(), &bot.bot_id, || {})
+            .await
+            .unwrap();
         assert_eq!(attach.guest_session_id, bot.guest_session_id);
         assert!(manager.attached(&bot.bot_id));
 
@@ -143,5 +177,33 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(!manager.attached(&bot.bot_id));
+    }
+
+    #[tokio::test]
+    async fn a_bot_resumed_by_an_attach_can_pause_after_the_detach() {
+        let (dir, _platform, manager) = setup();
+        let manager = std::sync::Arc::new(manager);
+        let bot = manager.spawn(&spec("bot-a")).await.unwrap();
+        manager.pause(&bot.bot_id).await.unwrap();
+
+        let (ended, end) = tokio::sync::oneshot::channel();
+        let watcher = std::sync::Arc::clone(&manager);
+        let bot_id = bot.bot_id.clone();
+        let attach = attach_bot(&manager, dir.path(), &bot.bot_id, move || {
+            let _ = ended.send(watcher.attached(&bot_id));
+        })
+        .await
+        .unwrap();
+        assert_eq!(manager.get(&bot.bot_id).unwrap().status, BotStatus::Running);
+
+        drop(connect_transport(&attach.endpoint).await.unwrap());
+        let attached_at_end = tokio::time::timeout(Duration::from_secs(5), end)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!attached_at_end, "the guard is released before on_end runs");
+        // What the follower started by on_end does after the grace: the bot pauses.
+        let paused = manager.pause(&bot.bot_id).await.unwrap();
+        assert_eq!(paused.status, BotStatus::Paused);
     }
 }

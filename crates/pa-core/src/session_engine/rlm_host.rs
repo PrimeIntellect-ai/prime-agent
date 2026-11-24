@@ -46,6 +46,9 @@ pub struct RlmSpawnHandle {
     pub name: String,
     pub session_dir: String,
     pub model: String,
+    /// Why the child runs on another model than the one it inherited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// `rlm.create_session` handle: one resident depth-0 daemon session.
@@ -1037,6 +1040,7 @@ mod tests {
                     name: "worker".into(),
                     session_dir: "/tmp/sub-1".into(),
                     model: "p/m".into(),
+                    notice: None,
                 })
             })
         }

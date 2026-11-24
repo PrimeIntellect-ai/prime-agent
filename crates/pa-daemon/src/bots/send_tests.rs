@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use super::commands::{admit_bot_spawn, BOTS_DISABLED_MESSAGE};
 use super::guest::GuestClient;
 use super::ledger::{recover_all, BotLedger, MessageState};
-use super::send::{send_message, send_within, SendError};
+use super::send::{send_message, send_task, send_within, SendError};
 
 #[tokio::test]
 async fn a_bot_spawn_is_refused_until_the_user_opts_in() {
@@ -231,4 +231,31 @@ async fn a_send_past_its_deadline_is_uncertain() {
     .await;
     assert!(matches!(never_began, Err(SendError::NotDelivered(_))));
     assert_eq!(ledger.message_state("m2").unwrap(), None);
+}
+
+/// A spawn's task is the guest session's prompt, with the label a local
+/// child's task carries, under the same ledger rules.
+#[tokio::test]
+async fn a_task_prompts_the_guest_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = BotLedger::new(dir.path(), "bot-1");
+    let (seen_tx, mut seen) = mpsc::unbounded_channel::<String>();
+    let mut answering = client(Guest::Answer, &seen_tx).await;
+    send_task(
+        &ledger,
+        &mut answering,
+        "guest",
+        "spawn-bot-1",
+        "count to 3",
+    )
+    .await
+    .expect("the guest answered");
+    assert_eq!(
+        seen.recv().await.as_deref(),
+        Some("[task from parent]\n\ncount to 3")
+    );
+    assert_eq!(
+        ledger.message_state("spawn-bot-1").unwrap(),
+        Some(MessageState::Sent)
+    );
 }

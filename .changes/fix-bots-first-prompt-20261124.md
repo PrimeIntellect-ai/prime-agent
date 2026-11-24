@@ -1,0 +1,1 @@
+- A bot gets its first task as its session prompt, and inherits the owner's `factory.enabled` setting.

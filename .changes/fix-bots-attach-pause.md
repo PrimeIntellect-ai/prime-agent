@@ -1,0 +1,1 @@
+- Bots: a bot resumed by a TUI attach is paused again after the attach ends. The end of the attach (the view closes, no client connects, or the link fails) starts the bot follower: it delivers the turns run during the attach to the owner, then pauses the idle bot after the grace.

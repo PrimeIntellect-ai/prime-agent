@@ -41,26 +41,27 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         host_request.assert_awaited_once_with("rlm.list_subagents")
 
 
-    def test_lists_failed_subagents_from_host(self) -> None:
-        host_request = AsyncMock(
-            return_value={
-                "subagents": [
-                    {
-                        "rlm_child_id": "sub-failed",
-                        "active_session_id": None,
-                        "session_id": None,
-                        "session_name": "failed-worker",
-                        "session_dir": "/tmp/parent/sub-failed",
-                        "status": "error",
-                    }
-                ]
-            }
-        )
+    def test_lists_failed_and_paused_subagents_from_host(self) -> None:
+        for status in ("error", "paused"):
+            host_request = AsyncMock(
+                return_value={
+                    "subagents": [
+                        {
+                            "rlm_child_id": "sub-1",
+                            "active_session_id": None,
+                            "session_id": None,
+                            "session_name": "worker",
+                            "session_dir": "/tmp/parent/sub-1",
+                            "status": status,
+                        }
+                    ]
+                }
+            )
 
-        with patch.object(rlm_module, "host_request", host_request):
-            subagents = asyncio.run(rlm_module.rlm.list_subagents())
+            with patch.object(rlm_module, "host_request", host_request):
+                subagents = asyncio.run(rlm_module.rlm.list_subagents())
 
-        self.assertEqual(subagents[0].status, "error")
+            self.assertEqual(subagents[0].status, status)
 
     def test_forwards_orchestrator_chosen_name_model_and_cwd_to_host(self) -> None:
         host_request = AsyncMock(
@@ -96,6 +97,24 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
+        self.assertIsNone(result.notice)
+
+    def test_prints_the_spawn_notice(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "bot-1",
+                "name": "scout",
+                "session_dir": "bot://bot-1",
+                "model": "prime-inference/z-ai/glm-5.3",
+                "notice": "The bot runs on prime-inference/z-ai/glm-5.3.",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request), patch("builtins.print") as printed:
+            result = asyncio.run(rlm_module.rlm.spawn("scout", name="scout", target="sandbox"))
+
+        self.assertEqual(result.notice, "The bot runs on prime-inference/z-ai/glm-5.3.")
+        printed.assert_called_once_with("rlm.spawn: The bot runs on prime-inference/z-ai/glm-5.3.")
 
     def test_forwards_the_decision_kind_to_host(self) -> None:
         host_request = AsyncMock(

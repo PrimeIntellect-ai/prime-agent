@@ -15,8 +15,10 @@ use std::sync::LazyLock;
 
 use hmac::{Hmac, KeyInit, Mac};
 use pa_core::auth::{
-    AuthCredential, AuthStorage, PrimeTeamCredential, StoredPrimeTeam, PRIME_INFERENCE_PROVIDER_ID,
+    AuthCredential, AuthStorage, AuthStorageData, PrimeTeamCredential, StoredPrimeTeam,
+    PRIME_INFERENCE_PROVIDER_ID,
 };
+use pa_core::models::PRIME_INFERENCE_DEFAULT_MODEL_ID;
 use pa_sandbox::transport::ReqwestSandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 use sha2::Sha256;
@@ -152,13 +154,7 @@ fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
     let mut hosts = BTreeSet::new();
     let mut injections = Vec::new();
     for provider in providers {
-        if !matches!(
-            stored.credential(&provider),
-            Some(AuthCredential::ApiKey { .. }) | None
-        ) {
-            continue;
-        }
-        let Some(key) = auth.get_api_key(&provider).filter(|key| !key.is_empty()) else {
+        let Some(key) = injectable_key(auth, &stored, &provider) else {
             continue;
         };
         let fingerprint = key_fingerprint(&key);
@@ -177,6 +173,36 @@ fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
         });
     }
     injections
+}
+
+/// `provider`'s API key, unless its login is OAuth (a subscription or MCP
+/// login), which is never injected.
+fn injectable_key(
+    auth: &mut AuthStorage,
+    stored: &AuthStorageData,
+    provider: &str,
+) -> Option<String> {
+    if !matches!(
+        stored.credential(provider),
+        Some(AuthCredential::ApiKey { .. }) | None
+    ) {
+        return None;
+    }
+    auth.get_api_key(provider).filter(|key| !key.is_empty())
+}
+
+/// Whether a bot inheriting a `provider` model should run on the Prime
+/// Inference default model instead: `provider` holds only a subscription
+/// login, which a bot cannot use, and a Prime Inference key can be
+/// injected.
+pub fn use_prime_inference_instead(auth: &mut AuthStorage, provider: &str) -> bool {
+    let stored = auth.get_all();
+    provider != PRIME_INFERENCE_PROVIDER_ID
+        && matches!(
+            stored.credential(provider),
+            Some(AuthCredential::Oauth { .. })
+        )
+        && injectable_key(auth, &stored, PRIME_INFERENCE_PROVIDER_ID).is_some()
 }
 
 /// What [`provision`] confirmed: the rules for the confirmed secrets, the
@@ -221,17 +247,28 @@ impl Provisioned {
             ))),
             None if provider_rules(provider, "").is_empty() => Err(anyhow::anyhow!(
                 "A bot cannot run on {provider}: its requests do not carry an API key \
-                 the platform can inject. Choose another provider for the bot."
+                 the platform can inject. {}",
+                pass_another_model()
             )),
             None if !self.providers.iter().any(|confirmed| confirmed == provider) => {
                 Err(anyhow::anyhow!(
-                    "A bot on {provider} needs a {provider} API key. \
-                     Log in with an API key; a subscription login cannot be shared with a bot."
+                    "A bot cannot run on {provider} without an API key for that provider: \
+                     a subscription login cannot be shared with a bot. {} \
+                     Or log in to {provider} with an API key.",
+                    pass_another_model()
                 ))
             }
             None => Ok(self.rules),
         }
     }
+}
+
+/// How to pick a model a bot can run on.
+fn pass_another_model() -> String {
+    format!(
+        "Pass a model whose provider has an API key, for example \
+         rlm.spawn(..., target=\"sandbox\", model=\"{PRIME_INFERENCE_PROVIDER_ID}/{PRIME_INFERENCE_DEFAULT_MODEL_ID}\")."
+    )
 }
 
 /// Make sure the platform holds a secret for each stored provider key it
@@ -377,7 +414,7 @@ fn guest_auth_json(
 mod tests {
     use std::sync::Arc;
 
-    use pa_core::auth::{AuthStorageData, NoOAuth};
+    use pa_core::auth::NoOAuth;
     use serde_json::json;
 
     use super::*;
@@ -501,6 +538,23 @@ mod tests {
             .map(|injection| injection.provider.as_str())
             .collect();
         assert_eq!(providers, ["anthropic", "openai", "zai"]);
+    }
+
+    /// A subscription-only provider falls back to Prime Inference when its
+    /// key can be injected; an API-key provider keeps its model.
+    #[test]
+    fn a_subscription_model_falls_back_to_prime_inference() {
+        let mut home = auth(&home_auth());
+        assert!(use_prime_inference_instead(&mut home, "anthropic"));
+        assert!(!use_prime_inference_instead(&mut home, "google"));
+        assert!(!use_prime_inference_instead(
+            &mut home,
+            PRIME_INFERENCE_PROVIDER_ID
+        ));
+        let mut no_prime = auth(&json!({
+            "anthropic": { "type": "oauth", "access": "a", "refresh": "r", "expires": 1 },
+        }));
+        assert!(!use_prime_inference_instead(&mut no_prime, "anthropic"));
     }
 
     #[test]

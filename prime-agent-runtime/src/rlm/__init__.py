@@ -31,6 +31,7 @@ class RLMSpawnHandle:
     name: str
     session_dir: Path
     model: str
+    notice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,9 @@ class RLMSubagentActivity:
 
 @dataclass(frozen=True)
 class RLMSubagent:
-    """One direct child row: `status` is `running` | `completed` | `error` |
-    `cancelled` (a cancelled child keeps its status verbatim in the
-    registry row, the TS-era semantics)."""
+    """One direct child row: `status` is `running` | `paused` (a bot) |
+    `completed` | `error` | `cancelled` (a cancelled child keeps its status
+    verbatim in the registry row, the TS-era semantics)."""
 
     rlm_child_id: str
     active_session_id: str | None
@@ -169,6 +170,7 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
         name=name,
         session_dir=Path(session_dir),
         model=model,
+        notice=payload.get("notice"),
     )
 
 
@@ -308,7 +310,10 @@ async def _spawn(
         kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
-    return _spawn_handle_from_payload(payload)
+    handle = _spawn_handle_from_payload(payload)
+    if handle.notice:
+        print(f"rlm.spawn: {handle.notice}")
+    return handle
 
 
 def _model_from_payload(payload: Any) -> RLMModel:
@@ -424,7 +429,7 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         raise RuntimeError(f"{operation} entry is missing session_name")
     if not isinstance(session_dir, str) or not session_dir:
         raise RuntimeError(f"{operation} entry is missing session_dir")
-    if status not in {"running", "completed", "error", "cancelled"}:
+    if status not in {"running", "paused", "completed", "error", "cancelled"}:
         raise RuntimeError(f"{operation} entry has invalid status")
     return RLMSubagent(
         rlm_child_id=child_id,
