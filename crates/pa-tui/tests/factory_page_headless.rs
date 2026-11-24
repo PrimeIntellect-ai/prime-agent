@@ -1122,8 +1122,10 @@ fn the_mount_seed_keeps_the_scoped_graphs_finished_runs() {
         all.contains("\u{2699} 1 machine"),
         "the dock count stays live-only:\n{all}"
     );
+    // The title reads `machines · 1 live run` before the machine list lands
+    // and `machines · 3 · 1 live run` after; either frame may be the first.
     assert!(
-        all.contains("machines \u{b7} 1 live run"),
+        all.contains(" 1 live run"),
         "the mounted title counts the seeded rows live-only:\n{all}"
     );
     assert!(
