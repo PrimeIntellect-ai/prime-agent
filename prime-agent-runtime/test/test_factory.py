@@ -7142,6 +7142,29 @@ class FactoryPythonStateTest(_ExecutorTestCase):
         self.assertNotIn("subagent", graph_states["plan"])
 
     @async_test
+    async def test_a_node_file_named_like_a_loaded_stdlib_module_runs(self) -> None:
+        nodes = Path(os.getcwd(), "nodes")
+        nodes.mkdir()
+        (nodes / "select.py").write_text("def pick(inputs):\n    return {'picked': 'a'}\n", encoding="utf-8")
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "pick",
+                        "entry": True,
+                        "python": {"import": "select", "callable": "pick", "path": str(nodes)},
+                        "outputs": [{"name": "picked", "type": "text"}],
+                    }
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.finish(result)
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.executor._runs[result["run_id"]].states["pick"].entries[0].outputs, {"picked": "a"})
+
+    @async_test
     async def test_failed_calls_retry_then_apply_the_failure_policy(self) -> None:
         for callable_name, expected in (
             ("boom", "python state exited with code 1: "),
