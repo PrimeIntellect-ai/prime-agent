@@ -415,11 +415,18 @@ impl Worker {
         }
         let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
-        response_success(
-            None,
-            "get_state",
-            Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-        )
+        drop(core);
+        let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
+        // The owed background completions ride every state read: a child
+        // with a detached cell (or a queued completion) is not idle, and the
+        // parent's busy check reads the count.
+        if let Some(object) = data.as_object_mut() {
+            object.insert(
+                "pendingBackgroundCompletions".to_string(),
+                json!(self.pending_background_completions()),
+            );
+        }
+        response_success(None, "get_state", Some(data))
     }
 
     /// `get_session_header`: the persisted session header line (TS wraps it

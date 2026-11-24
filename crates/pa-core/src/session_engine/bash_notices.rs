@@ -1,7 +1,6 @@
 //! The kernel notice seam (the TS async-bash-completion wake): the
-//! `bash.completed`/`bash.consumed` notices, the `bash.waiting` keepalive,
-//! plus the `factory.progress` run-milestone notice that rides the same
-//! steering delivery. Here live
+//! `bash.completed`/`bash.consumed` notices plus the `factory.progress`
+//! run-milestone notice that rides the same steering delivery. Here live
 //! the shared notice types, the TS payload validation, and the
 //! host-handler registration, plus the in-process sinks a daemonless
 //! embedding uses — the notice row steers onto the session's own agent
@@ -45,22 +44,6 @@ impl KernelNotice {
                 crate::autonomous::now_millis(),
             ),
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-        }
-    }
-
-    /// The `[waiting]` keepalive for a parked session whose background
-    /// commands are still running: one paced notice per window so idle
-    /// clocks never close a session mid-wait.
-    #[must_use]
-    pub fn bash_waiting(pids: &[u32], commands: &[String], count: usize) -> Self {
-        Self {
-            row: messages::create_bash_waiting_message(
-                pids,
-                commands,
-                count,
-                crate::autonomous::now_millis(),
-            ),
-            preview_label: messages::BASH_WAITING_PREVIEW_LABEL,
         }
     }
 
@@ -122,7 +105,7 @@ impl KernelNotice {
 /// The queue-admission seam for one kernel notice (the daemon worker's
 /// steering lane + runner wake + recovery busy-evidence; the in-process
 /// sinks below steer onto the session's own agent).
-pub type KernelNoticeSink = Arc<dyn Fn(KernelNotice) -> bool + Send + Sync>;
+pub type KernelNoticeSink = Arc<dyn Fn(KernelNotice) + Send + Sync>;
 
 /// The kernel read a finished command's result before its notice
 /// delivered (the `bash.consumed` host request): the queued notice is stale.
@@ -139,8 +122,8 @@ pub type BashConsumedSink = Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
 /// notice admits its row, so the embedding resumes the idle run.
 pub type BashNoticeWake = Arc<dyn Fn() + Send + Sync>;
 
-/// The `bash.completed`/`bash.consumed`/`bash.waiting`/`factory.progress`
-/// kernel host handlers (TS `createAsyncBashCompletionHostHandler`,
+/// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
+/// handlers (TS `createAsyncBashCompletionHostHandler`,
 /// `createAsyncBashConsumedHostHandler`, `createFactoryProgressHostHandler`).
 pub fn register_kernel_notice_host_handlers(
     notice: KernelNoticeSink,
@@ -170,18 +153,6 @@ pub fn register_kernel_notice_host_handlers(
                 let notice = validate_consumed(&payload.data)?;
                 consumed(notice);
                 Ok(serde_json::json!({}))
-            })
-        }),
-    );
-    let waiting = Arc::clone(&notice);
-    handlers.register(
-        "bash.waiting",
-        host_handler(move |payload| {
-            let waiting = waiting.clone();
-            Box::pin(async move {
-                let notice = validate_bash_waiting(&payload.data)?;
-                let admitted = waiting(notice);
-                Ok(serde_json::json!({ "admitted": admitted }))
             })
         }),
     );
@@ -215,51 +186,6 @@ fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
         details["outputTail"] = tail.into();
     }
     Ok(notice)
-}
-
-/// The kernel's waiting keepalive payload (`_waiting_keepalive_loop` in
-/// `rlm/bash.py`): one non-empty array of positive integer pids, the
-/// same-length array of non-empty command strings, and a `count` of live
-/// commands at least as large as the pid list (the payload caps the
-/// described commands).
-fn validate_bash_waiting(data: &Value) -> anyhow::Result<KernelNotice> {
-    let pids: Vec<u32> = data
-        .get("pids")
-        .and_then(Value::as_array)
-        .filter(|pids| !pids.is_empty())
-        .and_then(|pids| {
-            pids.iter()
-                .map(|pid| {
-                    pid.as_u64()
-                        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
-                        .map(|pid| pid as u32)
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| anyhow::anyhow!("bash.waiting pids must be positive integers"))?;
-    let commands: Vec<String> = data
-        .get("commands")
-        .and_then(Value::as_array)
-        .filter(|commands| commands.len() == pids.len())
-        .and_then(|commands| {
-            commands
-                .iter()
-                .map(|command| {
-                    command
-                        .as_str()
-                        .filter(|command| !command.is_empty())
-                        .map(str::to_string)
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| anyhow::anyhow!("bash.waiting commands must be non-empty strings"))?;
-    let count = data
-        .get("count")
-        .and_then(Value::as_u64)
-        .filter(|count| *count >= pids.len() as u64)
-        .ok_or_else(|| anyhow::anyhow!("bash.waiting count must cover the pids"))?
-        as usize;
-    Ok(KernelNotice::bash_waiting(&pids, &commands, count))
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
@@ -328,21 +254,13 @@ pub fn register_in_process_kernel_notice_handlers(
     let notice_slot = Arc::clone(agent_slot);
     let notice: KernelNoticeSink = Arc::new(move |notice| {
         let Some(agent) = bound_agent(&notice_slot) else {
-            return false;
+            return;
         };
-        let waiting = notice.row.custom_type == messages::BASH_WAITING_NOTICE_CUSTOM_TYPE;
         let Some(row) = session_message_to_loop(&SessionAgentMessage::Custom(notice.row)) else {
-            return false;
+            return;
         };
-        if waiting {
-            if !agent.steer_if_idle(row) {
-                return false;
-            }
-        } else {
-            agent.steer(row);
-        }
+        agent.steer(row);
         notice_wake();
-        true
     });
     let consumed_slot = Arc::clone(agent_slot);
     let consumed: BashConsumedSink = Arc::new(move |notice| {
@@ -697,70 +615,6 @@ mod tests {
                 })),
             )
         );
-    }
-
-    #[tokio::test]
-    async fn in_process_waiting_refuses_an_active_run_without_a_wake() {
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let stream_started = Arc::clone(&started);
-        let stream_release = Arc::clone(&release);
-        let agent = Arc::new(pa_agent::agent::Agent::new(pa_agent::agent::AgentOptions {
-            stream_fn: Some(Arc::new(move |_, _, _| {
-                let started = Arc::clone(&stream_started);
-                let release = Arc::clone(&stream_release);
-                Box::pin(async move {
-                    started.notify_one();
-                    release.notified().await;
-                    anyhow::bail!("the stream probe finished")
-                })
-            })),
-            ..Default::default()
-        }));
-        let slot = Arc::new(Mutex::new(Some(Arc::downgrade(&agent))));
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let wake: BashNoticeWake = {
-            let wakes = Arc::clone(&wakes);
-            Arc::new(move || {
-                wakes.fetch_add(1, Ordering::SeqCst);
-            })
-        };
-        let mut handlers = HostRequestHandlers::default();
-        register_in_process_kernel_notice_handlers(&wake, &slot, &mut handlers);
-        let run_agent = Arc::clone(&agent);
-        let run = tokio::spawn(async move { run_agent.prompt("work").await });
-        started.notified().await;
-        let handler = handlers.get("bash.waiting").unwrap();
-        let payload = serde_json::json!({ "pids": [42], "commands": ["build"], "count": 1 });
-        let refused = dispatch(handler, payload.clone()).await.unwrap();
-        assert_eq!(refused["admitted"], false);
-        assert!(!agent.has_queued_messages());
-        assert_eq!(wakes.load(Ordering::SeqCst), 0);
-        release.notify_one();
-        assert!(run.await.unwrap().is_err());
-        let accepted = dispatch(handler, payload).await.unwrap();
-        assert_eq!(accepted["admitted"], true);
-        assert_eq!(agent.remove_queued_messages(|_| true).len(), 1);
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn waiting_reply_reports_the_sink_admission() {
-        for admitted in [false, true] {
-            let mut handlers = HostRequestHandlers::default();
-            register_kernel_notice_host_handlers(
-                Arc::new(move |_| admitted),
-                Arc::new(|_| {}),
-                &mut handlers,
-            );
-            let reply = dispatch(
-                handlers.get("bash.waiting").unwrap(),
-                serde_json::json!({ "pids": [42], "commands": ["build"], "count": 1 }),
-            )
-            .await
-            .unwrap();
-            assert_eq!(reply["admitted"], admitted);
-        }
     }
 
     #[test]

@@ -49,119 +49,6 @@ def _win_spawn(procs=None, resume=True):
     return spawn_in_job
 
 
-class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
-    async def run_ticks(self, live_handles, activity_handles, ticks, replies, *, started=0.0):
-        from rlm import repl
-
-        clock = SimpleNamespace(now=started, busy=False)
-        ticks = iter(ticks)
-        replies = iter(replies)
-        sent = []
-
-        async def tick(_delay):
-            try:
-                clock.now, clock.busy = next(ticks)
-            except StopIteration:
-                raise asyncio.CancelledError from None
-
-        async def host_request(payload):
-            sent.append((clock.now, payload))
-            return next(replies, {"status": "ok", "result": {"admitted": True}})
-
-        namespace = dict(bash_module._waiting_keepalive_loop.__globals__)
-        namespace.update(
-            _live_handles=live_handles,
-            _activity_handles=activity_handles,
-            _WAITING_KEEPALIVE_SECONDS=240.0,
-            asyncio=SimpleNamespace(sleep=tick),
-            time=SimpleNamespace(monotonic=lambda: clock.now),
-        )
-        run = FunctionType(bash_module._waiting_keepalive_loop.__code__, namespace)
-        with (
-            mock.patch.object(repl, "request_in_flight", side_effect=lambda: clock.busy),
-            mock.patch.object(repl, "host_request", side_effect=host_request),
-        ):
-            with self.assertRaises(asyncio.CancelledError):
-                await run()
-        return sent
-
-    def handle(self, cls=bash_module.BashHandle, *, pid=42, reaped=False):
-        handle = object.__new__(cls)
-        handle._pid = pid
-        handle._reaped = reaped
-        handle._released = False
-        handle.command = f"sleep 60 # {pid}"
-        return handle
-
-    async def test_waiting_scan_preserves_one_shot_ownership(self):
-        handle = self.handle()
-        sent = await self.run_ticks(
-            {handle}, {}, [(1000.0, False)],
-            [{"status": "ok", "result": {"admitted": True}}],
-        )
-        self.assertEqual(sent, [(1000.0, {
-            "type": "bash.waiting", "pids": [42],
-            "commands": ["sleep 60 # 42"], "count": 1,
-        })])
-        self.assertFalse(handle._released, "an internal scan must not disable kill-on-cancel")
-
-    async def test_waiting_includes_persistent_activity_without_exit_cleanup(self):
-        ordinary = self.handle()
-        persistent = self.handle(bash_module.PersistentBashHandle, pid=43)
-        finished = self.handle(bash_module.PersistentBashHandle, pid=44, reaped=True)
-        live = {ordinary}
-        sent = await self.run_ticks(
-            live, {"ordinary": ordinary, "persistent": persistent, "finished": finished},
-            [(1000.0, False)], [{"status": "ok", "result": {"admitted": True}}],
-        )
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(set(sent[0][1]["pids"]), {42, 43})
-        self.assertEqual(set(sent[0][1]["commands"]), {"sleep 60 # 42", "sleep 60 # 43"})
-        self.assertEqual(sent[0][1]["count"], 2)
-        self.assertEqual(live, {ordinary})
-
-    async def test_waiting_first_notice_waits_one_window_independent_of_uptime(self):
-        for started in (0.0, 1_000_000.0):
-            with self.subTest(started=started):
-                handle = self.handle()
-                ticks = [(started + offset, busy) for offset, busy in (
-                    (1.0, True), (16.0, False), (239.0, False),
-                    (240.0, False), (255.0, False), (480.0, False),
-                )]
-                sent = await self.run_ticks(
-                    {handle}, {}, ticks,
-                    [{"status": "ok", "result": {"admitted": True}}] * 2,
-                    started=started,
-                )
-                self.assertEqual([when - started for when, _ in sent], [240.0, 480.0])
-
-    async def test_waiting_window_restarts_while_nothing_runs(self):
-        handle = self.handle()
-        live = set()
-
-        def ticks():
-            live.add(handle)
-            yield (240.0, False)
-            live.clear()
-            yield (300.0, False)
-            yield (1000.0, False)
-            # A later job's first idle tick comes before one window of its own.
-            live.add(handle)
-            yield (1015.0, False)
-            yield (1255.0, False)
-
-        sent = await self.run_ticks(live, {}, ticks(), [])
-        self.assertEqual([when for when, _ in sent], [240.0, 1255.0])
-
-    async def test_waiting_rejected_notice_does_not_delay_next_idle_tick(self):
-        handle = self.handle()
-        sent = await self.run_ticks(
-            {handle}, {}, [(1000.0, False), (1015.0, False), (1030.0, False), (1255.0, False)],
-            [{"status": "ok", "result": {"admitted": admitted}} for admitted in (False, True, True)],
-        )
-        self.assertEqual([when for when, _ in sent], [1000.0, 1015.0, 1255.0])
-
-
 class BashTest(unittest.IsolatedAsyncioTestCase):
     async def test_activity_handles_are_scoped_and_tail_is_bounded(self):
         handle = bash("printf 'first\nsecond\n'; sleep 20")
@@ -1749,23 +1636,6 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         await _poll_group_dead(held_pid)
         self.assertEqual(self.files(), [])
 
-    async def test_persistent_only_launch_arms_waiting_without_exit_cleanup(self):
-        with (
-            mock.patch.object(bash_module, "_waiting_keepalive_task", None),
-            mock.patch.object(bash_module, "_WAITING_KEEPALIVE_SECONDS", 240.0),
-            mock.patch.object(bash_module, "_waiting_keepalive_loop", new=mock.AsyncMock()),
-        ):
-            handle = bash("sleep 60", persistent=True)
-            self.pgids.append(handle._pid)
-            try:
-                self.assertNotIn(handle, bash_module._live_handles)
-                task = bash_module._waiting_keepalive_task
-                self.assertIsNotNone(task)
-                await task
-            finally:
-                handle.kill(signal.SIGKILL)
-                await handle
-
     async def test_fresh_persistent_shell_reports_through_files(self):
         go = os.path.join(os.path.dirname(self.home), "go")
         handle = bash(f"while [ ! -e {shlex.quote(go)} ]; do sleep 0.01; done; echo hi; exit 4", persistent=True)
@@ -1784,6 +1654,34 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
+
+    async def test_persistent_completion_notice_waits_for_an_in_flight_await(self):
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        with mock.patch.object(bash_module.PersistentBashHandle, "_schedule_background_completion_notice"):
+            handle = bash("true", persistent=True)
+        self.pgids.append(handle.pid)
+        await handle._wait()
+        # The creating cell has finished; an await of THIS handle is in flight.
+        handle._creating_cell_finished = asyncio.Event()
+        handle._creating_cell_finished.set()
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            handle._begin_await()
+            notice = asyncio.ensure_future(handle._notify_completion())
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual([call["type"] for call in calls], ["bash.completed"])
 
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
@@ -2056,6 +1954,43 @@ class BashInventedKwargsTest(unittest.TestCase):
             self.assertIn("okay", handle.output())
         finally:
             handle.kill()
+
+
+class CompletionNoticeGateTest(unittest.IsolatedAsyncioTestCase):
+    """The completion notice must not race an await of the same handle."""
+
+    async def test_completion_notice_waits_for_an_in_flight_await(self):
+        bash_module._set_completion_notices_wired(True)
+        self.addCleanup(bash_module._set_completion_notices_wired, False)
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        handle = bash("true")
+        await handle._wait()
+        await handle._wait_reaped()
+        cell_finished = asyncio.Event()
+        cell_finished.set()
+        activity = {"id": handle._activity_id, "pid": handle.pid, "active": True}
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            # An await of THIS handle is in flight.
+            handle._begin_await()
+            notice = asyncio.ensure_future(
+                handle._notify_background_completion(cell_finished, activity)
+            )
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual(len(calls), 1, "the notice fires once the await clears")
+        self.assertEqual(calls[0]["type"], "bash.completed")
 
 
 if __name__ == "__main__":
