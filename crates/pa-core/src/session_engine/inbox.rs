@@ -796,17 +796,30 @@ pub fn utc_hh_mm(ms: u64) -> String {
 }
 
 /// The arrival notice for one batch of messages: the short steering row
-/// that replaces the notices' full rows. One count row per batch: a
-/// single arrival names its class ("1 new bash-done message"), a same
-/// class burst its count ("3 new bash-done messages"), a mixed burst
-/// the per-class breakdown ("3 new messages (2 bash-done, 1
-/// child-exited)"). The signature is the latest arrival's time; a
-/// wider batch carries the arrival window.
+/// that replaces the notices' full rows (see [`arrival_summary`] for the
+/// count wording), then the waiting count and the read instruction.
 #[must_use]
 pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, String) {
-    let Some(last) = batch.last() else {
+    let Some((window, summary)) = arrival_summary(batch) else {
         return (String::new(), String::new());
     };
+    (
+        format!("Inbox: {summary}"),
+        format!(
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
+        ),
+    )
+}
+
+/// One batch's `(window, summary)`. One count row per batch: a single
+/// arrival names its class ("1 new message (bash-done)"), a same class
+/// burst its count ("3 new bash-done messages"), a mixed burst the
+/// per-class breakdown ("3 new messages (2 bash-done, 1 child-exited)").
+/// The window is the latest arrival's UTC time; a wider batch carries
+/// the arrival window. `None` for an empty batch.
+#[must_use]
+pub fn arrival_summary(batch: &[InboxMessage]) -> Option<(String, String)> {
+    let last = batch.last()?;
     let signature = utc_hh_mm(last.arrived_at_ms);
     let mut classes: Vec<(&str, u64)> = Vec::new();
     for message in batch {
@@ -836,12 +849,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
     } else {
         format!("{}-{}", utc_hh_mm(batch[0].arrived_at_ms), signature)
     };
-    (
-        format!("Inbox: {summary}"),
-        format!(
-            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
-        ),
-    )
+    Some((window, summary))
 }
 
 /// The periodic reminder text while the inbox stays unread: a minimal
@@ -1531,7 +1539,7 @@ mod tests {
     /// milestone; other custom rows stay unrouted.
     #[test]
     fn inbox_notice_fields_route_by_custom_type() {
-        let bash = KernelNotice::bash_completion(4321, "sleep 1", 7, None);
+        let bash = KernelNotice::bash_completion(4321, "sleep 1", 7);
         let fields = inbox_notice_fields(&bash).expect("the completion routes");
         assert_eq!(fields.class, INBOX_CLASS_BASH_DONE);
         assert_eq!(fields.sender.as_deref(), Some("sleep 1"));

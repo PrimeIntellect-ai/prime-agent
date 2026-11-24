@@ -64,7 +64,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                     &worker.recovery,
                     &worker.core,
                     &Arc::new(Notify::new()),
-                    crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0, None),
+                    crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
                     || false,
                 );
                 withdraw_bash_completion_notice(
@@ -208,7 +208,7 @@ async fn headless_completion_counts_the_bash_lane() {
         &worker.recovery,
         &worker.core,
         &Arc::new(Notify::new()),
-        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0, None),
+        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
         || false,
     );
     worker

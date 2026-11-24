@@ -589,10 +589,17 @@ fn ledger_child_records(
                 },
                 |display| display.created_at,
             ),
+            decision_child: edge.decision_child,
+            // A decision child's display legitimately stays `running`
+            // (its spawn task is a readiness handshake, never its whole
+            // run, so the settle tail withholds the completed flip): a
+            // running display after a restart is the healthy serving
+            // state, not a crashed run. An ordinary child's running
+            // display still reads as the crash it is.
             run: RunState::reseeded(
                 if display
                     .as_ref()
-                    .is_some_and(|display| display.status == "running")
+                    .is_some_and(|display| display.status == "running" && !edge.decision_child)
                 {
                     RunVerdict::Error(None)
                 } else {
@@ -609,7 +616,6 @@ fn ledger_child_records(
             direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             factory: edge.factory.is_some(),
-            prompt_admitted: true,
             retirement: Retirement::live(),
             usage_registration_forgotten: false,
             session_file: Some(edge.child),
