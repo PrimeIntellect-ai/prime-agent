@@ -251,20 +251,9 @@ impl AgentSessionEngine {
                     .block_on(async { engine.turn_boundary.take_compaction().await })
             })
             .and_then(|pending| pending.instructions);
-        if !emit(EngineEvent::CompactionStart {
-            event: crate::compaction::compaction_start_event(
-                "overflow",
-                custom_instructions.as_deref(),
-            ),
-        }) {
-            return OverflowAttempt::Cancelled;
-        }
-        pa_core::session_engine::compaction_trace::trace(
-            "auto.overflow_start_emitted",
-            &serde_json::Value::Null,
-        );
         // The overflow run shares the auto-compaction abort slot: an
-        // `abort_compaction` command cancels the in-flight summarizer.
+        // `abort_compaction` command cancels the in-flight summarizer. The
+        // slot is set before the start event, so an abort sent on that event lands.
         let controller = std::sync::Arc::new(AbortController::new());
         let signal = controller.signal();
         {
@@ -273,6 +262,19 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
+        if !emit(EngineEvent::CompactionStart {
+            event: crate::compaction::compaction_start_event(
+                "overflow",
+                custom_instructions.as_deref(),
+            ),
+        }) {
+            self.clear_auto_compaction_abort(&controller);
+            return OverflowAttempt::Cancelled;
+        }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.overflow_start_emitted",
+            &serde_json::Value::Null,
+        );
         let (model, api_key) = self.resolve_request_target(model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
