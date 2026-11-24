@@ -1,0 +1,1 @@
+- Fixed a session worker sometimes dropping its daemon connection and reconnecting when its session was created while a daemon broadcast was arriving, which delayed the session's registration.

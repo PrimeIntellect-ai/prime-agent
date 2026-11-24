@@ -97,6 +97,27 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
+    def test_forwards_the_decision_kind_to_host(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "sub-a1b2c3d4",
+                "name": "system-1",
+                "session_dir": "/tmp/parent/sub-a1b2c3d4",
+                "model": "prime-inference/clef",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            asyncio.run(rlm_module.rlm.spawn("decide", name="system-1", kind="decision"))
+
+        host_request.assert_awaited_once_with(
+            "rlm.run",
+            {
+                "prompt": "decide",
+                "kwargs": {"name": "system-1", "kind": "decision"},
+            },
+        )
+
     def test_requires_an_explicit_child_name(self) -> None:
         host_request = AsyncMock()
         with patch.object(rlm_module, "host_request", host_request):

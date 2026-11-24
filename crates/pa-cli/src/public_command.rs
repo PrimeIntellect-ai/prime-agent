@@ -254,6 +254,16 @@ fn reject_removed_command(args: &[String]) -> PublicCommandResult {
         ("install", _) => Some("Use \"prime-agent package install\".".to_string()),
         ("remove" | "uninstall", _) => Some("Use \"prime-agent package remove\".".to_string()),
         ("manage", _) => Some("Use \"prime-agent agents\".".to_string()),
+        ("machine", Some("validate")) => Some(
+            "Use \"prime-agent factory import <path>\"; it validates the machine before importing it."
+                .to_string(),
+        ),
+        ("machine", Some(name))
+            if crate::command_registry::get_command_spec(&["factory", name]).is_some() =>
+        {
+            Some(format!("Use \"prime-agent factory {name}\"."))
+        }
+        ("machine", _) => Some("Use \"prime-agent factory\".".to_string()),
         _ => None,
     };
     let joined: Vec<&str> = args.iter().take(2).map(String::as_str).collect();

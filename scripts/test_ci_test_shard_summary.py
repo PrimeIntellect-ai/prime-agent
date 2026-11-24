@@ -21,16 +21,19 @@ class AttemptAudit(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        self.ids = [next(f"pkg#test:unit-{n}" for n in range(100)
-                         if shards.shard_of(f"pkg#test:unit-{n}", 2) == shard)
-                    for shard in range(2)]
+        # The recorded units fill both shards whatever shard 1's head start.
+        self.ids = sorted(shards.TIMINGS["unit_seconds"])
+        assignment = shards.shard_assignment(self.ids, 2)
+        self.by_shard = [[uid for uid in self.ids if assignment[uid] == shard]
+                         for shard in range(2)]
 
     def write(self, shard, attempt=1, rc=0, complete=True, legacy=False):
         suffix = "" if legacy else f"-attempt-{attempt}"
         path = self.directory / f"shard-manifest-{shard}{suffix}.json"
-        unit = {"id": self.ids[shard - 1], "rc": rc, "seconds": 1.0,
-                "failed_tests": ["failure"] if rc else []}
-        shards.write_manifest(path, shard, 2, self.ids, [unit] if complete else [],
+        units = [{"id": uid, "rc": rc if n == 0 else 0, "seconds": 1.0,
+                  "failed_tests": ["failure"] if rc and n == 0 else []}
+                 for n, uid in enumerate(self.by_shard[shard - 1])]
+        shards.write_manifest(path, shard, 2, self.ids, units if complete else [],
                               run_attempt=attempt, run_id="12345", commit_sha="a" * 40)
         if legacy:
             data = json.loads(path.read_text())
@@ -207,7 +210,7 @@ class AttemptAudit(unittest.TestCase):
         path = self.write(1)
         self.write(2)
         data = json.loads(path.read_text())
-        data["units"][0]["id"] = self.ids[1]
+        data["units"][0]["id"] = self.by_shard[1][0]
         path.write_text(json.dumps(data))
         result = self.run_summary()
         self.assertEqual(result.returncode, 1)
