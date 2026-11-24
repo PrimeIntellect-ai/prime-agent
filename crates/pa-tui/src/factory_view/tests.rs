@@ -2438,6 +2438,50 @@ fn narrow_node_markdown_wrap_and_scroll_preserve_the_full_paragraph() {
     );
 }
 
+/// The key loop scrolls by the window render draws: while an error row shows, the window is
+/// one row shorter, and paging down still reaches the document's last row.
+#[test]
+fn paging_reaches_the_last_row_while_an_error_shows() {
+    let prompt = (0..80)
+        .map(|index| format!("line-{index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let data = json!({
+        "state": {"id": "reviewing", "instances": [
+            {"index": 0, "entry": 0, "status": "done"}
+        ]},
+        "entry": {"index": 0, "status": "done", "outputs": null, "outputErrors": {}},
+        "instance": {"index": 0, "entry": 0, "status": "done", "prompt": prompt}
+    });
+    let mut view =
+        node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
+    view.set_error("the node request timed out");
+    let theme = theme();
+    let kb = kb();
+    let page_down = kb
+        .first_key("tui.select.pageDown")
+        .expect("the page-down binding");
+    let _ = view.render(&theme, 80, &kb, 12);
+    for _ in 0..60 {
+        assert!(view.handle_key(&page_down, &kb, 12));
+    }
+    let last_page = view
+        .render(&theme, 80, &kb, 12)
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        last_page.contains("Error: the node request timed out"),
+        "{last_page}"
+    );
+    assert!(last_page.contains("line-79"), "{last_page}");
+}
+
 #[test]
 fn narrow_file_markdown_scroll_uses_the_rendered_width() {
     let words = (0..240)
