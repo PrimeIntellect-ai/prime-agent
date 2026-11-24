@@ -571,20 +571,12 @@ mod liveness_tests {
 
     /// This very process reads alive wherever the probe lands: /proc's
     /// state line on Linux, kill(0) + the process record where /proc is
-    /// not mounted.
+    /// not mounted. A pid beyond the `pid_t` range must not wrap into
+    /// kill's negative "every process" argument.
     #[test]
-    fn a_live_process_reads_alive() {
+    fn only_a_live_process_reads_alive() {
         assert!(is_process_alive(std::process::id()).expect("liveness probe"));
-    }
-
-    /// Must not wrap into kill's negative "every process" argument.
-    #[test]
-    fn a_pid_beyond_the_pidt_range_is_dead() {
         assert!(!is_process_alive(u32::MAX).expect("liveness probe"));
-    }
-
-    #[test]
-    fn a_nonexistent_pid_reads_dead_through_the_fallback() {
         assert!(!is_process_alive(100_000_000).expect("liveness probe"));
     }
 
