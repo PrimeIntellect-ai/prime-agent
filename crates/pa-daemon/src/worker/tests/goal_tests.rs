@@ -247,7 +247,8 @@ async fn goal_turn_end_loop_runs_to_completion() {
     let kernel_failure = events.iter().find(|event| {
         event.get("type").and_then(Value::as_str) == Some("message_end")
             && event["message"]["role"] == "toolResult"
-            && event["message"]["isError"] == json!(true)
+            && (event["message"]["isError"] == json!(true)
+                || event["message"]["details"]["status"] == "error")
     });
     if let Some(failure) = kernel_failure {
         panic!(

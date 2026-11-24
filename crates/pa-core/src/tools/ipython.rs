@@ -283,8 +283,6 @@ pub struct IpythonToolOptions {
     /// Shared provisioner owning the kernel lifecycle.
     pub provisioner: Arc<dyn IpythonKernelProvisioner>,
     pub on_late_sent_agent_message: Option<LateSentAgentMessageHandler>,
-    /// Import names of the Python skills the kernel pre-imports.
-    pub python_skill_imports: Vec<String>,
 }
 
 pub fn ipython_tool_schema() -> serde_json::Value {
@@ -381,21 +379,6 @@ pub async fn execute_ipython(
         } else {
             format!("{}\n\n{}", kernel_restart_notice(), text)
         };
-    }
-    // A pre-imported skill missing from the kernel is a broken install, not a
-    // code error: fail the call so it cannot pass as an ordinary cell result.
-    if let Some(error) = r
-        .error
-        .as_ref()
-        .filter(|error| r.status == ExecuteStatus::Error && error.ename == "ModuleNotFoundError")
-    {
-        if let Some(skill) = options
-            .python_skill_imports
-            .iter()
-            .find(|skill| error.evalue == format!("No module named '{skill}'"))
-        {
-            anyhow::bail!("Python skill {skill} is not installed in the Python kernel.\n{text}");
-        }
     }
     // The sanctioned turn-end confirmation: short, and it lands in the
     // transcript for replay of the ended turn.

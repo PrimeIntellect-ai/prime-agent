@@ -484,11 +484,6 @@ pub fn ipython_tool_options(
     on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
 ) -> IpythonToolOptions {
     IpythonToolOptions {
-        python_skill_imports: provisioner
-            .python_skills()
-            .iter()
-            .map(|skill| skill.import_name.clone())
-            .collect(),
         provisioner,
         on_late_sent_agent_message,
     }

@@ -176,7 +176,6 @@ async fn golden_ipython_group_matches_ts() {
         let options = IpythonToolOptions {
             provisioner: provisioner.clone(),
             on_late_sent_agent_message: None,
-            python_skill_imports: Vec::new(),
         };
         let result = ipython::execute_ipython(
             &options,
@@ -257,7 +256,6 @@ async fn ipython_details_carry_the_cell_edit_diffs() {
             kill_calls: AtomicUsize::new(0),
         }),
         on_late_sent_agent_message: None,
-        python_skill_imports: Vec::new(),
     };
     let result = ipython::execute_ipython(&options, "edit()", None, None, None, None)
         .await
@@ -271,45 +269,6 @@ async fn ipython_details_carry_the_cell_edit_diffs() {
     );
 }
 
-/// A cell that fails importing a pre-imported skill fails the call; any
-/// other missing module stays an ordinary cell result.
-#[tokio::test]
-async fn a_missing_skill_import_fails_the_call() {
-    let missing_module = |name: &str| ExecuteResult {
-        status: ExecuteStatus::Error,
-        error: Some(KernelErrorInfo {
-            ename: "ModuleNotFoundError".to_string(),
-            evalue: format!("No module named '{name}'"),
-            traceback: vec![format!("ModuleNotFoundError: No module named '{name}'")],
-        }),
-        ..ExecuteResult::default()
-    };
-    let options = IpythonToolOptions {
-        provisioner: Arc::new(MockProvisioner {
-            kernel: Arc::new(MockKernel {
-                executions: Mutex::new(vec![missing_module("goal"), missing_module("pandaz")]),
-                exec_calls: AtomicUsize::new(0),
-                next_index: AtomicUsize::new(0),
-            }),
-            ensure_calls: AtomicUsize::new(0),
-            kill_calls: AtomicUsize::new(0),
-        }),
-        on_late_sent_agent_message: None,
-        python_skill_imports: vec!["goal".to_string()],
-    };
-    let skill = ipython::execute_ipython(&options, "import goal", None, None, None, None)
-        .await
-        .expect_err("a missing skill fails the call");
-    assert_eq!(
-        skill.to_string(),
-        "Python skill goal is not installed in the Python kernel.\nModuleNotFoundError: No module named 'goal'"
-    );
-    let other = ipython::execute_ipython(&options, "import pandaz", None, None, None, None)
-        .await
-        .expect("an ordinary missing module is a cell result");
-    assert!(other.is_error);
-}
-
 #[test]
 fn golden_schema_group_matches_ts() {
     let corpus = corpus("schema");
@@ -321,7 +280,6 @@ fn golden_schema_group_matches_ts() {
                 "/tmp",
                 IpythonToolOptions {
                     on_late_sent_agent_message: None,
-                    python_skill_imports: Vec::new(),
                     provisioner: Arc::new(MockProvisioner {
                         kernel: Arc::new(MockKernel {
                             executions: Mutex::new(Vec::new()),
