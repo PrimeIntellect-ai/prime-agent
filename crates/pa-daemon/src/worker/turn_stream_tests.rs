@@ -39,6 +39,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         last_action_snapshot: Some(SessionActionSnapshot::default()),
         rlm_depth: 0,
         runtime_kind: "top-level".to_string(),
+        decision_child: false,
         rlm_child_id: None,
         parent_active_session_id: None,
         parent_session_id: None,
@@ -53,6 +54,9 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         queued_input_suspended: false,
         pending_next_turn: Vec::new(),
         active_action: None,
+        inbox_wake_due: None,
+        inbox_shown_unaccepted: std::collections::BTreeSet::new(),
+        run_cut_at_tool_boundary: false,
         running_tool_calls: std::collections::HashSet::new(),
         running_admission_ids: std::collections::HashSet::new(),
         tool_use_count: 0,
@@ -77,6 +81,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
             worker_token: String::new(),
         },
         herdr: std::sync::Arc::new(std::sync::Mutex::new(crate::herdr::HerdrReporter::default())),
+        inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
+        inbox_engine: None,
     }
 }
 

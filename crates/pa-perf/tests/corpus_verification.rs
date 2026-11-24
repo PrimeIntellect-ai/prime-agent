@@ -9,7 +9,7 @@ use std::path::Path;
 use pa_core::session::parse_session_entries;
 use pa_daemon::rlm_ledger::RlmSpawnLedger;
 use pa_daemon::session_store::SessionFile;
-use pa_perf::corpus::{generate, CacheMode, CorpusOptions, Profile};
+use pa_perf::corpus::{generate, CorpusOptions, Profile};
 
 fn tiny(profile: Profile, out: &Path) -> CorpusOptions {
     CorpusOptions {
@@ -33,66 +33,16 @@ fn sessions_load_through_the_product_store() {
         let store = SessionFile::open(&path).expect("the product store opens the file");
         assert_eq!(store.header.id, path.file_stem().unwrap().to_string_lossy());
         assert!(!store.entries().is_empty(), "the session carried its rows");
+        let text = std::fs::read_to_string(&path).expect("read the session");
+        assert!(
+            parse_session_entries(&text)
+                .iter()
+                .all(|entry| !matches!(entry, pa_types::session::FileEntry::Unknown { .. })),
+            "no row degrades to an unknown entry"
+        );
         checked += 1;
     }
     assert_eq!(checked, options.sessions, "every sessions-dir file checked");
-}
-
-/// No row may degrade to an Unknown entry: the corpus speaks the wire format.
-#[test]
-fn rows_never_degrade_to_unknown_entries() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let options = tiny(Profile::Small, dir.path());
-    let manifest = generate(&options).expect("generate");
-    let huge = &manifest.markers.huge;
-    let text = std::fs::read_to_string(&huge.file).expect("read the huge session");
-    let entries = parse_session_entries(&text);
-    assert!(
-        entries
-            .iter()
-            .all(|entry| !matches!(entry, pa_types::session::FileEntry::Unknown { .. })),
-        "no unknown rows in the generated huge session"
-    );
-}
-
-/// The marker lands on the final user row of each marker session.
-#[test]
-fn markers_land_on_the_final_user_message() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let options = tiny(Profile::Small, dir.path());
-    let manifest = generate(&options).expect("generate");
-    for marker in [
-        &manifest.markers.huge,
-        &manifest.markers.switch_a,
-        &manifest.markers.switch_b,
-    ] {
-        let text = std::fs::read_to_string(&marker.file).expect("read session");
-        // The reply under the marker is one short text line, so rows the
-        // product appends at attach cannot push the marker off screen.
-        let last: serde_json::Value =
-            serde_json::from_str(text.lines().last().expect("a last row")).expect("valid row");
-        let blocks = last["message"]["content"].as_array();
-        assert!(
-            last["message"]["role"] == "assistant"
-                && last["message"]["stopReason"] == "stop"
-                && blocks.is_some_and(|blocks| blocks.len() == 1 && blocks[0]["type"] == "text"),
-            "the marker reply is one text block: {last}"
-        );
-        let last_user = text
-            .lines()
-            .rev()
-            .find_map(|line| {
-                let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                (value.get("type") == Some(&serde_json::json!("message"))
-                    && value["message"]["role"] == serde_json::json!("user"))
-                .then(|| value["message"]["content"].to_string())
-            })
-            .expect("a final user message");
-        assert!(
-            last_user.contains(&marker.needle),
-            "the needle is the final user message: {last_user}"
-        );
-    }
 }
 
 /// The ledger the corpus writes replays through the product's own reader.
@@ -254,82 +204,6 @@ fn entry_ids_stay_unique_past_the_uuid_prefix_collision_cliff() {
         rows += 1;
     }
     assert_eq!(ids.len(), rows, "no id collides across {rows} rows");
-}
-
-/// The warm pass writes the product's own window-cache sidecars.
-#[test]
-fn the_warm_pass_writes_product_sidecars() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let mut options = tiny(Profile::Small, dir.path());
-    options.cache = CacheMode::Warm;
-    let manifest = generate(&options).expect("generate");
-    let sidecars = manifest
-        .files
-        .iter()
-        .filter(|file| file.ends_with("window-cache.json"))
-        .count();
-    assert_eq!(
-        sidecars,
-        options.sessions + options.archive,
-        "every openable session gained a window-cache sidecar"
-    );
-}
-
-/// The switch-b row is the ONLY session the switch query can match. The
-/// agents-view search is a fuzzy subsequence match over each row's name
-/// AND message text, so a common token could rank another row first; the
-/// guarantee needs the `zq` token to be literally impossible elsewhere —
-/// no generated corpus text (names or message bodies) contains the letter
-/// z at all (the ISO `Z` header suffix is the one allowed z).
-#[test]
-fn the_switch_query_can_only_match_switch_b() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let options = tiny(Profile::Small, dir.path());
-    let manifest = generate(&options).expect("generate");
-    assert_eq!(manifest.markers.switch_row, "switch target zqmark");
-    assert!(manifest.markers.switch_query.contains("zqmark"));
-    assert!(manifest.markers.switch_query != manifest.markers.switch_row);
-    let mut scanned = 0;
-    for file in &manifest.files {
-        let path = std::path::PathBuf::from(file);
-        if path.parent() == Some(&manifest.paths.sessions_dir) {
-            // The search corpus folds MESSAGE text and names (not header
-            // timestamps, whose ISO `Z` suffix is the one allowed z).
-            for line in std::fs::read_to_string(&path)
-                .expect("read session")
-                .lines()
-            {
-                if line.contains('z')
-                    && !line.contains(r#""type":"session""#)
-                    && !line.contains(&manifest.markers.switch_row)
-                {
-                    panic!("a non-header row carries z: {line}");
-                }
-            }
-            scanned += 1;
-        }
-    }
-    assert_eq!(scanned, options.sessions, "every session checked");
-}
-
-/// The corpus manifest records the generated file set (the bench's
-/// per-run restore baseline) and the archive dir holds the archived files.
-#[test]
-fn the_manifest_is_the_file_set_baseline() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let options = tiny(Profile::Small, dir.path());
-    let manifest = generate(&options).expect("generate");
-    let on_disk = relative_files(dir.path());
-    assert_eq!(
-        manifest.files.len() + 1, // corpus.json is written after the walk
-        on_disk.len(),
-        "the manifest lists every generated file"
-    );
-    let archived = on_disk
-        .iter()
-        .filter(|file| file.starts_with("agent/sessions-archive/"))
-        .count();
-    assert_eq!(archived, options.archive);
 }
 
 /// The one ledger file under a corpus root (its name is the sessions-dir

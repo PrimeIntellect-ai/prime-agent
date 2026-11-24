@@ -48,14 +48,14 @@ fn bash_done_notice(pid: u32, command: &str) -> pa_core::session_engine::inbox::
 
 /// One test's routing state: a journal-backed worker core plus a fresh
 /// inbox store (the session dir the worker's journal lives under).
-type InboxRoutingState = (
+pub(super) type InboxRoutingState = (
     Arc<Worker>,
     Arc<SessionInbox>,
     Arc<Mutex<Vec<pa_core::session_engine::inbox::InboxMessage>>>,
     Arc<Notify>,
 );
 
-fn routing_state() -> InboxRoutingState {
+pub(super) fn routing_state() -> InboxRoutingState {
     let worker = worker_with_journal();
     let session_dir = worker
         .config
@@ -74,7 +74,7 @@ fn routing_state() -> InboxRoutingState {
     )
 }
 
-fn steering_rows(worker: &Worker) -> Vec<(String, Option<String>, bool)> {
+pub(super) fn steering_rows(worker: &Worker) -> Vec<(String, Option<String>, bool)> {
     worker
         .core
         .lock()
@@ -137,8 +137,7 @@ async fn an_idle_arrival_queues_one_short_notice_and_keeps_the_message() {
     // model-visible notice text, byte-identical (the class the TUI renders
     // as its own row). Whole-object equality against the builder: every
     // field at once, no extra keys, the admission timestamp read back.
-    let (_, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(&arrivals.lock().unwrap(), 1);
+    let (_, expected_text) = super::inbox_router::notice_text(&arrivals.lock().unwrap(), 1);
     let row = custom_message
         .as_ref()
         .expect("the notice row carries its custom twin");
@@ -912,7 +911,7 @@ async fn a_withdrawal_inside_a_covered_batch_rerenders_the_queued_rows() {
         "the arrival row and the reminder row: {rows:?}"
     );
     let (expected_preview, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(std::slice::from_ref(&milestone), 1);
+        super::inbox_router::notice_text(std::slice::from_ref(&milestone), 1);
     assert_eq!(
         rows[0],
         (expected_text.clone(), Some(expected_preview), true),
@@ -1234,6 +1233,10 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
 async fn a_withdrawal_racing_an_arrival_settles_both() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
+    // The admission stamps `inbox_wake_due` from the runtime clock
+    // (`tokio::time::Instant::now`), like every production caller; the
+    // racing threads enter the runtime so they read that clock.
+    let runtime = tokio::runtime::Handle::current();
     for i in 0..200u32 {
         let _ = admit_inbox_notice(
             &worker.recovery,
@@ -1249,15 +1252,17 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let admit = {
-            let (worker, inbox, arrivals, notify, barrier, done_tx) = (
+            let (worker, inbox, arrivals, notify, barrier, done_tx, runtime) = (
                 Arc::clone(&worker),
                 Arc::clone(&inbox),
                 Arc::clone(&arrivals),
                 Arc::clone(&notify),
                 Arc::clone(&barrier),
                 done_tx.clone(),
+                runtime.clone(),
             );
             std::thread::spawn(move || {
+                let _runtime = runtime.enter();
                 barrier.wait();
                 let _ = admit_inbox_notice(
                     &worker.recovery,
@@ -1484,7 +1489,7 @@ async fn a_withdrawals_rerender_keeps_the_persistence_error_clause() {
         "the re-rendered arrival row and reminder row: {rows:?}"
     );
     let (expected_preview, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(std::slice::from_ref(&milestone), 1);
+        super::inbox_router::notice_text(std::slice::from_ref(&milestone), 1);
     let expected_text = inbox.with_persistence_error_clause(expected_text);
     assert_eq!(
         rows[0],
@@ -2579,8 +2584,7 @@ async fn the_wake_row_refresh_follows_the_live_store() {
         "the twin's content is the row's model-visible text: {twin:?}"
     );
     let (count, _, _) = inbox.count();
-    let (_, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(&arrivals.lock().unwrap(), count);
+    let (_, expected_text) = super::inbox_router::notice_text(&arrivals.lock().unwrap(), count);
     let expected_text = inbox.with_persistence_error_clause(expected_text);
     assert_eq!(
         twin,
@@ -2808,7 +2812,7 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
     );
     assert_eq!(
         persisted_steering[0].message,
-        pa_core::session_engine::inbox::arrival_notice(&initial_waiting, 2).1
+        super::inbox_router::notice_text(&initial_waiting, 2).1
     );
 
     // Restore the durable queue and a freshly opened inbox, while the
@@ -2860,8 +2864,7 @@ async fn a_recovered_empty_arrivals_batch_keeps_the_remaining_wake_after_bash_co
         json!({ "text": "recovery survivor full body" })
     );
     assert_eq!(arrivals.lock().unwrap().as_slice(), remaining.as_slice());
-    let (expected_preview, expected_text) =
-        pa_core::session_engine::inbox::arrival_notice(&remaining, 1);
+    let (expected_preview, expected_text) = super::inbox_router::notice_text(&remaining, 1);
     assert_eq!(
         steering_rows(&worker),
         vec![(expected_text, Some(expected_preview), true)],

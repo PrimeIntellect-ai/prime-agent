@@ -1,0 +1,1 @@
+- Fixed the daemon dropping a client command whose bytes arrived in two reads while a response or session event went out, which left the client waiting for an answer that never came.
