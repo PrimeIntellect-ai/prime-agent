@@ -962,6 +962,12 @@ class BashHandle:
             # The cell may do other work before awaiting this handle. Do not classify
             # it as detached until that whole cell has crossed its completion barrier.
             await cell_finished.wait()
+            # An await of THIS handle that is still in flight owns the
+            # completion: let it resolve and count the result as consumed
+            # before deciding whether anything must be announced. A notice
+            # fired between the exit and the await would interrupt the
+            # awaiting cell and lose the result.
+            await self._awaiters_free_event().wait()
             if self._awaited_by_creating_cell or not repl.is_active() or not self._claim_notice():
                 return
             command = _capped(self.command)
@@ -1166,6 +1172,29 @@ class BashHandle:
         if delivered:
             _record_journal(self._pid, active=False)
 
+    # Awaiters of THIS handle, anywhere in the session: a later cell can
+    # await a handle an earlier cell created, and the completion notice must
+    # not fire between the process exit and the await that is resolving it —
+    # that arrival would interrupt the awaiting cell and lose the result the
+    # await was about to return. The event is set while no await is in
+    # flight, so the notice waits for every awaiter to clear.
+    def _awaiters_free_event(self) -> asyncio.Event:
+        event = getattr(self, "_awaiter_free", None)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._awaiter_free = event
+        return event
+
+    def _begin_await(self) -> None:
+        self._awaiters = getattr(self, "_awaiters", 0) + 1
+        self._awaiters_free_event().clear()
+
+    def _end_await(self) -> None:
+        self._awaiters = max(0, getattr(self, "_awaiters", 1) - 1)
+        if self._awaiters == 0:
+            self._awaiters_free_event().set()
+
     def __await__(self) -> Generator[Any, None, BashResult | BashSnapshot]:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
@@ -1182,6 +1211,7 @@ class BashHandle:
         self._released = True
         completed = False
         degraded = False
+        self._begin_await()
         try:
             result = yield from _bounded_wait(wait, bound).__await__()
             if result is None:
@@ -1202,6 +1232,7 @@ class BashHandle:
                 self._awaited_by_creating_cell = True
             if completed:
                 self._note_result_consumed()
+            self._end_await()
         if degraded:
             snapshot = self._degrade_snapshot()
             # Only the running cell's own await gets the note: a background
@@ -1404,6 +1435,8 @@ class PersistentBashHandle(BashHandle):
             result = await self._wait()
             if self._creating_cell_finished is not None:
                 await self._creating_cell_finished.wait()
+            # Same gate as a background command: an in-flight await owns the completion.
+            await self._awaiters_free_event().wait()
             if self._awaited_by_creating_cell or not repl.is_active() or not self._claim_notice():
                 return
             command = _capped(self.command)

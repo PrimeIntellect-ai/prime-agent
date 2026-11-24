@@ -200,6 +200,7 @@ mod navigation_pause_tests;
 mod queue_tests;
 mod sidecar_exit_tests;
 mod summary_tests;
+mod wake_starvation_tests;
 mod warning_marker_tests;
 mod windowed_attach_tests;
 #[tokio::test]
@@ -381,4 +382,54 @@ async fn wait_for_idle_bounds_one_busy_slice_without_stopping_work() {
         immediate.data, None,
         "an idle observation keeps the old response shape"
     );
+}
+
+/// The parent's child wait (`waitForRlmQuiescence`) holds while a
+/// background completion is still owed and answers once it delivers. A held
+/// input pause keeps the owed `[bash-done]` row queued while the session
+/// itself reads idle.
+#[tokio::test(start_paused = true)]
+async fn child_wait_holds_while_a_background_completion_is_owed() {
+    let worker = created_dispatch_worker().await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let pause = worker.hold_queued_work_pause("owed-completion");
+    admit_kernel_notice(
+        &worker.recovery,
+        &worker.core,
+        &worker.work_notify,
+        crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
+        || false,
+    );
+    let waiting_worker = std::sync::Arc::clone(&worker);
+    let waiting = tokio::spawn(async move {
+        waiting_worker
+            .dispatch(
+                "wait_for_idle",
+                &json!({"timeoutMs": 60_000, "waitForRlmQuiescence": true}),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the child wait must hold while a completion is owed"
+    );
+
+    // The owed row delivers: its turn end notifies idle.
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering.clear();
+        core.follow_up.clear();
+    }
+    worker.idle_notify.notify_waiters();
+    let response = waiting.await.expect("child wait task");
+    assert!(response.success);
+    assert_eq!(
+        response.data, None,
+        "the wait answered on delivery, not timeout"
+    );
+    drop(pause);
 }

@@ -1785,6 +1785,34 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
 
+    async def test_persistent_completion_notice_waits_for_an_in_flight_await(self):
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        with mock.patch.object(bash_module.PersistentBashHandle, "_schedule_background_completion_notice"):
+            handle = bash("true", persistent=True)
+        self.pgids.append(handle.pid)
+        await handle._wait()
+        # The creating cell has finished; an await of THIS handle is in flight.
+        handle._creating_cell_finished = asyncio.Event()
+        handle._creating_cell_finished.set()
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            handle._begin_await()
+            notice = asyncio.ensure_future(handle._notify_completion())
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual([call["type"] for call in calls], ["bash.completed"])
+
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
         self.pgids.append(handle.pid)
@@ -2056,6 +2084,43 @@ class BashInventedKwargsTest(unittest.TestCase):
             self.assertIn("okay", handle.output())
         finally:
             handle.kill()
+
+
+class CompletionNoticeGateTest(unittest.IsolatedAsyncioTestCase):
+    """The completion notice must not race an await of the same handle."""
+
+    async def test_completion_notice_waits_for_an_in_flight_await(self):
+        bash_module._set_completion_notices_wired(True)
+        self.addCleanup(bash_module._set_completion_notices_wired, False)
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        handle = bash("true")
+        await handle._wait()
+        await handle._wait_reaped()
+        cell_finished = asyncio.Event()
+        cell_finished.set()
+        activity = {"id": handle._activity_id, "pid": handle.pid, "active": True}
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            # An await of THIS handle is in flight.
+            handle._begin_await()
+            notice = asyncio.ensure_future(
+                handle._notify_background_completion(cell_finished, activity)
+            )
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual(len(calls), 1, "the notice fires once the await clears")
+        self.assertEqual(calls[0]["type"], "bash.completed")
 
 
 if __name__ == "__main__":
