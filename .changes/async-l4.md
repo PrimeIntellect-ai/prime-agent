@@ -1,0 +1,1 @@
+- A parked session gets paced keepalive notices while its background commands run.

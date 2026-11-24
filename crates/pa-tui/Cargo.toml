@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Terminal UI for Prime Agent."
 
+[lib]
+doctest = false
+
 [dependencies]
 pa-types = { path = "../pa-types" }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }

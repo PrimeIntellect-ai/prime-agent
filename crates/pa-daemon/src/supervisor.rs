@@ -7,6 +7,7 @@ mod accept_loop;
 mod adoption;
 mod clients;
 mod factory_overview;
+mod known_sessions;
 mod launch_budget;
 mod notes;
 mod options;
@@ -101,7 +102,6 @@ use crate::registry::{
     WorkerTransition,
 };
 use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
-use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,

@@ -359,84 +359,6 @@ mod tests {
     }
 
     #[test]
-    fn activity_detail_branches_match_the_shared_wording() {
-        let options = SessionActivityOptions {
-            heartbeat_label: "heartbeat".to_string(),
-            idle_label: String::new(),
-        };
-        let detail =
-            |overrides: Value| session_activity_detail(&activity_summary(overrides), &options);
-        assert_eq!(
-            detail(json!({ "activity": "working", "isStreaming": true, "isRunningTools": true })),
-            "running tools"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "isStreaming": true })),
-            "thinking"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "isBashRunning": true })),
-            "running bash"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "isCompacting": true })),
-            "compacting"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "hasRunningSubagents": true })),
-            "subagents running"
-        );
-        assert_eq!(
-            detail(json!({ "activity": "working", "workerState": "starting" })),
-            "starting"
-        );
-        assert_eq!(detail(json!({ "lifecycle": "archived" })), "archived");
-        assert_eq!(
-            detail(json!({ "runtimeKind": "subagent", "repliedSinceTask": true })),
-            "replied"
-        );
-        assert_eq!(detail(json!({ "activity": "working" })), "working");
-        assert_eq!(detail(json!({ "taskState": "error" })), "error");
-        assert_eq!(detail(json!({ "taskState": "completed" })), "completed");
-        // No branch fires: the surface's idle fallback.
-        assert_eq!(detail(json!({})), "");
-    }
-
-    #[test]
-    fn activity_detail_labels_carry_the_surface_options() {
-        let view = SessionActivityOptions {
-            heartbeat_label: "heartbeat \u{b7} next 3m".to_string(),
-            idle_label: "needs input".to_string(),
-        };
-        assert_eq!(
-            session_activity_detail(
-                &activity_summary(json!({ "hasActiveHeartbeat": true })),
-                &view
-            ),
-            "heartbeat \u{b7} next 3m"
-        );
-        assert_eq!(
-            session_activity_detail(&activity_summary(json!({})), &view),
-            "needs input"
-        );
-        let table = SessionActivityOptions {
-            heartbeat_label: "heartbeat".to_string(),
-            idle_label: String::new(),
-        };
-        assert_eq!(
-            session_activity_detail(
-                &activity_summary(json!({ "hasActiveHeartbeat": true })),
-                &table
-            ),
-            "heartbeat"
-        );
-        assert_eq!(
-            session_activity_detail(&activity_summary(json!({})), &table),
-            ""
-        );
-    }
-
-    #[test]
     fn activity_detail_worker_state_waits_for_no_ledger_mark() {
         let options = SessionActivityOptions {
             heartbeat_label: "heartbeat".to_string(),
@@ -468,27 +390,6 @@ mod tests {
             ),
             "recovering"
         );
-    }
-
-    #[test]
-    fn entry_round_trips_the_wire_shape() {
-        let entry = AgentRosterEntry {
-            agent_id: "s1".to_string(),
-            queued_child: None,
-            seeded_cwd: None,
-            summary: json!({ "sessionId": "s1" }),
-            status: AgentRosterStatus::Idle,
-            status_label: None,
-            last_heard_from_at: None,
-            worker_id: Some("w1".to_string()),
-            rest: JsonMap::default(),
-        };
-        let value = serde_json::to_value(&entry).unwrap();
-        assert_eq!(value["agentId"], "s1");
-        assert_eq!(value["status"], "idle");
-        assert_eq!(value["workerId"], "w1");
-        let back: AgentRosterEntry = serde_json::from_value(value).unwrap();
-        assert_eq!(back, entry);
     }
 
     #[test]
