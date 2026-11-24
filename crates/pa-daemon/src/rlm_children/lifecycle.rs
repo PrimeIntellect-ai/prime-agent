@@ -1038,12 +1038,14 @@ fn child_busy_flags(state: &Value) -> bool {
 }
 
 /// Factory task observers require the opt-in field; absence cannot prove the
-/// background lanes quiescent and therefore keeps that child unsettled.
+/// background lanes quiescent and therefore keeps that child unsettled. A
+/// settled child that runs a follow-up turn (a `[bash-done]` notice, a
+/// repair message) is task work too: its run never reopens.
 fn factory_task_busy(state: &Value) -> Option<bool> {
     state
         .get("outstandingBackgroundJobs")
         .and_then(Value::as_u64)
-        .map(|count| count > 0)
+        .map(|count| count > 0 || child_busy_flags(state))
 }
 
 #[cfg(test)]

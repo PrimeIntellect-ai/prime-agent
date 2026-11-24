@@ -528,7 +528,7 @@ async fn collect_reports_factory_task_work_separately_from_turn_settlement() {
 
     child_state.background_jobs.store(0, Ordering::SeqCst);
     let settled = sessions
-        .collect(vec![handle.rlm_child_id], 10_000)
+        .collect(vec![handle.rlm_child_id.clone()], 10_000)
         .await
         .expect("collect after background completion delivery");
     assert!(
@@ -536,6 +536,16 @@ async fn collect_reports_factory_task_work_separately_from_turn_settlement() {
         "the child turn stays settled: {settled:?}"
     );
     assert_eq!(settled[0].factory_task_busy, Some(false));
+
+    // The completion notice's follow-up turn still works in the checkout.
+    *child_state.live_state.lock().unwrap() =
+        Some(json!({ "isStreaming": true, "sessionActions": { "queuedCount": 0 } }));
+    let follow_up = sessions
+        .collect(vec![handle.rlm_child_id], 10_000)
+        .await
+        .expect("collect during the follow-up turn");
+    assert!(follow_up[0].settled, "the run never reopens: {follow_up:?}");
+    assert_eq!(follow_up[0].factory_task_busy, Some(true));
 }
 
 /// The task-activity write is part of the direct read: while one refresh
