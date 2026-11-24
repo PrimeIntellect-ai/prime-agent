@@ -2,6 +2,21 @@
 
 Prime Sandboxes are disposable VM environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (CPU $0.05/core/hr, memory $0.01/GB/hr, disk $0.001/GB/hr).
 
+## Agents: spawn a bot
+
+An agent that needs its own standing sandbox spawns a bot as a subagent. It does not drive the `prime sandbox` CLI:
+
+```python
+bot = await rlm.spawn("Watch the nightly eval and report failures.", name="eval-watcher", target="sandbox")
+await agent_message.send("Start with last night's run.", receiver_role="child", receiver_name=bot.name)
+```
+
+- The user must opt in first with `/bots on` (the `bots.enabled` setting, off by default). Ask the user; do not change it yourself.
+- The bot runs the same prime-agent version as its owner. The daemon creates, pauses, resumes, and deletes its sandbox.
+- Bot replies arrive as agent messages from the bot, not as rlm child results. The user attaches from the `/bots` page.
+
+The CLI and SDK below are the human and admin path: one-off jobs, untrusted code, and cleanup.
+
 Live docs: `sandboxes/overview.md`, `sandboxes/cli.md`, `sandboxes/sdk.md`, `sandboxes/images.md`, `sandboxes/tunnel.md` under https://docs.primeintellect.ai/
 
 ## CLI Lifecycle
