@@ -28,10 +28,11 @@ use crate::kernel::shared::{
     ATTACHMENT_DISPLAY_MIME, BASH_ACTIVITY_DISPLAY_MIME, BASH_COMMAND_DISPLAY_MIME,
     DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DIFF_DISPLAY_MIME,
     END_TURN_REQUEST_TYPE, FACTIVITY_SETTLE_TIMEOUT_MS, FACTIVITY_WATCH_TIMEOUT_MS_CAP,
-    HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_ABORT_GRACE_MS, KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE,
-    KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
-    KERNEL_STDERR_LOG_BUDGET_MARKER, MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
-    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, INBOX_MESSAGE_DISPLAY_MIME, KERNEL_ABORT_GRACE_MS,
+    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+    KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS, KERNEL_STDERR_LOG_BUDGET_MARKER,
+    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_KERNEL_STDERR_CHARS,
+    MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
     RESTORE_EXECUTION_TIMEOUT_MS, SNAPSHOT_EXECUTION_TIMEOUT_MS, TRANSCRIPT_READ_DISPLAY_MIME,
 };
 use crate::kernel::state_snapshot::{
@@ -86,6 +87,7 @@ struct ExecBuffers {
     sent_agent_messages: Vec<KernelSentAgentMessage>,
     bash_commands: Option<KernelBashCommands>,
     transcript_reads: Vec<Value>,
+    inbox_messages: Vec<Value>,
     background_output: String,
     background_output_chars: usize,
     background_output_truncated: bool,
@@ -131,6 +133,7 @@ impl InternalExecuteResult {
                 sent_agent_messages: None,
                 bash_commands: None,
                 transcript_reads: None,
+                inbox_messages: None,
                 background_output: None,
                 ended_turn: false,
                 status: ExecuteStatus::Aborted,
@@ -718,8 +721,6 @@ impl ReplKernelManager {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
-        entry: Option<u64>,
-        instance: Option<u64>,
     ) -> anyhow::Result<Value> {
         if !self.is_running() {
             return Err(anyhow!("Kernel is not running"));
@@ -740,8 +741,6 @@ impl ReplKernelManager {
             "runId": run_id,
             "specId": spec_id,
             "timeoutMs": timeout_ms,
-            "entry": entry,
-            "instance": instance,
         });
         if let Err(error) = self.inner.write_line(&frame).await {
             lock(&self.inner.guarded)

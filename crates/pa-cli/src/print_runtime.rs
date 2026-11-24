@@ -854,8 +854,6 @@ pub(crate) async fn build_headless_engine_with(
             tools: builtin_tools(&config.cwd),
             custom_system_prompt: config.system_prompt.clone(),
             prompt_guidelines: config.append_system_prompt.clone(),
-            generic_mcp_servers: vec![],
-            allow_recursion: None,
             session_manager: Some(session_manager),
             extra_host_handlers,
             conversation_log_path: None,
@@ -1136,6 +1134,20 @@ async fn session_header_json(
     Some(serde_json::Value::Object(object).to_string())
 }
 
+/// [`pa_core::models::resolve_cli_model`] with its warning on stderr, so an
+/// inexact selection (a typo'd `--model`) never runs silently.
+pub(crate) fn resolve_cli_model_warning_to_stderr(
+    cli_provider: Option<&str>,
+    cli_model: &str,
+    all_models: &[Model],
+) -> pa_core::models::ResolveCliModelResult {
+    let resolved = pa_core::models::resolve_cli_model(cli_provider, cli_model, all_models);
+    if let Some(warning) = &resolved.warning {
+        eprintln!("Warning: {warning}");
+    }
+    resolved
+}
+
 async fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
     config: &crate::mode::RuntimeConfig,
@@ -1146,7 +1158,7 @@ async fn select_model(
     if let Some(model_name) = config.model.as_deref() {
         let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
         let resolved =
-            pa_core::models::resolve_cli_model(config.provider.as_deref(), model_name, &available);
+            resolve_cli_model_warning_to_stderr(config.provider.as_deref(), model_name, &available);
         if let Some(error) = resolved.error {
             return Err(error);
         }

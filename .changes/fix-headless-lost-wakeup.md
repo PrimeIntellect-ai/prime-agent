@@ -1,0 +1,1 @@
+- Fixed a headless run that could hang and never finish on a heavily loaded machine while it waited for a turn to end.

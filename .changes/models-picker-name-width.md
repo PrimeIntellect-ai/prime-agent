@@ -1,0 +1,1 @@
+feat: the `/model` picker's name column now grows with the terminal, so long model names show in full on wide terminals; names truncate with an ellipsis only when the terminal is too narrow, and the effort and provider columns stay aligned

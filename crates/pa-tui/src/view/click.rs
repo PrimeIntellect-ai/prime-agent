@@ -271,8 +271,9 @@ impl AgentView {
     /// visible tool card, bash card, or TS `Clickable` custom row
     /// (agent message, shell completion, compaction summary,
     /// refinement outcome, skill invocation, injected prompt) toggles
-    /// that row's own expansion. Other rows (user, assistant, status,
-    /// slash, panels) are not clickable.
+    /// that row's own expansion; an inbox-notice row toggles its whole
+    /// run's. Other rows (user, assistant, status, slash, panels) are not
+    /// clickable.
     fn transcript_click_target(&self, window_row: usize) -> Option<ClickAction> {
         let section = self
             .click
@@ -280,6 +281,11 @@ impl AgentView {
             .iter()
             .find(|section| window_row >= section.from && window_row < section.to)?;
         let entry = self.chat.get(section.entry)?;
+        if matches!(entry, ChatEntry::InboxNotice(_)) {
+            return Some(ClickAction::ToggleCardExpansion(
+                self.inbox_run_head(section.entry),
+            ));
+        }
         (matches!(
             entry,
             ChatEntry::Tool(_)

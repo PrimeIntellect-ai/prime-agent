@@ -284,7 +284,7 @@ impl SessionUi {
                     self.library_overview_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
                     self.factory_graph = serde_json::json!({"runs": []});
-                    if let Some(factory_view) = view.factory_view.as_mut() {
+                    if let Some(factory_view) = view.run_page_mut() {
                         factory_view.apply_runs(Vec::new());
                     }
                     // The factory page keeps its all-session rows: its

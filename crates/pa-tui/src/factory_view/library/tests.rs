@@ -1631,6 +1631,29 @@ fn the_drill_in_draws_blocks_and_opens_each_nodes_files() {
     assert_eq!(view.handle_key("escape", &kb()), LibraryViewAction::Close);
 }
 
+/// The files page scrolls by the document at the width it draws: on a
+/// narrow terminal, where the Markdown wraps to more rows, paging down
+/// still reaches the file's last line.
+#[test]
+fn the_files_page_scrolls_to_the_end_at_a_narrow_width() {
+    let paragraph =
+        "This paragraph carries enough words to wrap onto several rows at forty columns.\n\n";
+    let markdown = format!("{}END-MARKER\n", paragraph.repeat(60));
+    let mut view = LibraryView::new(Vec::new(), Vec::new(), 40);
+    view.apply_machines(vec![machine("rsi", "user", "directory")], Vec::new());
+    view.apply_detail("rsi", &detail_with_markdown(&markdown));
+    let _ = view.handle_key("enter", &kb());
+    let _ = view.render(&theme(), 40, &kb());
+    for _ in 0..20 {
+        let _ = view.handle_key("pageDown", &kb());
+    }
+    let bottom = plain(&view.render(&theme(), 40, &kb()));
+    assert!(
+        bottom.contains("END-MARKER"),
+        "paging down reaches the last line:\n{bottom}"
+    );
+}
+
 /// A drill-in fixture whose `design` node carries one Markdown file, so
 /// a test drives the file view over exactly the text it pins.
 fn detail_with_markdown(markdown: &str) -> serde_json::Value {

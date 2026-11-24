@@ -191,8 +191,8 @@ fold-gates:
 restamp-gates:
 	python3 scripts/release/test_restamp.py
 
-# The CI shard tooling's contract battery (ci.yml's PR smoke): the stable
-# crc32 assignment under the narrowed selection, the scope-aware summary
+# The CI shard tooling's contract battery (ci.yml's PR smoke): the shard
+# assignment under the narrowed selection, the scope-aware summary
 # audit, the selection resolver the conditional bins build reads, and the
 # fail-safe PR-files mapping the changes job feeds it.
 shard-gates:
