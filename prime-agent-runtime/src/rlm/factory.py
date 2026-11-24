@@ -6427,7 +6427,9 @@ class FactoryExecutor:
                     return
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
                 task_work_waiting = task_work_waiting or result.factory_task_busy
-            if task_work_waiting and not python_calls and not repairing:
+            if task_work_waiting and not children and not python_calls and not repairing:
+                # Only settled owners were collected, so the collect returned
+                # at once; a running child's collect already waited.
                 await self._sleep_fn(REPAIR_POLL_SECONDS)
             for state, entry, instance in repairing:
                 if run.loop_generation != generation:

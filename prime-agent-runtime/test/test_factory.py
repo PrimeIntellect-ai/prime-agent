@@ -4443,6 +4443,25 @@ class FactoryExecutorTest(_ExecutorTestCase):
     # -- failure policies ---------------------------------------------------------
 
     @async_test
+    async def test_a_busy_owner_adds_no_poll_sleep_while_another_child_runs(self) -> None:
+        # The collect of the running child already waits, so the owner's
+        # background work adds no extra sleep on top of it.
+        self.host.outcomes["a"] = {"status": "done", "answer": "a", "factory_task_busy": True}
+        self.host.outcomes["b"] = {"status": "running"}
+        self.store_factory(
+            {"nodes": [{"id": "a", "subagent": "worker"}, {"id": "b", "subagent": "worker"}]}
+        )
+        held = self.host.gate("rlm.collect", 4)
+        result = await self.start()
+        await self.host.gate_entered("rlm.collect", 4).wait()
+        self.host.outcomes["a"]["factory_task_busy"] = False
+        self.host.outcomes["b"] = {"status": "done", "answer": "b"}
+        held.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertNotIn(factory_module.REPAIR_POLL_SECONDS, self.sleeps.sleeps)
+
+    @async_test
     async def test_fail_fast_cancels_running_children(self) -> None:
         self.host.outcomes["a"] = {"status": "error", "error": "boom"}
         self.host.outcomes["b"] = {"status": "running"}
