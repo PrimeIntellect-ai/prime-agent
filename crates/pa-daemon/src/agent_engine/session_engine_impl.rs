@@ -513,10 +513,14 @@ impl SessionEngine for AgentSessionEngine {
         Some(self.effective_thinking().wire_name().to_string())
     }
 
-    /// The built session's assembled prompt (the export embeds it); best-effort.
-    fn export_system_prompt(&self) -> Option<String> {
-        let session = self.session.try_lock().ok()?;
-        session.as_deref().map(|core| core.system_prompt.clone())
+    /// The built session's assembled prompt (the export embeds it).
+    fn export_system_prompt(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        Box::pin(async move {
+            let session = self.session.lock().await.clone()?;
+            Some(session.system_prompt.clone())
+        })
     }
 
     /// The built session's live tool registry mapped to the export's tools
@@ -527,8 +531,8 @@ impl SessionEngine for AgentSessionEngine {
         Box::pin(async move {
             let model = self.resolve_model().ok()?;
             self.ensure_core_session_async(&model).await.ok()?;
-            let session = self.session.try_lock().ok()?;
-            let state = session.as_deref()?.session.agent().state().await;
+            let session = self.session.lock().await.clone()?;
+            let state = session.session.agent().state().await;
             Some(pa_core::export_html::tools_section(&state.tools))
         })
     }
@@ -542,8 +546,8 @@ impl SessionEngine for AgentSessionEngine {
         Box::pin(async move {
             let model = self.resolve_model().ok()?;
             self.ensure_core_session_async(&model).await.ok()?;
-            let session = self.session.try_lock().ok()?;
-            let state = session.as_deref()?.session.agent().state().await;
+            let session = self.session.lock().await.clone()?;
+            let state = session.session.agent().state().await;
             let renderer = crate::session_export::ExportToolRenderer {
                 tools: &state.tools,
             };
