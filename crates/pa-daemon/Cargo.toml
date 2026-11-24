@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Session supervisor, worker processes, and wire protocol."
 
+[lib]
+doctest = false
+
 [dependencies]
 pa-types = { path = "../pa-types" }
 pa-core = { path = "../pa-core" }

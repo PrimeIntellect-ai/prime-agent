@@ -158,6 +158,7 @@ impl SessionUi {
             factory_updates: activity_updates.factory,
             library_updates: activity_updates.library,
             library_list_epoch: 0,
+            library_detail_epoch: 0,
             library_overview_in_flight: false,
             library_overview_epoch: 0,
             factory_selected_run: None,

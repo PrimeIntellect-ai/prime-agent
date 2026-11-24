@@ -122,6 +122,14 @@ def reply_ok(repl: ReplProcess, request: dict) -> None:
     repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
 
 
+def wait_for_host_request_of_type(repl: ReplProcess, kind: str) -> dict:
+    """Read protocol events until the next host_request whose data.type is `kind`."""
+    while True:
+        event = repl.read_event()
+        if event.get("event") == "host_request" and event.get("data", {}).get("type") == kind:
+            return event
+
+
 class ReplTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repl = ReplProcess()
@@ -144,7 +152,7 @@ class ReplTest(unittest.TestCase):
         return repl
 
     def test_bash_activity_is_available_while_cell_is_running(self):
-        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20'); await asyncio.sleep(20)"})
+        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20')\nawait asyncio.get_running_loop().create_future()"})
         # Wait for the activity start display before requesting list.
         while True:
             event = self.repl.read_event()
@@ -184,7 +192,7 @@ class ReplTest(unittest.TestCase):
 
     def test_factory_activity_is_available_while_cell_is_running(self):
         repl = self.enabled_factory_repl()
-        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.sleep(20)"})
+        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
         # The factory graph answers out of band while the cell runs: no
         # live runs exist yet, so the graph action lists the empty registry.
         repl.send({"type": "factory_activity", "id": "g", "action": "graph"})
@@ -455,7 +463,7 @@ class ReplTest(unittest.TestCase):
                 "if hasattr(signal, 'pthread_kill'):",
                 "    del signal.pthread_kill",
                 "import asyncio",
-                "await asyncio.sleep(30)",
+                "await asyncio.get_running_loop().create_future()",
             ]
         )
         self.repl.send({"type": "execute", "id": "nokill", "code": code})
@@ -572,11 +580,13 @@ class ReplTest(unittest.TestCase):
 
     def test_interrupt_await_suspended(self):
         events = self._interrupt_after_running(
-            "await", "import asyncio\nawait asyncio.sleep(1e9)"
+            "await", "import asyncio\nawait asyncio.get_running_loop().create_future()"
         )
         error = one(events, "error")
         self.assertEqual(error["ename"], "KeyboardInterrupt")
-        self.assertIn("await asyncio.sleep(1e9)", "".join(error["traceback"]))
+        self.assertIn(
+            "await asyncio.get_running_loop().create_future()", "".join(error["traceback"])
+        )
         self.assertEqual(one(events, "done")["status"], "error")
         follow = self.repl.execute("after-await", "2+2")
         self.assertEqual(one(follow, "result")["text"], "4")
@@ -602,7 +612,7 @@ class ReplTest(unittest.TestCase):
                 "    while True:",
                 "        time.sleep(0.05)",
                 "hog_task = asyncio.create_task(hog())",
-                "await asyncio.sleep(1e9)",
+                "await asyncio.get_running_loop().create_future()",
             ]
         )
         events = self._interrupt_after_running("fg", code)
@@ -615,7 +625,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "14")
 
     def test_interrupt_written_back_to_back_with_execute(self):
-        execute = json.dumps({"type": "execute", "id": "race", "code": "import asyncio\nawait asyncio.sleep(1e9)"})
+        execute = json.dumps({"type": "execute", "id": "race", "code": "import asyncio\nawait asyncio.get_running_loop().create_future()"})
         interrupt = json.dumps({"type": "interrupt"})
         assert self.repl.proc.stdin is not None
         self.repl.proc.stdin.write(execute + "\n" + interrupt + "\n")
@@ -649,7 +659,8 @@ class ReplTest(unittest.TestCase):
                 "import time",
                 "class SlowRepr:",
                 "    def __repr__(self):",
-                "        time.sleep(600)",
+                "        while True:",
+                "            time.sleep(0.05)",
                 "        return 'late'",
                 "SlowRepr()",
             ]
@@ -682,6 +693,753 @@ class ReplTest(unittest.TestCase):
         self.assertNotIn("repl.py", text)
         self.assertNotIn("ast.py", text)
         self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_discipline_screen_declines_long_sleep(self):
+        events = self.repl.execute(
+            "sleep-30", "import time\ntime.sleep(30)\nprint('slept')"
+        )
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "CellDeclinedError")
+        self.assertIn("[bash-done]", error["evalue"])
+        self.assertIn("time.sleep(30)", error["evalue"])
+        text = "".join(error["traceback"])
+        self.assertIn("Traceback (most recent call last):", text)
+        self.assertEqual(one(events, "done")["status"], "error")
+        # Refused before it ran: nothing from the cell body reached stdout.
+        self.assertIsNone(one(events, "result"))
+        self.assertNotIn("slept", stream_text(events, "stdout"))
+
+    def test_discipline_screen_allows_short_and_unresolved_waits(self):
+        events = self.repl.execute("sleep-short", "import time\ntime.sleep(0.05)\nprint('ok')")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("ok", stream_text(events, "stdout"))
+        events = self.repl.execute("sleep-var", "import time\nn = 0.05\ntime.sleep(n)")
+        self.assertIsNone(one(events, "error"))
+        events = self.repl.execute("aio-short", "import asyncio\nawait asyncio.sleep(0.05)")
+        self.assertIsNone(one(events, "error"))
+
+    def test_discipline_screen_declines_sleep_aliases(self):
+        for rid, code in (
+            ("alias", "from time import sleep as wait\nwait(45)"),
+            ("module-alias", "import time as t\nt.sleep(60)"),
+            ("aio", "import asyncio\nawait asyncio.sleep(15)"),
+            ("bare", "time.sleep(30)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+
+    def test_discipline_screen_declines_star_imported_calls(self):
+        for rid, code in (
+            ("star-time", "from time import *\nsleep(5)"),
+            ("star-asyncio", "from asyncio import *\nawait sleep(5)"),
+            ("star-system", "from os import *\nsystem('true')"),
+            ("star-popen", "from os import *\npopen('true')"),
+            ("star-pty", "from pty import *\nspawn('true')"),
+        ):
+            with self.subTest(rid=rid):
+                events = self.repl.execute(rid, "print('ran')\n" + code)
+                self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+                self.assertEqual(one(events, "done")["status"], "error")
+                self.assertNotIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_spares_allowed_star_imports(self):
+        for rid, code in (
+            ("star-short", "from time import *\nsleep(0.01)"),
+            ("star-unused", "from os import *"),
+            ("star-shadowed", "from time import *\nsleep = print\nsleep(5)"),
+            ("star-submodule", "system = print\nfrom os.path import *\nsystem(5)"),
+        ):
+            with self.subTest(rid=rid):
+                events = self.repl.execute(rid, code + "\nprint('ran')")
+                self.assertIsNone(one(events, "error"))
+                self.assertEqual(one(events, "done")["status"], "ok")
+                self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_declines_subprocess_family(self):
+        for rid, code in (
+            ("imp", "import subprocess"),
+            ("run", "import subprocess\nsubprocess.run(['ls'])"),
+            ("from-import", "from subprocess import run\nrun(['ls'])"),
+            ("os-system", "import os\nos.system('ls')"),
+            ("os-popen", "os.popen('ls')"),
+            ("from-os", "from os import system\nsystem('ls')"),
+            ("pty", "import pty\npty.spawn('/bin/sh')"),
+        ):
+            events = self.repl.execute(rid, code)
+            error = one(events, "error")
+            self.assertEqual(error["ename"], "CellDeclinedError", rid)
+            self.assertIn("bash('...')", error["evalue"], rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+
+    def test_discipline_screen_declines_huge_literal_sleeps(self):
+        events = self.repl.execute("sleep-huge", f"import time\ntime.sleep({'9' * 400})")
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "CellDeclinedError")
+        self.assertIn("time.sleep(", error["evalue"])
+
+    def test_discipline_screen_declines_sleeps_in_defaults_and_decorators(self):
+        for rid, code in (
+            ("default", "import time\ndef f(time=time.sleep(5)):\n    pass"),
+            ("decorator", "import time\n@time.sleep(5)\ndef f():\n    pass"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_declines_sleeps_in_loop_and_with_targets(self):
+        # Python runs the calls in a subscript target when it binds the target.
+        for rid, code in (
+            ("for-target", "import time as t\nd = {}\nfor d[t.sleep(5)] in [1]:\n    pass\n"),
+            (
+                "with-target",
+                "import contextlib, time as t\nd = {}\nwith contextlib.nullcontext() as d[t.sleep(5)]:\n    pass\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_reads_module_bindings_in_order(self):
+        events = self.repl.execute("order-after", "import time\ntime.sleep(5)\ntime = 3")
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        code = (
+            "import time\n"
+            "time = 3\n"
+            "try:\n"
+            "    time.sleep(5)\n"
+            "except AttributeError:\n"
+            "    print('ran')\n"
+        )
+        events = self.repl.execute("order-before", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_spares_relative_imports(self):
+        code = (
+            "def load():\n"
+            "    from .subprocess import prepare\n"
+            "    return prepare\n"
+            "print('parsed')\n"
+        )
+        events = self.repl.execute("relative", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("parsed", stream_text(events, "stdout"))
+
+    def test_discipline_screen_keeps_if_branches_separate(self):
+        code = (
+            "import time\n"
+            "if True:\n"
+            "    from time import sleep as delay\n"
+            "else:\n"
+            "    delay(5)\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("branch-separate", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+        # The join keeps a watched binding from either branch.
+        events = self.repl.execute(
+            "branch-join", "if True:\n    from time import sleep as delay\ndelay(5)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_keeps_joined_imports_after_the_statement(self):
+        code = (
+            "flag = False\n"
+            "if flag:\n"
+            "    import time as clock\n"
+            "else:\n"
+            "    clock = None\n"
+            "clock.sleep(5)\n"
+        )
+        events = self.repl.execute("if-join-after", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # A loop body can run zero times, so its shadow does not hide the import.
+        for rid, code in (
+            ("for-join-after", "import time\nfor time in ():\n    pass\ntime.sleep(5)"),
+            ("while-join-after", "import time\nwhile False:\n    time = None\ntime.sleep(5)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # A walrus target in the if condition binds before the suites run.
+        events = self.repl.execute(
+            "walrus-test", "from time import sleep as pause\nif (pause := print):\n    pause(5)"
+        )
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
+
+    def test_discipline_screen_charges_names_that_a_path_leaves_unbound(self):
+        # A shadow on one path does not hide the name on a path that skips the
+        # suite: there the name is unbound, so the call is charged as written.
+        for rid, code in (
+            ("if-unbound", "if False:\n    time = None\ntime.sleep(5)"),
+            ("for-unbound", "for time in ():\n    pass\ntime.sleep(5)"),
+            (
+                "try-unbound",
+                "try:\n    int('x')\n    time = None\n"
+                "except ValueError:\n    pass\ntime.sleep(5)",
+            ),
+            ("match-unbound", "match 1:\n    case 2:\n        time = None\ntime.sleep(5)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_honors_exception_handler_names(self):
+        code = (
+            "import time\n"
+            "try:\n"
+            "    pass\n"
+            "except Exception as time:\n"
+            "    time.sleep(5)\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("handler-name", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_unbinds_handler_names_after_the_handler(self):
+        # The handler name is unbound after the handler, so the call after it
+        # is charged as written, also when the body binds the same name.
+        for rid, body in (("handler-name-after", "pass"), ("handler-name-body", "time = None")):
+            code = f"try:\n    {body}\nexcept Exception as time:\n    pass\ntime.sleep(5)\n"
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # In a class body the lookup then goes on to the enclosing scope, also
+        # when the class bound the name before the handler.
+        code = (
+            "import time\n"
+            "class C:\n"
+            "    time = None\n"
+            "    try:\n"
+            "        int('x')\n"
+            "    except ValueError as time:\n"
+            "        pass\n"
+            "    time.sleep(5)\n"
+        )
+        events = self.repl.execute("handler-name-class", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_reads_annotations_without_values(self):
+        # An annotation without a value binds nothing in a module or class
+        # body, so the import stays. The flag keeps the cell from sleeping.
+        for rid, code in (
+            ("annotation-module", "import time as t\nflag = False\nt: int\nif flag:\n    t.sleep(5)\n"),
+            (
+                "annotation-class",
+                "import time as t\nflag = False\nclass C:\n    t: int\n    if flag:\n        t.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_unbinds_handler_names_on_the_next_pass(self):
+        # The handler deletes the class name, so the next pass reads the
+        # module's import.
+        code = (
+            "import time as t\n"
+            "class C:\n"
+            "    t = None\n"
+            "    for i in range(2):\n"
+            "        if i:\n"
+            "            t.sleep(5)\n"
+            "        try:\n"
+            "            raise ValueError\n"
+            "        except ValueError as t:\n"
+            "            pass\n"
+        )
+        events = self.repl.execute("handler-next-pass", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_lets_a_cell_too_deep_to_read_run(self):
+        # The parser and the compiler take this chain; the screen's walk runs
+        # out of depth, so it declines nothing.
+        code = "x = " + "+".join(["1"] * 600) + "\nprint(x)\n"
+        events = self.repl.execute("deep-chain", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("600", stream_text(events, "stdout"))
+
+    def test_discipline_screen_unbinds_deleted_names(self):
+        # After `del`, a class lookup goes on to the enclosing scope.
+        code = (
+            "import time\n"
+            "class C:\n"
+            "    time = None\n"
+            "    del time\n"
+            "    time.sleep(5)\n"
+        )
+        events = self.repl.execute("del-class", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_keeps_handler_bindings_off_other_paths(self):
+        raised = (
+            "import time\ntry:\n    raise ValueError\nexcept ValueError:\n    time = None\n"
+        )
+        for rid, code in (
+            # The handler's bindings stay off the paths that skip it.
+            ("try-else", raised + "else:\n    time.sleep(5)"),
+            ("try-other-handler", raised + "except Exception:\n    time.sleep(5)"),
+            ("try-finally", raised + "finally:\n    time.sleep(5)"),
+            # A handler or the finally suite can start before the body's bindings.
+            (
+                "try-early-handler",
+                "import time\ntry:\n    int('x')\n    time = None\n"
+                "except ValueError:\n    time.sleep(5)",
+            ),
+            (
+                "try-early-finally",
+                "import time\ntry:\n    int('x')\n    time = None\nfinally:\n    time.sleep(5)",
+            ),
+            # The statements after the try keep the import that a handler binds.
+            (
+                "try-after",
+                "import types\n"
+                "try:\n"
+                "    time = types.SimpleNamespace(sleep=print)\n"
+                "except Exception:\n"
+                "    import time\n"
+                "time.sleep(5)",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_keeps_match_cases_separate(self):
+        code = (
+            "import time\n"
+            "match 1:\n"
+            "    case 1:\n"
+            "        time = None\n"
+            "    case _:\n"
+            "        time.sleep(5)\n"
+        )
+        events = self.repl.execute("match-cases", code)
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # When no case matches, the statements after the match keep the import.
+        events = self.repl.execute(
+            "match-no-case",
+            "import time\nmatch 1:\n    case 1:\n        time = None\ntime.sleep(5)",
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        # A final wildcard case leaves no path around the cases.
+        code = (
+            "import time, types\n"
+            "match 1:\n"
+            "    case 1:\n"
+            "        time = types.SimpleNamespace(sleep=print)\n"
+            "    case _:\n"
+            "        time = types.SimpleNamespace(sleep=print)\n"
+            "time.sleep(5)\n"
+        )
+        events = self.repl.execute("match-wildcard", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
+
+    def test_discipline_screen_keeps_every_binding_a_join_can_carry(self):
+        for rid, code in (
+            # The branches bind the alias to two watched modules.
+            (
+                "join-two-modules",
+                "flag = True\n"
+                "if flag:\n"
+                "    import os as t\n"
+                "else:\n"
+                "    import time as t\n"
+                "t.sleep(5)\n",
+            ),
+            # The path that skips the import leaves the name unbound, so the
+            # call is also charged as written.
+            (
+                "join-unbound-and-module",
+                "flag = False\nif flag:\n    import os as time\ntime.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_carries_bindings_out_of_suites_that_end_early(self):
+        # An exception, a break, or the next loop pass can start from any
+        # point of a suite.
+        for rid, body in (
+            (
+                "handler-mid-body",
+                "try:\n"
+                "    import time as t\n"
+                "    int('x')\n"
+                "    t = None\n"
+                "except ValueError:\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "finally-after-handler",
+                "try:\n"
+                "    int('x')\n"
+                "except ValueError:\n"
+                "    import time as t\n"
+                "    int('y')\n"
+                "    t = None\n"
+                "finally:\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "finally-after-else",
+                "try:\n"
+                "    pass\n"
+                "except ValueError:\n"
+                "    pass\n"
+                "else:\n"
+                "    import time as t\n"
+                "    int('x')\n"
+                "    t = None\n"
+                "finally:\n"
+                "    t.sleep(5)\n",
+            ),
+            (
+                "with-swallowed",
+                "with contextlib.suppress(ValueError):\n"
+                "    import time as t\n"
+                "    int('x')\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            (
+                "with-swallowed-at-start",
+                "import time as t\n"
+                "with contextlib.suppress(ValueError):\n"
+                "    int('x')\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            (
+                "for-break",
+                "for i in range(2):\n"
+                "    import time as t\n"
+                "    if i == 0:\n"
+                "        break\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            # A break leaves the loop without the else suite.
+            (
+                "for-else-break",
+                "import time as t\n"
+                "for i in range(2):\n"
+                "    if i:\n"
+                "        break\n"
+                "else:\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            (
+                "inner-else-break",
+                "import time as t\n"
+                "for i in range(2):\n"
+                "    for j in range(2):\n"
+                "        pass\n"
+                "    else:\n"
+                "        break\n"
+                "else:\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            (
+                "while-else-break",
+                "import time as t\n"
+                "while t:\n"
+                "    break\n"
+                "else:\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            # A continue can end the last pass at any point of the body.
+            (
+                "for-continue",
+                "for i in range(2):\n"
+                "    import time as t\n"
+                "    if i:\n"
+                "        continue\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            (
+                "while-continue",
+                "i = 0\n"
+                "while i < 2:\n"
+                "    i += 1\n"
+                "    import time as t\n"
+                "    if i:\n"
+                "        continue\n"
+                "    t = None\n"
+                "t.sleep(5)\n",
+            ),
+            # The test runs again after each pass.
+            (
+                "while-test-after-pass",
+                "t = None\n"
+                "while t.sleep(5):\n"
+                "    import time as t\n"
+                "    t = None\n",
+            ),
+            (
+                "while-next-pass",
+                "t = None\n"
+                "i = 0\n"
+                "while i < 2:\n"
+                "    i += 1\n"
+                "    if i == 2:\n"
+                "        t.sleep(5)\n"
+                "    import time as t\n",
+            ),
+            # One exception group can run several except* handlers in turn.
+            (
+                "except-star-chain",
+                "try:\n"
+                "    pass\n"
+                "except* ValueError:\n"
+                "    import time as t\n"
+                "except* TypeError:\n"
+                "    t.sleep(5)\n",
+            ),
+        ):
+            events = self.repl.execute(rid, "import contextlib\n" + body)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # At most one handler of a plain try runs, so a handler does not see
+        # the bindings of another handler.
+        code = (
+            "try:\n"
+            "    pass\n"
+            "except ValueError:\n"
+            "    import time as t\n"
+            "except TypeError:\n"
+            "    t.sleep(5)\n"
+            "print('defined')\n"
+        )
+        events = self.repl.execute("plain-handlers", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("defined", stream_text(events, "stdout"))
+        # Without a break or a continue, a loop runs out after zero passes or
+        # after a full pass. A while loop runs out after its test.
+        clock = "types.SimpleNamespace(sleep=print)"
+        for rid, code in (
+            (
+                "for-full-pass",
+                f"for i in range(1):\n    import time as t\n    t = {clock}\n",
+            ),
+            (
+                "while-full-pass",
+                f"i = 0\nwhile i < 1:\n    i += 1\n    import time as t\n    t = {clock}\n",
+            ),
+            ("while-test", f"import time as t\nwhile (t := {clock}) is None:\n    pass\n"),
+        ):
+            events = self.repl.execute(rid, "import types\n" + code + "t.sleep(5)\n")
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
+        # Without a break that leaves the loop, the else suite runs on every
+        # path out of the loop.
+        for rid, loop_body in (
+            ("for-else-no-break", "    pass\n"),
+            ("for-else-inner-break", "    for j in range(1):\n        break\n"),
+        ):
+            code = (
+                "import time as t, types\n"
+                "for i in range(1):\n"
+                + loop_body
+                + "else:\n"
+                "    t = types.SimpleNamespace(sleep=print)\n"
+                "t.sleep(5)\n"
+            )
+            events = self.repl.execute(rid, code)
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
+
+    def test_discipline_screen_spares_bodies_that_run_later(self):
+        # A function, lambda, or generator body runs later, maybe in a
+        # background task or thread, so it does not hold the cell.
+        code = (
+            "import asyncio, os, threading, time\n"
+            "async def watch():\n"
+            "    await asyncio.sleep(30)\n"
+            "task = asyncio.create_task(watch())\n"
+            "threading.Thread(target=lambda: time.sleep(10), daemon=True).start()\n"
+            "def retry():\n"
+            "    time.sleep(10)\n"
+            "def run(cmd):\n"
+            "    os.system(cmd)\n"
+            "pending = (time.sleep(10) for _ in range(1))\n"
+            "task.cancel()\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("later", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_keeps_bindings_past_operands_that_may_not_run(self):
+        # A walrus in an operand that may not run does not hide the import.
+        for rid, code in (
+            ("walrus-and", "flag = False\nflag and (time := None)\n"),
+            ("walrus-or", "flag = True\nflag or (time := None)\n"),
+            ("walrus-ifexp", "flag = True\nx = 1 if flag else (time := None)\n"),
+            ("walrus-compare", "x = 2 < 1 < (time := 3)\n"),
+            ("walrus-assert-message", "assert True, (time := None)\n"),
+        ):
+            events = self.repl.execute(rid, "import time\n" + code + "time.sleep(5)\n")
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+        # The first operand always runs, so its walrus shadows the import.
+        code = "from time import sleep as pause\n(pause := print) and 1\npause(5)\n"
+        events = self.repl.execute("walrus-first-operand", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("5", stream_text(events, "stdout"))
+
+    def test_discipline_screen_binds_assignment_targets_in_order(self):
+        for target, value in (
+            ("t, items[t.sleep(5)]", "helper, 42"),
+            ("[t, [items[t.sleep(5)]]]", "[helper, [42]]"),
+            ("t, *items[t.sleep(5)]", "helper, 42"),
+            ("t = items[t.sleep(5)]", "helper"),
+        ):
+            with self.subTest(target=target):
+                code = (
+                    "import time as t, types\n"
+                    "helper = types.SimpleNamespace(sleep=lambda seconds: 0)\n"
+                    "items = {}\n"
+                    f"{target} = {value}\n"
+                    "print('ran')"
+                )
+                events = self.repl.execute("target-order", code)
+                self.assertIsNone(one(events, "error"))
+                self.assertEqual(one(events, "done")["status"], "ok")
+                self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_binds_walrus_targets_in_evaluation_order(self):
+        # A walrus binds before the rest of its statement runs.
+        clock = "import time, types\nclock = types.SimpleNamespace(sleep=print)\n"
+        for rid, code in (
+            ("walrus-then-call", "(time := clock, time.sleep(5))\n"),
+            ("walrus-operand-then-call", "flag = True\nflag and (time := clock) and time.sleep(5)\n"),
+            # Defaults and decorators run in the enclosing scope, so their
+            # walrus binds there.
+            ("walrus-default", "def f(a=(time := clock)):\n    pass\ntime.sleep(5)\n"),
+            ("walrus-decorator", "@(time := clock).sleep\ndef f():\n    pass\ntime.sleep(5)\n"),
+        ):
+            events = self.repl.execute(rid, clock + code)
+            self.assertIsNone(one(events, "error"), rid)
+            self.assertIn("5", stream_text(events, "stdout"), rid)
+        # An assignment runs its value before its targets, and a dict display
+        # runs each key before its value.
+        for rid, line in (
+            ("assign-value-first", "d[(time := 0)] = time.sleep(5)"),
+            ("annotated-value-first", "d[(time := 0)]: int = time.sleep(5)"),
+            ("dict-key-then-value", "d = {1: time.sleep(5), (time := 0): 2}"),
+        ):
+            code = f"import time\nd = {{}}\n{line}\n"
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+
+    def test_discipline_screen_honors_loop_targets(self):
+        code = (
+            "from time import sleep as item\n"
+            "for item in ():\n"
+            "    item(5)\n"
+            "print('ran')\n"
+        )
+        events = self.repl.execute("loop-target", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("ran", stream_text(events, "stdout"))
+
+    def test_discipline_screen_reads_class_body_imports(self):
+        events = self.repl.execute(
+            "class-body-import",
+            "class C:\n    from time import sleep as delay\n    delay(5)",
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_handles_many_calls(self):
+        code = "import time\n" + "\n".join(f"v{i} = len('x')" for i in range(1500))
+        events = self.repl.execute("many-calls", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_discipline_screen_reads_compound_statements_in_order(self):
+        events = self.repl.execute(
+            "if-import", "if True:\n    import time as clock\n    clock.sleep(5)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_spares_class_headers(self):
+        code = (
+            "import dataclasses\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class Point:\n"
+            "    x: int = 1\n"
+            "class Sub(type('Base', (), {})):\n"
+            "    pass\n"
+            "print(Point().x, Sub.__name__)\n"
+        )
+        events = self.repl.execute("class-headers", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("1 Sub", stream_text(events, "stdout"))
+        # A banned call directly in a class body still declines.
+        events = self.repl.execute(
+            "class-body", "from time import sleep\nclass C:\n    sleep(30)"
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_reads_the_first_comprehension_iterable(self):
+        events = self.repl.execute(
+            "comp-iter",
+            "from time import sleep as pause\n[pause for pause in (pause(5),)]",
+        )
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+
+    def test_discipline_screen_reads_sleep_keywords(self):
+        for rid, code in (
+            ("aio-delay", "import asyncio\nawait asyncio.sleep(delay=5)"),
+            ("time-secs", "import time\ntime.sleep(secs=30)"),
+        ):
+            events = self.repl.execute(rid, code)
+            self.assertEqual(one(events, "error")["ename"], "CellDeclinedError", rid)
+            self.assertEqual(one(events, "done")["status"], "error", rid)
+        events = self.repl.execute(
+            "aio-delay-short", "import asyncio\nawait asyncio.sleep(delay=0.05)"
+        )
+        self.assertIsNone(one(events, "error"))
+
+    def test_discipline_screen_spares_mentions_bash_and_libraries(self):
+        code = (
+            "import os\n"
+            "doc = 'never run time.sleep(30) or os.system(rm -rf /) in a cell'\n"
+            "print(doc, os.pathsep)"
+        )
+        events = self.repl.execute("mention", code)
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        # Backgrounded shell work is the sanctioned shape, never declined.
+        events = self.repl.execute("bg", "from rlm import bash\nbash('sleep 30 & echo started')\nprint('launched')")
+        self.assertIsNone(one(events, "error"))
+        self.assertIn("launched", stream_text(events, "stdout"))
+
+    def test_declined_cell_keeps_an_interrupt_from_the_next_cell(self):
+        # The long cell keeps the screen busy while the untargeted interrupt
+        # arrives, so the interrupt parks for the declined cell.
+        declined = "\n".join(f"v{i} = len('x')" for i in range(3000)) + "\nimport time\ntime.sleep(30)"
+        lines = [
+            json.dumps({"type": "execute", "id": "declined", "code": declined}),
+            json.dumps({"type": "interrupt"}),
+            json.dumps({"type": "execute", "id": "next", "code": "5+5"}),
+        ]
+        assert self.repl.proc.stdin is not None
+        self.repl.proc.stdin.write("\n".join(lines) + "\n")
+        self.repl.proc.stdin.flush()
+        events = self.repl.until_done("declined")
+        self.assertEqual(one(events, "error")["ename"], "CellDeclinedError")
+        events = self.repl.until_done("next")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "result")["text"], "10")
+
+    def test_declined_cell_keeps_kernel_usable(self):
+        self.repl.execute("d1", "import time\ntime.sleep(10)")
+        events = self.repl.execute("d2", "2+2")
+        self.assertEqual(one(events, "result")["text"], "4")
 
     def test_snapshot_restore_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3303,6 +4061,352 @@ class OwnerExitWaitTest(unittest.TestCase):
         ):
             self.repl_module._wait_owner_posix(self.owner.pid, os.getppid())
         sleep.assert_called_once()
+
+
+class CellSpanGuardTest(unittest.TestCase):
+    """The in-cell span guard runs on the host's own cell limit: a cell still
+    running at that limit is interrupted through the SIGINT path and settles
+    as a teaching error (CellSpanGuard). Short cells run untouched, the kernel
+    stays usable, and a request with no limit keeps the guard disarmed even
+    where the host wires completion notices."""
+
+    def guarded_repl(self) -> ReplProcess:
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        # The guard arms only in sessions whose host wires completion
+        # notices (the bootstrap flips the flag from the host-handler
+        # registry); the test host simulates the daemon's registration.
+        repl.execute(
+            "wire",
+            "from rlm.bash import _set_completion_notices_wired\n"
+            "_set_completion_notices_wired(True)",
+        )
+        return repl
+
+    def execute_limited(self, repl: ReplProcess, rid: str, code: str, timeout_ms: int) -> list[dict]:
+        """One execute frame carrying the host's cell limit, the way the
+        manager sends it (`ExecuteOptions::cell_timeout_ms`)."""
+        repl.send({"type": "execute", "id": rid, "code": code, "timeout_ms": timeout_ms})
+        return repl.until_done(rid)
+
+    def test_an_unwired_host_keeps_long_cells_untouched(self):
+        # A host without completion notices has no [bash-done] wake, so the
+        # guard's teaching promise cannot hold there: it stays disarmed and
+        # a cell past the limit runs unbounded as on main (the wired twin
+        # interrupts the same shape at the limit).
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        events = self.execute_limited(
+            repl, "slow", "import time\ntime.sleep(1.5)\ndone = True", 400
+        )
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "done")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+    def test_long_compute_cell_is_interrupted_with_the_teaching_error(self):
+        # Pure compute: no banned shape, invisible to the discipline screen,
+        # and blocking — exactly the single-giant-cell shape the boundary
+        # notices cannot reach.
+        repl = self.guarded_repl()
+        repl.send(
+            {"type": "execute", "id": "long", "code": "n = 0\nwhile True:\n    n += 1", "timeout_ms": 500}
+        )
+        events = repl.until_done("long")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.5s cell limit", error["evalue"])
+        self.assertIn("[cell-span]", "\n".join(error["traceback"]))
+        self.assertIn("bash()", "\n".join(error["traceback"]))
+        self.assertEqual(one(events, "done")["status"], "error")
+        # The kernel stays usable and the interrupted cell's prior state
+        # persists in the namespace.
+        events = repl.execute("after", "n > 0")
+        self.assertEqual(one(events, "result")["text"], "True")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_a_bounded_cell_past_the_limit_settles_at_the_guard_not_at_its_end(self):
+        # The request's limit, not the cell, decides: 1.5s of work under a
+        # 400ms limit settles with the teaching error long before the cell
+        # would have ended.
+        repl = self.guarded_repl()
+        started = time.monotonic()
+        events = self.execute_limited(repl, "bounded", "import time\ntime.sleep(1.5)", 400)
+        elapsed = time.monotonic() - started
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertLess(elapsed, 1.0, "the guard fires at the request limit, not at the cell's end")
+
+    def test_await_suspended_cell_is_interrupted_at_the_limit(self):
+        repl = self.guarded_repl()
+        repl.send(
+            {
+                "type": "execute",
+                "id": "parked",
+                "code": "import asyncio\nawait asyncio.get_running_loop().create_future()",
+                "timeout_ms": 500,
+            }
+        )
+        events = repl.until_done("parked")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_short_cells_run_untouched(self):
+        repl = self.guarded_repl()
+        events = self.execute_limited(repl, "quick", "40 + 2", 1000)
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_the_guard_stays_armed_through_result_rendering(self):
+        # The cell body returns at once, but its __repr__ outlives the limit:
+        # rendering is still this cell's span, so the teaching error replaces
+        # the value instead of a bare KeyboardInterrupt or an ok outcome.
+        repl = self.guarded_repl()
+        events = self.execute_limited(
+            repl,
+            "slow-repr",
+            "import time\n"
+            "class Slow:\n"
+            "    def __repr__(self):\n"
+            "        time.sleep(1.5)\n"
+            "        return 'slow'\n"
+            "Slow()",
+            400,
+        )
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.4s cell limit", error["evalue"])
+        self.assertIsNone(one(events, "result"))
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_an_interrupt_during_the_close_reports_the_span_teaching(self):
+        # The guard can fire while the request closes its interrupt window.
+        # The close sits inside the guarded region, so that interrupt still
+        # becomes the teaching, and the retry finishes the half-run close
+        # instead of letting the request escape to the bare-error backstop.
+        repl = self.guarded_repl()
+        repl.execute(
+            "arm-close",
+            "import rlm.repl as repl_module\n"
+            "repl_module._span_guard_fired['close'] = 0.4\n"
+            "real_finish = repl_module._finish_request\n"
+            "raised = []\n"
+            "def finish(rid):\n"
+            "    if rid == 'close' and not raised:\n"
+            "        raised.append(True)\n"
+            "        raise KeyboardInterrupt\n"
+            "    return real_finish(rid)\n"
+            "repl_module._finish_request = finish",
+        )
+        events = repl.execute("close", "1 + 1")
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertIn("0.4s cell limit", error["evalue"])
+        self.assertIsNone(one(events, "result"))
+        self.assertEqual(one(events, "done")["status"], "error")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_no_announced_limit_keeps_the_guard_disarmed(self):
+        # An absent field and an explicit 0 both mean the session runs with
+        # no cell limit (the setting is off): the guard must not invent one.
+        repl = self.guarded_repl()
+        repl.send({"type": "execute", "id": "absent", "code": "import time\ntime.sleep(1.5)\nseen = True"})
+        events = repl.until_done("absent")
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = self.execute_limited(repl, "zero", "import time\ntime.sleep(1.5)\nseen = True", 0)
+        self.assertIsNone(one(events, "error"), f"events: {events}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = repl.execute("check", "seen")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+    def test_guard_fires_even_when_the_host_blocked_sigint(self):
+        # A host that blocks SIGINT on the spawning thread (tokio-style signal
+        # handling) leaks that mask through fork+exec; the kernel must own its
+        # mask and unblock SIGINT at startup, or no interrupt -- user abort or
+        # the span guard -- can ever land in a stuck cell.
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masks required")
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            repl = self.guarded_repl()
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        events = self.execute_limited(repl, "stuck", "n = 0\nwhile True:\n    n += 1", 500)
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "CellSpanGuard")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+
+
+class SpanGuardBudgetTest(unittest.TestCase):
+    """The guard's clock arithmetic: the host's limit is the budget, the
+    timer sits a lead inside it (the watchdog's clock starts earlier, so a
+    guard at the bare limit loses the race), and no limit disarms it."""
+
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import rlm.repl as repl_module
+
+        self.repl_module = repl_module
+
+    def test_the_budget_is_the_host_limit_in_seconds(self):
+        self.assertEqual(self.repl_module._span_guard_budget(60_000), 60.0)
+        self.assertEqual(self.repl_module._span_guard_budget(400), 0.4)
+        self.assertEqual(self.repl_module._span_guard_budget(180_000), 180.0)
+
+    def test_no_limit_disarms_the_guard(self):
+        for raw in (None, 0, -1, "500", True):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.repl_module._span_guard_budget(raw), 0.0)
+
+    def test_the_timer_fires_inside_the_limit(self):
+        for budget in (0.4, 60.0, 180.0):
+            with self.subTest(budget=budget):
+                delay = self.repl_module._span_guard_delay(budget)
+                self.assertLess(delay, budget, "the guard must beat the watchdog's clock")
+                self.assertGreater(delay, 0.0)
+
+    def test_the_lead_is_a_quarter_second_bounded_by_a_quarter_of_the_limit(self):
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(60.0), 59.75)
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(180.0), 179.75)
+        self.assertAlmostEqual(self.repl_module._span_guard_delay(0.4), 0.3)
+
+
+class ProtocolFrameAtomicityTest(unittest.TestCase):
+    """An interrupt raised by the handler must not tear a protocol frame: the
+    write blocks SIGINT on the main thread, so the signal lands after the last
+    byte instead of splitting the frame the host is parsing."""
+
+    def test_interrupt_during_a_display_write_keeps_the_frame_whole(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        cell = "\n".join(
+            [
+                "import os",
+                "import rlm.repl as repl_module",
+                "real_write = repl_module.os.write",
+                "armed = []",
+                "def write(fd, data):",
+                "    if fd == repl_module._protocol_fd and len(data) > 4096 and not armed:",
+                "        armed.append(True)",
+                "        sent = real_write(fd, bytes(data[:4096]))",
+                # The span guard's own path: mark the rid, then SIGINT the
+                # main thread while the frame is only partly on the wire.
+                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        return sent",
+                "    return real_write(fd, data)",
+                "repl_module.os.write = write",
+                "try:",
+                "    repl_module.emit({'text/plain': 'x' * 200000})",
+                "finally:",
+                "    repl_module.os.write = real_write",
+            ]
+        )
+        repl.send({"type": "execute", "id": "tear", "code": cell})
+        events = repl.until_done("tear")
+        display = one(events, "display")
+        self.assertIsNotNone(display, f"events: {events}")
+        self.assertEqual(len(display["data"]["text/plain"]), 200000)
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
+
+
+class WaitingKeepaliveTest(unittest.TestCase):
+    """The waiting keepalive: a parked session with live background commands
+    paces [waiting] host requests so idle clocks never close it mid-wait;
+    a session with no live work stays quiet, and the env knob disables."""
+
+    def kept_repl(self, seconds: str) -> ReplProcess:
+        repl = ReplProcess(env={"PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS": seconds})
+        self.addCleanup(repl.close)
+        repl.ready()
+        return repl
+
+    def test_parked_session_paces_waiting_notices_while_background_work_runs(self):
+        repl = self.kept_repl("0.5")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 3; echo done')\nprint('launched', h.pid)",
+        )
+        waiting = wait_for_host_request_of_type(repl, "bash.waiting")
+        data = waiting["data"]
+        self.assertEqual(len(data["pids"]), 1)
+        self.assertGreaterEqual(data["count"], 1)
+        self.assertIn("sleep 3", data["commands"][0])
+        reply_ok(repl, waiting)
+        # The keepalive paces: another one arrives while the command still runs.
+        second = wait_for_host_request_of_type(repl, "bash.waiting")
+        reply_ok(repl, second)
+        # The completion notice still fires for the finished command.
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
+
+    def test_an_error_reply_disables_the_keepalive(self):
+        # A host without the handler (an older daemon, the TS daemon) answers
+        # with an error reply instead: the keepalive disables itself rather
+        # than re-asking every window.
+        repl = self.kept_repl("0.5")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 10; echo done')\nprint('launched', h.pid)",
+        )
+        first = wait_for_host_request_of_type(repl, "bash.waiting")
+        repl.send(
+            {
+                "type": "host_reply",
+                "id": first["id"],
+                "data": {"status": "error", "error": "not available in this session"},
+            }
+        )
+        # The window is 0.5s with 0.125s ticks: a re-asking loop would fire
+        # within a second; the disabled one stays quiet through 2s.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                event = repl.read_event(timeout=max(0.1, deadline - time.monotonic()))
+            except TimeoutError:
+                break
+            self.assertNotEqual(
+                (event.get("data") or {}).get("type"),
+                "bash.waiting",
+                f"the keepalive re-asked a refusing host: {event}",
+            )
+
+    def test_no_waiting_notice_without_live_background_work(self):
+        repl = self.kept_repl("0.5")
+        repl.execute("quick", "print('idle session')")
+        try:
+            event = repl.read_event(timeout=2.0)
+        except TimeoutError:
+            return
+        self.assertNotEqual(event.get("event"), "host_request", "nothing should request the host")
+
+    def test_zero_disables_the_keepalive(self):
+        repl = self.kept_repl("0")
+        repl.execute(
+            "launch",
+            "from rlm import bash\nh = bash('sleep 2; echo done')\nprint('launched', h.pid)",
+        )
+        # Only the completion notice may request the host — never a waiting row.
+        done = wait_for_host_request_of_type(repl, "bash.completed")
+        reply_ok(repl, done)
 
 
 if __name__ == "__main__":

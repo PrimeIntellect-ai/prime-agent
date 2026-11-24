@@ -64,15 +64,10 @@ PORT_TYPES: tuple[str, ...] = ("text", "json")
 LIFECYCLES: tuple[str, ...] = ("task", "resident")
 TRANSITION_ON_KINDS: tuple[str, ...] = ("settled",)
 GUARD_OPS: tuple[str, ...] = ("eq", "ne", "gt", "gte", "lt", "lte", "exists", "contains")
-MAX_NODES = 1024
-MAX_STATES = MAX_NODES
-MAX_RETRIES = 10
-MAX_PARALLEL_MIN = 1
-MAX_PARALLEL_MAX = 64
-FOREACH_MAX_MIN = 1
-FOREACH_MAX_MAX = 256
-MAX_TRANSITIONS_CAP = 10_000
-MAX_CHILDREN_CAP = 1_000_000
+# The numeric limits (states, retries, max_parallel, foreach.max,
+# max_entries, max_transitions, max_children) live only in the Rust
+# ``pa_factory::limits``; a run asks for them through the
+# ``factory.limits`` host request before it starts (``_check_limits``).
 TRANSITIONS_PER_STATE_DEFAULT = 10
 RUN_FAILURE_POLICY_DEFAULT = "escalate"
 RUN_MAX_PARALLEL_DEFAULT = 8
@@ -244,21 +239,6 @@ def _validate_run_fields(run: Any, errors: list[str]) -> int | None:
     run_budget = run.get("budget_ms") if _is_positive_int(run.get("budget_ms")) else None
     if "failure_policy" in run and run.get("failure_policy") not in FAILURE_POLICIES:
         errors.append(f"run failure_policy must be one of {list(FAILURE_POLICIES)}, got {run.get('failure_policy')!r}")
-    max_parallel = run.get("max_parallel")
-    if "max_parallel" in run and not (
-        _is_int(max_parallel) and MAX_PARALLEL_MIN <= max_parallel <= MAX_PARALLEL_MAX
-    ):
-        errors.append(f"run max_parallel must be an integer between {MAX_PARALLEL_MIN} and {MAX_PARALLEL_MAX}")
-    max_transitions = run.get("max_transitions")
-    if "max_transitions" in run and not (
-        _is_positive_int(max_transitions) and max_transitions <= MAX_TRANSITIONS_CAP
-    ):
-        errors.append(f"run max_transitions must be a positive integer no greater than {MAX_TRANSITIONS_CAP}")
-    max_children = run.get("max_children")
-    if "max_children" in run and not (
-        _is_positive_int(max_children) and max_children <= MAX_CHILDREN_CAP
-    ):
-        errors.append(f"run max_children must be a positive integer no greater than {MAX_CHILDREN_CAP}")
     return run_budget
 
 
@@ -348,9 +328,7 @@ def _validate_state_fields(
         elif run_budget is not None and budget > run_budget:
             errors.append(f"{noun} {ref} budget_ms {budget} exceeds the run budget_ms {run_budget}")
 
-    if "retries" in state and not (_is_int(state.get("retries")) and 0 <= state.get("retries") <= MAX_RETRIES):
-        errors.append(f"{noun} {ref} retries must be an integer between 0 and {MAX_RETRIES}")
-    elif is_resident and state.get("retries", NODE_RETRIES_DEFAULT) > 0:
+    if is_resident and state.get("retries", NODE_RETRIES_DEFAULT) != 0:
         errors.append(f"resident {noun} {ref} cannot declare retries")
 
     if "failure_policy" in state and state.get("failure_policy") not in FAILURE_POLICIES:
@@ -456,11 +434,6 @@ def _validate_state_fields(
                     )
                 elif declared_inputs[over] != "json":
                     errors.append(f"{noun} {ref} foreach.over input {over!r} must have type 'json'")
-            foreach_max = foreach.get("max")
-            if not (_is_int(foreach_max) and FOREACH_MAX_MIN <= foreach_max <= FOREACH_MAX_MAX):
-                errors.append(
-                    f"{noun} {ref} foreach.max must be an integer between {FOREACH_MAX_MIN} and {FOREACH_MAX_MAX}"
-                )
 
 
 # ---------------------------------------------------------------------------
@@ -557,8 +530,8 @@ def validate_factory_machine(machine: Any) -> list[str]:
     if not isinstance(states, list):
         errors.append("factory machine requires a states list")
         return errors
-    if not 1 <= len(states) <= MAX_STATES:
-        errors.append(f"factory machine must declare between 1 and {MAX_STATES} states, got {len(states)}")
+    if not states:
+        errors.append("factory machine must declare at least one state")
         return errors
 
     seen_ids: set[str] = set()
@@ -639,10 +612,6 @@ def validate_factory_machine(machine: Any) -> list[str]:
                 seen_subagent_names[configured_name] = state_id
         if "entry" in state and not isinstance(state.get("entry"), bool):
             errors.append(f"state {state_id} entry must be a boolean")
-        if "max_entries" in state and not (
-            _is_int(state.get("max_entries")) and state.get("max_entries") >= STATE_MAX_ENTRIES_DEFAULT
-        ):
-            errors.append(f"state {state_id} max_entries must be an integer >= {STATE_MAX_ENTRIES_DEFAULT}")
         # A REQUIRED input can never bind on an entry state's first entry
         # (admission has no upstream settle) nor on a self-input's first
         # entry (no settle exists before an entry settles). Optional inputs
@@ -780,8 +749,8 @@ def compile_factory_dag(dag: Any) -> "tuple[dict[str, Any] | None, list[str]]":
     nodes = dag.get("nodes")
     if not isinstance(nodes, list):
         return None, errors + ["factory dag requires a nodes list"]
-    if not 1 <= len(nodes) <= MAX_NODES:
-        return None, errors + [f"factory dag must declare between 1 and {MAX_NODES} nodes, got {len(nodes)}"]
+    if not nodes:
+        return None, errors + ["factory dag must declare at least one node"]
 
     seen_ids: set[str] = set()
     nodes_by_id: dict[str, dict[str, Any]] = {}
@@ -883,7 +852,7 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     """Apply defaults to a validated machine and normalize it into a clean dict.
 
     Defaults: run failure_policy 'escalate', run max_parallel 8, run
-    max_transitions 10 per state capped at 10000, run max_children 10000,
+    max_transitions 10 per state, run max_children 10000,
     state entry False, state max_entries 1, state lifecycle 'task', state
     retries 0, state failure_policy copied from the run policy, and
     transition on 'settled'.
@@ -895,8 +864,7 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
         "failure_policy": run_policy,
         "max_parallel": run_in.get("max_parallel", RUN_MAX_PARALLEL_DEFAULT),
         "max_transitions": run_in.get(
-            "max_transitions",
-            min(TRANSITIONS_PER_STATE_DEFAULT * states_count, MAX_TRANSITIONS_CAP),
+            "max_transitions", TRANSITIONS_PER_STATE_DEFAULT * states_count
         ),
         "max_children": run_in.get("max_children", RUN_MAX_CHILDREN_DEFAULT),
     }
@@ -932,6 +900,18 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     canonical["states"] = states_out
     canonical["transitions"] = transitions_out
     return canonical
+
+
+async def _check_limits(spec: dict[str, Any]) -> None:
+    """Check a valid spec's declared numeric limits with the host (the
+    Rust ``pa_factory::limits``, the one copy of those numbers); raises
+    ``ValueError`` with every bound the spec breaks."""
+    from . import host_request
+
+    try:
+        await host_request("factory.limits", {"spec": spec})
+    except RuntimeError as error:
+        raise ValueError(str(error)) from None
 
 
 def canonicalize_factory_spec(spec: Any) -> dict[str, Any]:
@@ -1035,34 +1015,23 @@ __all__ = [
     "FactoryExecutor",
     "FactoryRun",
     "MachineFile",
-    "MachineResolutionError",
     "canonicalize_factory_spec",
     "cli_dispatch",
     "compile_factory_dag",
     "default_factory_executor",
     "export_factory_spec",
-    "export_library_machine",
     "export_machine",
     "factory_enabled",
-    "import_machine",
-    "library_graph",
-    "list_machines",
-    "machine_library_dirs",
-    "parse_machine_file",
     "render_machine_file",
-    "repo_machines_dir",
     "require_factory_enabled",
-    "resolve_machine",
     "resume_factory",
     "run_factory",
     "FactoryEmitError",
     "emit_factory_outputs",
     "factory_inputs",
-    "spec_to_mermaid",
     "status_factory",
     "stop_factory",
     "topological_order",
-    "user_machines_dir",
     "validate_factory_machine",
     "validate_factory_spec",
 ]
@@ -1146,10 +1115,11 @@ ACTIVITY_ACTIONS = (
 """The host bridge's actions over the factory surface, the
 ``factory_activity`` frame's action vocabulary: one run's
 ``graph``/``status``/``watch``/``stop``/``resume``, a ``run`` by spec id,
-the machine library's list/graph reads, and ``peek`` — the unscoped graph
+``library`` (one library machine's graph for the machines page's drill-in;
+the daemon answers the machine list itself), ``peek`` — the unscoped graph
 minus the rehydration re-arm, the read another session's display polls
-through (the kernel namespace is the same surface plus
-``graph``/``watch`` for agents)."""
+through — and ``node`` (one run state's detail for the node view). The
+kernel namespace is the same surface plus ``graph``/``watch`` for agents."""
 
 NODE_PROMPT_CAP = 65_536
 """Byte cap on one ``node`` reply's realized prompt (the exact spawn text
@@ -1251,12 +1221,9 @@ RUN_LOST_PYTHON_CALL = (
 mid-flight when the kernel restarted: honest about the loss, routed
 through the state's own retry/policy path."""
 
-REPAIR_WAIT_SECONDS = 600.0
-"""How long a child that settled owing outputs has, after the one repair
-message, to emit them before its entry fails with ``missing_output``."""
-
 REPAIR_POLL_SECONDS = 5.0
-"""How often a repairing child's outputs file is re-read."""
+"""How often a settled child is re-read while its repair turn or its
+background work runs (its collect answers at once)."""
 
 
 class FactoryEmitError(ValueError):
@@ -1824,9 +1791,8 @@ class _NodeInstance:
     # call receives them, an emit child gets them from rlm.factory.inputs(), re-runs reuse them
     session_dir: str | None = None  # the child's session dir: its emitted outputs live there
     child_name: str | None = None  # the child's session name (the repair message's receiver)
-    repair_sent: bool = False  # the one "you still owe ..." message went to this child
-    awaiting_outputs_until: float | None = None  # repairing: the child is re-polled
-    # for its emitted outputs until this deadline
+    repair_sent: bool = False  # the one "you still owe ..." message went to this child;
+    # while the instance is running again, the repair turn decides it
     ownership_change_in_progress: bool = False  # an admission or deletion owns the actor slot
     factory_task_activity: str | None = None  # busy, idle, or unverified for factory children
     process: "_PythonProcess | None" = None  # a python state's running call
@@ -1914,7 +1880,7 @@ class FactoryRun:
     state: str = "running"  # running | stopping | paused | done | failed | stopped
     started_at: float = 0.0
     max_parallel: int = RUN_MAX_PARALLEL_DEFAULT
-    max_transitions: int = MAX_TRANSITIONS_CAP
+    max_transitions: int = 0
     max_children: int = RUN_MAX_CHILDREN_DEFAULT
     max_transitions_reported: bool = False
     max_children_reported: bool = False
@@ -2107,7 +2073,6 @@ def _instance_json(instance: _NodeInstance) -> dict[str, Any]:
         "child_name": instance.child_name,
         "factory_task_activity": instance.factory_task_activity,
         "repair_sent": instance.repair_sent,
-        "awaiting_outputs_until": instance.awaiting_outputs_until,
         "deadline": instance.deadline,
     }
 
@@ -2118,7 +2083,7 @@ def _instance_from_json(data: dict[str, Any]) -> _NodeInstance:
         "status", "attempt", "retry_base", "infra_respawned", "capture_failed",
         "rate_limit_streak", "child_id", "spawned_at", "duration_ms", "answer",
         "provisional", "error", "tool_uses", "inputs", "session_dir",
-        "child_name", "factory_task_activity", "repair_sent", "awaiting_outputs_until", "deadline",
+        "child_name", "factory_task_activity", "repair_sent", "deadline",
     ):
         setattr(instance, field, data.get(field))
     instance.attempt = data.get("attempt") or 0
@@ -2239,7 +2204,6 @@ def rebase_run_clocks(
         for entry in state.entries:
             for instance in entry.instances:
                 instance.spawned_at = shift(instance.spawned_at)
-                instance.awaiting_outputs_until = shift(instance.awaiting_outputs_until)
                 instance.deadline = shift(instance.deadline)
 
 
@@ -3184,6 +3148,7 @@ class FactoryExecutor:
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
+        await _check_limits(spec)
         run = self._create_run(entry.id, canonical, resolved, name=name)
         return await self._launch_run(run)
 
@@ -3204,6 +3169,7 @@ class FactoryExecutor:
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
+        await _check_limits(machine.spec)
         run = self._create_run(machine.name, canonical, resolved, name=name)
         result = await self._launch_run(run)
         result["machine"] = machine.name
@@ -3978,39 +3944,24 @@ class FactoryExecutor:
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
         if action == "library":
-            # The library lane: the machine list (no target), or one
-            # machine's graph payload (``specId`` names it) — the same
-            # snapshot shape a stored spec's ``graph`` answers, plus the
-            # machine file's fields and the mermaid rendering. The machine
-            # resolves through the library's own contract (repo first,
-            # user second; broken machines name their errors), so the
-            # lane, run, and export never disagree about a name.
+            # One library machine's graph for the machines page's drill-in
+            # (the daemon answers the machine list itself, from its scan):
+            # the Rust loader describes the machine by name — the same
+            # resolution a run uses — and the reply is the snapshot shape a
+            # stored spec's ``graph`` answers, plus the machine's fields.
             if spec_id is None:
-                machines, warnings = await library_listing()
-                return _wire_payload(
-                    {
-                        "machines": [
-                            {
-                                "name": entry["name"],
-                                "description": entry["description"],
-                                "source": entry["source"],
-                                "kind": entry["kind"],
-                            }
-                            for entry in machines
-                        ],
-                        "warnings": warnings,
-                    }
-                )
-            graph = await library_graph_any(spec_id)
-            canonical = canonicalize_factory_spec(graph["spec"])
-            snapshot = self._spec_snapshot(graph["name"], canonical, compact=True)
-            snapshot["mermaid"] = graph["mermaid"]
-            snapshot["description"] = graph["description"]
-            snapshot["version"] = graph["version"]
-            snapshot["author"] = graph["author"]
-            snapshot["params"] = graph.get("params") or []
-            snapshot["files"] = graph.get("files") or []
-            snapshot["state_files"] = graph.get("state_files") or []
+                raise ValueError("factory activity library requires specId")
+            from . import host_request
+
+            described = await host_request("factory.describe", {"name": spec_id})
+            canonical = canonicalize_factory_spec(described["spec"])
+            snapshot = self._spec_snapshot(described["name"], canonical, compact=True)
+            snapshot["description"] = described["description"]
+            snapshot["version"] = str(described["version"])
+            snapshot["author"] = described.get("author") or ""
+            snapshot["params"] = described.get("params") or []
+            snapshot["files"] = described.get("files") or []
+            snapshot["state_files"] = described.get("state_files") or []
             return _wire_payload(snapshot)
         if action == "node":
             # The node lane: one state's inspection document — the
@@ -5026,7 +4977,6 @@ class FactoryExecutor:
         instance.child_name = handle.name
         instance.factory_task_activity = None
         instance.repair_sent = False
-        instance.awaiting_outputs_until = None
         instance.spawned_at = self._now_fn()
         instance.status = "running"
         instance.rate_limit_streak = 0
@@ -5543,10 +5493,10 @@ class FactoryExecutor:
 
         Settled means told: every required port carries an accepted value.
         A child that ended its turn still owing a port gets one repair
-        message in the same session and is re-polled for its outputs; it
-        is never replaced by a fresh child (two writers in one worktree).
-        A child that still owes a port after the repair window fails the
-        entry with ``missing_output``, without a retry.
+        message in the same session; it is never replaced by a fresh child
+        (two writers in one worktree). When that repair turn ends, a child
+        that still owes a port fails the entry with ``missing_output``,
+        without a retry.
         """
         owed = self._emitted_outputs(state, entry)
         if not owed:
@@ -5612,7 +5562,6 @@ class FactoryExecutor:
             return None
         instance.repair_sent = True
         instance.status = "running"
-        instance.awaiting_outputs_until = self._now_fn() + REPAIR_WAIT_SECONDS
         self._event(
             run,
             "repair_requested",
@@ -5659,12 +5608,13 @@ class FactoryExecutor:
         *,
         task_busy: bool | None,
     ) -> None:
-        """Re-read a repairing child's outputs, failing only after it is idle."""
+        """Decide a repair when its turn ends: the child reads idle again
+        (the queued repair message keeps it busy until its turn starts).
+        Emitted means done; anything still owed fails with ``missing_output``."""
         if (
             instance.status != "running"
             or instance.ownership_change_in_progress
             or run.state in ("stopping", "stopped")
-            or instance.awaiting_outputs_until is None
         ):
             return
         instance.factory_task_activity = (
@@ -5672,7 +5622,6 @@ class FactoryExecutor:
         )
         owed = self._emitted_outputs(state, entry).get(instance.index)
         if owed is None:
-            instance.awaiting_outputs_until = None
             instance.status = "done"
             self._event(run, "repaired", node=state.state_id, entry=entry.index, instance=instance.index)
             if entry.status == "running" and all(i.status == "done" for i in entry.instances):
@@ -5681,8 +5630,7 @@ class FactoryExecutor:
         if task_busy is None:
             await self._pause_for_unverified_task_activity(run, state, entry, instance)
             return
-        if not task_busy and self._now_fn() >= instance.awaiting_outputs_until:
-            instance.awaiting_outputs_until = None
+        if not task_busy:
             await self._apply_instance_failure(
                 run,
                 state,
@@ -6340,11 +6288,9 @@ class FactoryExecutor:
             task_owners = self._factory_task_owners(run)
             owner_polls = [item for item in task_owners if item[2].status != "running"]
             active_work = in_flight + owner_polls
-            repairing = [item for item in in_flight if item[2].awaiting_outputs_until is not None]
+            repairing = [item for item in in_flight if item[2].repair_sent]
             children = [
-                item
-                for item in in_flight
-                if item[2].child_id is not None and item[2].awaiting_outputs_until is None
+                item for item in in_flight if item[2].child_id is not None and not item[2].repair_sent
             ]
             python_calls = [item for item in in_flight if item[2].process is not None]
             results_by_child: dict[str, Any] = {}
@@ -6794,70 +6740,47 @@ async def run_factory(
 
     A path to a machine directory (``machine.toml``) runs that directory.
     Otherwise the argument names a stored factory entry (a runtime
-    instance) first; when no entry carries that id, it resolves a machine
-    from the library (repo directory first, user second; within a level a
-    machine directory wins over a MACHINE.md of the same name) and runs the
-    template directly: ``await rlm.factory.run("review-sweep")`` starts the
-    library machine without creating a harness entry. Harness entries
-    remain runtime instances; machines are templates.
+    instance) first; when no entry carries that id, the session's Rust
+    library scan resolves the name (the ``factory.compile`` host request,
+    the same scan ``prime-agent factory list`` shows) and the template runs
+    directly: ``await rlm.factory.run("review-sweep")`` starts the library
+    machine without creating a harness entry. Harness entries remain
+    runtime instances; machines are templates.
 
-    A machine directory is loaded, checked, and compiled by the session's
-    Rust loader (the ``factory.compile`` host request, the same one
-    ``prime-agent factory validate`` uses) with ``params`` bound; params
-    apply to machine directories only.
+    A machine directory is loaded, checked, and compiled by the Rust loader
+    with ``params`` bound; params apply to machine directories only.
     """
     require_factory_enabled()
     if params is not None and not isinstance(params, dict):
         raise TypeError(f"params must be a dict, got {type(params).__name__}")
     executor = await _armed_executor()
-    harness = executor._resolve_harness()
     directory = _machine_dir_argument(spec_id)
-    if directory is None and harness.get("factory", spec_id) is None:
-        directory = _resolve_machine_dir(spec_id)
-    if directory is not None:
-        from . import host_request
+    if directory is None and executor._resolve_harness().get("factory", spec_id) is not None:
+        if params:
+            raise ValueError(
+                f"params apply to machine directories (machine.toml); {spec_id!r} is a stored "
+                "factory entry, which takes none"
+            )
+        return await executor.run(spec_id, name=name)
+    from . import host_request
 
-        compiled = await host_request(
-            "factory.compile", {"path": str(directory), "params": params or {}}
-        )
-        machine = MachineFile(
-            name=compiled["name"],
-            description=compiled["description"],
-            version=str(compiled["version"]),
-            author=compiled.get("author") or "",
-            spec=compiled["spec"],
-        )
-        return await executor.run_machine(machine, machine_path=directory, name=name)
-    if params:
+    target = {"path": str(directory)} if directory is not None else {"name": spec_id}
+    try:
+        compiled = await host_request("factory.compile", {**target, "params": params or {}})
+    except RuntimeError as error:
+        if directory is not None:
+            raise ValueError(str(error)) from None
         raise ValueError(
-            f"params apply to machine directories (machine.toml); {spec_id!r} is a stored "
-            "factory entry or a MACHINE.md machine, which take none"
-        )
-    if harness.get("factory", spec_id) is None:
-        try:
-            machine, path = resolve_machine(spec_id)
-        except MachineResolutionError as error:
-            if error.broken:
-                raise ValueError(
-                    f"the library machine {spec_id!r} exists but is broken ({error})"
-                ) from None
-            raise ValueError(
-                f"unknown factory spec {spec_id!r}: no stored factory entry and "
-                f"no library machine with that name ({error})"
-            ) from None
-        except ValueError as error:
-            # An id that is not a legal machine name (spaces, capitals) can
-            # never resolve from the library either; the unknown-spec frame
-            # must not lose the lookup to the name-rule sentence. Only the
-            # name-rule error can arrive here: every library-file failure
-            # (unreadable, non-UTF-8, unparseable, spec-invalid) is a
-            # MachineResolutionError in the first except arm.
-            raise ValueError(
-                f"unknown factory spec {spec_id!r}: no stored factory entry, and "
-                f"the id is not a valid machine name either ({error})"
-            ) from None
-        return await executor.run_machine(machine, machine_path=path, name=name)
-    return await executor.run(spec_id, name=name)
+            f"unknown factory spec {spec_id!r}: no stored factory entry, and {error}"
+        ) from None
+    machine = MachineFile(
+        name=compiled["name"],
+        description=compiled["description"] or "",
+        version=str(compiled["version"]),
+        author=compiled.get("author") or "",
+        spec=compiled["spec"],
+    )
+    return await executor.run_machine(machine, machine_path=Path(compiled["path"]), name=name)
 
 
 async def status_factory(run_id: str) -> dict[str, Any]:
@@ -6930,7 +6853,7 @@ def _machine_structure(
     run_block = machine.get("run") if isinstance(machine.get("run"), dict) else {}
     run_out: dict[str, Any] = {
         "max_parallel": run_block.get("max_parallel", RUN_MAX_PARALLEL_DEFAULT),
-        "max_transitions": run_block.get("max_transitions", MAX_TRANSITIONS_CAP),
+        "max_transitions": run_block.get("max_transitions"),
         "failure_policy": run_block.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT),
         "max_children": run_block.get("max_children", RUN_MAX_CHILDREN_DEFAULT),
     }
@@ -7205,41 +7128,23 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Machine library: MACHINE.md files (import, export, share).
 #
-# A MACHINE.md is the shareable unit of the machine library, mirroring the
-# SKILL.md/skills conventions: YAML frontmatter (name, description, version,
-# author) followed by one fenced ``machine-spec`` block whose payload is a
-# JSON factory spec in the exact schema ``validate_factory_spec`` accepts
-# (machine form, or dag sugar that compiles to one) -- no new spec parser.
-# The library resolves from two levels, repo first, user second:
-#
-# - repo: the bundled machines shipped INSIDE the runtime package
-#   (``src/rlm/machines/<name>/MACHINE.md``, wheel package data, so every
-#   installed kernel sees the same seeds a checkout does);
-#   ``PRIME_AGENT_MACHINES_DIR`` redirects the level at a team directory.
-# - user: ``<agent dir>/machines/<name>/MACHINE.md`` (personal machines).
-#
-# ``import_machine`` is the library's gate: it parses the file, passes the
-# spec through the SAME write-time validator as every factory write (an
-# invalid spec never persists, with exact user-correctable errors), then
-# writes the file verbatim into the user library so its documentation
-# travels with the spec. ``export_machine`` serializes a library machine, a
-# stored factory entry's spec, or a run's canonical machine back to
-# MACHINE.md (byte-pretty, stable formatting for diffs). Harness entries
-# remain runtime instances; machines in the library are templates, so
-# ``run_factory`` falls back to the library when its argument names no
-# stored entry: ``await rlm.factory.run("review-sweep")``.
+# A MACHINE.md is a v1 machine file: YAML frontmatter (name, description,
+# version, author) followed by one fenced ``machine-spec`` block whose
+# payload is a JSON factory spec in the schema ``validate_factory_spec``
+# accepts. The machine library (MACHINE.md files and machine directories)
+# belongs to the Rust ``pa_factory`` scan: ``prime-agent factory list |
+# import | export`` and ``run_factory``'s name lookup (the
+# ``factory.compile`` host request) all read it. This module renders
+# MACHINE.md for ``export_machine`` (a stored entry or a live run).
 # ---------------------------------------------------------------------------
 
-MACHINE_FILE_NAME = "MACHINE.md"
 MACHINE_DIR_FILE_NAME = "machine.toml"
 """The file that makes a directory a machine directory (the format
 ``prime-agent factory validate`` checks; loaded by the session's Rust
 loader through the ``factory.compile`` host request)."""
 MACHINE_SPEC_FENCE = "machine-spec"
-MACHINES_DIR_NAME = "machines"
 MACHINE_NAME_MAX_LENGTH = 64
 MACHINE_DESCRIPTION_MAX_LENGTH = 1024
-MACHINE_FRONTMATTER_FIELDS: tuple[str, ...] = ("name", "description", "version", "author")
 
 _MACHINE_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
 _PLAIN_FRONTMATTER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._/@+~-]*")
@@ -7279,134 +7184,6 @@ def machine_description_errors(description: Any) -> list[str]:
     return []
 
 
-def _unquote_frontmatter_value(raw: str, field: str) -> "tuple[str | None, str | None]":
-    """Unquote one frontmatter value: plain, single-quoted, or double-quoted.
-
-    Plain values must stay YAML-safe (no colon anywhere), so a rendered
-    value always parses back identically.
-    """
-    value = raw.strip()
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        try:
-            unquoted = json.loads(value)
-        except ValueError as error:
-            return None, f"frontmatter {field} has an invalid double-quoted value ({error})"
-        if not isinstance(unquoted, str):
-            return None, f"frontmatter {field} must be a string scalar"
-        return unquoted, None
-    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
-        return value[1:-1].replace("''", "'"), None
-    if ":" in value:
-        return (
-            None,
-            f"frontmatter {field} is not a plain scalar (quote the value to include ':' characters)",
-        )
-    return value, None
-
-
-def _parse_machine_frontmatter(
-    text: str, *, source: str
-) -> "tuple[dict[str, str] | None, str, list[str]]":
-    """Parse the strict frontmatter subset MACHINE.md allows.
-
-    The subset is deliberately narrower than full YAML: one ``key: value``
-    line per field, the four machine fields only, quoted values for
-    anything that is not a plain scalar. The error sentences are the
-    import gate's user-correctable surface. Returns
-    ``(fields, body, [])`` on success or ``(None, "", errors)``.
-    """
-    normalized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
-    lines = normalized.split("\n")
-    if not lines or lines[0].rstrip() != "---":
-        return None, "", [f"{source}: MACHINE.md must start with a `---` frontmatter block"]
-    fields: dict[str, str] = {}
-    errors: list[str] = []
-    close_index: int | None = None
-    for index in range(1, len(lines)):
-        line = lines[index].rstrip()
-        if line == "---":
-            close_index = index
-            break
-        if not line.strip():
-            errors.append(f"{source}: frontmatter line {index + 1} is empty (one `key: value` line per field)")
-            continue
-        key, separator, raw_value = line.partition(":")
-        if not separator:
-            errors.append(f"{source}: frontmatter line {index + 1} must be `key: value`")
-            continue
-        key = key.strip()
-        if key not in MACHINE_FRONTMATTER_FIELDS:
-            errors.append(
-                f"{source}: unknown frontmatter key {key!r} "
-                f"(allowed: {', '.join(MACHINE_FRONTMATTER_FIELDS)})"
-            )
-            continue
-        if key in fields:
-            errors.append(f"{source}: frontmatter field {key!r} is declared more than once")
-            continue
-        if not raw_value.strip():
-            errors.append(f"{source}: frontmatter field {key!r} requires a value")
-            continue
-        unquoted, error = _unquote_frontmatter_value(raw_value, key)
-        if error is not None:
-            errors.append(f"{source}: {error}")
-            continue
-        assert unquoted is not None
-        fields[key] = unquoted
-    if close_index is None:
-        return None, "", [f"{source}: frontmatter is not closed (end it with a `---` line)"]
-    body = "\n".join(lines[close_index + 1 :])
-    if errors:
-        return None, "", errors
-    return fields, body, []
-
-
-def _extract_machine_spec_blocks(body: str, *, source: str) -> "tuple[str | None, list[str]]":
-    """Return the single fenced ``machine-spec`` payload from the body.
-
-    Other fenced blocks (prose examples, JSON listings) are skipped as
-    opaque units: their content never participates in the fence scan.
-    """
-    lines = body.split("\n")
-    contents: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index].rstrip()
-        if not line.lstrip().startswith("```"):
-            index += 1
-            continue
-        open_index = index
-        info = line.strip()[3:].strip()
-        index += 1
-        content_lines: list[str] = []
-        closed = False
-        while index < len(lines):
-            fence_line = lines[index].rstrip()
-            if fence_line == "```":
-                closed = True
-                index += 1
-                break
-            content_lines.append(lines[index])
-            index += 1
-        if info != MACHINE_SPEC_FENCE:
-            if not closed:
-                return None, [f"{source}: the ```{info} fence opened at line {open_index + 1} is never closed"]
-            continue
-        if not closed:
-            return None, [f"{source}: the ```{MACHINE_SPEC_FENCE} fence is never closed"]
-        contents.append("\n".join(content_lines))
-    if not contents:
-        return None, [
-            f"{source}: MACHINE.md requires exactly one fenced ```{MACHINE_SPEC_FENCE} block; found none"
-        ]
-    if len(contents) > 1:
-        return None, [
-            f"{source}: MACHINE.md requires exactly one fenced ```{MACHINE_SPEC_FENCE} block; "
-            f"found {len(contents)}"
-        ]
-    return contents[0], []
-
-
 @dataclass(frozen=True)
 class MachineFile:
     """A parsed MACHINE.md: strict frontmatter plus the machine-spec payload."""
@@ -7416,48 +7193,6 @@ class MachineFile:
     version: str
     author: str
     spec: "dict[str, Any]"
-
-
-def parse_machine_file(text: str, *, source: str = "machine file") -> "tuple[MachineFile | None, list[str]]":
-    """Parse one MACHINE.md. Returns ``(machine, [])`` or ``(None, errors)``.
-
-    This owns the FILE format only (frontmatter, fence, JSON payload); the
-    spec stays in the existing validated schema, and the import and run
-    gates pass it through ``validate_factory_spec`` separately.
-    """
-    fields, body, errors = _parse_machine_frontmatter(text, source=source)
-    if fields is None:
-        return None, errors
-    payload, errors = _extract_machine_spec_blocks(body, source=source)
-    if errors:
-        return None, errors
-    assert payload is not None
-    try:
-        spec = json.loads(payload)
-    except ValueError as error:
-        return None, [
-            f"{source}: the ```{MACHINE_SPEC_FENCE} block must contain a JSON object ({error})"
-        ]
-    if not isinstance(spec, dict):
-        return None, [
-            f"{source}: the ```{MACHINE_SPEC_FENCE} block must contain a JSON object, "
-            f"got a {type(spec).__name__}"
-        ]
-    name = fields.get("name", "")
-    errors = machine_name_errors(name)
-    errors.extend(machine_description_errors(fields.get("description")))
-    if errors:
-        return None, errors
-    return (
-        MachineFile(
-            name=name,
-            description=fields["description"],
-            version=fields.get("version", ""),
-            author=fields.get("author", ""),
-            spec=spec,
-        ),
-        [],
-    )
 
 
 def _render_frontmatter_value(value: str) -> str:
@@ -7547,7 +7282,7 @@ def render_machine_file(machine: MachineFile) -> str:
     """Render a MachineFile back to canonical MACHINE.md text.
 
     Byte-stable: the same machine always renders to the same bytes (stable
-    formatting for diffs), and ``parse_machine_file`` of the output
+    formatting for diffs), and the Rust ``parse_machine_md`` of the output
     recovers the same machine.
     """
     frontmatter = [
@@ -7574,378 +7309,6 @@ def render_machine_file(machine: MachineFile) -> str:
     return "\n".join(sections) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# Mermaid rendering: one spec's graph as diagram text (the library view's
-# copyable payload — GitHub, previews, and external tools render it).
-# ---------------------------------------------------------------------------
-
-_MERMAID_ID_PATTERN = re.compile(r"[a-z0-9_]+")
-
-# stateDiagram keywords: an id spelled like these parses as a statement
-# (`note`, `state`, `class`, `style`, `direction`, `as`, `end`), not a node.
-_MERMAID_STATE_RESERVED = frozenset(
-    {"note", "state", "class", "style", "classdef", "direction", "as", "end", "click", "linkstyle"}
-)
-
-
-def _mermaid_state_ids(states: list[Any]) -> dict[str, str]:
-    """Map every state id to a mermaid-safe ``stateDiagram-v2`` identifier.
-
-    Mermaid state ids cannot carry hyphens (the parser reads
-    ``review-a --> b`` as a malformed edge) while machine ids may, so a
-    hyphenated id aliases to its underscored form — with a deterministic
-    numeric suffix when two ids alias to the same spelling (``a-b`` and
-    ``a_b``), so two states never merge into one diagram node. Safe ids
-    pass through verbatim.
-    """
-    ids: dict[str, str] = {}
-    taken: set[str] = set()
-    for state in states:
-        if not isinstance(state, dict) or not isinstance(state.get("id"), str):
-            continue
-        state_id = state["id"]
-        safe = (
-            _MERMAID_ID_PATTERN.fullmatch(state_id) is not None
-            and state_id not in _MERMAID_STATE_RESERVED
-        )
-        base = state_id if safe else state_id.replace("-", "_")
-        if base in _MERMAID_STATE_RESERVED:
-            base = f"{base}_state"
-        candidate = base
-        suffix = 2
-        while candidate in taken:
-            candidate = f"{base}_{suffix}"
-            suffix += 1
-        taken.add(candidate)
-        ids[state_id] = candidate
-    return ids
-
-
-def _mermaid_label(text: str) -> str:
-    """Escape label text with Mermaid's numeric character entities."""
-    return "".join(
-        char if char.isalnum() or char in " ._-" else f"#{ord(char)};"
-        for char in text
-    )
-
-
-def _mermaid_guard_label(when: Any) -> str:
-    """One guard's edge label: ``<output>[.<path>] <op>[ <value>]``.
-
-    The same shape the machine contract and the TUI's compact guard
-    rendering use (``verdict.approved eq false``): the output, the dotted
-    path when the guard drills one, the op, and the JSON value when the
-    guard declares one (``exists`` carries none).
-    """
-    if not isinstance(when, dict):
-        return ""
-    output = when.get("output")
-    path = when.get("path")
-    target = f"{output}.{path}" if isinstance(path, str) and path else str(output)
-    label = f"{target} {when.get('op')}"
-    if when.get("op") != "exists" and "value" in when:
-        label += f" {json.dumps(when.get('value'))}"
-    return _mermaid_label(label)
-
-
-def _machine_to_mermaid_lines(machine: dict[str, Any]) -> list[str]:
-    """Machine form: a ``stateDiagram-v2``.
-
-    Every state is a node (one ``state`` declaration per state, labeled
-    with the state's own id — the declaration keeps an edge-less state on
-    the diagram instead of dropping it), every entry state is marked with
-    a ``[*] -->`` edge, and every transition is an edge per source state
-    labeled with its guard (``stateDiagram-v2`` has no multi-source edge,
-    so a join renders its connectivity: one edge per source).
-    """
-    states = machine.get("states") if isinstance(machine.get("states"), list) else []
-    ids = _mermaid_state_ids(states)
-    lines = ["stateDiagram-v2"]
-    for state in states:
-        if isinstance(state, dict) and isinstance(state.get("id"), str):
-            lines.append(f'    state "{state["id"]}" as {ids[state["id"]]}')
-    for state in states:
-        if isinstance(state, dict) and state.get("entry") is True and isinstance(state.get("id"), str):
-            lines.append(f'    [*] --> {ids[state["id"]]}')
-    transitions = machine.get("transitions") if isinstance(machine.get("transitions"), list) else []
-    for transition in transitions:
-        if not isinstance(transition, dict):
-            continue
-        raw_from = transition.get("from")
-        sources = raw_from if isinstance(raw_from, list) else [raw_from]
-        guard = _mermaid_guard_label(transition.get("when"))
-        to = ids.get(transition.get("to")) if isinstance(transition.get("to"), str) else None
-        for source in sources:
-            source_id = ids.get(source) if isinstance(source, str) else None
-            if source_id is None or to is None:
-                continue
-            edge = f"    {source_id} --> {to}"
-            if guard:
-                edge += f": {guard}"
-            lines.append(edge)
-    return lines
-
-
-def _mermaid_id_is_safe(node_id: str) -> bool:
-    """True when a dag node id can be written as a mermaid flowchart id.
-
-    Mermaid reserves keywords (lowercase ``end`` closes a subgraph, and
-    ``graph``/``subgraph``/``style``/``class`` begin statements) and reads
-    punctuation as syntax, so an id may be a perfectly valid dag id and
-    still produce unrenderable text."""
-    if not node_id or node_id.lower() in _MERMAID_RESERVED_WORDS:
-        return False
-    first = node_id[0]
-    if not (first.isalpha() or first == "_"):
-        return False
-    return all(character.isalnum() or character in "_-" for character in node_id)
-
-
-_MERMAID_RESERVED_WORDS = frozenset(
-    {"end", "graph", "flowchart", "subgraph", "style", "class", "classdef", "click", "linkstyle"}
-)
-
-
-def _dag_to_mermaid_lines(dag: dict[str, Any]) -> list[str]:
-    """Dag form: a ``flowchart TB`` over the effective dependency edges.
-
-    Every node is a node line (bare, or labeled with the machine
-    annotation when the node declares a ``foreach``: ``foreach: over
-    <input> (max N)``); every node's effective dependencies
-    (``depends_on`` plus every ``inputs[].from`` source) render as one
-    edge each. An id mermaid cannot read as an id (a keyword such as
-    ``end``, or punctuation) is aliased to a generated id and carries its
-    original spelling as the label.
-    """
-    nodes = dag.get("nodes") if isinstance(dag.get("nodes"), list) else []
-    lines = ["flowchart TB"]
-    aliases: dict[str, str] = {}
-    taken = {node["id"] for node in nodes
-             if isinstance(node, dict) and isinstance(node.get("id"), str)}
-
-    def render_id(node_id: str) -> str:
-        if _mermaid_id_is_safe(node_id):
-            return node_id
-        if node_id not in aliases:
-            counter = len(aliases)
-            alias = f"m{counter}"
-            while alias in taken:
-                counter += 1
-                alias = f"m{counter}"
-            taken.add(alias)
-            aliases[node_id] = alias
-        return aliases[node_id]
-
-    def label_for(node: dict[str, Any], node_id: str) -> str:
-        text = _mermaid_label(node_id)
-        foreach = node.get("foreach")
-        if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
-            text += (f"<br/>foreach: over {_mermaid_label(foreach['over'])} "
-                     f"(max {foreach.get('max')})")
-        return text
-
-    for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
-            continue
-        node_id = node["id"]
-        rendered = render_id(node_id)
-        if rendered != node_id:
-            lines.append(f'    {rendered}["{label_for(node, node_id)}"]')
-            continue
-        foreach = node.get("foreach")
-        if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
-            lines.append(
-                f'    {rendered}["{node_id}<br/>foreach: over '
-                f'{_mermaid_label(foreach["over"])} (max {foreach.get("max")})"]'
-            )
-        else:
-            lines.append(f"    {rendered}")
-    declared: set[str] = set()
-    for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
-            continue
-        target = render_id(node["id"])
-        declared.add(target)
-        for dependency in _effective_dag_edges(node):
-            source = render_id(dependency)
-            if source != dependency and source not in declared:
-                declared.add(source)
-                lines.insert(1, f'    {source}["{_mermaid_label(dependency)}"]')
-            lines.append(f"    {source} --> {target}")
-    return lines
-
-
-def spec_to_mermaid(spec: Any) -> str:
-    """Render one factory spec as Mermaid diagram text (pure).
-
-    Machine form (``states``/``transitions``) renders as a
-    ``stateDiagram-v2``: each state a node, each entry state marked
-    ``[*] --> entryId``, and each transition an edge labeled with its
-    guard (``<output>[.<path>] <op>[ <value>]``) when it carries one.
-    Dag form (``nodes``) renders as a ``flowchart TB``: each node a node
-    line, a ``foreach`` node annotated ``foreach: over <input> (max N)``,
-    and the effective dependency set one edge each. The output is plain
-    mermaid text — GitHub, previews, and external tools render it; a
-    terminal renders the in-page ANSI diagram instead. The renderer is
-    pure and defensive: it renders the shape it is given (the library and
-    the run lane only feed it validated specs) without touching the
-    filesystem or validating.
-    """
-    if (
-        not _is_machine_form(spec)
-        and isinstance(spec, dict)
-        and isinstance(spec.get("nodes"), list)
-    ):
-        lines = _dag_to_mermaid_lines(spec)
-    else:
-        lines = _machine_to_mermaid_lines(spec if isinstance(spec, dict) else {})
-    return "\n".join(lines) + "\n"
-
-
-def _machine_env_dir(name: str) -> str | None:
-    # Set-but-empty env values behave as unset (mirrors harness._env_dir).
-    value = (os.environ.get(name) or "").strip()
-    return value or None
-
-
-def repo_machines_dir() -> Path:
-    """The bundled machine library shipped inside the runtime package.
-
-    An explicit ``PRIME_AGENT_MACHINES_DIR`` wins (a team can point the
-    shared level at their own directory); otherwise the library resolves
-    relative to this module — ``src/rlm/machines`` in a checkout, exactly
-    the wheel-package data a kernel venv installs into
-    ``site-packages/rlm/machines`` — so an installed kernel sees the same
-    seeds a checkout does, with no source-tree walk-up that could pick up
-    a stray directory above an installed venv.
-    """
-    override = _machine_env_dir("PRIME_AGENT_MACHINES_DIR")
-    if override:
-        return Path(override).expanduser().resolve()
-    return Path(__file__).resolve().parent / MACHINES_DIR_NAME
-
-
-def user_machines_dir() -> Path:
-    """The personal machines directory (``<agent dir>/machines``)."""
-    raw = (
-        _machine_env_dir("PRIME_AGENT_CODING_AGENT_DIR")
-        or _machine_env_dir("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".prime" / "agent")
-    )
-    return Path(raw).expanduser().resolve() / MACHINES_DIR_NAME
-
-
-def machine_library_dirs(
-    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
-) -> "list[tuple[str, Path]]":
-    """Library levels in resolution order: repo first, user second.
-
-    Both levels always exist (the repo level is the packaged library;
-    the user level is the personal directory under the agent dir); a
-    missing directory is simply empty, so listing and resolving skip it.
-    """
-    repo = Path(repo_dir).expanduser() if repo_dir is not None else repo_machines_dir()
-    user = Path(user_dir).expanduser() if user_dir is not None else user_machines_dir()
-    return [("repo", repo), ("user", user)]
-
-
-def _read_library_machine(path: Path) -> "tuple[MachineFile | None, str]":
-    """One library file's validity verdict, shared by scan and resolve.
-
-    The four gates both surfaces apply — read, decode, the file format's
-    strict parser, the write-time spec validator — in one helper, so
-    `factory list` and `resolve_machine` can never disagree: a file
-    invalid here is never listed as usable and never claims its name at
-    resolve time. Returns ``(machine, "")`` when the file parses and
-    validates, ``(None, "<path>: <exact errors>")`` when it fails to read,
-    decode, or parse, and ``(machine, "<path>: <exact spec errors>")``
-    when it parses but its spec fails the validator (the machine rides
-    along so resolve can tell which name the file carries).
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return None, f"{path}: unreadable ({error})"
-    except UnicodeDecodeError as error:
-        return None, f"{path}: not valid UTF-8 ({error})"
-    machine, errors = parse_machine_file(text, source=str(path))
-    if machine is None or errors:
-        return None, f"{path}: {'; '.join(errors)}"
-    spec_errors = validate_factory_spec(machine.spec)
-    if spec_errors:
-        return machine, f"{path}: {'; '.join(spec_errors)}"
-    return machine, ""
-
-
-def _scan_machine_library(
-    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
-) -> "tuple[list[dict[str, Any]], list[str]]":
-    """One pass over both levels: the listed machines and broken-file
-    warnings (``<path>: <errors>``).
-
-    The shared scan behind ``list_machines`` and the CLI's ``factory list``:
-    both levels resolve identically, repo wins on name conflicts, and the
-    gates are ``_read_library_machine`` — the same verdict
-    ``resolve_machine`` applies, so a machine the listing shows always
-    parses and validates for resolve/run/import, while the files it skips
-    surface as warnings here and never claim their name on the resolve
-    surface either (their exact errors surface there only when no valid
-    machine carries the name).
-    """
-    machines: dict[str, dict[str, Any]] = {}
-    warnings: list[str] = []
-    for source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
-        if not directory.is_dir():
-            continue
-        try:
-            paths = sorted(directory.glob(f"*/{MACHINE_FILE_NAME}"))
-        except OSError as error:
-            # An undecodable entry in the library dir (round-11 R11-05,
-            # round-9 R9-01's third trigger): the scan names it safely
-            # and moves on — one hostile name never breaks the listing
-            # request's own frame.
-            warnings.append(f"{_shown(str(directory))}: {error}")
-            continue
-        for path in paths:
-            # An undecodable entry name in the library level (round-13
-            # R13-01): the MACHINE.md half of the round-12 guard — a lone
-            # surrogate in a directory name reaches _read_library_machine
-            # and the raw path rides the warning (and the CLI's listing
-            # fails on the unparseable result). Skip the undecodable entry
-            # with a safe warning.
-            if _frame_has_lone_surrogate(str(path)):
-                warnings.append(
-                    f"{_shown(str(path))}: the entry is not decodable and cannot be listed"
-                )
-                continue
-            machine, error = _read_library_machine(path)
-            if error:
-                warnings.append(error)
-                continue
-            if machine.name in machines:
-                continue  # repo first: the earlier level keeps the name
-            machines[machine.name] = {
-                "name": machine.name,
-                "description": machine.description,
-                "version": machine.version,
-                "author": machine.author,
-                "source": source,
-                "path": str(path),
-            }
-    return [machines[name] for name in sorted(machines)], warnings
-
-
-def list_machines(
-    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
-) -> "list[dict[str, Any]]":
-    """Library contents with descriptions, resolution-deduped (repo wins).
-
-    Broken files are skipped silently here (the agent-facing list);
-    ``cli_dispatch``'s ``list`` op surfaces them as warnings so the CLI's
-    ``factory list`` can say why a machine does not show.
-    """
-    return _scan_machine_library(repo_dir=repo_dir, user_dir=user_dir)[0]
-
 
 def _machine_dir_argument(spec_id: str) -> "Path | None":
     """The machine directory an explicit path names (``~/machines/rsi``,
@@ -7956,310 +7319,6 @@ def _machine_dir_argument(spec_id: str) -> "Path | None":
     if not (directory / MACHINE_DIR_FILE_NAME).is_file():
         raise ValueError(f"{spec_id!r} is not a machine directory (no {MACHINE_DIR_FILE_NAME} in it)")
     return directory
-
-
-def _resolve_machine_dir(
-    name: str,
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-) -> "Path | None":
-    """The library machine directory carrying ``name``, if one claims it.
-
-    Levels resolve in order (repo, then user). Within a level a
-    ``<name>/machine.toml`` directory wins over ``<name>/MACHINE.md``; a
-    valid MACHINE.md machine at an earlier level keeps the name, the order
-    ``prime-agent factory list`` shows. The directory's own checks run in
-    the Rust loader, so a broken directory reports its exact errors when
-    run instead of falling through to another level.
-    """
-    if machine_name_errors(name):
-        return None
-    for _source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
-        candidate = directory / name
-        if (candidate / MACHINE_DIR_FILE_NAME).is_file():
-            return candidate
-        v1 = candidate / MACHINE_FILE_NAME
-        if v1.is_file():
-            machine, error = _read_library_machine(v1)
-            if not error and machine is not None and machine.name == name:
-                return None
-    return None
-
-
-class MachineResolutionError(ValueError):
-    """One library lookup failure, with its kind.
-
-    ``broken`` distinguishes the two outcomes a caller must not blur: the
-    name's only carriers are machine files that failed to parse or
-    validate (the first file's errors say why) versus no machine carrying
-    the name at all.
-    """
-
-    def __init__(self, message: str, *, broken: bool) -> None:
-        super().__init__(message)
-        self.broken = broken
-
-
-def resolve_machine(
-    name: str,
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-) -> "tuple[MachineFile, Path]":
-    """Resolve one machine by name: repo directory first, user second.
-
-    The fast path reads ``<dir>/<name>/MACHINE.md`` directly, but only
-    serves what passes ``_read_library_machine`` — the SAME validity
-    verdict the listing scan applies — and only when its DECLARED name
-    matches: a directory named ``x`` holding ``name: y`` is not the
-    machine ``x`` (the declared name is the machine's name); such a file
-    resolves only through the scan below, under its declared name like it
-    does in the skill library. A file that fails to read, decode, or
-    parse, or carries a spec the write-time validator rejects, never
-    claims its name on either surface: resolution falls through to the
-    next level exactly like the listing does, so `factory list`,
-    ``rlm.factory.run``, and export can never disagree about a name. A
-    name whose only carriers are invalid files raises
-    ``MachineResolutionError`` with ``broken=True`` and the first file's
-    exact errors (in repo-to-user order) — broken, never missing; a name
-    no machine carries raises it with ``broken=False``.
-    """
-    errors = machine_name_errors(name)
-    if errors:
-        raise ValueError("; ".join(errors))
-    broken: str | None = None
-    for _source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
-        path = directory / str(name) / MACHINE_FILE_NAME
-        if not path.is_file():
-            continue
-        machine, file_error = _read_library_machine(path)
-        if file_error:
-            # The same verdict the listing scan applied: an invalid file
-            # does not claim the name, so the next level gets its chance.
-            # Keep the broken frame only for a file that carries the name
-            # — one that fails outright (machine is None) or declares
-            # this name — because a file declaring another name never
-            # carried this one.
-            if broken is None and (machine is None or machine.name == name):
-                broken = file_error
-            continue
-        if machine.name == name:
-            return machine, path
-    listed = list_machines(repo_dir=repo_dir, user_dir=user_dir)
-    for entry in listed:
-        if entry["name"] == name:
-            machine, parse_errors = parse_machine_file(
-                Path(entry["path"]).read_text(encoding="utf-8"), source=entry["path"]
-            )
-            if machine is None or parse_errors:
-                raise MachineResolutionError("; ".join(parse_errors), broken=True)
-            return machine, Path(entry["path"])
-    if broken is not None:
-        raise MachineResolutionError(broken, broken=True)
-    listing = ", ".join(entry["name"] for entry in listed)
-    raise MachineResolutionError(
-        f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})",
-        broken=False,
-    )
-
-
-def library_graph(
-    name: str,
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-) -> dict[str, Any]:
-    """One library machine's graph payload.
-
-    Resolves the machine exactly like a run does (``resolve_machine``:
-    repo directory first, user second) and returns the machine file's own
-    fields with the spec rendered as diagram text:
-    ``{"name", "description", "version", "author", "spec", "mermaid"}``.
-    The spec is the file's payload as written (machine form, or dag sugar
-    — the same object ``parse_machine_file`` read); ``mermaid`` is its
-    ``spec_to_mermaid`` rendering. Raises ``ValueError`` for an invalid
-    machine name and ``MachineResolutionError`` when no valid machine
-    carries the name — the library's own resolution contract, so the graph
-    seam can never disagree with run/export about a name.
-    """
-    machine, _path = resolve_machine(name, repo_dir=repo_dir, user_dir=user_dir)
-    files, state_files = _spec_state_files(machine.spec)
-    return {
-        "name": machine.name,
-        "description": machine.description,
-        "version": machine.version,
-        "author": machine.author,
-        "spec": machine.spec,
-        "files": files,
-        "state_files": state_files,
-        "mermaid": spec_to_mermaid(machine.spec),
-    }
-
-
-def _spec_state_files(spec: Any) -> "tuple[list[dict[str, str]], list[dict[str, Any]]]":
-    """What a reader inspects for each state of a MACHINE.md spec: an
-    inline prompt (``MACHINE.md · <state>``), or a line naming where the
-    work comes from (a harness subagent entry, a python module in the
-    session's directory). The factory page's node view shows them."""
-    rows = spec.get("states") if isinstance(spec, dict) and "states" in spec else None
-    if rows is None and isinstance(spec, dict):
-        rows = spec.get("nodes")
-    files: list[dict[str, str]] = []
-    state_files: list[dict[str, Any]] = []
-    for row in rows or []:
-        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
-            continue
-        state_id = row["id"]
-        subagent, python = row.get("subagent"), row.get("python")
-        if isinstance(python, dict):
-            text = f"Runs {python.get('import')}.{python.get('callable')} from the session's working directory."
-        elif isinstance(subagent, dict):
-            text = str(subagent.get("prompt") or "")
-        elif isinstance(subagent, str):
-            text = f"Runs the harness subagent entry {subagent!r}; its content is the prompt."
-        else:
-            continue
-        path = f"MACHINE.md \u00b7 {state_id}"
-        files.append({"path": path, "text": text})
-        state_files.append({"state": state_id, "paths": [path]})
-    return files, state_files
-
-
-async def library_listing(
-    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
-) -> "tuple[list[dict[str, Any]], list[str]]":
-    """The whole machine library, as the factory page lists it.
-
-    MACHINE.md machines come from the kernel's own scan; machine
-    directories (``machine.toml``) are described by the session's Rust
-    loader (the ``factory.describe`` host request), so the page lists
-    exactly what runs. One row per name, in the order ``run`` resolves it:
-    an earlier level wins over a later one, and within a level a machine
-    directory wins over a MACHINE.md. Each row carries ``kind`` (``file``
-    or ``directory``). A directory that fails to load, or whose declared
-    name is not its directory's name (``run`` resolves by directory), is
-    a warning, never a row.
-    """
-    from . import host_request
-
-    files, warnings = _scan_machine_library(repo_dir=repo_dir, user_dir=user_dir)
-    levels = machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir)
-    rank = {source: index for index, (source, _directory) in enumerate(levels)}
-    chosen: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
-
-    def offer(order: tuple[int, int], row: dict[str, Any]) -> None:
-        held = chosen.get(row["name"])
-        if held is None or order < held[0]:
-            chosen[row["name"]] = (order, row)
-
-    for entry in files:
-        offer((rank.get(entry["source"], len(levels)), 1), {**entry, "kind": "file"})
-    for index, (source, directory) in enumerate(levels):
-        if not directory.is_dir():
-            continue
-        try:
-            manifests = sorted(directory.glob(f"*/{MACHINE_DIR_FILE_NAME}"))
-        except OSError as error:
-            warnings.append(f"{_shown(str(directory))}: {error}")
-            continue
-        for manifest in manifests:
-            machine_dir = manifest.parent
-            # An undecodable directory name (round-12 R12-02, carried from
-            # round-9 R9-01's third trigger): PEP 383 hands it through as
-            # a lone surrogate with NO raise, and str() would carry it
-            # raw into the factory.describe frame — the reply the host's
-            # parser rejects. The undecodable entry skips with a safe
-            # warning instead.
-
-            if _frame_has_lone_surrogate(str(machine_dir)):
-                warnings.append(
-                    f"{_shown(str(directory))}: the entry "
-                    f"{_shown(machine_dir.name)!r} is not decodable and cannot be listed"
-                )
-                continue
-            try:
-                described = await host_request("factory.describe", {"path": str(machine_dir)})
-            except RuntimeError as error:
-                warnings.append(str(error))
-                continue
-            if described["name"] != machine_dir.name:
-                warnings.append(
-                    f"{machine_dir}: declares the name {described['name']!r}; rename the "
-                    "directory or the machine so they match"
-                )
-                continue
-            offer(
-                (index, 0),
-                {
-                    "name": described["name"],
-                    "description": described["description"],
-                    "version": str(described["version"]),
-                    "author": described.get("author") or "",
-                    "source": source,
-                    "path": str(machine_dir),
-                    "kind": "directory",
-                },
-            )
-    return [chosen[name][1] for name in sorted(chosen)], warnings
-
-
-async def library_graph_any(
-    name: str,
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-) -> dict[str, Any]:
-    """``library_graph`` for either kind of machine: a machine directory
-    (resolved like ``run`` resolves it) is described by the Rust loader as
-    a template, with its declared params; a MACHINE.md machine is
-    ``library_graph``."""
-    from . import host_request
-
-    directory = _resolve_machine_dir(name, repo_dir=repo_dir, user_dir=user_dir)
-    if directory is None:
-        return library_graph(name, repo_dir=repo_dir, user_dir=user_dir)
-    described = await host_request("factory.describe", {"path": str(directory)})
-    return {
-        "name": described["name"],
-        "description": described["description"],
-        "version": str(described["version"]),
-        "author": described.get("author") or "",
-        "spec": described["spec"],
-        "params": described.get("params") or [],
-        "files": described.get("files") or [],
-        "state_files": described.get("state_files") or [],
-        "mermaid": spec_to_mermaid(described["spec"]),
-    }
-
-
-def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None) -> "dict[str, Any]":
-    """The library gate: parse a MACHINE.md, validate its spec, persist it.
-
-    The spec goes through the SAME write-time validator as every factory
-    write (``validate_factory_spec``): an invalid spec never persists, and
-    the ``ValueError`` carries every error sentence, so the surface stays
-    user-correctable. Valid files persist byte-for-byte (their own prose,
-    formatting, and line endings travel with the machine) into the user
-    library.
-    """
-    source_path = Path(path).expanduser()
-    if not source_path.is_file():
-        raise ValueError(f"machine file not found: {source_path}")
-    raw = source_path.read_bytes()
-    text = raw.decode("utf-8")
-    machine, errors = parse_machine_file(text, source=str(source_path))
-    if machine is None or errors:
-        raise ValueError("; ".join(errors))
-    spec_errors = validate_factory_spec(machine.spec)
-    if spec_errors:
-        raise ValueError("; ".join(spec_errors))
-    destination_root = Path(target_dir).expanduser() if target_dir is not None else user_machines_dir()
-    destination = destination_root / machine.name / MACHINE_FILE_NAME
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    created = not destination.exists()
-    destination.write_bytes(raw)
-    return {"name": machine.name, "path": str(destination), "created": created}
 
 
 def _single_line(text: Any) -> str:
@@ -8332,50 +7391,10 @@ def export_factory_spec(
     return {"name": name, "path": str(destination), "source": "spec"}
 
 
-def export_library_machine(
-    name: str,
-    out_path: "str | Path",
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-    overwrite: bool = False,
-) -> "dict[str, Any]":
-    """Export one library machine to MACHINE.md at ``out_path``.
-
-    Resolution is the library contract only (repo directory first, user
-    second); the file copies verbatim so the shared documentation travels
-    with the spec. The out target is never overwritten silently: an
-    existing file refuses unless ``overwrite=True`` says otherwise. The
-    CLI dispatches here because a fresh CLI process has no session state
-    (stored entries and live runs) to resolve from.
-    """
-    machine, path = resolve_machine(name, repo_dir=repo_dir, user_dir=user_dir)
-    destination = Path(out_path).expanduser()
-    if destination.is_dir():
-        raise ValueError(f"export path {destination} is a directory (pass a file path)")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _write_export_target(
-        destination, path.read_text(encoding="utf-8"), overwrite=overwrite
-    )
-    return {"name": machine.name, "path": str(destination), "source": "library"}
-
-
-def export_machine(
-    target: str,
-    out_path: "str | Path",
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-    overwrite: bool = False,
-) -> "dict[str, Any]":
-    """Export one machine to MACHINE.md at ``out_path``.
-
-    Resolution mirrors ``run_factory``: a stored factory entry first, a
-    live run's canonical machine second, then the library machine (repo
-    directory first, user second). Library machines copy their file
-    verbatim so the shared documentation travels with the spec; entry and
-    run specs render byte-pretty.
-    """
+def export_machine(target: str, out_path: "str | Path", *, overwrite: bool = False) -> "dict[str, Any]":
+    """Export a stored factory entry's spec, or a live run's canonical
+    machine, to MACHINE.md at ``out_path`` (byte-pretty). Library machines
+    export with ``prime-agent factory export``, which copies the file."""
     executor = default_factory_executor()
     harness = executor._resolve_harness()
     entry = harness.get("factory", target)
@@ -8406,84 +7425,23 @@ def export_machine(
         return export_factory_spec(
             run.machine, out_path, name=run.spec_id, description=description, overwrite=overwrite
         )
-    return export_library_machine(
-        target, out_path, repo_dir=repo_dir, user_dir=user_dir, overwrite=overwrite
+    raise ValueError(
+        f"no stored factory entry or live run {target!r}; export a library machine with "
+        "`prime-agent factory export`"
     )
 
 
 def cli_dispatch(payload: Any) -> "dict[str, Any]":
-    """JSON facade for the ``prime-agent factory`` subcommands.
-
-    The CLI resolves the kernel Python, feeds one JSON payload on stdin,
-    and reads one JSON result from stdout: ``{"ok": true, ...}`` or
-    ``{"ok": false, "errors": [...]}``. Every error surfaces as data, so
-    the exact validator sentences reach the command's output verbatim.
-    The payload carries only what the user typed (an op, a path, a name,
-    an out target); ``read`` answers one MACHINE.md machine's fields and
-    spec for ``prime-agent factory convert``, and ``list`` answers the
-    library levels so the CLI can add machine directories (which the Rust
-    loader checks); this process resolves every library directory itself,
-    so the kernel is the single resolution contract for list, import, and
-    export alike — a fresh CLI process has no session state (stored
-    entries, live runs), so export resolves the library only.
+    """JSON facade for ``prime-agent factory import``: the ``validate`` op
+    checks a spec's structure with the write-time validator and answers
+    ``{"ok": true}`` or ``{"ok": false, "errors": [...]}`` (the exact
+    sentences reach the command's output verbatim). The CLI owns the rest
+    of the library (parsing, limits, listing, files) through ``pa-factory``.
     """
-    if not isinstance(payload, dict):
-        return {"ok": False, "errors": ["factory cli payload must be a JSON object"]}
-    op = payload.get("op")
-    if op == "list":
-        machines, warnings = _scan_machine_library()
-        # The levels let the CLI list machine directories with the Rust
-        # loader in the same resolution order.
-        levels = [
-            {"source": source, "path": str(directory)}
-            for source, directory in machine_library_dirs()
-        ]
-        return {"ok": True, "machines": machines, "warnings": warnings, "levels": levels}
-    if op == "read":
-        path, name = payload.get("path"), payload.get("name")
-        try:
-            if isinstance(path, str) and path:
-                machine, error = _read_library_machine(Path(path).expanduser())
-                if error or machine is None:
-                    raise ValueError(error)
-            elif isinstance(name, str) and name:
-                machine, _path = resolve_machine(name)
-            else:
-                return {"ok": False, "errors": ["factory read requires a `path` or `name` string"]}
-        except (ValueError, OSError) as error:
-            return {"ok": False, "errors": [str(error)]}
-        return {
-            "ok": True,
-            "name": machine.name,
-            "description": machine.description,
-            "version": machine.version,
-            "author": machine.author,
-            "spec": machine.spec,
-        }
-    if op == "import":
-        if not isinstance(payload.get("path"), str) or not payload["path"]:
-            return {"ok": False, "errors": ["factory import requires a `path` string"]}
-        try:
-            result = import_machine(payload["path"])
-        except (ValueError, OSError) as error:
-            return {"ok": False, "errors": [str(error)]}
-        return {"ok": True, **result}
-    if op == "export":
-        if not isinstance(payload.get("name"), str) or not payload["name"]:
-            return {"ok": False, "errors": ["factory export requires a `name` string"]}
-        if not isinstance(payload.get("out"), str) or not payload["out"]:
-            return {"ok": False, "errors": ["factory export requires an `out` string"]}
-        try:
-            result = export_library_machine(payload["name"], payload["out"])
-        except (ValueError, OSError) as error:
-            return {"ok": False, "errors": [str(error)]}
-        return {"ok": True, **result}
-    return {
-        "ok": False,
-        "errors": [
-            f"unknown factory cli op {op!r} (expected 'list', 'read', 'import' or 'export')"
-        ],
-    }
+    if not isinstance(payload, dict) or payload.get("op") != "validate":
+        return {"ok": False, "errors": ["factory cli payload must be {\"op\": \"validate\", \"spec\": ...}"]}
+    errors = validate_factory_spec(payload.get("spec"))
+    return {"ok": False, "errors": errors} if errors else {"ok": True}
 
 
 FACTORY_HELP: str = r"""# Factory
@@ -8678,8 +7636,8 @@ the cap, fails to capture, and fails the producing state through its
   life — foreach expansions and retry re-spawns included (neither
   `max_parallel` nor `max_transitions` bounds children); reaching it
   pauses the run once, and `resume` continues past it as an explicit
-  operator decision. `run.max_transitions` (default 10 per state, capped
-  at 10,000) pauses the run once at the boundary, mid-settle; `resume`
+  operator decision. `run.max_transitions` (default 10 per state, at
+  most 10,000) pauses the run once at the boundary, mid-settle; `resume`
   continues after the transitions that already fired without re-firing
   them. `run.budget_ms` pauses the run once when exceeded (in-flight
   children keep running). Per state: `max_entries` (default 1), `retries`
@@ -8954,8 +7912,8 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   `file` port takes a path and the file is copied beside the child's
   session. `await rlm.factory.inputs()` returns the bound inputs and params
   as values. A child that ends its turn still owing a required output gets
-  one message in its own session asking for it; if it still owes one ten
-  minutes later the entry fails with `missing_output`. No fresh child is
+  one message in its own session asking for it; if it still owes one when
+  that turn ends, the entry fails with `missing_output`. No fresh child is
   started for a missing output. A python state's returned dict goes
   through the same check. `text?` marks an optional output, and an input
   that reads one must be optional too.
@@ -8970,17 +7928,18 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
 
 ## Discovering machines
 
-- The machine library: machines are `MACHINE.md` files (frontmatter plus
-  one fenced `machine-spec` block), one directory per machine, resolved
-  from two levels — the bundled seeds shipped inside the runtime (visible
-  in every install; `PRIME_AGENT_MACHINES_DIR` redirects the level at a
-  team directory) first, the personal `machines/` library under the agent
-  dir second; the earlier level wins on name conflicts. `prime-agent
-  factory list | import | export` manages them: list shows only what
-  parses and validates (broken files print as warnings), import runs the same
-  write-time validation as a stored spec so an invalid machine never
-  persists, and export copies a library machine verbatim to a fresh path
-  (an existing target is refused, never overwritten). `rlm.factory.run('<name>')`
+- The machine library: one folder per machine, either a machine directory
+  (`machine.toml`) or a `MACHINE.md` file (frontmatter plus one fenced
+  `machine-spec` block), resolved from two levels — the bundled seeds
+  shipped inside the runtime (visible in every install;
+  `PRIME_AGENT_MACHINES_DIR` redirects the level at a team directory)
+  first, the personal `machines/` library under the agent dir second; the
+  earlier level wins on name conflicts, and within a level a machine
+  directory wins. `prime-agent factory list | import | export` manages
+  them: list shows what loads (broken folders print as warnings), import
+  checks the spec like a stored one so an invalid machine never persists,
+  and export copies a library MACHINE.md verbatim to a fresh path (an
+  existing target is refused, never overwritten). `rlm.factory.run('<name>')`
   runs a library machine directly without creating a harness entry; a
   machine that exists but is broken names its errors
   instead of pretending the name is unknown. The bundled seeds are
@@ -8993,9 +7952,9 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   own group. Open it from any session with the
   activity dock's `⚙ N machines` group or a bare `/factory`, or from the
   agents view with Ctrl+F (through the selected session). Enter on a
-  machine shows its diagram, params, and its mermaid rendered as a
-  diagram (a mermaid fence in a node's Markdown renders the same way;
-  types the page cannot draw collapse to a one-line placeholder); Enter
+  machine shows its diagram, params, and each state's files (a mermaid
+  fence in a node's Markdown renders as a diagram; types the page cannot
+  draw collapse to a one-line placeholder); Enter
   on this session's run opens the run page: one live diagram, where
   the up/down arrows walk the run header and the states that spawned a
   child, Enter or Right opens a state's latest child session, Ctrl+X (the
@@ -9020,9 +7979,8 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   outputs compact — the rosters and ledger previews stay ~160 characters
   — and let the full answer live in the child's session.
 - Runs survive kernel restarts: the registry snapshots to the session
-  artifact dir (forced on state changes and settle evaluations, throttled
-  otherwise, with a mutation journal for batches and admissions in
-  between), a restarted kernel rehydrates it on the next factory use, and
+  artifact dir (at the control loop's consistent points, with a mutation
+  journal for batches and admissions in between), a restarted kernel rehydrates it on the next factory use, and
   the runs continue (a run that was stopping
   finishes its cancellations; a python call the restart orphaned fails
   through its state's `retries` and `failure_policy`; children, supervisor-

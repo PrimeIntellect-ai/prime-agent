@@ -50,6 +50,13 @@ pub(crate) enum LibraryUpdate {
         epoch: u64,
         message: String,
     },
+    /// One machine's drill-in graph (or the error that replaced it).
+    Detail {
+        session: String,
+        epoch: u64,
+        name: String,
+        result: Result<Value, String>,
+    },
 }
 
 impl super::SessionUi {
@@ -154,7 +161,7 @@ impl super::SessionUi {
                 self.dirty = true;
             }
             Some(LibraryViewAction::DrillIn { name }) => {
-                self.fetch_library_graph(view, name).await?;
+                self.spawn_library_graph_fetch(view, name);
             }
             Some(LibraryViewAction::OpenRun { run_id }) => {
                 self.open_factory_runs(view, Some(FactoryRow::header(&run_id)));
@@ -203,39 +210,43 @@ impl super::SessionUi {
         Ok(())
     }
 
-    /// Fetch one machine's graph payload over the lane (the drill-in's
-    /// request, the run page's stop/resume pattern: one bounded
-    /// request, the reply folds straight into the open view, and a
-    /// failure surfaces on the view's error row).
-    async fn fetch_library_graph(&mut self, view: &mut AgentView, name: String) -> Result<()> {
-        let reply = self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::FactoryActivity {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    action: "library".to_string(),
-                    run_id: None,
-                    spec_id: Some(name.clone()),
-                    timeout_ms: None,
-                    rest: Map::default(),
-                },
-            )
-            .await;
-        match reply {
-            Ok(data) => {
-                if let Some(library_view) = view.machines_page_mut() {
-                    library_view.apply_detail(&name, &data);
-                }
-            }
-            Err(error) => {
-                if let Some(library_view) = view.machines_page_mut() {
-                    library_view.set_error(Some(format!("{error:#}")));
-                }
-            }
+    /// Fetch one machine's graph payload over the lane (the drill-in) off
+    /// the key loop: the read may boot the session's kernel, which can
+    /// outlast the UI request bound, so it takes the long-running class and
+    /// its reply lands through the library channel. A later drill-in's
+    /// epoch drops an older reply.
+    fn spawn_library_graph_fetch(&mut self, view: &mut AgentView, name: String) {
+        self.library_detail_epoch += 1;
+        let epoch = self.library_detail_epoch;
+        if let Some(library_view) = view.machines_page_mut() {
+            library_view.set_row_notice(Some(format!("opening machine {name}…")));
         }
         self.dirty = true;
-        Ok(())
+        let client = self.client.clone();
+        let session = self.active_session_id.clone();
+        let tx = self.library_updates.clone();
+        tokio::spawn(async move {
+            let fetched = client
+                .request_ok_with_timeout(
+                    DaemonCommand::FactoryActivity {
+                        id: None,
+                        active_session_id: session.clone(),
+                        action: "library".to_string(),
+                        run_id: None,
+                        spec_id: Some(name.clone()),
+                        timeout_ms: None,
+                        rest: Map::default(),
+                    },
+                    crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS,
+                )
+                .await;
+            let _ = tx.send(LibraryUpdate::Detail {
+                session,
+                epoch,
+                name,
+                result: fetched.map_err(|error| format!("{error:#}")),
+            });
+        });
     }
 
     /// Fire the open path's list fetch (the heartbeat refresh's shape,
@@ -249,22 +260,21 @@ impl super::SessionUi {
         let epoch = self.library_list_epoch;
         let tx = self.library_updates.clone();
         tokio::spawn(async move {
-            // This read may boot the session's kernel, which can outlast the UI request bound;
-            // it runs off the key loop, so it takes the long-running class.
-            let fetched = client
-                .request_ok_with_timeout(
-                    DaemonCommand::FactoryActivity {
-                        id: None,
-                        active_session_id: active_session_id.clone(),
-                        action: "library".to_string(),
-                        run_id: None,
-                        spec_id: None,
-                        timeout_ms: None,
-                        rest: Map::default(),
-                    },
-                    crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS,
-                )
-                .await;
+            // The daemon answers the list from its own library scan: no kernel.
+            let fetched = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(DaemonCommand::FactoryActivity {
+                    id: None,
+                    active_session_id: active_session_id.clone(),
+                    action: "library".to_string(),
+                    run_id: None,
+                    spec_id: None,
+                    timeout_ms: None,
+                    rest: Map::default(),
+                }),
+            )
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the machine list request timed out")));
             let update = match fetched {
                 Ok(data) => LibraryUpdate::Machines {
                     session: active_session_id,
@@ -445,6 +455,24 @@ impl super::SessionUi {
                 epoch,
                 message,
             } => self.apply_machines_update(&session, epoch, Err(message), view),
+            LibraryUpdate::Detail {
+                session,
+                epoch,
+                name,
+                result,
+            } => {
+                if session != self.active_session_id || epoch != self.library_detail_epoch {
+                    return;
+                }
+                if let Some(library_view) = view.machines_page_mut() {
+                    library_view.set_row_notice(None);
+                    match result {
+                        Ok(data) => library_view.apply_detail(&name, &data),
+                        Err(error) => library_view.set_error(Some(error)),
+                    }
+                }
+                self.dirty = true;
+            }
         }
     }
 

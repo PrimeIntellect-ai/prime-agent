@@ -760,9 +760,10 @@ impl AgentSessionEngine {
     }
 
     /// One factory activity over this session's kernel (the `/factory`
-    /// view's lane). Only the machines page's `library` read builds the
-    /// core session (like a prompt read), so the session can start its
-    /// kernel; every other action never builds one.
+    /// view's lane). Only the machines page's drill-in (`library` with a
+    /// machine name; the worker answers the list itself) builds the core
+    /// session (like a prompt read), so the session can start its kernel;
+    /// every other action never builds one.
     ///
     /// # Errors
     ///
@@ -807,6 +808,7 @@ impl AgentSessionEngine {
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
         images: &[pa_agent::types::ImageContent],
+        compaction_abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<SessionCommandExecution> {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
@@ -814,6 +816,7 @@ impl AgentSessionEngine {
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
+            compaction_abort,
             api_key,
             autonomous: &mut autonomous,
         };
