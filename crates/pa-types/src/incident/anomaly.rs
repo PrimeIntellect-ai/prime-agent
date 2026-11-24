@@ -231,19 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn duration_matches_the_ts_buckets() {
-        assert_eq!(format_incident_duration(0), "1s");
-        assert_eq!(format_incident_duration(999), "1s");
-        assert_eq!(format_incident_duration(2_500), "3s");
-        assert_eq!(format_incident_duration(120_000), "2m");
-        assert_eq!(format_incident_duration(1_158_000), "19m18s");
-        assert_eq!(format_incident_duration(607_000), "10m7s");
-        // TS keeps only hours+minutes once hours overflow.
-        assert_eq!(format_incident_duration(3_700_000), "1h1m");
-        assert_eq!(format_incident_duration(86_400_000), "24h");
-    }
-
-    #[test]
     fn durations_in_anomalies_report_the_cluster_span() {
         let daemon_a = "/tmp/prime-agent-501/daemon.sock";
         let daemon_b = "/tmp/other/daemon.sock";

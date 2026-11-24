@@ -110,12 +110,19 @@ pub type KernelBootstrapResultHandler = Arc<dyn Fn(KernelBootstrapStats) + Send 
 pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
-    /// Default time limit for user `python_repl` cells, in milliseconds
+    /// Default wait budget for user `python_repl` cells, in milliseconds
     /// (`None`: never armed; `0`: disabled). The daemon engine resolves it
     /// from settings and disarms it for daemonless sessions; a cell's own
-    /// `timeout` argument replaces it. The runtime bootstrap and internal
-    /// state ops never arm it.
+    /// `timeout` argument replaces it. A cell that outlives it is detached,
+    /// not interrupted: the call returns early, the cell keeps running, and
+    /// its completion goes to `on_background_cell`. The runtime bootstrap
+    /// and internal state ops never arm it.
     pub cell_timeout_ms: Option<u64>,
+    /// The session's shared cell wake: fires the detach on a user/inbox
+    /// interrupt.
+    pub cell_wake: Option<Arc<crate::kernel::cell_wake::CellWake>>,
+    /// Receives the late completion of a detached cell.
+    pub on_background_cell: Option<crate::kernel::shared::BackgroundCellCallback>,
     pub env: HashMap<String, String>,
     /// Command prefix prepended to every kernel `bash()` invocation.
     pub command_prefix: Option<String>,
@@ -175,11 +182,22 @@ struct ProvisionerInner {
     /// dispose while they invalidate a generation: a notice is either suppressed
     /// or published before the invalidation. A callback must not re-enter kill.
     notices: Mutex<()>,
+    /// The session's count of detached cells awaiting their terminal
+    /// admission: shared with every manager this provisioner creates, so a
+    /// replacement manager cannot hide an older pending notice.
+    pending_detached_completions: Arc<crate::kernel::shared::PendingDetachedCompletions>,
+    /// The previous manager was retired because its cell ignored a stop
+    /// interrupt: the next foreground result must carry the kernel-restart
+    /// note. Set when the owner reboots over a defunct manager; taken by the
+    /// tool layer.
+    restart_note_pending: std::sync::atomic::AtomicBool,
 }
 
 impl IpythonKernelProvisioner {
     pub fn new(cwd: impl Into<PathBuf>, options: IpythonKernelProvisionerOptions) -> Self {
         let (commands, inbox) = mpsc::unbounded_channel();
+        let pending_detached_completions =
+            Arc::new(crate::kernel::shared::PendingDetachedCompletions::default());
         Self {
             inner: Arc::new(ProvisionerInner {
                 cwd: cwd.into(),
@@ -189,6 +207,8 @@ impl IpythonKernelProvisioner {
                 inbox: Mutex::new(Some(inbox)),
                 dispose_signal: AbortSignal::new(),
                 notices: Mutex::new(()),
+                pending_detached_completions,
+                restart_note_pending: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -210,11 +230,53 @@ impl IpythonKernelProvisioner {
         owner::lock(&self.inner.state).manager()
     }
 
-    /// The default time limit the kernel executor arms for user cells
+    /// The default wait budget the kernel executor arms for user cells
     /// (`None`: never armed).
     #[must_use]
     pub fn cell_timeout_ms(&self) -> Option<u64> {
         self.inner.options.cell_timeout_ms
+    }
+
+    /// The session's shared cell wake, when one was wired.
+    #[must_use]
+    pub fn cell_wake(&self) -> Option<Arc<crate::kernel::cell_wake::CellWake>> {
+        self.inner.options.cell_wake.clone()
+    }
+
+    /// The background-cell completion sink, when one was wired.
+    #[must_use]
+    pub fn on_background_cell(&self) -> Option<crate::kernel::shared::BackgroundCellCallback> {
+        self.inner.options.on_background_cell.clone()
+    }
+
+    /// The number of detached cells whose terminal outcome is not yet
+    /// admitted: the residency gates' live-work term. The count is shared
+    /// with every manager this provisioner creates, so a defunct-manager
+    /// replacement cannot hide an older pending notice.
+    #[must_use]
+    pub fn pending_detached_completions(&self) -> usize {
+        self.inner.pending_detached_completions.count()
+    }
+
+    /// Whether the kernel restarted because its predecessor was retired for
+    /// an ignored stop interrupt, taking the note: exactly one foreground
+    /// result names the restart.
+    #[allow(clippy::must_use_candidate)] // the read is a take, not a pure query
+    pub fn take_kernel_restart_note(&self) -> bool {
+        self.inner
+            .restart_note_pending
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The session's live background kernel work: detached cells awaiting
+    /// their terminal admission plus live `bash()` handles. The daemon's
+    /// background-work gates read this count.
+    #[must_use]
+    pub fn background_work_count(&self) -> usize {
+        self.pending_detached_completions()
+            + self
+                .manager()
+                .map_or(0, |manager| manager.background_bash_handle_count())
     }
 
     /// The Python skills pre-imported at kernel bootstrap.
@@ -549,6 +611,7 @@ async fn start_kernel_impl(
         host_handlers: options.host_handlers.clone(),
         python_skills: options.python_skills.clone(),
         on_background_work_settled: options.on_background_work_settled.clone(),
+        pending_detached_completions: Some(Arc::clone(&inner.pending_detached_completions)),
         snapshot,
         bootstrap_code: Some(bootstrap_code.clone()),
         stderr_log_path,

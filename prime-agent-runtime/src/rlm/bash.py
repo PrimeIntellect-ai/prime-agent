@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn, cast
 
 from . import _winjob
+from .inbox_lifecycle import NoticeLifecycle
 
 _IS_POSIX = os.name == "posix"
 
@@ -47,6 +48,8 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
+# The output tail a [bash-done] wake row shows (the daemon caps it further).
+_COMPLETION_NOTICE_TAIL_CAP = 400
 # Display MIME the host aggregates into a per-cell summary of the bash()
 # commands the cell ran (first capped command, count, line total).
 _BASH_COMMAND_MIME = "application/vnd.prime-agent.bash-command+json"
@@ -78,25 +81,26 @@ def _set_completion_notices_wired(wired: bool) -> None:
     _completion_notices_wired = wired
 
 
-# One stderr hint per degrade, budgeted per kernel (nano-rlm's
-# MAX_LONG_RUN_NOTES shape): the first few degrades teach the contract, later
-# ones stay quiet.
-_MAX_DEGRADE_HINTS = 3
-_degrade_hints_written = 0
+# The machine-facing directive every degraded await carries: the command is
+# backgrounded, so this turn's work on it is done. Shared by the stderr note
+# and the snapshot repr so both tell the same story.
+_DEGRADE_DIRECTIVE = (
+    "The command runs in the background: do not await it again this turn; "
+    "end the turn and collect the final result on the completion notice."
+)
 
 
-def _note_degrade(handle: "BashHandle", bound: float) -> None:
-    """Write the degrade hint to the awaiting cell's stderr, within budget."""
-    global _degrade_hints_written
-    if _degrade_hints_written >= _MAX_DEGRADE_HINTS:
-        return
-    _degrade_hints_written += 1
-    sys.stderr.write(
-        f"bash: still running after {bound:g}s (pid {handle._pid}); "
-        "returned a snapshot: r.running is True, r.output is the output so "
-        "far, r.handle is the live handle. End the turn — a completion "
-        "notice arrives when it finishes.\n"
-    )
+def _note_degrade(snapshot: "BashSnapshot") -> None:
+    """Write the snapshot's directive to the awaiting cell's stderr.
+
+    One note per degrade of the cell's own await, never budgeted: for an
+    assignment-form await the note is the model's only feedback (no trailing
+    expression means no repr in the tool result), and a quiet repeat reads as
+    progress. The note is
+    what makes the re-await loop visible: every repeat shows the pid, the
+    growing elapsed, and the end-the-turn contract.
+    """
+    sys.stderr.write(f"{snapshot.directive()}\n")
 
 
 async def _bounded_wait(
@@ -178,6 +182,8 @@ def _capped(command: str) -> str:
     if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
         return command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
     return command
+
+
 
 
 def _completion_reaches(
@@ -292,23 +298,36 @@ class BashSnapshot:
     """A degraded await's still-running snapshot (`BashHandle.__await__`).
 
     `r.output`/`r.exit_code` read like a BashResult's — output so far and
-    None while running — and `r.running` is True; `r.handle` is the live
-    handle: collect the final result on the completion notice or with
-    `await r.handle`. The snapshot itself is not awaitable (that was #3076's
-    rejected wrapper shape).
+    None while running — and `r.running` is True. `r.duration` is the
+    command's elapsed running time at `r.result_time` (UTC), the wall-clock
+    moment the snapshot was taken, so repeated snapshots show the elapsed
+    growing. `r.handle` is the live handle: collect the final result on the
+    completion notice. The snapshot itself is not awaitable (that was
+    #3076's rejected wrapper shape), and its repr carries the background
+    directive so a bare-expression await states it in the tool result.
     """
 
     output: str
     exit_code: None
     running: bool
     duration: float
+    result_time: datetime
     handle: "BashHandle"
+
+    def directive(self) -> str:
+        """The model-facing note for this snapshot: elapsed, result time,
+        and the end-the-turn directive, in the stderr note's exact wording."""
+        return (
+            f"bash: still running after {self.duration:g}s "
+            f"(pid {self.handle._pid}, snapshot at "
+            f"{self.result_time.strftime('%Y-%m-%dT%H:%M:%SZ')}). {_DEGRADE_DIRECTIVE}"
+        )
 
     def __repr__(self) -> str:
         return (
             f"<BashSnapshot running pid={self.handle._pid} "
-            f"after {self.duration:g}s: collect on the completion "
-            "notice or await .handle>"
+            f"after {self.duration:g}s at "
+            f"{self.result_time.strftime('%Y-%m-%dT%H:%M:%SZ')}: {_DEGRADE_DIRECTIVE}>"
         )
 
 
@@ -390,7 +409,7 @@ class BashHandle:
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
-        self._result_consumed = False
+        self._notice_state = NoticeLifecycle.QUEUED
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
@@ -791,25 +810,34 @@ class BashHandle:
                 return
         callback()
 
-    def _note_result_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
-        """Record a result read that reaches the model: only reads during a live
-        cell count (a detached reader between turns must keep the notice — it is
-        the idle session's only wake-up), and an awaiting reader must be one the
-        live cell waits for."""
+    def _note_result_consumed(self) -> None:
+        """Record a read of the finished result from any cell or task while a
+        cell is live: a read before completion does not count, and neither does
+        a read with no live cell (it reaches nobody, and the notice is the idle
+        session's only wake-up). Read before the notice left the kernel, the
+        notice is never sent; read after, the host is asked to withdraw it."""
         if not self._done.is_set():
             return
-        owner = _live_cell_owner()
-        if owner is None:
-            return
-        if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
+        if _live_cell_owner() is None:
             return
         with self._callback_lock:
-            if self._result_consumed:
+            if self._notice_state is NoticeLifecycle.QUEUED:
+                self._notice_state = NoticeLifecycle.CONSUMED
+            elif self._notice_state is NoticeLifecycle.SENT:
+                self._notice_state = NoticeLifecycle.WITHDRAWN
+            else:
                 return
-            self._result_consumed = True
             notice, self._consumed_notice = self._consumed_notice, None
         if notice is not None:
             notice()
+
+    def _claim_notice(self) -> bool:
+        """Mark the notice as sent unless a read already consumed it."""
+        with self._callback_lock:
+            if self._notice_state is not NoticeLifecycle.QUEUED:
+                return False
+            self._notice_state = NoticeLifecycle.SENT
+            return True
 
     def _schedule_background_completion_notice(self) -> None:
         cell_finished = self._creating_cell_finished
@@ -845,7 +873,13 @@ class BashHandle:
             # The cell may do other work before awaiting this handle. Do not classify
             # it as detached until that whole cell has crossed its completion barrier.
             await cell_finished.wait()
-            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
+            # An await of THIS handle that is still in flight owns the
+            # completion: let it resolve and count the result as consumed
+            # before deciding whether anything must be announced. A notice
+            # fired between the exit and the await would interrupt the
+            # awaiting cell and lose the result.
+            await self._awaiters_free_event().wait()
+            if self._awaited_by_creating_cell or not repl.is_active() or not self._claim_notice():
                 return
             command = _capped(self.command)
             reply = await repl.host_request(
@@ -854,6 +888,7 @@ class BashHandle:
                     "pid": self._pid,
                     "command": command,
                     "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
                 }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
@@ -877,7 +912,7 @@ class BashHandle:
         dispatch = functools.partial(self._notify_result_consumed, command)
 
         with self._callback_lock:
-            if not self._result_consumed:
+            if self._notice_state is NoticeLifecycle.SENT:
                 self._consumed_notice = dispatch
                 return
         dispatch()
@@ -1048,6 +1083,29 @@ class BashHandle:
         if delivered:
             _record_journal(self._pid, active=False)
 
+    # Awaiters of THIS handle, anywhere in the session: a later cell can
+    # await a handle an earlier cell created, and the completion notice must
+    # not fire between the process exit and the await that is resolving it —
+    # that arrival would interrupt the awaiting cell and lose the result the
+    # await was about to return. The event is set while no await is in
+    # flight, so the notice waits for every awaiter to clear.
+    def _awaiters_free_event(self) -> asyncio.Event:
+        event = getattr(self, "_awaiter_free", None)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._awaiter_free = event
+        return event
+
+    def _begin_await(self) -> None:
+        self._awaiters = getattr(self, "_awaiters", 0) + 1
+        self._awaiters_free_event().clear()
+
+    def _end_await(self) -> None:
+        self._awaiters = max(0, getattr(self, "_awaiters", 1) - 1)
+        if self._awaiters == 0:
+            self._awaiters_free_event().set()
+
     def __await__(self) -> Generator[Any, None, BashResult | BashSnapshot]:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
@@ -1064,6 +1122,7 @@ class BashHandle:
         self._released = True
         completed = False
         degraded = False
+        self._begin_await()
         try:
             result = yield from _bounded_wait(wait, bound).__await__()
             if result is None:
@@ -1083,10 +1142,17 @@ class BashHandle:
             ):
                 self._awaited_by_creating_cell = True
             if completed:
-                self._note_result_consumed(current_task)
+                self._note_result_consumed()
+            self._end_await()
         if degraded:
-            _note_degrade(self, cast("float", bound))
-            return self._degrade_snapshot()
+            snapshot = self._degrade_snapshot()
+            # Only the calling cell's own await gets the note, while that cell
+            # runs (beside a newer cell too): a background task's note would
+            # land in a later, unrelated cell's output.
+            context = _current_cell_completion_context()
+            if context is not None and _creating_cell_waits_for(context[1], current_task):
+                _note_degrade(snapshot)
+            return snapshot
         return cast("BashResult", result)
 
     def _degrade_snapshot(self) -> BashSnapshot:
@@ -1098,6 +1164,7 @@ class BashHandle:
             exit_code=None,
             running=True,
             duration=time.monotonic() - self._started,
+            result_time=datetime.now(timezone.utc),
             handle=self,
         )
 
@@ -1180,7 +1247,7 @@ class PersistentBashHandle(BashHandle):
         self._completion_error: OSError | ValueError | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
-        self._result_consumed = False
+        self._notice_state = NoticeLifecycle.QUEUED
         self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         self._reaped = False
@@ -1280,11 +1347,19 @@ class PersistentBashHandle(BashHandle):
             result = await self._wait()
             if self._creating_cell_finished is not None:
                 await self._creating_cell_finished.wait()
-            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
+            # Same gate as a background command: an in-flight await owns the completion.
+            await self._awaiters_free_event().wait()
+            if self._awaited_by_creating_cell or not repl.is_active() or not self._claim_notice():
                 return
             command = _capped(self.command)
             reply = await repl.host_request(
-                {"type": "bash.completed", "pid": self._pid, "command": command, "exitCode": result.exit_code}
+                {
+                    "type": "bash.completed",
+                    "pid": self._pid,
+                    "command": command,
+                    "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
+                }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
                 self._arm_consumed_notice(command)
@@ -1296,7 +1371,11 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, persistent: bool = False) -> BashHandle:
+def bash(
+    command: str,
+    persistent: bool = False,
+    **unknown: Any,
+) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
@@ -1330,6 +1409,28 @@ def bash(command: str, persistent: bool = False) -> BashHandle:
     polled, so its result and completion notice lag by up to a second; its
     exit_code is -1 when it was killed before recording a status.
     """
+    if unknown:
+        # Invented wait parameters (`timeout=`) are the recurring failure the
+        # eval traces show: the model reaches for a common API shape, loses the
+        # cell to a bare TypeError, and flails. Decline with the real
+        # signature and the route this session can deliver: the parked-turn
+        # notice exists only where the host wires it, and a notice-less await
+        # waits for the command to finish.
+        route = (
+            "launch the command (bash() returns immediately and "
+            "auto-backgrounds it) and end the turn; a [bash-done] "
+            "notification resumes you. An await always yields after 1 second."
+            if _completion_notices_wired
+            else "launch the command (bash() returns immediately) and read "
+            "the handle in a later cell; this session has no [bash-done] "
+            "notice, so an await waits until the command finishes."
+        )
+        raise TypeError(
+            "bash() takes command, persistent — not "
+            + ", ".join(f"{name!r}" for name in sorted(unknown))
+            + ". There is no wait or timeout parameter: "
+            + route
+        )
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     if persistent:

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use pa_core::kernel::bootstrap::{KernelPythonSkill, UnavailablePythonSkills};
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
-use pa_core::kernel::shared::HostRequestHandlers;
+use pa_core::kernel::shared::{ExecuteOptions, ExecuteStatus, HostRequestHandlers};
 use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
 use pa_core::session_engine::provider_adapter::{json_round_trip, real_stream_fn};
 use pa_core::session_engine::skills_unavailable_notice::{
@@ -70,6 +70,7 @@ fn skill(name: &str) -> KernelPythonSkill {
 
 /// One boot with an explicit kernel python reports the broken import (and only it): the marker line
 /// carries `json`'s healthy import nowhere, so the report stays honest about what actually failed.
+/// The broken skill's placeholder then raises that import error on use.
 #[tokio::test]
 async fn broken_skill_import_reports_and_healthy_skills_stay_silent() {
     let Some(python) = kernel_python() else {
@@ -94,7 +95,7 @@ async fn broken_skill_import_reports_and_healthy_skills_stay_silent() {
             ..Default::default()
         },
     );
-    provisioner
+    let manager = provisioner
         .ensure(None, None)
         .await
         .expect("the broken skill must not cost the kernel (TS: placeholders swallow it)");
@@ -107,6 +108,27 @@ async fn broken_skill_import_reports_and_healthy_skills_stay_silent() {
         reported, expected,
         "the healthy `json` import must stay out"
     );
+    // The placeholder names the import error on use, with or without an import.
+    for code in [
+        "broken_skill_lane.complete()",
+        "import broken_skill_lane\nbroken_skill_lane.complete()",
+    ] {
+        let result = manager
+            .execute(code, ExecuteOptions::default())
+            .await
+            .expect("execute");
+        assert_eq!(result.status, ExecuteStatus::Error, "{code}");
+        let error = result.error.expect("the cell error");
+        assert_eq!(
+            (error.ename.as_str(), error.evalue.as_str()),
+            (
+                "RuntimeError",
+                "Python skill broken_skill_lane is unavailable in this kernel. \
+                 Import error: No module named 'broken_skill_lane'"
+            ),
+            "{code}"
+        );
+    }
     provisioner.dispose(None).await;
 }
 
@@ -163,6 +185,8 @@ async fn notice_rides_the_next_turn_as_model_context() {
     let stream_fn = real_stream_fn(None, model.clone());
 
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd,
         agent_dir,
         model: Some(json_round_trip(&model).expect("model conversion")),

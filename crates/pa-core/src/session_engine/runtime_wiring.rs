@@ -257,6 +257,8 @@ pub fn kernel_provisioner(
     websearch_env: Vec<(String, String)>,
     session_artifact_dir: Option<std::path::PathBuf>,
     cell_timeout_ms: Option<u64>,
+    cell_wake: Arc<crate::kernel::cell_wake::CellWake>,
+    on_background_cell: Option<crate::kernel::shared::BackgroundCellCallback>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
@@ -301,9 +303,11 @@ pub fn kernel_provisioner(
             // Only persistent sessions (which have an artifact dir) get
             // a revivable snapshot (TS `snapshotDir`).
             snapshot_dir: session_artifact_dir,
-            // The engine-resolved default cell time limit (`None`: daemonless;
+            // The engine-resolved default cell wait budget (`None`: daemonless;
             // the runtime bootstrap and state ops never arm it).
             cell_timeout_ms,
+            cell_wake: Some(cell_wake),
+            on_background_cell,
             ready_gate,
             on_restore,
             on_background_work_settled,
@@ -365,9 +369,13 @@ impl IpythonKernelProvisioner for KernelProvisioner {
             let signal = signal.map(crate::kernel::cancellation::AbortSignal::from_token);
             let manager = this.ensure(on_progress, signal).await?;
             let cell_timeout_ms = this.cell_timeout_ms();
+            let cell_wake = this.cell_wake();
+            let on_background_cell = this.on_background_cell();
             Ok(Box::new(KernelManagerExecutor {
                 manager,
                 cell_timeout_ms,
+                cell_wake,
+                on_background_cell,
             }) as Box<dyn KernelExecutor>)
         })
     }
@@ -376,13 +384,21 @@ impl IpythonKernelProvisioner for KernelProvisioner {
         let this = self.clone();
         Box::pin(async move { this.kill_and_wait().await })
     }
+
+    fn take_kernel_restart_note(&self) -> bool {
+        self.take_kernel_restart_note()
+    }
 }
 
 /// Adapts the kernel manager to the ipython tool's executor contract.
 struct KernelManagerExecutor {
     manager: crate::kernel::manager::ReplKernelManager,
-    /// The session's default cell time limit (`None`: never armed; `0`: disabled).
+    /// The session's default cell wait budget (`None`: never armed; `0`: disabled).
     cell_timeout_ms: Option<u64>,
+    /// The session's shared cell wake (`None`: waits never end early).
+    cell_wake: Option<Arc<crate::kernel::cell_wake::CellWake>>,
+    /// Receives auto-backgrounded cells' late completions (`None`: dropped).
+    on_background_cell: Option<crate::kernel::shared::BackgroundCellCallback>,
 }
 
 impl KernelExecutor for KernelManagerExecutor {
@@ -396,12 +412,14 @@ impl KernelExecutor for KernelManagerExecutor {
         let code = code.to_string();
         let signal = options.signal;
         let on_late_sent_agent_message = options.on_late_sent_agent_message;
-        // The session decides whether cells are limited at all; the model's
-        // per-call `timeout` only replaces the default limit.
+        // The session decides whether cells are budgeted at all; the model's
+        // per-call `timeout` only replaces the default budget.
         let cell_timeout_ms = self
             .cell_timeout_ms
             .filter(|ms| *ms > 0)
             .map(|default_ms| options.timeout_ms.unwrap_or(default_ms));
+        let cell_wake = self.cell_wake.clone();
+        let on_background_cell = self.on_background_cell.clone();
         Box::pin(async move {
             let result = manager
                 .execute(
@@ -410,6 +428,8 @@ impl KernelExecutor for KernelManagerExecutor {
                         signal: signal.map(crate::kernel::cancellation::AbortSignal::from_token),
                         on_late_sent_agent_message,
                         cell_timeout_ms,
+                        wake: cell_wake,
+                        on_background_cell,
                         ..Default::default()
                     },
                 )
@@ -443,7 +463,10 @@ fn convert_status(
     }
 }
 
-fn convert_execute_result(
+/// The ONE kernel-to-tool settled-result conversion: the foreground tool
+/// result and the background completion notice both compose through it,
+/// so the two lanes share one result shape and one formatter.
+pub(crate) fn convert_execute_result(
     result: crate::kernel::shared::ExecuteResult,
 ) -> crate::tools::ipython::ExecuteResult {
     crate::tools::ipython::ExecuteResult {
@@ -472,7 +495,7 @@ fn convert_execute_result(
         bash_commands: result.bash_commands,
         transcript_reads: result.transcript_reads.unwrap_or_default(),
         inbox_messages: result.inbox_messages.unwrap_or_default(),
-        timed_out_after_ms: result.timed_out_after_ms,
+        detached: result.detached,
         ended_turn: result.ended_turn,
     }
 }

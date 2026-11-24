@@ -75,6 +75,7 @@ impl SupervisorChildSessionsInner {
         depth: u32,
         model: &str,
         thinking: Option<&str>,
+        decision_child: bool,
         cwd: &str,
         session_dir: &Path,
         // The parent's in-flight turn request the child anchors to (TS
@@ -91,6 +92,11 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
+        // The create key: descriptor.rs derives the worker's launch env
+        // from it, and the admission projects it onto the ledger edge.
+        if decision_child {
+            config["decisionChild"] = json!(true);
+        }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
             config["model"] = json!(id);
@@ -182,6 +188,7 @@ impl SupervisorChildSessionsInner {
                 depth,
                 model,
                 thinking,
+                /*decision_child*/ false,
                 cwd,
                 session_dir,
                 /*spawned_by_request_id*/ None,
@@ -419,14 +426,16 @@ impl SupervisorChildSessionsInner {
         }
         // The child's own descendants keep it busy (`child_busy`), so the
         // wait holds until they settle too.
+        let timeout_ms = budget.as_millis().min(u128::from(u64::MAX)) as u64;
         let command = DaemonCommand::WaitForIdle {
             id: None,
             active_session_id: active_session_id.to_string(),
             wait_for_rlm_quiescence: Some(true),
+            timeout_ms: Some(timeout_ms),
             rest: Map::default(),
         };
         let _ = self
-            .command(&command, budget.as_millis() as u64 + IDLE_WAIT_GRACE_MS)
+            .command(&command, timeout_ms.saturating_add(IDLE_WAIT_GRACE_MS))
             .await;
     }
 
@@ -437,7 +446,7 @@ impl SupervisorChildSessionsInner {
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         {
             let record = record.lock().await;
-            if !record.prompt_admitted {
+            if !record.run.prompt_admitted() {
                 return false;
             }
         }
@@ -590,10 +599,15 @@ impl SupervisorChildSessionsInner {
                 self.emit_child_update(record).await;
                 // Only a successful run completes the display (TS
                 // `completeRlmSubagentRuntime`); a cancelled or failed run
-                // stays `running`, which a restart relists as `error`.
+                // stays `running`, which a restart relists as `error`. A
+                // decision child never completes here: its spawn task is a
+                // readiness handshake, not its run — the child is meant to
+                // serve after the settle, and a completed display would
+                // stop the update roster from reviving it.
                 let completed = {
                     let record = record.lock().await;
-                    matches!(record.run.verdict(), Some(RunVerdict::Done))
+                    (matches!(record.run.verdict(), Some(RunVerdict::Done))
+                        && !record.decision_child)
                         .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
                 };
                 if let Some((session_dir, child_id)) = completed {
@@ -1007,7 +1021,11 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
 }
 
 /// The busy flags of one child `get_state` summary (streaming, its own
-/// descendants, or queued work in flight).
+/// descendants, queued work in flight, or owed background completions — a
+/// detached kernel cell and a queued completion both mean the child has
+/// work that will still land, so an ordinary child must not settle while the
+/// count is non-zero; the child's `waitForRlmQuiescence` wait holds on the
+/// same count).
 fn child_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
     flag("isStreaming")
@@ -1018,6 +1036,32 @@ fn child_busy_flags(state: &Value) -> bool {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             > 0
+        || state
+            .get("pendingBackgroundCompletions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+}
+
+#[cfg(test)]
+mod background_busy_tests {
+    use super::*;
+
+    /// A detached cell (or a queued completion) keeps an ordinary child
+    /// unsettled: the count is the only evidence that work will still land,
+    /// and a child that settles without it reports done/no-reply while its
+    /// cell still runs.
+    #[test]
+    fn a_child_with_owed_background_completions_is_not_idle() {
+        assert!(child_busy_flags(
+            &json!({ "pendingBackgroundCompletions": 1 })
+        ));
+        assert!(!child_busy_flags(
+            &json!({ "pendingBackgroundCompletions": 0 })
+        ));
+        // A summary that predates the field keeps the old rules only.
+        assert!(!child_busy_flags(&json!({})));
+    }
 }
 
 #[cfg(test)]
@@ -1219,6 +1263,69 @@ pub(super) mod exit_capture_tests {
         assert_eq!(
             final_turn_error_from_file("/nonexistent/pa-rlm-final-turn.jsonl"),
             None
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod wait_for_child_budget_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn wait_for_child_sends_the_bounded_idle_slice() {
+        let dir = tempfile::TempDir::new().expect("temporary directory");
+        let socket = dir.path().join("sup.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("listener");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("link connection");
+            let (reader, mut writer) = stream.into_split();
+            writer
+                .write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n")
+                .await
+                .expect("hello");
+            let mut lines = BufReader::new(reader);
+            let mut line = String::new();
+            lines.read_line(&mut line).await.expect("request line");
+            let request: Value = serde_json::from_str(&line).expect("request JSON");
+            let command = request["command"].clone();
+            let reply = crate::protocol::response_line(&crate::protocol::response_success(
+                request["id"].as_str(),
+                "wait_for_idle",
+                Some(json!({"timedOut": true})),
+            ));
+            writer
+                .write_all(serde_json::to_string(&reply).unwrap().as_bytes())
+                .await
+                .expect("response");
+            writer.write_all(b"\n").await.expect("response newline");
+            command
+        });
+        let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket.clone()));
+        let agent_dir = dir.path().join("agent");
+        let sessions = crate::rlm_children::SupervisorChildSessions::new(
+            link,
+            agent_dir.clone(),
+            "parent".to_string(),
+            Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+                agent_dir, true,
+            )),
+            String::new(),
+        );
+        sessions
+            .inner
+            .wait_for_child("child", Duration::from_millis(12_345))
+            .await;
+        let command = server.await.expect("server task");
+        assert_eq!(
+            command,
+            json!({
+                "type": "wait_for_idle",
+                "activeSessionId": "child",
+                "waitForRlmQuiescence": true,
+                "timeoutMs": 12_345,
+            }),
+            "the worker request must carry the same bound as the link slice"
         );
     }
 }

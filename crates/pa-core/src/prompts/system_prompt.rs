@@ -302,7 +302,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         let agent_inbox = !options.daemonless && options.settings.get_agent_inbox_enabled();
         if agent_inbox {
             lines.push(
-                "This session has an agent inbox: bash completions, agent messages, child exits, heartbeats, and factory milestones wait in it, and a short `[inbox …]` notice announces new ones. The notice means unread messages are waiting; read them with `msgs = await rlm.inbox.read()`."
+                "This session has an agent inbox: bash completions, agent messages, child exits, heartbeats, and factory milestones wait in it, and a short `[inbox …]` notice announces new ones. When the notice says messages are waiting, read them with `msgs = await rlm.inbox.read()`. Your own `bash-done` messages need no reply; when nothing else needs action, end the turn silently."
                     .to_string(),
             );
         }
@@ -315,8 +315,14 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             }
         ));
         lines.push(
-            "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
-                .to_string(),
+            if options.daemonless {
+                "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
+            } else if agent_inbox {
+                "Sleeping and long waits inside a cell are fine (`time.sleep(...)`, awaiting a handle). A user message or inbox arrival ends the wait early: the cell auto-backgrounds (it keeps running; nothing is killed) and its `[cell-done]` completion notice arrives in the inbox. A cell that outlives its wait budget auto-backgrounds the same way."
+            } else {
+                "Sleeping and long waits inside a cell are fine (`time.sleep(...)`, awaiting a handle). A user message or another incoming message ends the wait early: the cell auto-backgrounds (it keeps running; nothing is killed) and its completion arrives as a `[cell-done]` notification. A cell that outlives its wait budget auto-backgrounds the same way."
+            }
+            .to_string(),
         );
     } else {
         lines.push(
@@ -582,6 +588,20 @@ mod tests {
     }
 
     #[test]
+    fn only_daemon_sessions_are_told_that_cells_auto_background() {
+        let fixture = Fixture::new();
+        assert!(build_system_prompt(&fixture.options()).contains("the cell auto-backgrounds"));
+        let mut daemonless = fixture.options();
+        daemonless.daemonless = true;
+        let daemonless = build_system_prompt(&daemonless);
+        assert!(
+            !daemonless.contains("auto-backgrounds"),
+            "no wait budget or wake is armed without a daemon"
+        );
+        assert!(daemonless.contains("Do not run long blocking work in a cell"));
+    }
+
+    #[test]
     fn daemonless_line_drops_the_stale_no_wake_claim() {
         // The line's one durable contract: it no longer tells daemonless
         // agents that background completions never wake them.
@@ -594,6 +614,28 @@ mod tests {
         let mut bare = fixture.options();
         bare.daemonless = true;
         assert!(!build_system_prompt(&bare).contains("completions do not wake you"));
+    }
+
+    #[test]
+    fn the_cell_wait_line_names_where_the_completion_arrives() {
+        const INBOX: &str = "its `[cell-done]` completion notice arrives in the inbox";
+        const NOTIFICATION: &str = "its completion arrives as a `[cell-done]` notification";
+        let mut fixture = Fixture::new();
+        let inbox = build_system_prompt(&fixture.options());
+        assert!(inbox.contains(INBOX) && !inbox.contains(NOTIFICATION));
+
+        fixture.settings = SettingsManager::in_memory(&crate::settings::Settings {
+            agent_inbox: Some(crate::settings::types::AgentInboxSettings {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let no_inbox = build_system_prompt(&fixture.options());
+        assert!(
+            no_inbox.contains(NOTIFICATION) && !no_inbox.contains(INBOX),
+            "an inbox-disabled session gets the cell-done notification"
+        );
     }
 
     #[test]

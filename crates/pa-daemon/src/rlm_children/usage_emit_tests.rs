@@ -51,7 +51,8 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         model: String::new(),
         label: "child".to_string(),
         started_at_ms: 0,
-        run: RunState::running(),
+        run: RunState::admitted(),
+        decision_child: false,
         answer_preview: None,
         answer_text: None,
         answer_captured: false,
@@ -62,7 +63,6 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
-        prompt_admitted: true,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(session_file.display().to_string()),
@@ -242,9 +242,14 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     let child_legacy = file_at(agent.join("session-artifacts/P/sub-legacy/sess-legacy.jsonl"));
     let child_three = file_at(agent.join("session-artifacts/P/sub-c/sess-c.jsonl"));
     let child_four = file_at(agent.join("session-artifacts/Q/sub-d/sess-d.jsonl"));
+    let child_five = file_at(agent.join("session-artifacts/P/sub-e/sess-e.jsonl"));
     for (child_id, session_file, status, prompt) in [
         ("sub-a", &child_one, "completed", Some("finished task")),
         ("sub-b", &child_two, "running", None),
+        // A decision child's display legitimately stays running (the
+        // settle tail withholds the completed flip), so its reseed must
+        // read the serving state, not a crash.
+        ("sub-e", &child_five, "running", None),
     ] {
         crate::rlm_ledger::write_rlm_subagent_display(
             &crate::rlm_ledger::RlmSubagentDisplayEntry {
@@ -282,6 +287,10 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
             r#"{"v":1,"op":"spawn","at":"#,
             spawn("sub-b", &parent_one, &child_two).as_str(),
             spawn("sub-legacy", &parent_one, &child_legacy).as_str(),
+            // The decision flag rides the spawn edge.
+            spawn("sub-e", &parent_one, &child_five)
+                .replace('}', r#","decisionChild":true}"#)
+                .as_str(),
             spawn("sub-c", &parent_one, &child_three).as_str(),
             format!(
                 r#"{{"v":1,"op":"delete","at":"2026-09-30T00:00:01Z","childId":"sub-c","child":"{child_three}","reason":"user"}}"#
@@ -334,8 +343,21 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
                 Some("sess-legacy"),
                 Some("child agent")
             ),
+            // The decision child's running display is the serving state,
+            // never a crashed run: the row settles done with the flag
+            // (the roster label for a settled run: "completed").
+            ("sub-e", "completed", Some("sess-e"), Some("child agent")),
         ],
         "completed and interrupted children keep their display verdicts"
+    );
+    let decision = sessions
+        .inner
+        .find_record("sub-e")
+        .await
+        .expect("the decision child's reseeded row");
+    assert!(
+        decision.lock().await.decision_child,
+        "the reseed carries the decision flag"
     );
 
     let legacy = sessions

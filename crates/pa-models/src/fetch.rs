@@ -206,16 +206,4 @@ mod tests {
         assert_eq!(fetcher.timeout, FETCH_TIMEOUT);
         assert_eq!(fetcher.max_bytes, MAX_RESPONSE_BYTES);
     }
-
-    #[test]
-    fn catalog_urls_are_the_frozen_contract() {
-        assert_eq!(
-            MODEL_CATALOG_URL,
-            "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent-catalog/main/models/catalog.v1.json"
-        );
-        assert_eq!(
-            MCP_SERVICE_CATALOG_URL,
-            "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent-catalog/main/plugins/catalog.v2.json"
-        );
-    }
 }

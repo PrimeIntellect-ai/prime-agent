@@ -474,10 +474,17 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// `abort` (scope `None`): the full abort funnel. `scope:
+    /// "background_cell"` targets ONLY the session's detached
+    /// (backgrounded) kernel cell — no queue is touched, no turn is
+    /// aborted, and a session without one changes nothing (the idle
+    /// cancel contract; capability `background_cell_abort`).
     Abort {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -637,6 +644,9 @@ pub enum DaemonCommand {
         /// (the `wait_for_headless_completion` barrier of the same name).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_for_rlm_quiescence: Option<bool>,
+        /// Maximum time to wait for the session and its optional RLM subtree to become idle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         #[serde(flatten)]
         rest: JsonMap,
     },

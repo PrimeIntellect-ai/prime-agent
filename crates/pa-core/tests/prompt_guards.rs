@@ -664,17 +664,11 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
 
 /// Since #3580 every session kind wakes on bash completion: daemonless runs
 /// get a queued `[bash-done]` turn, so the static usage layer must not carry
-/// the pre-#3580 rule to await commands before ending the turn — the
-/// no-polling rule right below it already ends turns on the done
-/// notification, and an unscoped await rule would contradict that wake.
+/// the pre-#3580 rule to await commands before ending the turn.
 #[test]
-fn usage_layer_ends_turns_on_the_done_notification_not_an_await_rule() {
+fn usage_layer_has_no_await_before_turn_end_rule() {
     assert!(
         !USAGE_LAYER.contains("await commands before ending the turn"),
         "every session kind has completion notifications: the await-before-turn-end rule is stale"
-    );
-    assert!(
-        USAGE_LAYER.contains("end the turn and collect the result on the done notification"),
-        "the no-polling rule keeps the collect-on-notice turn-end contract"
     );
 }
