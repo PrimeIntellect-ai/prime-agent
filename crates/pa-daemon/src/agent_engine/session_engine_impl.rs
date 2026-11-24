@@ -653,20 +653,16 @@ impl SessionEngine for AgentSessionEngine {
                     custom_instructions.as_deref(),
                     &model,
                     api_key,
-                    // The run's own signal: a raced summarizer still lands
-                    // the pre-commit check (TS `_performCompaction`).
+                    // The run's own signal cancels it up to the commit
+                    // (TS `_performCompaction`); a committed run finishes.
                     Some(signal),
                 )
                 .await
         };
-        let result = self
-            .runtime
-            .block_on(pa_agent::abort::race_with_abort(run, signal));
-        let compaction = match result {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(error)) => {
-                // Abort-marked errors and a lost race both surface as the
-                // TS "Compaction cancelled" outcome.
+        let compaction = match self.runtime.block_on(run) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Abort-marked errors surface as the TS "Compaction cancelled" outcome.
                 if pa_agent::abort::is_abort_error(&error) {
                     return CompactionOutcome::Aborted;
                 }
@@ -674,7 +670,6 @@ impl SessionEngine for AgentSessionEngine {
                     error: format!("{error:#}"),
                 };
             }
-            Err(_) => return CompactionOutcome::Aborted,
         };
         match compaction {
             pa_core::session_engine::compact_session::CompactOutcome::Skipped(message) => {

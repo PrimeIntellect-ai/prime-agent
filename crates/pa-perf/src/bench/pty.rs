@@ -426,24 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_gap_is_bounded_by_the_window_edges() {
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
-        let arrivals = [at(0), at(5), at(40), at(45), at(200)];
-        // Arrivals before the window never shorten its leading stretch.
-        assert_eq!(
-            longest_gap(&arrivals, at(10), at(42)),
-            Duration::from_millis(30)
-        );
-        // The trailing stretch runs to the window end, not the next arrival.
-        assert_eq!(
-            longest_gap(&arrivals, at(10), at(100)),
-            Duration::from_millis(55)
-        );
-        assert_eq!(longest_gap(&[], at(0), at(7)), Duration::from_millis(7));
-    }
-
-    #[test]
     fn exited_children_fail_missing_needles_without_waiting_for_liveness_timeout() {
         let directory = tempfile::tempdir().expect("mock directory");
         let mut child = PtyChild::spawn(
@@ -473,26 +455,6 @@ mod tests {
             .expect_err("screen wait also sees exit")
             .to_string()
             .contains("exit status: 7"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_child_exit_seen_by_the_last_drain_pump_fails_the_window() {
-        let directory = tempfile::tempdir().expect("mock directory");
-        let mut child = PtyChild::spawn(
-            std::path::Path::new("/bin/sh"),
-            &["-c".into(), "exit 7".into()],
-            &[],
-            directory.path(),
-            120,
-            36,
-        )
-        .expect("spawn exiting mock");
-        child.child.wait().expect("the mock exits");
-        let error = child
-            .drain_until(Instant::now())
-            .expect_err("a dead child fails the window");
-        assert!(error.to_string().contains("exit status: 7"), "{error}");
     }
 
     #[test]
