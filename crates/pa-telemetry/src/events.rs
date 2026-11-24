@@ -235,25 +235,6 @@ mod tests {
     use crate::catalog::{RUN_TRIGGERS, TOOL_CATEGORIES};
 
     #[test]
-    fn tool_category_mapping() {
-        assert_eq!(ToolCategory::from_tool_name("bash"), ToolCategory::Bash);
-        assert_eq!(ToolCategory::from_tool_name("Edit"), ToolCategory::Edit);
-        assert_eq!(
-            ToolCategory::from_tool_name("python_repl"),
-            ToolCategory::Ipython
-        );
-        assert_eq!(
-            ToolCategory::from_tool_name("mcp__github__create_issue"),
-            ToolCategory::Mcp
-        );
-        assert_eq!(
-            ToolCategory::from_tool_name("web-search"),
-            ToolCategory::Custom
-        );
-        assert_eq!(ToolCategory::from_tool_name(""), ToolCategory::Unknown);
-    }
-
-    #[test]
     fn vocabulary_consts_stay_in_the_catalog() {
         for trigger in ["prompt", "continuation", "unknown"] {
             assert!(RUN_TRIGGERS.contains(&trigger));

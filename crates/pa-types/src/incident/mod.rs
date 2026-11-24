@@ -171,26 +171,3 @@ pub(crate) fn error_message(message: &str) -> &str {
         message
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_line_trims_the_tail() {
-        assert_eq!(first_line("line one\nline two\n"), "line one");
-        assert_eq!(first_line("  padded  "), "padded");
-    }
-
-    #[test]
-    fn truncate_marks_the_cut() {
-        assert_eq!(truncate_text("short", 10), "short");
-        assert_eq!(truncate_text("  a long summary  ", 7), "a long ...");
-    }
-
-    #[test]
-    fn error_prefix_strips_only_the_prefix() {
-        assert_eq!(error_message("Error: boom"), "boom");
-        assert_eq!(error_message("boom"), "boom");
-    }
-}

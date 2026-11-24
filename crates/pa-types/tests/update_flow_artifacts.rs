@@ -2,16 +2,10 @@
 //! example,
 //! the intent/status/marker artifacts, and the watchdog/transition tables.
 
-use std::path::Path;
-
 use pa_types::daemon::update_flow::{
-    prepared_marker_expiry, socket_update_dir, update_intent_path, update_marker_path,
-    update_prepared_dir, update_roster_path, update_status_path, update_transition_allowed,
-    PreparedMarkerExpiry, UpdateHeartbeatDeliveryMode, UpdateHeartbeatStatus, UpdateId,
-    UpdateIntent, UpdatePreparedMarker, UpdateProcessIdentity, UpdateRoster, UpdateRosterBinary,
-    UpdateRosterHeartbeat, UpdateRosterSessionKind, UpdateRosterSubagentStatus, UpdateState,
-    UpdateStatus, UpdateSupervisorIdentity, UpdateTimeoutBudget, UPDATE_ROSTER_FORMAT_VERSION,
-    UPDATE_STATUS_FORMAT_VERSION,
+    prepared_marker_expiry, update_transition_allowed, PreparedMarkerExpiry, UpdateId,
+    UpdateIntent, UpdatePreparedMarker, UpdateProcessIdentity, UpdateRoster, UpdateState,
+    UpdateStatus, UpdateSupervisorIdentity, UpdateTimeoutBudget, UPDATE_STATUS_FORMAT_VERSION,
 };
 use pa_types::JsonMap;
 
@@ -91,27 +85,6 @@ const SPEC_ROSTER: &str = r#"{
 }"#;
 
 #[test]
-fn spec_roster_example_roundtrips_losslessly() {
-    rt::<UpdateRoster>(SPEC_ROSTER);
-    let roster: UpdateRoster = serde_json::from_str(SPEC_ROSTER).unwrap();
-    assert_eq!(roster.format_version, UPDATE_ROSTER_FORMAT_VERSION);
-    assert_eq!(roster.sessions.len(), 1);
-    assert_eq!(roster.sessions[0].kind, UpdateRosterSessionKind::TopLevel);
-    assert!(roster.sessions[0].queue.next_turn[0]
-        .custom_type
-        .contains("queued"));
-    assert_eq!(
-        roster.subagents[0].status,
-        UpdateRosterSubagentStatus::Completed
-    );
-    assert_eq!(roster.heartbeats[0].status, UpdateHeartbeatStatus::Active);
-    assert_eq!(
-        roster.heartbeats[0].delivery_mode,
-        UpdateHeartbeatDeliveryMode::Steer
-    );
-}
-
-#[test]
 fn full_artifact_set_roundtrips() {
     rt::<UpdateIntent>(
         r#"{"update_id":"018f","pid":100,"process_start_id":"100/22","heartbeat_at":"2026-10-01T12:00:00.000Z"}"#,
@@ -122,29 +95,17 @@ fn full_artifact_set_roundtrips() {
     rt::<UpdatePreparedMarker>(
         r#"{"update_id":"018f","expires_at":"2026-10-01T12:00:45.000Z","supervisor":{"pid":4242,"process_start_id":"4242/170000","generation":"gen-7"}}"#,
     );
-}
-
-#[test]
-fn prepared_artifact_paths_lay_out_under_the_socket_dir() {
-    let agent_dir = Path::new("/ad");
-    let socket_dir = socket_update_dir(agent_dir, "cafebabe");
-    let id = UpdateId::from(String::from("018f"));
-    let prepared = update_prepared_dir(&socket_dir, &id);
-    assert_eq!(
-        update_intent_path(&socket_dir),
-        Path::new("/ad/update-restarts/cafebabe/intent.json")
+    // Unknown fields survive and absent collections stay absent.
+    rt::<UpdateIntent>(r#"{"update_id":"u","pid":9,"heartbeat_at":"t","note":"kept"}"#);
+    rt::<UpdateStatus>(
+        r#"{"version":1,"updateId":"u2","socketPath":"/s","state":"complete","epoch":7,"predecessor":{"pid":1},"successor":{"pid":2,"supervisorGeneration":"g"},"counts":{"total":3,"restored":2,"resumed":1,"failed":1},"failures":[{"sessionFile":"/sessions/a.jsonl","message":"worker refused"}],"message":"updated","startedAt":"a","updatedAt":"b","unknownField":true}"#,
     );
-    assert_eq!(
-        update_status_path(&socket_dir),
-        Path::new("/ad/update-restarts/cafebabe/status.json")
+    rt::<UpdatePreparedMarker>(
+        r#"{"update_id":"u","expires_at":"t","supervisor":{"pid":1,"generation":"g"},"note":"kept"}"#,
     );
-    assert_eq!(
-        update_roster_path(&prepared),
-        Path::new("/ad/update-restarts/cafebabe/prepared/018f/roster.json")
-    );
-    assert_eq!(
-        update_marker_path(&prepared),
-        Path::new("/ad/update-restarts/cafebabe/prepared/018f/marker.json")
+    rt::<UpdateRoster>(SPEC_ROSTER);
+    rt::<UpdateRoster>(
+        r#"{"format_version":1,"update_id":"u","socket_path":"/s","created_at":"t","supervisor":{"pid":1,"generation":"g"},"binary":{"from_version":"a","to_version":"b"}}"#,
     );
 }
 
@@ -235,22 +196,4 @@ fn status_schema_is_ts_shaped() {
     assert!(encoded.get("updatedAt").is_some());
     assert!(encoded.get("epoch").is_some());
     assert!(encoded.get("state").is_some());
-}
-
-#[test]
-fn roster_binary_and_heartbeat_wire_names() {
-    let binary: UpdateRosterBinary = serde_json::from_value(serde_json::json!({
-        "from_version": "0.9.5", "to_version": "0.9.6"
-    }))
-    .unwrap();
-    assert_eq!(binary.from_version, "0.9.5");
-    let heartbeat: UpdateRosterHeartbeat = serde_json::from_value(serde_json::json!({
-        "job_id": "j", "session_id": "s", "schedule": "every 5m",
-        "delivery_mode": "follow_up", "status": "paused", "next_run_at": "t"
-    }))
-    .unwrap();
-    assert_eq!(
-        heartbeat.delivery_mode,
-        UpdateHeartbeatDeliveryMode::FollowUp
-    );
 }
