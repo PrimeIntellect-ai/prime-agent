@@ -21,11 +21,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
 
+use super::known_sessions::{scan_known_sessions, KnownSessionRoots, ResidentFile};
 use super::{
     paths, response_failure, response_success, Arc, DaemonResponse, ResidentWorker, RouteAdmission,
     Supervisor, SUMMARY_TIMEOUT_MS, WORKER_READ_TIMED_OUT,
 };
-use crate::rlm_roster::{walk_passive_rlm_children, RosterWalkRoot};
 use pa_core::session_engine::harness_digest::session_artifact_dir_for_log;
 use pa_types::daemon::ACTIVITY_POLL_INTERVAL;
 
@@ -53,14 +53,15 @@ const LIVE_RUN_STATES: [&str; 3] = ["running", "stopping", "paused"];
 /// run page and its guidance.
 pub(crate) const FACTORY_SAVED_RECORD_RETENTION: Duration = Duration::from_hours(24);
 
-/// One resident owner: its durable identity (its active id when the
-/// session has no file), its display name, and the live worker its runs
-/// are read through.
+/// One resident worker the overview reads live: the worker, its active
+/// id (the `peek` route), and its durable owner id once the catalog scan
+/// resolved it.
 #[derive(Clone)]
 struct ResidentOwner {
     id: String,
     active_session_id: String,
     name: Option<String>,
+    session_file: Option<PathBuf>,
     resident: Arc<ResidentWorker>,
 }
 
@@ -73,51 +74,31 @@ struct CatalogOwner {
     log: Option<PathBuf>,
 }
 
-/// The overview's live-half cache: the last rows every resident owner's
-/// kernel answered through the non-arming `peek` read, each stamped with
-/// its read time, plus each owner's last real read failure. The request
-/// path serves this snapshot; guarded per-owner background refreshes —
-/// never awaited by a request — keep each owner at most one read behind,
-/// so no reply ever waits on a kernel read and a healthy owner's result
-/// folds the moment it lands, never waiting behind a busier owner's
-/// pending read. A busy owner keeps its last rows — served with the
-/// saved marker once they age past the freshness bound — until its read
-/// lands again.
+/// The overview's live-half cache, keyed by worker id: the last rows each
+/// resident worker's kernel answered through the non-arming `peek` read,
+/// each stamped with its read time, plus each worker's last real read
+/// failure. A worker id is fresh per launched worker, so a read from a
+/// worker that is gone has no slot and drops, and a re-admitted session's
+/// new worker starts empty. The request path serves this snapshot;
+/// guarded per-worker background refreshes, never awaited by a request,
+/// keep each worker at most one read behind. A busy worker keeps its last
+/// rows (served with the saved marker once they age past the freshness
+/// bound) until its read lands again.
 #[derive(Debug, Default)]
 pub(crate) struct FactoryLiveCache {
-    /// The last good live rows per owner (keyed by the owner id the
-    /// resident list derives).
+    /// The last good live rows per worker.
     pub(crate) rows: BTreeMap<String, Vec<Value>>,
-    /// When each owner's cached rows were last READ: rows older than
-    /// two page poll windows ([`FACTORY_LIVE_FRESH_WINDOW`]) serve with
-    /// the saved marker, never as unqualified live — a busy or timed-out
-    /// owner's snapshot can be arbitrarily old, and the runs it held may
-    /// have settled while no read landed.
+    /// When each worker's rows were last read: rows older than two page
+    /// poll windows ([`FACTORY_LIVE_FRESH_WINDOW`]) serve with the saved
+    /// marker, never as unqualified live.
     pub(crate) read_at: BTreeMap<String, Instant>,
-    /// The live half's warnings, one slot per owner: a real read
-    /// failure's reason (a busy, successful, or skipped read clears it).
+    /// A real read failure's reason per worker (a busy, successful, or
+    /// skipped read clears it).
     pub(crate) warnings: BTreeMap<String, String>,
-    /// The owners with a background read in flight, each with the
-    /// residency generation it was issued under: at most one read per
-    /// residency, so a poll never stacks requests on one kernel.
-    pub(crate) in_flight: BTreeMap<String, u64>,
-    /// The owners in the resident list of the latest refresh, each with
-    /// its current residency: a read that lands after its owner
-    /// passivated, or under an earlier residency of a re-admitted owner,
-    /// must not restamp rows or publish its timeout or failure, or a
-    /// gone worker's answer would paint as the live session's.
-    pub(crate) resident: BTreeMap<String, Residency>,
-    /// The last residency generation handed out.
-    pub(crate) last_generation: u64,
-}
-
-/// One owner's residency: the worker hosting it and the generation the
-/// live cache assigned when the owner entered the resident list or its
-/// worker changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Residency {
-    pub(crate) worker_id: String,
-    pub(crate) generation: u64,
+    /// The workers with a background read in flight: at most one each.
+    pub(crate) in_flight: BTreeSet<String>,
+    /// The workers of the latest refresh.
+    pub(crate) resident: BTreeSet<String>,
 }
 
 /// Two activity-poll windows ([`ACTIVITY_POLL_INTERVAL`] in pa-types,
@@ -153,65 +134,33 @@ impl Supervisor {
                 return response_failure(Some(command_id), type_name, &error.to_string(), None)
             }
         };
-        // Every resident joins the owner set, file or not (the saved
-        // catalog alone omits memory-only owners).
-        let residents = self.registry.list().await;
+        // Every resident is read live, file or not (the catalog alone
+        // omits memory-only owners). A quarantined identity or a retired
+        // route is not the session's live worker: during a replacement it
+        // is the one going away.
         let mut resident_owners: Vec<ResidentOwner> = Vec::new();
-        // The residents as catalog owners: every resident's identity and
-        // conversation log, so a resident with a durable record outside the
-        // sessions dir still reads it.
-        let mut known_owners: Vec<(String, Option<String>, Option<PathBuf>)> = Vec::new();
-        // Resident files are walk roots: their passive descendants (and
-        // theirs) join the owner set through the same ledger walk the
-        // all-session list runs. Roster-known owner files join the same
-        // list (below, with no live active id).
-        let mut walk_roots: Vec<(PathBuf, Option<String>)> = Vec::new();
-        for resident in &residents {
-            let (root_session_id, root_active_session_id, session_file) = {
-                let descriptor = resident.descriptor.lock().await;
-                (
-                    descriptor.root_session_id.clone(),
-                    descriptor.root_active_session_id.clone(),
-                    descriptor.session_file.clone(),
-                )
-            };
-            if root_active_session_id.is_empty() {
+        for resident in self.registry.list().await {
+            if resident.identity_quarantined() || resident.route_state().retired() {
                 continue;
             }
-            let owner = ResidentOwner {
-                id: root_session_id
+            let descriptor = resident.descriptor.lock().await;
+            if descriptor.root_active_session_id.is_empty() {
+                continue;
+            }
+            resident_owners.push(ResidentOwner {
+                id: descriptor
+                    .root_session_id
                     .clone()
                     .filter(|id| !id.is_empty())
-                    .unwrap_or_else(|| root_active_session_id.clone()),
-                active_session_id: root_active_session_id.clone(),
+                    .unwrap_or_else(|| descriptor.root_active_session_id.clone()),
+                active_session_id: descriptor.root_active_session_id.clone(),
                 name: None,
-                resident: Arc::clone(resident),
-            };
-            if let Some(file) = session_file {
-                walk_roots.push((PathBuf::from(&file), Some(root_active_session_id)));
-                known_owners.push((owner.id.clone(), None, Some(PathBuf::from(file))));
-            } else {
-                known_owners.push((owner.id.clone(), None, None));
-            }
-            resident_owners.push(owner);
+                session_file: descriptor.session_file.as_ref().map(PathBuf::from),
+                resident: Arc::clone(&resident),
+            });
         }
-        // Known roster owners' session files: the roster keeps an owner's
-        // row (its `sessionFile`) after the worker's idle passivation
-        // removes registry residency, and a custom sessionDir's root
-        // never enters the saved catalog — residency must not be the
-        // only source of custom-directory owners. Every top-level
-        // entry's file OUTSIDE the default sessions dir joins the
-        // catalog as its own root (a passive root: no live worker to
-        // read), deduped against live residents, whose roots they
-        // already are; its passive descendants then walk through that
-        // directory's ledger and the default one, exactly like a
-        // resident's.
-        let mut roster_roots: Vec<(PathBuf, String, Option<String>)> = Vec::new();
         {
             let roster = self.roster.lock().unwrap();
-            // The display names come from the supervisor's roster (the
-            // same source the offline summary reads), one lock for
-            // every resident.
             for owner in &mut resident_owners {
                 owner.name = roster
                     .by_active_session_id(&owner.active_session_id)
@@ -223,143 +172,33 @@ impl Supervisor {
                             .map(str::to_string)
                     });
             }
-            let resident_files: std::collections::HashSet<PathBuf> = walk_roots
-                .iter()
-                .map(|(file, _)| crate::lease::canonical_session_path(file))
-                .collect();
-            let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-            for entry in roster.entries() {
-                let summary = &entry.summary;
-                // A subagent's row joins through its parent's ledger
-                // walk; only top-level entries are catalog roots.
-                if summary.get("runtimeKind").and_then(Value::as_str) == Some("subagent") {
-                    continue;
-                }
-                let Some(file) = summary
-                    .get("sessionFile")
-                    .and_then(Value::as_str)
-                    .filter(|file| !file.is_empty())
-                else {
-                    continue;
-                };
-                let path = PathBuf::from(file);
-                // The default directory's sessions are the saved
-                // catalog's own roots.
-                if path.parent() == Some(sessions_dir.as_path()) {
-                    continue;
-                }
-                let canonical = crate::lease::canonical_session_path(&path);
-                if !seen.insert(canonical.clone()) || resident_files.contains(&canonical) {
-                    continue;
-                }
-                let id = summary
-                    .get("sessionId")
-                    .or_else(|| summary.get("id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if id.is_empty() {
-                    continue;
-                }
-                roster_roots.push((
-                    path,
-                    id.to_string(),
-                    summary
-                        .get("sessionName")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                ));
-            }
         }
-        for (file, id, name) in roster_roots {
-            walk_roots.push((file.clone(), None));
-            known_owners.push((id, name, Some(file)));
-        }
-        for owner in &mut known_owners {
-            if owner.1.is_none() {
-                owner.1 = resident_owners
-                    .iter()
-                    .find(|resident| resident.id == owner.0)
-                    .and_then(|resident| resident.name.clone());
-            }
-        }
-        // The passive-descendant walk's ledgers, one per sessions
-        // directory the roots live in: each directory's roots walk
-        // against BOTH that directory's own ledger (legacy or seeded
-        // edges) and the default directory's memoized one, exactly as
-        // the walk itself states below — production admission writes
-        // every spawn edge to the DEFAULT ledger
-        // (`record_rlm_child_admission` calls `rlm_spawn_ledger_for(None)`
-        // whatever `sessionDir` the create carried), so a custom
-        // directory's ledger is never the only place a root's children
-        // live.
-        let mut ledgers: BTreeMap<PathBuf, Arc<crate::rlm_ledger::RlmSpawnLedger>> =
-            BTreeMap::new();
-        {
-            let default_ledger = match self.rlm_spawn_ledger_for(None).await {
-                Ok(ledger) => ledger,
-                Err(error) => {
-                    return response_failure(Some(command_id), type_name, &error.to_string(), None)
-                }
-            };
-            ledgers.insert(sessions_dir.clone(), default_ledger);
-            let mut custom_dirs: Vec<PathBuf> = walk_roots
-                .iter()
-                .filter_map(|(file, _)| file.parent().map(PathBuf::from))
-                .filter(|dir| !ledgers.contains_key(dir))
-                .collect();
-            custom_dirs.sort();
-            custom_dirs.dedup();
-            for dir in custom_dirs {
-                let ledger = match self
-                    .rlm_spawn_ledger_for(Some(&dir.to_string_lossy()))
-                    .await
-                {
-                    Ok(ledger) => ledger,
-                    Err(error) => {
-                        return response_failure(
-                            Some(command_id),
-                            type_name,
-                            &error.to_string(),
-                            None,
-                        )
-                    }
-                };
-                ledgers.insert(dir, ledger);
-            }
-        }
-        let sessions_dir_for_scan = sessions_dir.clone();
-        // The blocking scan borrows the ledger map, so the Arc owns it
-        // across the 'static boundary.
-        let ledgers = Arc::new(ledgers);
-        // The resident owners' ids gate the durable-record retention
-        // bound inside the scan: a resident's kernel reads its runs
-        // live, so its records are reachable rows, while a gone owner's
-        // records age out of the page.
-        let resident_ids: BTreeSet<String> = resident_owners
-            .iter()
-            .map(|owner| owner.id.clone())
-            .collect();
-        let records_cache = Arc::clone(&self.factory_records);
-        let catalog_task = tokio::task::spawn_blocking(move || {
-            catalog_and_records(
-                &sessions_dir_for_scan,
-                &ledgers,
-                walk_roots,
-                known_owners,
-                &resident_ids,
-                &records_cache,
-            )
-        });
         // The live half is a CACHE SERVE, never an awaited read: one busy
-        // owner (a kernel whose event loop runs a synchronous cell holds
-        // the peek frame for the whole read budget) never stalls the
-        // reply. The guarded refresh below keeps the cache at most one
-        // read behind the page's cadence; a cold cache (the first open
-        // since boot) answers the durable rows alone, and any rows older
-        // than the freshness bound below — a busy owner's held snapshot,
-        // a page closed for a gap — serve with the saved marker instead.
+        // owner never stalls the reply. The guarded refresh keeps the cache
+        // at most one read behind the page's cadence; a cold cache answers
+        // the durable rows alone.
         self.spawn_factory_live_refresh(&resident_owners);
-        let (owners, records, mut warnings) = match catalog_task.await {
+        let resident_files: Vec<ResidentFile> = resident_owners
+            .iter()
+            .filter_map(|owner| {
+                Some(ResidentFile {
+                    session_file: owner.session_file.clone()?,
+                    active_session_id: owner.active_session_id.clone(),
+                })
+            })
+            .collect();
+        let roots = match self.known_session_roots(sessions_dir, resident_files).await {
+            Ok(roots) => roots,
+            Err(error) => {
+                return response_failure(Some(command_id), type_name, &error.to_string(), None)
+            }
+        };
+        let records_cache = Arc::clone(&self.factory_records);
+        let scan_owners = resident_owners.clone();
+        let catalog_task = tokio::task::spawn_blocking(move || {
+            catalog_and_records(&roots, &scan_owners, &records_cache)
+        });
+        let (owners, live_owner_ids, records, mut warnings) = match catalog_task.await {
             Ok(catalog) => catalog,
             Err(error) => {
                 return response_failure(
@@ -370,12 +209,14 @@ impl Supervisor {
                 )
             }
         };
-        // The cached live half: the rows each owner's kernel last answered
-        // (through the display-only allowlist, the re-arm marker riding),
-        // each stamped with its read time, and the warnings of the reads
-        // that really failed. A busy owner keeps its cached rows; every
-        // owner's durable rows still merge below exactly as before — only
-        // the live CLAIM is bounded by the freshness rule.
+        // Each owner's live worker: the first resident the scan resolved to
+        // that owner.
+        let mut live_worker: BTreeMap<&str, &str> = BTreeMap::new();
+        for (owner, id) in resident_owners.iter().zip(&live_owner_ids) {
+            live_worker
+                .entry(id.as_str())
+                .or_insert(owner.resident.worker_id.as_str());
+        }
         let (mut live_rows, live_read_at, live_warnings) = {
             let cache = self.factory_live.lock().unwrap();
             (
@@ -390,21 +231,16 @@ impl Supervisor {
             // Live rows win over durable rows for the same run id; the
             // live predicate runs AFTER that overlay, so a live terminal
             // result removes an older saved running row instead of
-            // resurrecting it from disk.
-            //
-            // The freshness rule: cached rows still within the freshness
-            // bound of their read claim live; older ones (a busy owner
-            // whose read never lands, a page closed for a gap, a boot
-            // window) carry the saved marker instead — the page never
-            // paints a ticking live claim off a snapshot with no
-            // confirmed read behind it. A memory-only owner's last-seen
-            // rows survive the same way: served saved, never dropped,
-            // and never as fresh.
-            let stale = !live_rows_are_fresh(live_read_at.get(&owner.id));
-            let mut live: Vec<Value> = live_rows.remove(&owner.id).unwrap_or_default();
+            // resurrecting it from disk. Cached rows older than the
+            // freshness bound carry the saved marker: the page never paints
+            // a ticking live claim off a snapshot with no confirmed read
+            // behind it.
+            let worker = live_worker.get(owner.id.as_str()).copied();
+            let stale = !live_rows_are_fresh(worker.and_then(|worker| live_read_at.get(worker)));
+            let mut live: Vec<Value> = worker
+                .and_then(|worker| live_rows.remove(worker))
+                .unwrap_or_default();
             live.reverse();
-            // Owned ids: the merge below moves `live`, so a `&str`
-            // borrowed from it cannot carry into the overlay filter.
             let live_ids: Vec<String> = live
                 .iter()
                 .map(|row| {
@@ -418,19 +254,10 @@ impl Supervisor {
             let merged: Vec<(bool, Value)> = live
                 .into_iter()
                 .map(|row| {
-                    // A live row still queued for its re-arm (the peek
-                    // lane marks `armed: false`) is listed but not
-                    // executing, and a row read longer than the
-                    // freshness bound ago has no confirmed read behind
-                    // it: each carries the saved marker, never a
-                    // ticking age for a run no confirmed loop drives.
-                    // The `armed` marker stays on the row — the page
-                    // routes by it: a row the live cache sourced with
-                    // an executing or aged run (the marker present and
-                    // not false) keeps its run page even aged, while a
-                    // `false` marker (a rehydrated run only its re-arm
-                    // awaits) and a durable-only row (no marker) report
-                    // saved instead.
+                    // A live row still queued for its re-arm (`armed:
+                    // false`) is listed but not executing: it reports
+                    // saved, like an aged row. The marker stays on the row,
+                    // since the page routes by it.
                     let saved = stale || row.get("armed") == Some(&json!(false));
                     (saved, row)
                 })
@@ -468,51 +295,25 @@ impl Supervisor {
     fn spawn_factory_live_refresh(self: &Arc<Self>, owners: &[ResidentOwner]) {
         let mut guard = self.factory_live.lock().unwrap();
         let cache = &mut *guard;
-        // An owner that left the resident list is gone from this refresh:
-        // its kernel with it, so its cached rows must not stay (a
-        // passivated owner's runs list from its durable record alone).
-        // An owner keeps its residency only while it stays on the same
-        // worker; one that (re-)enters or moved gets a new generation,
-        // which gates the fold: a read issued under an earlier residency
-        // never restamps or warns for the current one. A new residency
-        // also drops the previous one's cached rows, read time, and
-        // warning: they came from another worker's kernel, so serving
-        // them until the new read lands would show runs that worker
-        // owned as this owner's live runs.
-        let previous = std::mem::take(&mut cache.resident);
-        for owner in owners {
-            let residency = match previous.get(&owner.id) {
-                Some(residency) if residency.worker_id == owner.resident.worker_id => {
-                    residency.clone()
-                }
-                Some(_) | None => {
-                    cache.rows.remove(&owner.id);
-                    cache.read_at.remove(&owner.id);
-                    cache.warnings.remove(&owner.id);
-                    cache.last_generation += 1;
-                    Residency {
-                        worker_id: owner.resident.worker_id.clone(),
-                        generation: cache.last_generation,
-                    }
-                }
-            };
-            cache.resident.insert(owner.id.clone(), residency);
-        }
+        // A worker that left the resident list took its kernel with it:
+        // its rows go (the session's durable records still answer).
+        cache.resident = owners
+            .iter()
+            .map(|owner| owner.resident.worker_id.clone())
+            .collect();
         let resident = &cache.resident;
-        cache.rows.retain(|id, _| resident.contains_key(id));
-        cache.read_at.retain(|id, _| resident.contains_key(id));
-        cache.warnings.retain(|id, _| resident.contains_key(id));
+        cache.rows.retain(|worker, _| resident.contains(worker));
+        cache.read_at.retain(|worker, _| resident.contains(worker));
+        cache.warnings.retain(|worker, _| resident.contains(worker));
         for owner in owners {
-            let generation = cache.resident[&owner.id].generation;
-            if cache.in_flight.get(&owner.id) == Some(&generation) {
-                continue; // this residency's read still pending: never stack a second
+            if !cache.in_flight.insert(owner.resident.worker_id.clone()) {
+                continue; // this worker's read is still pending: never stack a second
             }
-            cache.in_flight.insert(owner.id.clone(), generation);
             let supervisor = Arc::clone(self);
             let owner = owner.clone();
             tokio::spawn(async move {
                 let outcome = supervisor.read_factory_live(&owner).await;
-                supervisor.fold_factory_live(&owner.id, generation, outcome);
+                supervisor.fold_factory_live(&owner.resident.worker_id, &owner.id, outcome);
             });
         }
     }
@@ -555,42 +356,34 @@ impl Supervisor {
     /// its boot window. The read's in-flight slot frees either way.
     fn fold_factory_live(
         &self,
+        worker: &str,
         owner: &str,
-        generation: u64,
         outcome: Option<anyhow::Result<DaemonResponse>>,
     ) {
         let mut cache = self.factory_live.lock().unwrap();
-        if cache.in_flight.get(owner) == Some(&generation) {
-            cache.in_flight.remove(owner);
-        }
-        // The read outlived the residency it was issued under: the owner
-        // passivated (its rows were pruned and its durable record alone
-        // answers) or came back as a new residency (whose own read is
-        // issued). Its rows, timeout, or failure are not this residency's.
-        if cache
-            .resident
-            .get(owner)
-            .is_none_or(|residency| residency.generation != generation)
-        {
+        cache.in_flight.remove(worker);
+        // The worker left the resident list while its read was out: its
+        // rows, timeout, or failure belong to nobody now.
+        if !cache.resident.contains(worker) {
             return;
         }
         match outcome {
             // Not route-ready yet: no live rows, no warning.
             None => {
-                cache.warnings.remove(owner);
+                cache.warnings.remove(worker);
             }
             Some(reply) => match live_read_outcome(&reply) {
                 LiveRead::Rows(rows) => {
-                    cache.rows.insert(owner.to_string(), rows);
-                    cache.read_at.insert(owner.to_string(), Instant::now());
-                    cache.warnings.remove(owner);
+                    cache.rows.insert(worker.to_string(), rows);
+                    cache.read_at.insert(worker.to_string(), Instant::now());
+                    cache.warnings.remove(worker);
                 }
                 LiveRead::Busy => {
-                    cache.warnings.remove(owner);
+                    cache.warnings.remove(worker);
                 }
                 LiveRead::Failed(reason) => {
                     cache.warnings.insert(
-                        owner.to_string(),
+                        worker.to_string(),
                         format!("session {owner}: live factory graph unavailable: {reason}"),
                     );
                 }
@@ -608,10 +401,12 @@ fn live_rows_are_fresh(read_at: Option<&Instant>) -> bool {
     read_at.is_some_and(|read_at| read_at.elapsed() <= FACTORY_LIVE_FRESH_WINDOW)
 }
 
-/// The catalog scan's result: every known owner, its durable run rows,
-/// and the partial-failure warnings.
+/// The catalog scan's result: every known owner, each resident's durable
+/// owner id (in the order the residents were passed), the owners' durable
+/// run rows, and the partial-failure warnings.
 type CatalogScan = (
     BTreeMap<String, CatalogOwner>,
+    Vec<String>,
     BTreeMap<String, Vec<Value>>,
     Vec<String>,
 );
@@ -636,109 +431,67 @@ pub(crate) struct CachedRecord {
 /// holds exactly the records the page still lists.
 pub(crate) type FactoryRecordsCache = std::sync::Mutex<BTreeMap<PathBuf, CachedRecord>>;
 
-/// The catalog half of the overview: every owner the sessions catalog,
-/// the spawn ledgers, the registry, and the roster know — saved sessions,
-/// passive RLM children, every resident, roster-known passivated owners —
-/// each with its durable run records read and projected into the page's
-/// row shape. Pure filesystem reads: no kernel, no worker, no boot.
+/// The catalog half of the overview: every owner the shared session
+/// catalog knows (the one `list --all` reads) plus every resident, each
+/// with its durable run records read and projected into the page's row
+/// shape. Pure filesystem reads: no kernel, no worker, no boot.
 fn catalog_and_records(
-    sessions_dir: &std::path::Path,
-    ledgers: &BTreeMap<PathBuf, Arc<crate::rlm_ledger::RlmSpawnLedger>>,
-    walk_roots: Vec<(PathBuf, Option<String>)>,
-    known_owners: Vec<(String, Option<String>, Option<PathBuf>)>,
-    resident_ids: &BTreeSet<String>,
+    roots: &KnownSessionRoots,
+    residents: &[ResidentOwner],
     records_cache: &FactoryRecordsCache,
 ) -> CatalogScan {
-    let mut warnings = Vec::new();
+    let known = scan_known_sessions(roots, None);
+    let mut warnings = known.warnings;
     let mut owners: BTreeMap<String, CatalogOwner> = BTreeMap::new();
-    // The saved catalog's read must distinguish a MISSING sessions
-    // directory (an empty catalog) from an UNREADABLE one: the shared
-    // `list_sessions` folds a failed `read_dir` into an empty list, so the
-    // probe runs first and an unreadable catalog warns — never a
-    // successful silent empty overview.
-    let infos = match std::fs::read_dir(sessions_dir) {
-        Ok(_) => crate::session_store::list_sessions(sessions_dir),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            warnings.push(format!("the sessions catalog is unreadable: {error}"));
-            Vec::new()
+    // A resident hosting a saved session is that session's owner (a
+    // booting worker has no persisted id yet, and its file's records must
+    // not list under a second id); any other resident owns itself.
+    let file_residents: Vec<usize> = residents
+        .iter()
+        .enumerate()
+        .filter(|(_, resident)| resident.session_file.is_some())
+        .map(|(index, _)| index)
+        .collect();
+    let mut live_owner_ids: Vec<String> = residents
+        .iter()
+        .map(|resident| resident.id.clone())
+        .collect();
+    for (info, hosted) in &known.saved {
+        let resident = hosted.map(|index| file_residents[index]);
+        if let Some(index) = resident {
+            live_owner_ids[index].clone_from(&info.id);
         }
-    };
-    // The walk's roots, grouped by their sessions directory: the catalog
-    // scan's saved sessions under the default directory, each resident's
-    // file under its own (a resident opened from a custom sessionDir).
-    let mut walk_groups: BTreeMap<PathBuf, Vec<RosterWalkRoot>> = BTreeMap::new();
-    for info in &infos {
         owners
             .entry(info.id.clone())
             .or_insert_with(|| CatalogOwner {
                 id: info.id.clone(),
-                name: info.name.clone(),
+                name: info
+                    .name
+                    .clone()
+                    .or_else(|| resident.and_then(|index| residents[index].name.clone())),
                 log: Some(info.path.clone()),
             });
-        walk_groups
-            .entry(sessions_dir.to_path_buf())
-            .or_default()
-            .push(RosterWalkRoot {
-                session_file: info.path.clone(),
-                active_session_id: None,
+    }
+    for child in &known.children {
+        owners
+            .entry(child.info.id.clone())
+            .or_insert_with(|| CatalogOwner {
+                id: child.info.id.clone(),
+                name: child.info.name.clone(),
+                log: Some(child.info.path.clone()),
             });
     }
-    // Resident and roster-known roots join the walk so a root's
-    // passivated descendants count as owners too (the same roots the
-    // all-session list walks), in the group of the directory their file
-    // lives in; a resident carries its live active id, a roster-known
-    // owner (passivated) walks as a passive root.
-    for (file, active_session_id) in walk_roots {
-        let dir = file
-            .parent()
-            .map_or_else(|| sessions_dir.to_path_buf(), PathBuf::from);
-        walk_groups.entry(dir).or_default().push(RosterWalkRoot {
-            session_file: file,
-            active_session_id,
+    for (resident, id) in residents.iter().zip(&live_owner_ids) {
+        owners.entry(id.clone()).or_insert_with(|| CatalogOwner {
+            id: id.clone(),
+            name: resident.name.clone(),
+            log: resident.session_file.clone(),
         });
     }
-    // Each directory's roots walk against that directory's ledger AND
-    // the DEFAULT sessions dir's ledger: production admission writes
-    // every spawn edge to the default dir's ledger
-    // (`record_rlm_child_admission` calls `rlm_spawn_ledger_for(None)`
-    // whatever `sessionDir` the create carried), while a custom
-    // directory's own ledger holds legacy/seeded edges. The two walks'
-    // children merge; owners dedupe by identity.
-    for (dir, roots) in walk_groups {
-        let mut walked: Vec<crate::rlm_roster::PassiveRlmChild> = Vec::new();
-        let mut ledger_dirs = vec![dir.clone()];
-        if sessions_dir != dir {
-            ledger_dirs.push(sessions_dir.to_path_buf());
-        }
-        for ledger_dir in ledger_dirs {
-            let Some(ledger) = ledgers.get(&ledger_dir) else {
-                warnings.push(format!(
-                    "the RLM spawn ledger for {} is unavailable",
-                    ledger_dir.display()
-                ));
-                continue;
-            };
-            match walk_passive_rlm_children(ledger, &roots) {
-                Ok(children) => walked.extend(children),
-                Err(error) => warnings.push(format!("the RLM spawn ledger walk failed: {error:#}")),
-            }
-        }
-        for child in &walked {
-            owners
-                .entry(child.info.id.clone())
-                .or_insert_with(|| CatalogOwner {
-                    id: child.info.id.clone(),
-                    name: child.info.name.clone(),
-                    log: Some(child.info.path.clone()),
-                });
-        }
-    }
-    for (id, name, log) in known_owners {
-        owners
-            .entry(id.clone())
-            .or_insert_with(|| CatalogOwner { id, name, log });
-    }
+    // The retention bound's gate: an owner with a resident worker reads its
+    // runs live, so its records are reachable rows, never ghosts that age
+    // out.
+    let resident_ids: BTreeSet<&str> = live_owner_ids.iter().map(String::as_str).collect();
     let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     // The record paths the scan projects this pass: the cache prunes to
     // them at the end, so entries for retired or aged-out records drop
@@ -875,7 +628,7 @@ fn catalog_and_records(
         .lock()
         .unwrap()
         .retain(|path, _| projected.contains(path));
-    (owners, records, warnings)
+    (owners, live_owner_ids, records, warnings)
 }
 
 /// Whether a merged row is LIVE in the page's sense — the exact rule the
@@ -1463,74 +1216,73 @@ mod tests {
         });
         // The fold gate: production only folds a read the refresh spawned
         // for a resident owner, so seed the resident set the refresh owns.
-        supervisor.factory_live.lock().unwrap().resident.insert(
-            "busy".to_string(),
-            Residency {
-                worker_id: "w-busy".to_string(),
-                generation: 1,
-            },
-        );
+        supervisor
+            .factory_live
+            .lock()
+            .unwrap()
+            .resident
+            .insert("w-busy".to_string());
         // A successful read replaces the owner's rows and stamps them.
-        supervisor.fold_factory_live("busy", 1, Some(healthy));
+        supervisor.fold_factory_live("w-busy", "busy", Some(healthy));
         {
             let cache = supervisor.factory_live.lock().unwrap();
-            assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
+            assert_eq!(cache.rows["w-busy"][0]["runId"], "run-ok");
             assert!(
-                live_rows_are_fresh(cache.read_at.get("busy")),
+                live_rows_are_fresh(cache.read_at.get("w-busy")),
                 "the fresh stamp qualifies the rows as live"
             );
             assert!(cache.warnings.is_empty());
-            assert!(!cache.in_flight.contains_key("busy"));
+            assert!(!cache.in_flight.contains("w-busy"));
         }
         // A timed-out read keeps the rows and their OLD stamp: the busy
         // owner's claim ages into the saved marker at serve time instead
         // of staying an unqualified live row forever.
-        let stamped = supervisor.factory_live.lock().unwrap().read_at["busy"];
-        supervisor.fold_factory_live("busy", 1, Some(timeout));
+        let stamped = supervisor.factory_live.lock().unwrap().read_at["w-busy"];
+        supervisor.fold_factory_live("w-busy", "busy", Some(timeout));
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert_eq!(
-                cache.rows["busy"][0]["runId"], "run-ok",
+                cache.rows["w-busy"][0]["runId"], "run-ok",
                 "the busy owner keeps its last rows, never a drop"
             );
             assert_eq!(
-                cache.read_at["busy"], stamped,
+                cache.read_at["w-busy"], stamped,
                 "a timed-out read never restamps the rows it kept"
             );
             assert!(cache.warnings.is_empty(), "a busy owner is not a failure");
-            assert!(!cache.in_flight.contains_key("busy"));
+            assert!(!cache.in_flight.contains("w-busy"));
         }
         // A real failure keeps them and carries its reason.
-        supervisor.fold_factory_live("busy", 1, Some(refused));
+        supervisor.fold_factory_live("w-busy", "busy", Some(refused));
         {
             let cache = supervisor.factory_live.lock().unwrap();
-            assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
+            assert_eq!(cache.rows["w-busy"][0]["runId"], "run-ok");
             assert_eq!(
-                cache.warnings["busy"],
+                cache.warnings["w-busy"],
                 "session busy: live factory graph unavailable: Kernel is not running"
             );
         }
         // A skipped (booting) owner keeps its rows through the boot
         // window and clears the owner's warning slot.
-        supervisor.fold_factory_live("busy", 1, None);
+        supervisor.fold_factory_live("w-busy", "busy", None);
         {
             let cache = supervisor.factory_live.lock().unwrap();
-            assert_eq!(cache.rows["busy"][0]["runId"], "run-ok");
+            assert_eq!(cache.rows["w-busy"][0]["runId"], "run-ok");
             assert_eq!(
-                cache.read_at["busy"], stamped,
+                cache.read_at["w-busy"], stamped,
                 "the boot window never restamps the rows it kept"
             );
             assert!(cache.warnings.is_empty());
-            assert!(!cache.in_flight.contains_key("busy"));
+            assert!(!cache.in_flight.contains("w-busy"));
         }
     }
 
-    /// An owner that left the resident list is gone from the next
-    /// refresh pass: its cached rows drop (its kernel is gone, so they
-    /// must not stay live), while a resident that stays keeps its rows
-    /// through its boot window.
+    /// The live cache is keyed by worker: a worker that left the resident
+    /// list loses its rows at the next refresh, and its read that lands
+    /// afterwards (the session passivated, or came back on a new worker)
+    /// restamps and warns nothing, while a worker that stays keeps its rows.
     #[tokio::test]
-    async fn a_departed_owners_cached_rows_drop_at_the_next_refresh() {
+    async fn a_gone_workers_rows_drop_and_its_late_read_never_lands() {
         let dir = tempfile::tempdir().expect("temp dir");
         let supervisor = Arc::new(
             Supervisor::new(SupervisorOptions {
@@ -1541,188 +1293,56 @@ mod tests {
         );
         {
             let mut cache = supervisor.factory_live.lock().unwrap();
-            cache
-                .rows
-                .insert("gone".to_string(), vec![json!({ "runId": "run-gone" })]);
-            cache.read_at.insert("gone".to_string(), Instant::now());
-            cache
-                .rows
-                .insert("stays".to_string(), vec![json!({ "runId": "run-stays" })]);
-            cache.read_at.insert("stays".to_string(), Instant::now());
-            // Rows exist only under a residency: the refresh that cached them.
-            cache.last_generation = 2;
-            cache.resident.insert(
-                "gone".to_string(),
-                Residency {
-                    worker_id: "w-gone".to_string(),
-                    generation: 1,
-                },
-            );
-            cache.resident.insert(
-                "stays".to_string(),
-                Residency {
-                    worker_id: "w-stays".to_string(),
-                    generation: 2,
-                },
-            );
+            for worker in ["w-gone", "w-stays"] {
+                cache
+                    .rows
+                    .insert(worker.to_string(), vec![json!({ "runId": worker })]);
+                cache.read_at.insert(worker.to_string(), Instant::now());
+                cache.resident.insert(worker.to_string());
+            }
+            cache.in_flight.insert("w-gone".to_string());
         }
-        let stays = memory_only_resident("w-stays", "stays");
-        supervisor.registry.insert(Arc::clone(&stays)).await;
+        let stays = memory_only_resident("w-stays", "owner");
         supervisor.spawn_factory_live_refresh(&[ResidentOwner {
-            id: "stays".to_string(),
-            active_session_id: "stays".to_string(),
+            id: "owner".to_string(),
+            active_session_id: "owner".to_string(),
             name: None,
+            session_file: None,
             resident: stays,
         }]);
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert!(
-                !cache.rows.contains_key("gone"),
-                "the departed owner's rows drop"
+                !cache.rows.contains_key("w-gone"),
+                "the gone worker's rows drop"
             );
-            assert!(!cache.read_at.contains_key("gone"));
-            assert_eq!(
-                cache.rows["stays"][0]["runId"], "run-stays",
-                "the resident that stays keeps its rows through its boot window"
-            );
+            assert!(!cache.read_at.contains_key("w-gone"));
+            assert_eq!(cache.rows["w-stays"][0]["runId"], "w-stays");
         }
-    }
-
-    /// A read already in flight when its owner passivates must not
-    /// restamp the rows the prune dropped: the owner is gone from the
-    /// page, and its durable record alone answers.
-    #[tokio::test]
-    async fn a_late_read_never_restamps_a_passivated_owners_rows() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let supervisor = Arc::new(
-            Supervisor::new(SupervisorOptions {
-                socket_path: dir.path().join("daemon.sock"),
-                agent_dir: dir.path().join("agent"),
-            })
-            .expect("supervisor"),
-        );
-        {
-            let mut cache = supervisor.factory_live.lock().unwrap();
-            cache
-                .rows
-                .insert("gone".to_string(), vec![json!({ "runId": "run-gone" })]);
-            cache.read_at.insert("gone".to_string(), Instant::now());
-            cache.in_flight.insert("gone".to_string(), 1);
-        }
-        // The passivation refresh prunes the rows but cannot cancel the
-        // read already in flight.
-        supervisor.spawn_factory_live_refresh(&[]);
-        {
-            let cache = supervisor.factory_live.lock().unwrap();
-            assert!(!cache.rows.contains_key("gone"));
-            assert!(cache.in_flight.contains_key("gone"));
-        }
-        // The late read lands after the prune: it must not put the rows
-        // back or restamp them.
-        supervisor.fold_factory_live(
-            "gone",
-            1,
-            Some(Ok(DaemonResponse {
+        for late in [
+            Ok(DaemonResponse {
                 id: None,
                 command: "factory_activity".to_string(),
                 success: true,
                 error: None,
-                data: Some(json!({ "runs": [{ "runId": "run-gone" }] })),
+                data: Some(json!({ "runs": [{ "runId": "late" }] })),
                 error_info: None,
-            })),
-        );
+            }),
+            Err(anyhow::anyhow!("Kernel is not running")),
+        ] {
+            supervisor.fold_factory_live("w-gone", "owner", Some(late));
+        }
         let cache = supervisor.factory_live.lock().unwrap();
         assert!(
-            !cache.rows.contains_key("gone"),
+            !cache.rows.contains_key("w-gone"),
             "the late fold adds no rows"
         );
-        assert!(
-            !cache.read_at.contains_key("gone"),
-            "the late fold restamps nothing"
-        );
-        assert!(!cache.in_flight.contains_key("gone"));
-    }
-
-    /// A read issued under an owner's earlier residency lands after the
-    /// owner unloaded and was re-admitted: the re-admission issues its
-    /// own fresh read instead of waiting on the old one, and the old
-    /// worker's timeout or failure is discarded, never published as the
-    /// new residency's result.
-    #[tokio::test]
-    async fn a_late_read_from_an_earlier_residency_is_discarded() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let supervisor = Arc::new(
-            Supervisor::new(SupervisorOptions {
-                socket_path: dir.path().join("daemon.sock"),
-                agent_dir: dir.path().join("agent"),
-            })
-            .expect("supervisor"),
-        );
-        let owner = |resident: Arc<ResidentWorker>| ResidentOwner {
-            id: "owner".to_string(),
-            active_session_id: "owner".to_string(),
-            name: None,
-            resident,
-        };
-        let readmitted = memory_only_resident("w-new", "owner");
-        // The first residency's read is in flight (seeded: a spawned
-        // read of a memory-only resident would land at once).
-        {
-            let mut cache = supervisor.factory_live.lock().unwrap();
-            cache.last_generation = 1;
-            cache.resident.insert(
-                "owner".to_string(),
-                Residency {
-                    worker_id: "w-old".to_string(),
-                    generation: 1,
-                },
-            );
-            cache.in_flight.insert("owner".to_string(), 1);
-        }
-        // Unload, then re-admit on a new worker before the read lands.
-        supervisor.spawn_factory_live_refresh(&[]);
-        supervisor.spawn_factory_live_refresh(&[owner(readmitted)]);
-        let current = {
-            let cache = supervisor.factory_live.lock().unwrap();
-            let current = cache.resident["owner"].generation;
-            assert_ne!(current, 1, "the re-admission is a new residency");
-            assert_eq!(
-                cache.in_flight.get("owner"),
-                Some(&current),
-                "the re-admission issues its own fresh read"
-            );
-            current
-        };
-        // The old worker's failure and timeout land late: both discarded.
-        supervisor.fold_factory_live(
-            "owner",
-            1,
-            Some(Ok(DaemonResponse {
-                id: None,
-                command: "factory_activity".to_string(),
-                success: false,
-                error: Some("Kernel is not running".to_string()),
-                data: None,
-                error_info: None,
-            })),
-        );
-        supervisor.fold_factory_live(
-            "owner",
-            1,
-            Some(Err(anyhow::anyhow!(WORKER_READ_TIMED_OUT))),
-        );
-        let cache = supervisor.factory_live.lock().unwrap();
+        assert!(!cache.read_at.contains_key("w-gone"));
         assert!(
             cache.warnings.is_empty(),
-            "the old residency's failure is never published"
+            "the late failure is never published"
         );
-        assert!(!cache.rows.contains_key("owner"));
-        assert!(!cache.read_at.contains_key("owner"));
-        assert_eq!(
-            cache.in_flight.get("owner"),
-            Some(&current),
-            "the late fold never frees the fresh read's slot"
-        );
+        assert!(!cache.in_flight.contains("w-gone"));
     }
 
     /// An owner re-admitted under a different worker starts a new
@@ -1743,23 +1363,16 @@ mod tests {
             })
             .expect("supervisor"),
         );
-        // The previous residency on `w-old` cached one fresh live run.
+        // The previous worker `w-old` cached one fresh live run.
         {
             let mut cache = supervisor.factory_live.lock().unwrap();
-            cache.last_generation = 1;
-            cache.resident.insert(
-                "owner".to_string(),
-                Residency {
-                    worker_id: "w-old".to_string(),
-                    generation: 1,
-                },
-            );
+            cache.resident.insert("w-old".to_string());
             cache.rows.insert(
-                "owner".to_string(),
+                "w-old".to_string(),
                 live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
                     .expect("the snapshot reply folds"),
             );
-            cache.read_at.insert("owner".to_string(), Instant::now());
+            cache.read_at.insert("w-old".to_string(), Instant::now());
         }
         // The owner is re-admitted on `w-new`.
         supervisor
@@ -1771,10 +1384,8 @@ mod tests {
         assert_eq!(
             response.data,
             Some(json!({ "runs": [], "warnings": [] })),
-            "the previous residency's cached rows never reach the overview"
+            "the previous worker's cached rows never reach the overview"
         );
-        let cache = supervisor.factory_live.lock().unwrap();
-        assert_ne!(cache.resident["owner"].generation, 1);
     }
 
     /// A memory-only resident (no session file: the saved catalog never
@@ -1804,21 +1415,12 @@ mod tests {
         {
             let mut cache = supervisor.factory_live.lock().unwrap();
             cache.rows.insert(
-                "mem-owner".to_string(),
+                "w-mem".to_string(),
                 live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
                     .expect("the snapshot reply folds"),
             );
-            cache
-                .read_at
-                .insert("mem-owner".to_string(), Instant::now());
-            cache.last_generation = 1;
-            cache.resident.insert(
-                "mem-owner".to_string(),
-                Residency {
-                    worker_id: "w-mem".to_string(),
-                    generation: 1,
-                },
-            );
+            cache.read_at.insert("w-mem".to_string(), Instant::now());
+            cache.resident.insert("w-mem".to_string());
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
         assert!(response.success, "the overview answered: {response:?}");
@@ -1886,24 +1488,17 @@ mod tests {
             // The cached rows are the fold's projection output — the
             // production cache shape, never the raw lane wire.
             cache.rows.insert(
-                "stale-owner".to_string(),
+                "w-stale".to_string(),
                 live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
                     .expect("the snapshot reply folds"),
             );
             cache.read_at.insert(
-                "stale-owner".to_string(),
+                "w-stale".to_string(),
                 Instant::now()
                     .checked_sub(FACTORY_LIVE_FRESH_WINDOW + Duration::from_millis(500))
                     .expect("a read stamp past the fresh window"),
             );
-            cache.last_generation = 1;
-            cache.resident.insert(
-                "stale-owner".to_string(),
-                Residency {
-                    worker_id: "w-stale".to_string(),
-                    generation: 1,
-                },
-            );
+            cache.resident.insert("w-stale".to_string());
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
         assert!(response.success, "the overview answered: {response:?}");
@@ -2112,6 +1707,16 @@ mod tests {
         assert!(!row_is_live(&json!({})));
     }
 
+    /// Catalog inputs with no residents, roster roots, or ledgers.
+    fn no_roots(sessions: &std::path::Path) -> KnownSessionRoots {
+        KnownSessionRoots {
+            catalog_dir: sessions.to_path_buf(),
+            residents: Vec::new(),
+            roster_files: Vec::new(),
+            ledgers: BTreeMap::new(),
+        }
+    }
+
     /// One minimal saved session file (the scan's exact shapes), written
     /// wherever the caller needs it.
     fn write_saved_session(dir: &std::path::Path, id: &str, name: &str) -> PathBuf {
@@ -2153,28 +1758,16 @@ mod tests {
         let agent_dir = dir.path().join("agent");
         // A missing sessions directory: no owners, no warnings.
         let missing = agent_dir.join("sessions-missing");
-        let (owners, records, warnings) = catalog_and_records(
-            &missing,
-            &BTreeMap::new(),
-            Vec::new(),
-            Vec::new(),
-            &BTreeSet::new(),
-            &FactoryRecordsCache::default(),
-        );
+        let (owners, _, records, warnings) =
+            catalog_and_records(&no_roots(&missing), &[], &FactoryRecordsCache::default());
         assert!(owners.is_empty() && records.is_empty() && warnings.is_empty());
         // A sessions path that is a regular file (ENOTDIR, the probe's
         // shape): the read failure warns — never a silent empty catalog.
         let unreadable = agent_dir.join("sessions");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
         std::fs::write(&unreadable, "not a directory").expect("regular file");
-        let (owners, records, warnings) = catalog_and_records(
-            &unreadable,
-            &BTreeMap::new(),
-            Vec::new(),
-            Vec::new(),
-            &BTreeSet::new(),
-            &FactoryRecordsCache::default(),
-        );
+        let (owners, _, records, warnings) =
+            catalog_and_records(&no_roots(&unreadable), &[], &FactoryRecordsCache::default());
         assert!(owners.is_empty() && records.is_empty());
         assert!(
             warnings
@@ -2230,14 +1823,17 @@ mod tests {
                 |_log| {},
             )),
         );
-        let (owners, records, warnings) = catalog_and_records(
-            &default_sessions,
-            &ledgers,
-            vec![(parent_log, Some("active-a".to_string()))],
-            Vec::new(),
-            &BTreeSet::new(),
-            &FactoryRecordsCache::default(),
-        );
+        let roots = KnownSessionRoots {
+            catalog_dir: default_sessions,
+            residents: vec![ResidentFile {
+                session_file: parent_log,
+                active_session_id: "active-a".to_string(),
+            }],
+            roster_files: Vec::new(),
+            ledgers,
+        };
+        let (owners, _, records, warnings) =
+            catalog_and_records(&roots, &[], &FactoryRecordsCache::default());
         assert!(warnings.is_empty(), "no partial failures: {warnings:?}");
         let child = owners
             .get("custom-child")
@@ -2383,18 +1979,18 @@ mod tests {
                 |_log| {},
             )),
         );
-        let cache = FactoryRecordsCache::default();
-        let scan = |resident_ids: &BTreeSet<String>, cache: &FactoryRecordsCache| {
-            catalog_and_records(
-                &sessions,
-                &ledgers,
-                Vec::new(),
-                Vec::new(),
-                resident_ids,
-                cache,
-            )
+        let roots = KnownSessionRoots {
+            catalog_dir: sessions,
+            residents: Vec::new(),
+            roster_files: Vec::new(),
+            ledgers,
         };
-        let gone = BTreeSet::new();
+        let cache = FactoryRecordsCache::default();
+        let scan = |residents: &[ResidentOwner], cache: &FactoryRecordsCache| {
+            let (owners, _, records, warnings) = catalog_and_records(&roots, residents, cache);
+            (owners, records, warnings)
+        };
+        let gone: Vec<ResidentOwner> = Vec::new();
         // The first scan reads and caches the record.
         let (owners, records, warnings) = scan(&gone, &cache);
         assert_eq!(owners.len(), 1, "the saved session is the one owner");
@@ -2440,7 +2036,13 @@ mod tests {
         );
         // The retention bound gates ghosts alone: the same aged record
         // under a resident owner lists — its kernel reads the runs live.
-        let residents = BTreeSet::from(["cache-owner".to_string()]);
+        let residents = vec![ResidentOwner {
+            id: "cache-owner".to_string(),
+            active_session_id: "cache-owner".to_string(),
+            name: None,
+            session_file: None,
+            resident: memory_only_resident("w-cache", "cache-owner"),
+        }];
         let (_, records, _) = scan(&residents, &cache);
         assert_eq!(
             records["cache-owner"][0]["runId"], "run-c2",

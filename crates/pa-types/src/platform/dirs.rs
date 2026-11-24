@@ -100,82 +100,40 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn agent_dir_env_override_expands_tilde() {
-        with_env(
-            &[
-                ("HOME", Some("/home/tester")),
-                ("PRIME_AGENT_CODING_AGENT_DIR", Some("~/state")),
-            ],
-            || {
-                assert_eq!(agent_dir(), Some(PathBuf::from("/home/tester/state")));
-            },
+    fn home_and_agent_dirs_follow_the_environment() {
+        type Case<'a> = (
+            &'a [(&'a str, Option<&'a str>)],
+            Option<&'a str>,
+            Option<&'a str>,
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn agent_dir_env_override_passthrough() {
-        with_env(
-            &[
-                ("HOME", None),
-                ("PRIME_AGENT_CODING_AGENT_DIR", Some("/opt/state")),
-            ],
-            || {
-                assert_eq!(agent_dir(), Some(PathBuf::from("/opt/state")));
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn agent_dir_default_under_home() {
-        with_env(
-            &[
-                ("HOME", Some("/home/tester")),
-                ("PRIME_AGENT_CODING_AGENT_DIR", None),
-            ],
-            || {
-                assert_eq!(
-                    agent_dir(),
-                    Some(PathBuf::from("/home/tester/.prime/agent"))
-                );
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn agent_dir_without_home_is_none() {
-        with_env(
-            &[("HOME", None), ("PRIME_AGENT_CODING_AGENT_DIR", None)],
-            || {
-                assert_eq!(agent_dir(), None);
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn home_dir_follows_home() {
-        with_env(&[("HOME", Some("/home/tester"))], || {
-            assert_eq!(home_dir(), Some(PathBuf::from("/home/tester")));
-        });
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn home_dir_unset_is_none() {
-        with_env(&[("HOME", None)], || {
-            assert_eq!(home_dir(), None);
-        });
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn home_dir_empty_is_none() {
-        with_env(&[("HOME", Some(""))], || {
-            assert_eq!(home_dir(), None);
-        });
+        let cases: [Case; 5] = [
+            (
+                &[
+                    ("HOME", Some("/home/tester")),
+                    (ENV_AGENT_DIR, Some("~/state")),
+                ],
+                Some("/home/tester"),
+                Some("/home/tester/state"),
+            ),
+            (
+                &[("HOME", None), (ENV_AGENT_DIR, Some("/opt/state"))],
+                None,
+                Some("/opt/state"),
+            ),
+            (
+                &[("HOME", Some("/home/tester")), (ENV_AGENT_DIR, None)],
+                Some("/home/tester"),
+                Some("/home/tester/.prime/agent"),
+            ),
+            (&[("HOME", None), (ENV_AGENT_DIR, None)], None, None),
+            (&[("HOME", Some("")), (ENV_AGENT_DIR, None)], None, None),
+        ];
+        for (env, home, agent) in cases {
+            with_env(env, || {
+                assert_eq!(home_dir(), home.map(PathBuf::from), "{env:?}");
+                assert_eq!(agent_dir(), agent.map(PathBuf::from), "{env:?}");
+            });
+        }
     }
 
     #[test]
@@ -198,58 +156,43 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn home_dir_prefers_home_over_userprofile() {
-        with_env(
-            &[
-                ("HOME", Some("/home/tester")),
-                ("USERPROFILE", Some(r"C:\Users\tester")),
-            ],
-            || {
-                assert_eq!(home_dir(), Some(PathBuf::from("/home/tester")));
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(windows)]
     fn home_dir_falls_back_to_userprofile() {
-        with_env(
-            &[("HOME", None), ("USERPROFILE", Some(r"C:\Users\tester"))],
-            || {
-                assert_eq!(home_dir(), Some(PathBuf::from(r"C:\Users\tester")));
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn home_dir_falls_back_to_homedrive_homepath() {
-        with_env(
-            &[
-                ("HOME", None),
-                ("USERPROFILE", None),
-                ("HOMEDRIVE", Some("C:")),
-                ("HOMEPATH", Some(r"\Users\tester")),
-            ],
-            || {
-                assert_eq!(home_dir(), Some(PathBuf::from(r"C:\Users\tester")));
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn home_dir_unset_is_none() {
-        with_env(
-            &[
-                ("HOME", None),
-                ("USERPROFILE", None),
-                ("HOMEDRIVE", None),
-                ("HOMEPATH", None),
-            ],
-            || {
-                assert_eq!(home_dir(), None);
-            },
-        );
+        type Case<'a> = (&'a [(&'a str, Option<&'a str>)], Option<&'a str>);
+        let cases: [Case; 4] = [
+            (
+                &[
+                    ("HOME", Some("/home/tester")),
+                    ("USERPROFILE", Some(r"C:\Users\tester")),
+                ],
+                Some("/home/tester"),
+            ),
+            (
+                &[("HOME", None), ("USERPROFILE", Some(r"C:\Users\tester"))],
+                Some(r"C:\Users\tester"),
+            ),
+            (
+                &[
+                    ("HOME", None),
+                    ("USERPROFILE", None),
+                    ("HOMEDRIVE", Some("C:")),
+                    ("HOMEPATH", Some(r"\Users\tester")),
+                ],
+                Some(r"C:\Users\tester"),
+            ),
+            (
+                &[
+                    ("HOME", None),
+                    ("USERPROFILE", None),
+                    ("HOMEDRIVE", None),
+                    ("HOMEPATH", None),
+                ],
+                None,
+            ),
+        ];
+        for (env, home) in cases {
+            with_env(env, || {
+                assert_eq!(home_dir(), home.map(PathBuf::from), "{env:?}");
+            });
+        }
     }
 }

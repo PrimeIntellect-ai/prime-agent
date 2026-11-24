@@ -209,6 +209,143 @@ impl SessionEngine for GateProbeEngine {
     }
 }
 
+#[tokio::test]
+async fn the_turn_held_timer_fires_only_for_its_live_delivery() {
+    // `cell_running`: a tool call is in flight at the window. Without one the
+    // model is streaming, and a turn that then ends on its own gets no extra
+    // pacing turn.
+    for (held_past_window, pacing_only, cell_running) in [
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+        (true, false, false),
+    ] {
+        let (started_tx, started_rx) = oneshot::channel();
+        let started_tx = Mutex::new(Some(started_tx));
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+            frames: vec![EngineEvent::Done(Ok(()))],
+            before_delivery: Mutex::new(Some(Box::new(move || {
+                started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                let _ = finish_rx.recv();
+            }))),
+            ..GateProbeEngine::default()
+        });
+        let runner = burst_runner(Arc::clone(&engine));
+        let core = Arc::clone(&runner.core);
+        core.lock().unwrap().busy = true;
+        let work_notify = Arc::clone(&runner.work_notify);
+        let recovery = Arc::clone(&runner.recovery);
+        let custom_message = pacing_only.then(|| {
+            crate::session_commands::custom_message_value(
+                &crate::engine::KernelNotice::turn_held(60_000).row,
+            )
+        });
+        let message = custom_message
+            .as_ref()
+            .map_or("timer probe", |row| row["content"].as_str().unwrap())
+            .to_string();
+        tokio::time::pause();
+        let turn = tokio::spawn(async move {
+            runner
+                .run_turn(
+                    engine,
+                    Lane::Steering,
+                    vec![QueuedItem {
+                        priority: QueuePriority::Human,
+                        preview: None,
+                        message,
+                        custom_message,
+                        agent_message: None,
+                        queue_key: None,
+                        admission_id: None,
+                        images: Vec::new(),
+                        done: None,
+                        queue_visible: true,
+                        policy: TurnPolicy::Queued,
+                        forced_batch: false,
+                    }],
+                )
+                .await;
+        });
+        started_rx.await.unwrap();
+        if cell_running {
+            core.lock()
+                .unwrap()
+                .running_tool_calls
+                .insert("cell".to_string());
+        }
+        tokio::task::yield_now().await;
+        let queues = held_past_window && !pacing_only && cell_running;
+        let checkpoint_blocker = queues.then(|| {
+            let recovery = Arc::clone(&recovery);
+            let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = std::thread::spawn(move || {
+                let _guard = recovery.lock().unwrap();
+                locked_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .is_ok()
+            });
+            locked_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            (release_tx, blocker)
+        });
+        if held_past_window {
+            tokio::time::advance(std::time::Duration::from_secs(59)).await;
+            tokio::task::yield_now().await;
+            assert!(core.lock().unwrap().steering.is_empty());
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+            tokio::task::yield_now().await;
+            if queues {
+                let (release_tx, blocker) = checkpoint_blocker.unwrap();
+                while core.lock().unwrap().steering.is_empty() {
+                    assert!(
+                        !blocker.is_finished(),
+                        "admission never reached the checkpoint"
+                    );
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    release_tx.send(()).is_ok(),
+                    "the journal checkpoint must not block the executor"
+                );
+                assert!(blocker.join().unwrap());
+                tokio::time::resume();
+                tokio::time::timeout(std::time::Duration::from_secs(1), work_notify.notified())
+                    .await
+                    .expect("a held delivery must receive its pacing notice");
+                tokio::time::pause();
+                let mut core = core.lock().unwrap();
+                assert_eq!(core.steering.len(), 1);
+                let row = core.steering[0].custom_message.as_ref().unwrap();
+                assert_eq!(row["customType"], "turn_held_notice");
+                core.steering.clear();
+            } else {
+                assert!(core.lock().unwrap().steering.is_empty());
+                assert!(futures::FutureExt::now_or_never(work_notify.notified()).is_none());
+            }
+        }
+        finish_tx.send(()).unwrap();
+        turn.await.unwrap();
+        assert!(
+            core.lock().unwrap().steering.is_empty(),
+            "no pacing row is left to start another turn"
+        );
+        // A later busy delivery must not receive the completed turn's timer.
+        core.lock().unwrap().busy = true;
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            core.lock().unwrap().steering.is_empty(),
+            "a settled delivery must cancel its pacing timer"
+        );
+        tokio::time::resume();
+    }
+}
+
 /// One gated sighting battery: change the worker flags after producing each
 /// scripted frame, immediately before delivering it to the worker callback.
 async fn gate_sighting_events(

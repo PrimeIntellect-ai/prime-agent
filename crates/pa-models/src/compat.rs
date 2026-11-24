@@ -173,12 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_compat_is_always_valid() {
-        assert!(is_model_compat("gemini", None));
-        assert!(is_model_compat("openai-completions", None));
-    }
-
-    #[test]
     fn completions_compat_accepts_declared_keys_only() {
         assert!(is_model_compat(
             "openai-completions",
@@ -213,7 +207,28 @@ mod tests {
     }
 
     #[test]
-    fn responses_compat_shape() {
+    fn compat_objects_validate_per_api() {
+        assert!(
+            is_model_compat("gemini", None),
+            "absent compat is always valid"
+        );
+        assert!(is_model_compat("openai-completions", None));
+        assert!(!is_model_compat(
+            "gemini",
+            Some(&compat(json!({"supportsLongCacheRetention": true})))
+        ));
+        assert!(is_model_compat(
+            "anthropic-messages",
+            Some(&compat(json!({"supportsEagerToolInputStreaming": true})))
+        ));
+        assert!(is_model_compat(
+            "anthropic-messages",
+            Some(&compat(json!({"requiresThinkingSignature": false})))
+        ));
+        assert!(!is_model_compat(
+            "anthropic-messages",
+            Some(&compat(json!({"sendSessionIdHeader": true})))
+        ));
         assert!(is_model_compat(
             "openai-responses",
             Some(&compat(json!({"sendSessionIdHeader": true})))
@@ -229,30 +244,6 @@ mod tests {
         assert!(!is_model_compat(
             "openai-responses",
             Some(&compat(json!({"sendSessionIdHeader": "no"})))
-        ));
-    }
-
-    #[test]
-    fn anthropic_compat_shape() {
-        assert!(is_model_compat(
-            "anthropic-messages",
-            Some(&compat(json!({"supportsEagerToolInputStreaming": true})))
-        ));
-        assert!(is_model_compat(
-            "anthropic-messages",
-            Some(&compat(json!({"requiresThinkingSignature": false})))
-        ));
-        assert!(!is_model_compat(
-            "anthropic-messages",
-            Some(&compat(json!({"sendSessionIdHeader": true})))
-        ));
-    }
-
-    #[test]
-    fn unknown_api_rejects_compat_objects() {
-        assert!(!is_model_compat(
-            "gemini",
-            Some(&compat(json!({"supportsLongCacheRetention": true})))
         ));
     }
 

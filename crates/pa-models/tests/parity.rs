@@ -24,6 +24,8 @@ fn parses_the_real_payload_with_zero_failures() {
     assert_eq!(providers.len(), 31, "31 providers");
     // No entry ever carries headers from catalog data.
     assert!(parsed.models.iter().all(|model| model.headers.is_none()));
+    let skipped = parse_model_catalog(&fixture(), InvalidEntries::SkipInvalid).expect("skip mode");
+    assert_eq!(skipped.models.len(), 1197, "no real entry is skipped");
 }
 
 #[test]
@@ -66,10 +68,4 @@ fn passes_the_packer_gates() {
         ))),
         "fixture is compiled-transport-shaped"
     );
-}
-
-#[test]
-fn skip_invalid_keeps_the_real_payload_whole() {
-    let parsed = parse_model_catalog(&fixture(), InvalidEntries::SkipInvalid).expect("skip mode");
-    assert_eq!(parsed.models.len(), 1197, "no real entry is skipped");
 }

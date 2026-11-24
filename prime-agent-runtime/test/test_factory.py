@@ -72,40 +72,26 @@ from rlm.factory import (
     ANSWER_CAPTURE_CAP,
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
-    MACHINE_FILE_NAME,
     MACHINE_SPEC_FENCE,
-    NODE_OUTPUTS_CAP,
     POLL_TIMEOUT_MS,
     RUN_MAX_CHILDREN_DEFAULT,
     RUN_MAX_PARALLEL_DEFAULT,
     SUBAGENT_NAME_MAX_LENGTH,
     FactoryExecutor,
     MachineFile,
-    MachineResolutionError,
     _child_name,
     _guard_passes,
     _parse_json_output,
-    _resolve_machine_dir,
-    _scan_machine_library,
     _spawn_label,
     canonicalize_factory_spec,
     cli_dispatch,
     compile_factory_dag,
     export_factory_spec,
-    export_library_machine,
     export_machine,
-    import_machine,
-    library_graph,
-    list_machines,
     machine_description_errors,
     machine_name_errors,
-    parse_machine_file,
     render_machine_file,
-    repo_machines_dir,
-    resolve_machine,
-    spec_to_mermaid,
     topological_order,
-    user_machines_dir,
     validate_factory_machine,
     validate_factory_spec,
 )
@@ -224,14 +210,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
             validate_factory_spec({"run": "bad", "nodes": "nope"}),
             ["run must be an object", "factory dag requires a nodes list"],
         )
-
-    def test_node_cap(self) -> None:
-        at_cap = {"nodes": [node(f"n{i}") for i in range(1024)]}
-        self.assertEqual(validate_factory_spec(at_cap), [])
-        over_cap = {"nodes": [node(f"n{i}") for i in range(1025)]}
-        errors = validate_factory_spec(over_cap)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("between 1 and 1024 nodes", errors[0])
 
     def test_node_ids(self) -> None:
         for good in ("a", "node-1", "1st-node", "a" * 64):
@@ -353,41 +331,12 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("run failure_policy must be one of", errors[0])
 
-    def test_run_max_parallel(self) -> None:
-        for good in (1, 8, 64):
-            self.assertEqual(validate_factory_spec({"run": {"max_parallel": good}, "nodes": [node("a")]}), [])
-        for bad in (0, 65, -1, 1.5, "8", True):
-            errors = validate_factory_spec({"run": {"max_parallel": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run max_parallel must be an integer between 1 and 64"], bad)
-
-    def test_run_max_transitions(self) -> None:
-        for good in (1, 40, 10_000):
-            self.assertEqual(validate_factory_spec({"run": {"max_transitions": good}, "nodes": [node("a")]}), [])
-        for bad in (0, -1, 10_001, 1.5, "5", True):
-            errors = validate_factory_spec({"run": {"max_transitions": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run max_transitions must be a positive integer no greater than 10000"], bad)
-
-    def test_run_max_children(self) -> None:
-        # The run-wide child budget: total admissions over the run's life.
-        for good in (1, 40, 1_000_000):
-            self.assertEqual(validate_factory_spec({"run": {"max_children": good}, "nodes": [node("a")]}), [])
-        for bad in (0, -1, 1_000_001, 1.5, "5", True):
-            errors = validate_factory_spec({"run": {"max_children": bad}, "nodes": [node("a")]})
-            self.assertEqual(errors, ["run max_children must be a positive integer no greater than 1000000"], bad)
-
     def test_node_failure_policy(self) -> None:
         for good in ("fail_fast", "continue", "escalate"):
             self.assertEqual(validate_factory_spec({"nodes": [node("a", failure_policy=good)]}), [])
         errors = validate_factory_spec({"nodes": [node("a", failure_policy="retry")]})
         self.assertEqual(len(errors), 1)
         self.assertIn("node a failure_policy must be one of", errors[0])
-
-    def test_retries(self) -> None:
-        for good in (0, 5, 10):
-            self.assertEqual(validate_factory_spec({"nodes": [node("a", retries=good)]}), [])
-        for bad in (-1, 11, 1.5, "2", True):
-            errors = validate_factory_spec({"nodes": [node("a", retries=bad)]})
-            self.assertEqual(errors, ["node a retries must be an integer between 0 and 10"], bad)
 
     def test_depends_on(self) -> None:
         ok = {"nodes": [node("a"), node("b", depends_on=["a"])]}
@@ -441,28 +390,12 @@ class ValidateFactorySpecTest(unittest.TestCase):
         # limit. Presence-based checks reject null with the field's own
         # message instead of treating it as an omitted default.
         self.assertEqual(
-            validate_factory_spec({"run": {"max_parallel": None}, "nodes": [node("a")]}),
-            ["run max_parallel must be an integer between 1 and 64"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"run": {"max_transitions": None}, "nodes": [node("a")]}),
-            ["run max_transitions must be a positive integer no greater than 10000"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"run": {"max_children": None}, "nodes": [node("a")]}),
-            ["run max_children must be a positive integer no greater than 1000000"],
-        )
-        self.assertEqual(
             validate_factory_spec({"run": {"budget_ms": None}, "nodes": [node("a")]}),
             ["run budget_ms must be a positive integer"],
         )
         self.assertEqual(
             validate_factory_spec({"run": {"failure_policy": None}, "nodes": [node("a")]}),
             ["run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got None"],
-        )
-        self.assertEqual(
-            validate_factory_spec({"nodes": [node("a", retries=None)]}),
-            ["node a retries must be an integer between 0 and 10"],
         )
         self.assertEqual(
             validate_factory_spec({"nodes": [node("a", budget_ms=None)]}),
@@ -475,25 +408,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             validate_factory_spec({"nodes": [node("a", lifecycle=None)]}),
             ["node a lifecycle must be 'task' or 'resident', got None"],
-        )
-        machine_nulls = {
-            "states": [
-                {
-                    "id": "a",
-                    "entry": True,
-                    "subagent": "w",
-                    "max_entries": None,
-                    "retries": None,
-                }
-            ],
-            "transitions": [],
-        }
-        self.assertEqual(
-            validate_factory_machine(machine_nulls),
-            [
-                "state a retries must be an integer between 0 and 10",
-                "state a max_entries must be an integer >= 1",
-            ],
         )
         self.assertEqual(
             validate_factory_machine({"states": [{"id": "a", "entry": None, "subagent": "w"}], "transitions": []}),
@@ -691,20 +605,6 @@ class ValidateFactorySpecTest(unittest.TestCase):
             }
             self.assertEqual(validate_factory_spec(ok_max), [])
 
-        for bad_max in (0, 257, -1, 1.5, "8", True):
-            bad = {
-                "nodes": [
-                    node("a", outputs=[{"name": "items", "type": "json"}]),
-                    node(
-                        "b",
-                        inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                        foreach={"over": "items", "max": bad_max},
-                    ),
-                ]
-            }
-            errors = validate_factory_spec(bad)
-            self.assertEqual(errors, ["node b foreach.max must be an integer between 1 and 256"], bad_max)
-
         wrong_port = {
             "nodes": [
                 node("a", outputs=[{"name": "items", "type": "json"}]),
@@ -811,9 +711,7 @@ class ValidateFactorySpecTest(unittest.TestCase):
             errors,
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
-                "run max_parallel must be an integer between 1 and 64",
                 "node a depends on unknown node 'ghost'",
-                "node b retries must be an integer between 0 and 10",
                 "node c failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'retry'",
             ],
         )
@@ -909,11 +807,9 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(result["states"][0]["failure_policy"], "continue")
         self.assertEqual(result["states"][1]["failure_policy"], "escalate")
 
-    def test_max_transitions_defaults_to_ten_per_state_capped(self) -> None:
+    def test_max_transitions_defaults_to_ten_per_state(self) -> None:
         ten_states = {"nodes": [node(f"n{i}") for i in range(10)]}
         self.assertEqual(canonicalize_factory_spec(ten_states)["run"]["max_transitions"], 100)
-        many_states = {"nodes": [node(f"n{i}") for i in range(1024)]}
-        self.assertEqual(canonicalize_factory_spec(many_states)["run"]["max_transitions"], 10_000)
 
     def test_deduplicates_depends_on_into_one_transition(self) -> None:
         dag = {
@@ -1058,17 +954,8 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         at_cap = {"states": [state(f"s{i}") for i in range(1024)], "transitions": []}
         at_cap["states"][0]["entry"] = True
         self.assertEqual(validate_factory_machine(at_cap), [])
-        over_cap = {"states": [state(f"s{i}") for i in range(1025)], "transitions": []}
-        over_cap["states"][0]["entry"] = True
-        self.assertEqual(
-            validate_factory_machine(over_cap),
-            [f"factory machine must declare between 1 and 1024 states, got 1025"],
-        )
         empty = {"states": [], "transitions": []}
-        self.assertEqual(
-            validate_factory_machine(empty),
-            ["factory machine must declare between 1 and 1024 states, got 0"],
-        )
+        self.assertEqual(validate_factory_machine(empty), ["factory machine must declare at least one state"])
 
     def test_state_ids(self) -> None:
         for good in ("a", "state-1", "1st-state", "a" * 64):
@@ -1213,18 +1100,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             ]
         }
         self.assertEqual(validate_factory_spec(dag), [])
-
-    def test_max_entries(self) -> None:
-        for good in (1, 2, 99):
-            machine = {"states": [state("a", entry=True, max_entries=good)], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), [], good)
-        for bad in (0, -1, 1.5, "2", True):
-            machine = {"states": [state("a", entry=True, max_entries=bad)], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["state a max_entries must be an integer >= 1"],
-                repr(bad),
-            )
 
     def test_python_states(self) -> None:
         python = {"import": "tools", "callable": "plan"}
@@ -1590,13 +1465,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             self.assertEqual(validate_factory_machine(machine), ["run budget_ms must be a positive integer"], bad)
             machine = {"states": [state("a", entry=True, budget_ms=bad)], "transitions": []}
             self.assertEqual(validate_factory_machine(machine), ["state a budget_ms must be a positive integer"], bad)
-        for bad in (-1, 11, 1.5, "2", True):
-            machine = {"states": [state("a", entry=True, retries=bad)], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["state a retries must be an integer between 0 and 10"],
-                bad,
-            )
         bad_policy = {"states": [state("a", entry=True, failure_policy="retry")], "transitions": []}
         self.assertEqual(
             validate_factory_machine(bad_policy),
@@ -1607,18 +1475,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(bad_lifecycle),
             ["state a lifecycle must be 'task' or 'resident', got 'daemon'"],
         )
-
-    def test_run_max_transitions(self) -> None:
-        for good in (1, 40, 10_000):
-            machine = {"run": {"max_transitions": good}, "states": [state("a", entry=True)], "transitions": []}
-            self.assertEqual(validate_factory_machine(machine), [], good)
-        for bad in (0, -1, 10_001, 1.5, "5", True):
-            machine = {"run": {"max_transitions": bad}, "states": [state("a", entry=True)], "transitions": []}
-            self.assertEqual(
-                validate_factory_machine(machine),
-                ["run max_transitions must be a positive integer no greater than 10000"],
-                bad,
-            )
 
     def test_foreach_rules(self) -> None:
         ok = {
@@ -1660,18 +1516,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             "transitions": [{"from": "a", "to": "b"}],
         }
         self.assertEqual(validate_factory_machine(text_port), ["state b foreach.over input 'draft' must have type 'json'"])
-        bad_max = {
-            "states": [
-                state("a", entry=True, outputs=[{"name": "items", "type": "json"}]),
-                state(
-                    "b",
-                    inputs=[{"name": "items", "type": "json", "from": "a.items"}],
-                    foreach={"over": "items", "max": 257},
-                ),
-            ],
-            "transitions": [{"from": "a", "to": "b"}],
-        }
-        self.assertEqual(validate_factory_machine(bad_max), ["state b foreach.max must be an integer between 1 and 256"])
         not_object = {"states": [state("a", entry=True, foreach=["bad"])], "transitions": []}
         self.assertEqual(validate_factory_machine(not_object), ["state a foreach must be an object"])
 
@@ -2058,9 +1902,6 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(machine),
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
-                "run max_parallel must be an integer between 1 and 64",
-                "state a retries must be an integer between 0 and 10",
-                "state b max_entries must be an integer >= 1",
                 "transitions[0] references unknown to-state 'ghost'",
             ],
         )
@@ -2216,7 +2057,7 @@ class CompileFactoryDagTest(unittest.TestCase):
         for bad, expected in (
             ("nope", "factory dag must be a JSON object"),
             ({"nodes": "nope"}, "factory dag requires a nodes list"),
-            ({"nodes": []}, "factory dag must declare between 1 and 1024 nodes, got 0"),
+            ({"nodes": []}, "factory dag must declare at least one node"),
             ({"nodes": [node("a", depends_on=["ghost"])]}, "node a depends on unknown node 'ghost'"),
         ):
             machine, errors = compile_factory_dag(bad)
@@ -2314,7 +2155,7 @@ class ValidateFactorySpecFormTest(unittest.TestCase):
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": ["a", {}], "to": "a"}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": ["a"], "to": {}}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": [{"from": "a", "to": "a", "when": {"op": "eq", "value": [1]}}]},
-            {"states": [{"id": "a", "entry": True, "subagent": "w", "max_entries": {}}]},
+            {"states": [{"id": "a", "entry": True, "subagent": "w", "failure_policy": {}}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": {"from": "a"}},
             {"nodes": [{"id": "a", "subagent": "w"}], "states": [{"id": "b", "entry": True, "subagent": "w"}]},
         ]
@@ -2600,21 +2441,20 @@ class FactoryHelpTest(unittest.TestCase):
         # fact-checked against the machine-library code (parse/import
         # gate/run fallback).
         self.assertIn(
-            "The machine library: machines are `MACHINE.md` files (frontmatter plus "
-            "one fenced `machine-spec` block), one directory per machine, resolved "
-            "from two levels — the bundled seeds shipped inside the runtime "
-            "(visible in every install; `PRIME_AGENT_MACHINES_DIR` redirects the "
-            "level at a team directory) first, the personal `machines/` library "
-            "under the agent dir second",
+            "The machine library: one folder per machine, either a machine directory "
+            "(`machine.toml`) or a `MACHINE.md` file (frontmatter plus one fenced "
+            "`machine-spec` block), resolved from two levels — the bundled seeds "
+            "shipped inside the runtime (visible in every install; "
+            "`PRIME_AGENT_MACHINES_DIR` redirects the level at a team directory) "
+            "first, the personal `machines/` library under the agent dir second",
             flat,
         )
         self.assertIn(
             "`prime-agent factory list | import | export` manages them: list shows "
-            "only what parses and validates (broken files print as warnings), "
-            "import runs the same write-time validation as a stored spec so an "
-            "invalid machine never persists, and export copies a library machine "
-            "verbatim to a fresh path (an existing target is refused, never "
-            "overwritten)",
+            "what loads (broken folders print as warnings), import checks the spec "
+            "like a stored one so an invalid machine never persists, and export "
+            "copies a library MACHINE.md verbatim to a fresh path (an existing "
+            "target is refused, never overwritten)",
             flat,
         )
         self.assertIn(
@@ -2627,25 +2467,6 @@ class FactoryHelpTest(unittest.TestCase):
             "The bundled seeds are `builder`, `pr-manager`, and `review-sweep`", flat
         )
 
-        # The TUI page paragraph names the renamed surfaces: the machines
-        # page and the dock's `⚙ N machines` group — while /factory,
-        # Ctrl+F, and the rlm.factory calls stay frozen.
-        self.assertIn("The TUI machines page lists every library machine", flat)
-        self.assertIn(
-            "the activity dock's `⚙ N machines` group or a bare `/factory`", flat
-        )
-        self.assertIn("run page to machines page to wherever you came from", flat)
-        # The same paragraph carries the page's post-#89 facts: the
-        # roster nests every session's active runs (live-first), and
-        # Enter routes by ownership — only this session's run opens the
-        # run page; another session's run reports its owner.
-        self.assertIn(
-            "nests every session's active runs under their machine, machines "
-            "with a live run first",
-            flat,
-        )
-        self.assertIn("Enter on this session's run opens the run page", flat)
-        self.assertIn("another session's run names its owner instead", flat)
 
         # The configured inline subagent name contract.
         self.assertIn("The optional `name` labels the spawned children", flat)
@@ -2898,8 +2719,8 @@ class FakeHost:
         self.gates: dict[tuple[str, int], asyncio.Event] = {}
         self.gate_entries: dict[tuple[str, int], asyncio.Event] = {}
         self._call_indices: dict[str, int] = {}
-        # factory.compile replies by machine directory path (the Rust
-        # loader's answer, scripted).
+        # factory.compile replies by machine directory path or library
+        # name (the Rust loader's answer, scripted).
         self.compiled: dict[str, dict[str, Any]] = {}
         # Emit-state children: with session_root set, each spawn gets a real
         # session dir; ``emitted[node]`` is written there as the child's
@@ -2910,6 +2731,8 @@ class FakeHost:
         self.on_message: Callable[[dict[str, Any]], None] | None = None
         self.check_errors: dict[str, str] = {}
         self.factory_task_busy_until_collect: dict[str, int] = {}
+        # factory.limits answers {} unless a test scripts its error.
+        self.limits_error: str | None = None
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -3102,8 +2925,15 @@ class FakeHost:
         if request_type == "factory.progress":
             self.notices.append(payload)
             return {}
-        if request_type in ("factory.compile", "factory.describe"):
-            return self.compiled[(payload or {})["path"]]
+        if request_type == "factory.compile":
+            key = (payload or {}).get("path") or (payload or {}).get("name")
+            if key not in self.compiled:
+                raise RuntimeError(f"no library machine named {key!r} (machines: none)")
+            return self.compiled[key]
+        if request_type == "factory.limits":
+            if self.limits_error is not None:
+                raise RuntimeError(self.limits_error)
+            return {}
         if request_type == "agent_message.send":
             if self.on_message is not None:
                 self.on_message(payload or {})
@@ -6475,12 +6305,6 @@ class FactoryExecutorTest(_ExecutorTestCase):
             [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
             ["foreach expanded to zero items; nothing to run"] * 2,
         )
-        node_reply = self.executor._node_report(result["run_id"], "fan")
-        self.assertEqual(node_reply["state"]["id"], "fan")
-        self.assertEqual(node_reply["entry"]["status"], "done")
-        self.assertIn("outputs", node_reply["entry"])
-        self.assertIn("output_errors", node_reply["entry"])
-        self.assertIsNone(node_reply["instance"])
 
     @async_test
     async def test_optional_input_waits_for_a_live_upstream_before_spawning(self) -> None:
@@ -7544,16 +7368,16 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.library = user_machines_dir()
-        self.machine_dir = self.library / "review"
+        self.machine_dir = Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"]) / "machines" / "review"
         (self.machine_dir / "nodes").mkdir(parents=True)
         (self.machine_dir / "machine.toml").write_text("format = 1\n", encoding="utf-8")
         (self.machine_dir / "nodes" / "review_nodes.py").write_text(
             "def plan(inputs):\n    return {'items': [inputs['task'], inputs['max_loc']]}\n",
             encoding="utf-8",
         )
-        self.host.compiled[str(self.machine_dir)] = {
+        self.host.compiled["review"] = {
             "name": "review",
+            "path": str(self.machine_dir),
             "version": 3,
             "description": "Plan and review",
             "author": None,
@@ -7592,7 +7416,7 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
         self.assertEqual(result["machine_path"], str(self.machine_dir))
         self.assertEqual(
             self.host.calls_of("factory.compile"),
-            [{"path": str(self.machine_dir), "params": {"task": "ship it"}}],
+            [{"name": "review", "params": {"task": "ship it"}}],
         )
         # The python state imported from the directory and received the
         # params; the prompt rendered both, and no unused param was
@@ -7608,23 +7432,15 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
         with self.assertRaisesRegex(ValueError, "params apply to machine directories"):
             await rlm_module.rlm.factory.run("sw", params={"task": "x"})
 
-    def test_directories_resolve_per_level_before_machine_files(self) -> None:
-        repo = self.library.parent / "repo"
-        user = self.library
-        bundled = repo_machines_dir() / "builder" / MACHINE_FILE_NAME
-        (repo / "builder").mkdir(parents=True)
-        shutil.copy(bundled, repo / "builder" / MACHINE_FILE_NAME)
-        (user / "builder").mkdir()
-        (user / "builder" / "machine.toml").write_text("format = 1\n", encoding="utf-8")
-        (repo / "both").mkdir()
-        (repo / "both" / MACHINE_FILE_NAME).write_text("broken", encoding="utf-8")
-        (repo / "both" / "machine.toml").write_text("format = 1\n", encoding="utf-8")
-        resolve = lambda name: _resolve_machine_dir(name, repo_dir=repo, user_dir=user)  # noqa: E731
-        # A valid MACHINE.md at an earlier level keeps its name.
-        self.assertIsNone(resolve("builder"))
-        self.assertEqual(resolve("review"), user / "review")
-        self.assertEqual(resolve("both"), repo / "both")
-        self.assertIsNone(resolve("absent"))
+    @async_test
+    async def test_a_run_asks_the_host_for_the_limits_before_it_starts(self) -> None:
+        spec = {"run": {"max_parallel": 65}, "states": [state("a", entry=True)]}
+        self.store_machine(spec)
+        self.host.limits_error = "run max_parallel must be an integer between 1 and 64"
+        with self.assertRaisesRegex(ValueError, "run max_parallel must be an integer between 1 and 64"):
+            await rlm_module.rlm.factory.run("sw")
+        self.assertEqual(self.host.calls_of("factory.limits"), [{"spec": spec}])
+        self.assertEqual(self.host.calls_of("rlm.run"), [])
 
 
 class FactoryEmitTest(_ExecutorTestCase):
@@ -7703,126 +7519,6 @@ class FactoryEmitTest(_ExecutorTestCase):
         )
         self.assertEqual(self.host.calls_of("agent_message.send"), [])
 
-    @async_test
-    async def test_node_report_caps_large_outputs_without_changing_the_settle(self) -> None:
-        large_output = "x" * 300_000
-        self.host.emitted["report"] = {"result": large_output}
-        self.store_machine(
-            {
-                "states": [
-                    {
-                        "id": "report",
-                        "entry": True,
-                        "subagent": "worker",
-                        "outputs": [{"name": "result", "type": "text"}],
-                        "emit": {"outputs": [{"name": "result", "type": "text"}], "records": {}},
-                    }
-                ]
-            },
-            spec_id="node-report",
-        )
-        result = await self.start("node-report")
-        await self.executor._runs[result["run_id"]].task
-        status = await rlm_module.rlm.factory.status(result["run_id"])
-        self.assertEqual(status["state"], "done")
-
-        run = self.executor._require_run(result["run_id"])
-        stored = run.states["report"].entries[-1].outputs
-        self.assertEqual(stored, {"result": large_output})
-        node = self.executor._node_report(result["run_id"], "report")
-        preview = node["entry"]["outputs"]
-        self.assertTrue(node["entry"]["outputs_truncated"])
-        self.assertEqual(len(preview.encode("utf-8")), NODE_OUTPUTS_CAP)
-        self.assertLess(len(json.dumps(node).encode("utf-8")), 262_144)
-
-    @async_test
-    async def test_node_activity_caps_aggregate_previews_in_the_final_frame(self) -> None:
-        backslashes = "\\" * 65_536
-        self.store_machine(
-            {
-                "states": [
-                    {
-                        "id": "report",
-                        "entry": True,
-                        "subagent": {"prompt": backslashes},
-                        "outputs": [{"name": "result", "type": "text"}],
-                        "emit": {"outputs": [{"name": "result", "type": "text"}], "records": {}},
-                    }
-                ]
-            },
-            spec_id="node-frame",
-        )
-        self.host.emitted["report"] = {"result": backslashes}
-        self.host.outcomes["report"] = {"status": "done", "answer": backslashes}
-        started = await self.start("node-frame")
-        await self.executor._runs[started["run_id"]].task
-        entry = self.executor._require_run(started["run_id"]).states["report"].entries[-1]
-        self.assertEqual(entry.outputs, {"result": backslashes})
-        entry.output_errors = {"risk_score": backslashes}
-
-        sent: list[dict[str, Any]] = []
-        with patch("rlm.repl._send", sent.append):
-            await factory_module._run_activity(
-                {
-                    "id": "node-frame",
-                    "action": "node",
-                    "runId": started["run_id"],
-                    "specId": "report",
-                }
-            )
-        self.assertEqual(len(sent), 1)
-        frame = sent[0]
-        self.assertEqual(frame["event"], "done")
-        self.assertEqual(frame["id"], "node-frame")
-        self.assertEqual(frame["status"], "ok")
-        self.assertIn("result", frame, "the bounded Node result stays available")
-        self.assertLessEqual(
-            len(json.dumps(frame).encode("utf-8")),
-            factory_module.FACTORY_FRAME_CAP,
-            "the actual event/id/status/result frame stays under the existing cap",
-        )
-        self.assertTrue(
-            frame["result"]["instance"]["promptTruncated"]
-            or frame["result"]["instance"]["answerTruncated"]
-            or frame["result"]["entry"]["outputErrorsTruncated"],
-            "the aggregate preview reduction is visible",
-        )
-        self.assertTrue(frame["result"]["entry"]["outputsTruncated"])
-        self.assertTrue(frame["result"]["entry"]["outputErrorsTruncated"])
-        self.assertEqual(set(frame["result"]["entry"]["outputErrors"]), {"risk_score"})
-        self.assertEqual(
-            self.executor._require_run(started["run_id"]).states["report"].entries[-1].outputs,
-            {"result": backslashes},
-            "wire preview reduction never mutates stored outputs",
-        )
-
-    @async_test
-    async def test_node_wire_preserves_output_error_port_names(self) -> None:
-        self.store_machine(
-            {
-                "run": {"failure_policy": "continue"},
-                "states": [
-                    {
-                        "id": "report",
-                        "entry": True,
-                        "subagent": {"prompt": "Capture the result."},
-                        "outputs": [{"name": "risk_score", "type": "json"}],
-                    }
-                ],
-            },
-            spec_id="node-errors",
-        )
-        self.host.outcomes["report"] = {"status": "done", "answer": "not json"}
-        started = await self.start("node-errors")
-        await self.executor._runs[started["run_id"]].task
-
-        node = await self.executor.activity(
-            {"action": "node", "runId": started["run_id"], "specId": "report"}
-        )
-        errors = node["entry"]["outputErrors"]
-        self.assertEqual(set(errors), {"risk_score"})
-        self.assertIn("no JSON object containing output 'risk_score'", errors["risk_score"])
-
     async def _run_with_a_never_entered_state(self) -> str:
         self.store_machine(
             {
@@ -7850,42 +7546,6 @@ class FactoryEmitTest(_ExecutorTestCase):
         await self.executor._runs[started["run_id"]].task
         self.assertEqual(self.executor._require_run(started["run_id"]).states["fix"].entries, [])
         return started["run_id"]
-
-    @async_test
-    async def test_a_never_entered_node_state_reports_no_entry(self) -> None:
-        run_id = await self._run_with_a_never_entered_state()
-
-        node = await self.executor.activity({"action": "node", "runId": run_id, "specId": "fix"})
-        self.assertIsNone(node["entry"])
-        self.assertIsNone(node["instance"])
-        self.assertEqual(node["state"]["instances"], [])
-        with self.assertRaisesRegex(ValueError, "unknown entry 0"):
-            await self.executor.activity(
-                {"action": "node", "runId": run_id, "specId": "fix", "entry": 0, "instance": 0}
-            )
-
-    @async_test
-    async def test_present_malformed_node_selectors_are_rejected_without_defaulting_to_latest(
-        self,
-    ) -> None:
-        run_id = await self._run_with_a_never_entered_state()
-        base = {"action": "node", "runId": run_id, "specId": "report"}
-        latest = await self.executor.activity(base)
-        self.assertEqual(latest["entry"]["index"], 0)
-        # The kernel frame's own "no selector" shape: both keys null.
-        framed = await self.executor.activity({**base, "entry": None, "instance": None})
-        self.assertEqual(framed["entry"], latest["entry"])
-
-        for selectors in (
-            {"entry": 0, "instance": None},
-            {"entry": True, "instance": 0},
-            {"entry": "0", "instance": 0},
-            {"entry": -1, "instance": 0},
-            {"entry": 0},
-        ):
-            with self.subTest(selectors=selectors):
-                with self.assertRaises(ValueError):
-                    await self.executor.activity({**base, **selectors})
 
     @async_test
     async def test_a_successful_emit_waits_for_background_quiescence_before_dependent_writer(self) -> None:
@@ -8010,22 +7670,22 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertNotIn("child-1", self.host.children)
 
     @async_test
-    async def test_active_repair_is_not_failed_at_the_wall_deadline(self) -> None:
+    async def test_a_repair_turn_that_runs_long_is_decided_only_when_it_ends(self) -> None:
         self.host.emitted["design"] = {"design": "the design"}
         self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
 
         def repair(payload: dict[str, Any]) -> None:
-            self.host.outcomes["design"]["factory_task_busy"] = True
+            self.host.outcomes["design"]["factory_task_busy"] = True  # the repair turn runs
 
         self.host.on_message = repair
         started = await self.start()
         run = self.executor._runs[started["run_id"]]
-        deadline = self.clock.now + factory_module.REPAIR_WAIT_SECONDS
-        await self.wait_until(lambda: self.clock.now >= deadline or run.state != "running")
+        hour_later = self.clock.now + 3600
+        await self.wait_until(lambda: self.clock.now >= hour_later or run.state != "running")
 
         self.assertEqual(run.state, "running", run.last_error)
         self.assertEqual(len(self.host.spawn_calls("design")), 1)
-        self.host.outcomes["design"]["factory_task_busy"] = False
+        self.host.outcomes["design"]["factory_task_busy"] = False  # the repair turn ended
         await run.task
         status = await rlm_module.rlm.factory.status(started["run_id"])
         self.assertEqual(status["state"], "paused")
@@ -8035,7 +7695,12 @@ class FactoryEmitTest(_ExecutorTestCase):
     @async_test
     async def test_a_child_still_owing_after_the_repair_fails_without_a_new_child(self) -> None:
         self.host.emitted["design"] = {"design": "the design"}
+        started_at = self.clock.now
         status = await self.finish()
+
+        # The repair turn ended (the child reads idle), so the verdict
+        # comes at the next read, not after a fixed wait.
+        self.assertLess(self.clock.now - started_at, 2 * factory_module.REPAIR_POLL_SECONDS)
 
         self.assertEqual(status["state"], "paused")
         self.assertEqual(len(self.host.spawn_calls("design")), 1)
@@ -9573,212 +9238,6 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
 # ---------------------------------------------------------------------------
 
 
-class FactoryLibraryLaneTest(_ExecutorTestCase):
-    """The activity lane's library actions: the machine list and one
-    machine's graph payload — the TUI library view's lane, riding the same
-    opt-in gate as every activity action."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        # Isolate the repo library level from this checkout's bundled
-        # seeds; the user level is the isolated agent dir's own machines
-        # directory (the shared executor setUp already points the agent dir
-        # at a temp dir with the enabled settings file).
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.repo = Path(temp.name).resolve() / "repo-machines"
-        self.user = self.settings_path.parent / "machines"
-        env = patch.dict(os.environ, {"PRIME_AGENT_MACHINES_DIR": str(self.repo)})
-        env.start()
-        self.addCleanup(env.stop)
-        self.store_library(
-            "sweep",
-            "The repo machine.",
-            {
-                "states": [
-                    {
-                        "id": "source",
-                        "entry": True,
-                        "subagent": {"prompt": "P."},
-                        "outputs": [{"name": "o", "type": "json"}],
-                    },
-                    {"id": "sink", "subagent": {"prompt": "P."}},
-                ],
-                "transitions": [
-                    {"from": "source", "to": "sink", "when": {"output": "o", "op": "eq", "value": True}},
-                ],
-            },
-        )
-
-    def store_library(self, name: str, description: str, spec: dict[str, Any]) -> Path:
-        directory = self.repo / name
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "MACHINE.md"
-        path.write_text(
-            machine_file_text(name=name, description=description, spec_json=json.dumps(spec)),
-            encoding="utf-8",
-        )
-        return path
-
-    @async_test
-    async def test_activity_library_lists_the_machines(self) -> None:
-        listed = await factory_module.default_factory_executor().activity(
-            {"action": "library"}
-        )
-        self.assertEqual(
-            listed["machines"],
-            [{"name": "sweep", "description": "The repo machine.", "source": "repo", "kind": "file"}],
-        )
-        # A user-level machine rides the same list with its own source;
-        # repo wins on a name conflict.
-        self.store_library("shared", "The repo machine.", {
-            "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]
-        })
-        (self.user / "mine").mkdir(parents=True, exist_ok=True)
-        (self.user / "mine" / "MACHINE.md").write_text(
-            machine_file_text(
-                name="mine",
-                description="The user machine.",
-                spec_json=json.dumps({"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]}),
-            ),
-            encoding="utf-8",
-        )
-        (self.user / "shared").mkdir(parents=True, exist_ok=True)
-        (self.user / "shared" / "MACHINE.md").write_text(
-            machine_file_text(
-                name="shared",
-                description="The user machine.",
-                spec_json=json.dumps({"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]}),
-            ),
-            encoding="utf-8",
-        )
-        listed = await factory_module.default_factory_executor().activity(
-            {"action": "library"}
-        )
-        self.assertEqual(
-            listed["machines"],
-            [
-                {"name": "mine", "description": "The user machine.", "source": "user", "kind": "file"},
-                {"name": "shared", "description": "The repo machine.", "source": "repo", "kind": "file"},
-                {"name": "sweep", "description": "The repo machine.", "source": "repo", "kind": "file"},
-            ],
-        )
-
-    @async_test
-    async def test_activity_library_lists_machine_directories_through_the_rust_loader(self) -> None:
-        def directory(level: Path, name: str, declared: str | None = None) -> str:
-            (level / name).mkdir(parents=True, exist_ok=True)
-            (level / name / "machine.toml").write_text("format = 1\n", encoding="utf-8")
-            path = str((level / name).resolve())
-            self.host.compiled[path] = {
-                "name": declared or name,
-                "description": f"The {name} directory.",
-                "version": 2,
-                "author": None,
-                "params": [{"name": "task", "type": "text"}],
-                "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan {task}."}}]},
-            }
-            return path
-
-        directory(self.user, "rsi")
-        directory(self.repo, "sweep")  # beside the repo's sweep MACHINE.md: the directory wins
-        directory(self.user, "misnamed", declared="other")
-        listed = await factory_module.default_factory_executor().activity({"action": "library"})
-        self.assertEqual(
-            listed["machines"],
-            [
-                {"name": "rsi", "description": "The rsi directory.", "source": "user", "kind": "directory"},
-                {"name": "sweep", "description": "The sweep directory.", "source": "repo", "kind": "directory"},
-            ],
-        )
-        self.assertEqual(len(listed["warnings"]), 1)
-        self.assertIn("declares the name 'other'", listed["warnings"][0])
-        graph = await factory_module.default_factory_executor().activity(
-            {"action": "library", "specId": "rsi"}
-        )
-        self.assertEqual(graph["params"], [{"name": "task", "type": "text"}])
-        # A directory's node files ride through as the Rust loader read them.
-        self.assertEqual(graph["files"], [])
-        self.assertEqual([state["id"] for state in graph["machine"]["states"]], ["plan"])
-        self.assertTrue(graph["mermaid"].startswith("stateDiagram-v2"))
-
-    @async_test
-    async def test_activity_library_serves_one_machines_graph_payload(self) -> None:
-        graph = await factory_module.default_factory_executor().activity(
-            {"action": "library", "specId": "sweep"}
-        )
-        # The same snapshot shape a stored spec's graph answers (camelCase
-        # on the wire), plus the machine file's fields and the mermaid.
-        self.assertIsNone(graph["runId"])
-        self.assertEqual(graph["specId"], "sweep")
-        self.assertIsNone(graph["state"])
-        self.assertEqual(graph["description"], "The repo machine.")
-        self.assertEqual(graph["version"], "1")
-        self.assertEqual(graph["author"], "Tester")
-        # A MACHINE.md's nodes carry their inline prompts as files.
-        self.assertEqual(
-            graph["stateFiles"],
-            [
-                {"state": "source", "paths": ["MACHINE.md \u00b7 source"]},
-                {"state": "sink", "paths": ["MACHINE.md \u00b7 sink"]},
-            ],
-        )
-        self.assertEqual(len(graph["files"]), 2)
-        self.assertEqual(
-            [state["id"] for state in graph["machine"]["states"]], ["source", "sink"]
-        )
-        guarded = graph["machine"]["transitions"][0]
-        self.assertEqual(guarded["from"], "source")
-        # the guard rides verbatim (the wire never re-keys it)
-        self.assertEqual(guarded["when"], {"output": "o", "op": "eq", "value": True})
-        self.assertEqual(graph["nodes"], [])
-        self.assertEqual(graph["lastFired"], [])
-        self.assertEqual(
-            graph["mermaid"],
-            """stateDiagram-v2
-    state "source" as source
-    state "sink" as sink
-    [*] --> source
-    source --> sink: o eq true
-""",
-        )
-
-    @async_test
-    async def test_activity_library_refuses_while_disabled(self) -> None:
-        self.disable_factory()
-        with self.assertRaises(ValueError) as raised:
-            await factory_module.default_factory_executor().activity({"action": "library"})
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        with self.assertRaises(ValueError) as raised:
-            await factory_module.default_factory_executor().activity(
-                {"action": "library", "specId": "sweep"}
-            )
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-
-    @async_test
-    async def test_activity_library_names_unknown_and_broken_machines(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unknown machine 'missing'"):
-            await factory_module.default_factory_executor().activity(
-                {"action": "library", "specId": "missing"}
-            )
-        broken = self.repo / "broken" / "MACHINE.md"
-        broken.parent.mkdir(parents=True, exist_ok=True)
-        broken.write_text(
-            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
-        )
-        with self.assertRaises(ValueError) as raised:
-            await factory_module.default_factory_executor().activity(
-                {"action": "library", "specId": "broken"}
-            )
-        self.assertIn("frontmatter description is required", str(raised.exception))
-
-
-
-# ---------------------------------------------------------------------------
-# Out-of-band frame plumbing
-# ---------------------------------------------------------------------------
-
-
 class FactoryFrameCapTest(unittest.TestCase):
     """The reply frame's wire cap: event tails trim from the oldest end
     first (one reply's tail, or each run row's), the all-runs drop takes
@@ -9934,215 +9393,18 @@ class FactoryFrameCapTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Machine library: MACHINE.md parse, render, gate, resolution, run.
-#
-# New-feature coverage (the machine library): the file format round-trips
-# (export -> import -> identical validated spec), the import gate refuses
-# invalid specs with the write-time validator's exact errors and never
-# persists, library resolution is repo-first/user-second, and
-# rlm.factory.run falls back to the library for machine names.
+# MACHINE.md render, export, the import gate's spec check, and running a
+# library machine by name (the Rust scan answers through factory.compile).
 # ---------------------------------------------------------------------------
 
 
-def machine_file_text(
-    *,
-    name: str = "sweep",
-    description: str = "A machine that sweeps.",
-    version: str = "1",
-    author: str = "Tester",
-    spec_json: str | None = None,
-    frontmatter: str | None = None,
-    body: str | None = None,
-) -> str:
-    """Build MACHINE.md text; ``frontmatter``/``body`` override the defaults."""
-    if frontmatter is None:
-        frontmatter = (
-            "---\n"
-            f"name: {name}\n"
-            f"description: {description}\n"
-            f"version: {version}\n"
-            f"author: {author}\n"
-            "---"
-        )
-    if body is None:
-        spec_json = spec_json or json.dumps({"run": {"failure_policy": "continue"}, "states": [
-            {"id": "a", "entry": True, "subagent": {"prompt": "Do the work."}}
-        ]})
-        body = f"# {name}\n\n```machine-spec\n{spec_json}\n```"
-    return f"{frontmatter}\n\n{body}"
-
-
-class MachineFileParseTest(unittest.TestCase):
-    """The strict MACHINE.md format: frontmatter + one machine-spec fence."""
-
-    def parse(self, text: str) -> "tuple[MachineFile | None, list[str]]":
-        return parse_machine_file(text, source="test-MACHINE.md")
-
-    def test_parses_frontmatter_and_spec(self) -> None:
-        machine, errors = self.parse(machine_file_text())
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(machine.description, "A machine that sweeps.")
-        self.assertEqual(machine.version, "1")
-        self.assertEqual(machine.author, "Tester")
-        self.assertEqual(machine.spec["states"][0]["id"], "a")
-
-    def test_parses_quoted_frontmatter_values(self) -> None:
-        text = machine_file_text(
-            frontmatter=(
-                "---\n"
-                'name: "sweep"\n'
-                "description: 'It: reviews things.'\n"
-                "version: 1\n"
-                "author: Prime Agent\n"
-                "---"
-            )
-        )
-        machine, errors = self.parse(text)
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(machine.description, "It: reviews things.")
-
-    def test_missing_frontmatter_is_an_exact_error(self) -> None:
-        machine, errors = self.parse("# just prose\n\n```machine-spec\n{}\n```")
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors, ["test-MACHINE.md: MACHINE.md must start with a `---` frontmatter block"]
-        )
-
-    def test_unclosed_frontmatter_is_an_exact_error(self) -> None:
-        machine, errors = self.parse("---\nname: sweep\nno close")
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors, ["test-MACHINE.md: frontmatter is not closed (end it with a `---` line)"]
-        )
-
-    def test_unknown_and_duplicate_frontmatter_keys_are_exact_errors(self) -> None:
-        machine, errors = self.parse(
-            machine_file_text(frontmatter="---\nname: sweep\ndescription: A machine.\n---", body="x")
-        )
-        # Missing the spec fence is reported too, but the frontmatter still parsed:
-        self.assertIsNone(machine)
-        machine2, errors2 = self.parse(
-            machine_file_text(frontmatter="---\nname: sweep\nname: again\ndescription: A machine.\n---")
-        )
-        self.assertIsNone(machine2)
-        self.assertTrue(any("declared more than once" in error for error in errors2), errors2)
-        machine3, errors3 = self.parse(
-            machine_file_text(frontmatter="---\nname: sweep\ndescription: A machine.\nlicense: MIT\n---")
-        )
-        self.assertIsNone(machine3)
-        self.assertTrue(any("unknown frontmatter key 'license'" in error for error in errors3), errors3)
-
-    def test_missing_name_and_description_are_exact_errors(self) -> None:
-        machine, errors = self.parse(
-            machine_file_text(frontmatter="---\nversion: 1\nauthor: Tester\n---")
-        )
-        self.assertIsNone(machine)
-        self.assertTrue(any("machine name must be a non-empty string" in error for error in errors), errors)
-        self.assertTrue(any("frontmatter description is required" in error for error in errors), errors)
-
-    def test_multiline_descriptions_are_rejected(self) -> None:
-        # The description is one listing row by contract, so a quoted
-        # frontmatter value that decodes an embedded line break is a format
-        # error with its own sentence — not a machine whose listing renders
-        # across several terminal lines.
-        for description in ('"A machine that\\nsweeps."', '"A machine that\\rsweeps."'):
-            machine, errors = self.parse(machine_file_text(frontmatter=(
-                "---\nname: sweep\n"
-                f"description: {description}\n"
-                "version: 1\nauthor: Tester\n---"
-            )))
-            self.assertIsNone(machine, description)
-            self.assertEqual(
-                errors, ["frontmatter description must be a single line"]
-            )
-        self.assertEqual(
-            machine_description_errors("One line, as the format requires."), []
-        )
-
-    def test_name_rules_mirror_the_skill_library(self) -> None:
-        for bad in ("Sweep", "sweep x", "-sweep", "sweep-", "a" * 65):
-            machine, errors = self.parse(machine_file_text(name=bad))
-            self.assertIsNone(machine, bad)
-            self.assertTrue(errors, bad)
-        self.assertEqual(machine_name_errors("sweep-2"), [])
-        self.assertEqual(machine_name_errors(""), ["machine name must be a non-empty string"])
-        self.assertEqual(machine_name_errors(7), ["machine name must be a non-empty string"])
-        self.assertIn("must not end with a hyphen", machine_name_errors("sweep-")[0])
-
-    def test_plain_value_with_colon_demands_quotes(self) -> None:
-        machine, errors = self.parse(
-            machine_file_text(
-                frontmatter="---\nname: sweep\ndescription: Reviews: everything\n---",
-                body="# sweep\n\n```machine-spec\n{\"run\": {}}\n```",
-            )
-        )
-        self.assertIsNone(machine)
-        self.assertTrue(any("quote the value" in error for error in errors), errors)
-
-    def test_no_fence_is_an_exact_error(self) -> None:
-        machine, errors = self.parse(machine_file_text(body="# sweep\n\nNo spec here."))
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors,
-            ["test-MACHINE.md: MACHINE.md requires exactly one fenced ```machine-spec block; found none"],
-        )
-
-    def test_multiple_fences_are_an_exact_error(self) -> None:
-        spec_json = '{"run": {"failure_policy": "continue"}, "states": [{"id": "a", "entry": true, "subagent": {"prompt": "P."}}]}'
-        text = machine_file_text(body=f"# sweep\n\n```machine-spec\n{spec_json}\n```\n\n```machine-spec\n{spec_json}\n```")
-        machine, errors = self.parse(text)
-        self.assertIsNone(machine)
-        self.assertEqual(
-            errors,
-            ["test-MACHINE.md: MACHINE.md requires exactly one fenced ```machine-spec block; found 2"],
-        )
-
-    def test_unterminated_fence_is_an_exact_error(self) -> None:
-        text = machine_file_text(body="# sweep\n\n```machine-spec\n{\"run\": {}}")
-        machine, errors = self.parse(text)
-        self.assertIsNone(machine)
-        self.assertEqual(errors, ["test-MACHINE.md: the ```machine-spec fence is never closed"])
-
-    def test_fence_payload_must_be_a_json_object(self) -> None:
-        machine, errors = self.parse(machine_file_text(body="# sweep\n\n```machine-spec\n[1, 2]\n```"))
-        self.assertIsNone(machine)
-        self.assertIn(
-            "must contain a JSON object, got a list", errors[0]
-        )
-        machine2, errors2 = self.parse(machine_file_text(body="# sweep\n\n```machine-spec\nnot json\n```"))
-        self.assertIsNone(machine2)
-        self.assertTrue(errors2[0].startswith("test-MACHINE.md: the ```machine-spec block must contain a JSON object"), errors2)
-
-    def test_other_fenced_blocks_do_not_confuse_the_scan(self) -> None:
-        spec_json = '{"run": {"failure_policy": "continue"}, "states": [{"id": "a", "entry": true, "subagent": {"prompt": "P."}}]}'
-        text = machine_file_text(
-            body=(
-                "# sweep\n\n"
-                "Example prose with a json block:\n\n"
-                "```json\n{\"not\": \"a machine\"}\n```\n\n"
-                "```text\nplain text\n```\n\n"
-                f"```machine-spec\n{spec_json}\n```"
-            )
-        )
-        machine, errors = self.parse(text)
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.spec["run"]["failure_policy"], "continue")
-
-    def test_crlf_and_bom_are_normalized(self) -> None:
-        text = machine_file_text().replace("\n", "\r\n")
-        machine, errors = self.parse("\ufeff" + text)
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
+def rendered_spec(text: str) -> dict[str, Any]:
+    """The JSON spec inside a rendered MACHINE.md's machine-spec fence."""
+    return json.loads(text.split(f"```{MACHINE_SPEC_FENCE}\n", 1)[1].rsplit("\n```", 1)[0])
 
 
 class MachineFileRenderTest(unittest.TestCase):
-    """render_machine_file is byte-stable and parse-identical."""
+    """render_machine_file is byte-stable (the Rust parser reads it back)."""
 
     def render(self, spec: dict[str, Any]) -> str:
         machine = MachineFile(
@@ -10157,14 +9419,12 @@ class MachineFileRenderTest(unittest.TestCase):
     def test_render_is_byte_stable_and_round_trips(self) -> None:
         text = self.render(valid_machine())
         self.assertEqual(text, self.render(valid_machine()))
-        machine, errors = parse_machine_file(text, source="rendered")
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(machine.description, "A machine that sweeps.")
-        self.assertEqual(machine.version, "1")
-        self.assertEqual(machine.author, "Tester")
-        self.assertEqual(machine.spec, valid_machine())
+        self.assertTrue(
+            text.startswith(
+                "---\nname: sweep\ndescription: A machine that sweeps.\nversion: 1\nauthor: Tester\n---\n"
+            )
+        )
+        self.assertEqual(rendered_spec(text), valid_machine())
 
     def test_render_quotes_non_plain_values(self) -> None:
         machine = MachineFile(
@@ -10176,10 +9436,6 @@ class MachineFileRenderTest(unittest.TestCase):
         )
         text = render_machine_file(machine)
         self.assertIn('description: "Reviews: everything, carefully."', text)
-        reparsed, errors = parse_machine_file(text, source="rendered")
-        self.assertEqual(errors, [])
-        assert reparsed is not None
-        self.assertEqual(reparsed.description, "Reviews: everything, carefully.")
 
     def test_render_generates_contract_prose_from_both_forms(self) -> None:
         machine_text = self.render(valid_machine())
@@ -10202,926 +9458,24 @@ class MachineFileRenderTest(unittest.TestCase):
         self.assertIn('\n  "run": {\n    "failure_policy": "continue"\n  },', fence)
 
 
-class MachineFileRoundTripTest(unittest.TestCase):
-    """export -> import -> identical validated spec (the format round-trip)."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.library = root / "machines"
-        self.out_dir = root / "out"
-
-    def test_exported_file_imports_to_the_identical_spec(self) -> None:
-        spec = valid_dag()
-        out = self.out_dir / "shared.MACHINE.md"
-        export_factory_spec(spec, out, name="sweep", description="A machine that sweeps.")
-        imported = import_machine(out, target_dir=self.library)
-        self.assertEqual(imported["name"], "sweep")
-        self.assertTrue(imported["created"])
-        stored, errors = parse_machine_file(
-            (self.library / "sweep" / "MACHINE.md").read_text(encoding="utf-8"), source="stored"
-        )
-        self.assertEqual(errors, [])
-        assert stored is not None
-        self.assertEqual(validate_factory_spec(stored.spec), [])
-        self.assertEqual(
-            canonicalize_factory_spec(stored.spec), canonicalize_factory_spec(spec)
-        )
-
-    def test_library_export_import_export_is_byte_identical(self) -> None:
-        spec = valid_machine()
-        first = self.out_dir / "first.MACHINE.md"
-        export_factory_spec(spec, first, name="sweep", description="A machine that sweeps.")
-        import_machine(first, target_dir=self.library)
-        # Export the imported library machine (verbatim copy) and re-import: bytes never move.
-        second = self.out_dir / "second.MACHINE.md"
-        export_machine("sweep", second, repo_dir=None, user_dir=self.library)
-        self.assertEqual(first.read_text(encoding="utf-8"), second.read_text(encoding="utf-8"))
-        imported = import_machine(second, target_dir=self.library)
-        self.assertFalse(imported["created"])
-
-
-class ImportGateTest(unittest.TestCase):
-    """The import gate: invalid specs never persist, with exact errors."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.library = Path(temp.name) / "machines"
-        self.sources = Path(temp.name) / "sources"
-
-    def write_source(self, text: str) -> Path:
-        self.sources.mkdir(parents=True, exist_ok=True)
-        path = self.sources / "machine.MACHINE.md"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def test_import_persists_valid_files_verbatim(self) -> None:
-        text = machine_file_text(
-            description="A machine that sweeps.",
-            spec_json=json.dumps(valid_dag()),
-        )
-        path = self.write_source(text)
-        result = import_machine(path, target_dir=self.library)
-        self.assertEqual(result["name"], "sweep")
-        stored = self.library / "sweep" / "MACHINE.md"
-        self.assertTrue(stored.is_file())
-        self.assertEqual(stored.read_text(encoding="utf-8"), text)
-
-    def test_import_preserves_crlf_and_cr_files_byte_for_byte(self) -> None:
-        # The import persists the SUPPLIED file: a valid CRLF or CR machine
-        # keeps its exact bytes (a read_text/write_text round trip would
-        # silently rewrite every line ending), and the stored copy still
-        # parses.
-        text = machine_file_text(spec_json=json.dumps(valid_dag()))
-        self.sources.mkdir(parents=True, exist_ok=True)
-        for line_ending in ("\r\n", "\r"):
-            source = self.sources / f"{len(line_ending)}-byte-newline.MACHINE.md"
-            source.write_bytes(text.replace("\n", line_ending).encode("utf-8"))
-            result = import_machine(source, target_dir=self.library)
-            stored = Path(result["path"])
-            self.assertEqual(stored.read_bytes(), source.read_bytes())
-            stored_machine, errors = parse_machine_file(
-                stored.read_text(encoding="utf-8"), source=str(stored)
-            )
-            self.assertEqual(errors, [])
-            assert stored_machine is not None
-            self.assertEqual(stored_machine.name, "sweep")
-
-    def test_import_rejects_invalid_spec_with_exact_errors_and_persists_nothing(self) -> None:
-        invalid_spec = {
-            "run": {"max_parallel": None},
-            "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}],
-        }
-        path = self.write_source(machine_file_text(spec_json=json.dumps(invalid_spec)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn(
-            "run max_parallel must be an integer between 1 and 64", str(ctx.exception)
-        )
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_both_forms_and_guaranteed_dead_specs(self) -> None:
-        both_forms = {
-            "nodes": [{"id": "a", "subagent": {"prompt": "P."}}],
-            "states": [{"id": "s", "subagent": {"prompt": "P."}}],
-        }
-        path = self.write_source(machine_file_text(spec_json=json.dumps(both_forms)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("pass either dag or machine form, not both", str(ctx.exception))
-        dead = {"states": [
-            {"id": "start", "entry": True, "subagent": {"prompt": "P."}},
-            {
-                "id": "loop",
-                "subagent": {"prompt": "P."},
-                "inputs": [{"name": "v", "type": "text", "from": "loop.v"}],
-                "outputs": [{"name": "v", "type": "text"}],
-            },
-        ]}
-        path = self.write_source(machine_file_text(spec_json=json.dumps(dead)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("cannot require itself", str(ctx.exception))
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_malformed_files_with_format_errors(self) -> None:
-        path = self.write_source("# no frontmatter here")
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("must start with a `---` frontmatter block", str(ctx.exception))
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_multiline_descriptions_and_persists_nothing(self) -> None:
-        # A quoted description decoding an embedded newline renders the
-        # machine across several listing rows: the import gate refuses it
-        # with the format's own sentence, exactly like any other parse
-        # failure.
-        path = self.write_source(machine_file_text(frontmatter=(
-            "---\nname: multiline\n"
-            'description: "A machine that\\nsweeps the branch."\n'
-            "version: 1\nauthor: Tester\n---"
-        )))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn("frontmatter description must be a single line", str(ctx.exception))
-        self.assertFalse(self.library.exists())
-
-    def test_import_rejects_missing_files_and_overwrites_renamed(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(self.sources / "nope.MACHINE.md", target_dir=self.library)
-        self.assertIn("machine file not found", str(ctx.exception))
-        text = machine_file_text()
-        first = self.write_source(text)
-        import_machine(first, target_dir=self.library)
-        result = import_machine(first, target_dir=self.library)
-        self.assertFalse(result["created"])
-
-    def test_import_gate_is_the_write_time_validator(self) -> None:
-        # The exact sentences import_machine raises are the write-time
-        # validator's: bypassing the gate must fail the reject test above.
-        invalid_spec = {"states": [{"id": "a", "entry": True, "subagent": 5}]}
-        path = self.write_source(machine_file_text(spec_json=json.dumps(invalid_spec)))
-        with self.assertRaises(ValueError) as ctx:
-            import_machine(path, target_dir=self.library)
-        self.assertIn(
-            "state a requires a subagent", str(ctx.exception)
-        )
-        self.assertFalse(self.library.exists())
-
-
-class MachineLibraryResolutionTest(unittest.TestCase):
-    """Repo directory first, user directory second."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.repo = root / "repo-machines"
-        self.user = root / "user-machines"
-
-    def store(self, root: Path, name: str, description: str, spec: dict[str, Any] | None = None) -> Path:
-        directory = root / name
-        directory.mkdir(parents=True, exist_ok=True)
-        spec = spec if spec is not None else {"states": [
-            {"id": "a", "entry": True, "subagent": {"prompt": "P."}}
-        ]}
-        text = machine_file_text(name=name, description=description, spec_json=json.dumps(spec))
-        path = directory / "MACHINE.md"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def test_repo_dir_wins_over_user_dir(self) -> None:
-        repo_path = self.store(self.repo, "sweep", "The repo machine.")
-        user_path = self.store(self.user, "sweep", "The user machine.")
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, repo_path)
-        self.assertEqual(machine.description, "The repo machine.")
-
-    def test_frontmatter_name_wins_over_the_directory_name(self) -> None:
-        # Mirrors the skill library: the declared name is the machine's
-        # name even when its directory is named differently.
-        directory = self.user / "renamed-dir"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(
-            machine_file_text(name="sweep", description="The renamed machine."),
-            encoding="utf-8",
-        )
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, directory / "MACHINE.md")
-        self.assertEqual(machine.description, "The renamed machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-
-    def test_the_declared_name_wins_over_the_directory_name(self) -> None:
-        # The fast path reads <dir>/<name>/MACHINE.md but only returns it
-        # when its DECLARED name matches: a directory named `misdir`
-        # holding `name: actual` is not the machine `misdir` — it resolves
-        # as `actual` (and a repo machine declared `sweep` is never
-        # shadowed by a `sweep/` directory that declares another name).
-        directory = self.user / "misdir"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(
-            machine_file_text(name="actual", description="Declared, not directory-named."),
-            encoding="utf-8",
-        )
-        machine, path = resolve_machine("actual", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, directory / "MACHINE.md")
-        with self.assertRaises(ValueError) as raised:
-            resolve_machine("misdir", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("unknown machine 'misdir'", str(raised.exception))
-
-    def test_a_directory_named_machine_shadowing_is_refused(self) -> None:
-        # repo/sweep/ declares `other`: asking for `sweep` must not return
-        # that file, and a user machine legitimately named `sweep` wins.
-        misnamed = self.repo / "sweep"
-        misnamed.mkdir(parents=True)
-        (misnamed / "MACHINE.md").write_text(
-            machine_file_text(name="other", description="Not sweep."),
-            encoding="utf-8",
-        )
-        self.store(self.user, "sweep", "The real sweep.")
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, self.user / "sweep" / "MACHINE.md")
-        self.assertEqual(machine.description, "The real sweep.")
-
-    def test_user_dir_serves_names_the_repo_does_not_have(self) -> None:
-        self.store(self.repo, "repo-only", "The repo machine.")
-        user_path = self.store(self.user, "mine", "The user machine.")
-        machine, path = resolve_machine("mine", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, user_path)
-        self.assertEqual(machine.description, "The user machine.")
-
-    def test_unknown_name_lists_available_machines(self) -> None:
-        self.store(self.repo, "builder", "Builds.")
-        self.store(self.user, "sweep", "Sweeps.")
-        with self.assertRaises(ValueError) as ctx:
-            resolve_machine("missing", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("unknown machine 'missing'", str(ctx.exception))
-        self.assertIn("builder", str(ctx.exception))
-        self.assertIn("sweep", str(ctx.exception))
-
-    def test_invalid_machine_name_is_rejected_before_scanning(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            resolve_machine("Not A Name", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("invalid characters", str(ctx.exception))
-
-    def test_list_machines_dedupes_repo_first_and_sorts_by_name(self) -> None:
-        self.store(self.repo, "sweep", "The repo machine.")
-        self.store(self.user, "sweep", "The user machine.")
-        self.store(self.user, "alpha", "An early machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["alpha", "sweep"])
-        sweep = next(entry for entry in listed if entry["name"] == "sweep")
-        self.assertEqual(sweep["source"], "repo")
-        self.assertEqual(sweep["description"], "The repo machine.")
-        self.assertEqual(listed[0]["source"], "user")
-
-    def test_list_machines_skips_broken_files(self) -> None:
-        good = self.store(self.user, "good", "Good machine.")
-        broken = self.user / "broken" / "MACHINE.md"
-        broken.parent.mkdir(parents=True, exist_ok=True)
-        broken.write_text("no frontmatter", encoding="utf-8")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["good"])
-
-    def test_list_machines_excludes_spec_invalid_files_with_their_errors(self) -> None:
-        # The listing reports only machines resolve/run can use: a repo
-        # file whose spec fails the write-time validator never wins the
-        # name, a valid user machine shows instead, and the exact
-        # validator sentences ride the scan warnings (the CLI list
-        # surface) naming the broken file.
-        invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        self.store(self.user, "sweep", "The user machine.")
-        listed, warnings = _scan_machine_library(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        self.assertEqual(listed[0]["source"], "user")
-        self.assertEqual(listed[0]["description"], "The user machine.")
-        self.assertEqual(
-            warnings,
-            [f"{invalid}: factory machine must declare between 1 and 1024 states, got 0"],
-        )
-        self.assertEqual(list_machines(repo_dir=self.repo, user_dir=self.user)[0]["source"], "user")
-
-    def test_resolve_machine_raises_exact_parse_errors_for_broken_files(self) -> None:
-        broken = self.user / "broken" / "MACHINE.md"
-        broken.parent.mkdir(parents=True, exist_ok=True)
-        broken.write_text("---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8")
-        with self.assertRaises(ValueError) as ctx:
-            resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("frontmatter description is required", str(ctx.exception))
-
-    def test_resolve_machine_reports_non_utf8_files_as_broken(self) -> None:
-        # A machine file that exists but does not decode is a broken library
-        # file, exactly like one that fails to parse: the decode error rides
-        # the broken frame with the SAME sentence the listing scan warns
-        # with (the shared verdict's wording, path-prefixed).
-        # (UnicodeDecodeError is a ValueError, so an unguarded read would
-        # instead surface through run_factory's name-rule arm as an
-        # invalid id.)
-        corrupt = self.user / "broken" / "MACHINE.md"
-        corrupt.parent.mkdir(parents=True, exist_ok=True)
-        corrupt.write_bytes(b"\xff\xfe\xff not utf-8")
-        with self.assertRaises(MachineResolutionError) as ctx:
-            resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
-        self.assertTrue(ctx.exception.broken)
-        self.assertIn("not valid UTF-8", str(ctx.exception))
-        self.assertIn(str(corrupt), str(ctx.exception))
-
-    def test_resolve_machine_reports_spec_invalid_files_as_broken(self) -> None:
-        # A file that parses but carries a spec the write-time validator
-        # rejects is the exists-but-broken case at resolve time when it is
-        # the name's only carrier — the exact broken frame naming the file,
-        # never a usable machine the run rejects late, and never a missing
-        # frame. The scan path below skips one in a differently-named
-        # directory, so an unknown name keeps the missing frame instead of
-        # resolving a spec-invalid file, and a file at the name's directory
-        # that DECLARES another name never carried the requested one: the
-        # invalid file claims no name on either surface.
-        invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        with self.assertRaises(MachineResolutionError) as ctx:
-            resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertTrue(ctx.exception.broken)
-        message = str(ctx.exception)
-        self.assertIn(str(invalid), message)
-        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
-        renamed = self.repo / "renamed-dir"
-        renamed.mkdir(parents=True)
-        (renamed / "MACHINE.md").write_text(
-            machine_file_text(
-                name="ghost", description="Ghost.", spec_json=json.dumps({"states": []})
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaises(MachineResolutionError) as scan_ctx:
-            resolve_machine("ghost", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(scan_ctx.exception.broken)
-        self.assertIn("unknown machine 'ghost'", str(scan_ctx.exception))
-        misnamed = self.repo / "warp"
-        misnamed.mkdir(parents=True)
-        (misnamed / "MACHINE.md").write_text(
-            machine_file_text(
-                name="other", description="Not warp.", spec_json=json.dumps({"states": []})
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaises(MachineResolutionError) as misnamed_ctx:
-            resolve_machine("warp", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(misnamed_ctx.exception.broken)
-        self.assertIn("unknown machine 'warp'", str(misnamed_ctx.exception))
-
-    def test_list_and_resolve_agree_on_spec_invalid_files(self) -> None:
-        # Cursor's finding: the scan skips a spec-invalid repo machine so
-        # the listing surfaces a valid user machine of the same name, but
-        # resolve still raised broken on the repo file — `factory list`
-        # advertised a machine that run and export refused. Both surfaces
-        # now share _read_library_machine's verdict: an invalid file never
-        # claims its name, so the valid user machine serves exactly where
-        # the listing shows it, and export copies it verbatim.
-        self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        user_path = self.store(self.user, "sweep", "The user machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        self.assertEqual(listed[0]["source"], "user")
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, user_path)
-        self.assertEqual(machine.description, "The user machine.")
-        self.assertEqual(validate_factory_spec(machine.spec), [])
-        out = self.user.parent / "exported.MACHINE.md"
-        result = export_library_machine("sweep", out, repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(out.read_text(encoding="utf-8"), user_path.read_text(encoding="utf-8"))
-
-    def test_resolve_falls_through_parse_broken_files_to_valid_user_machines(self) -> None:
-        # The shared verdict covers every invalidity class: a repo file
-        # that fails to parse claims its name no more than a spec-invalid
-        # one, so the valid user machine serves on both surfaces (the
-        # listing always skipped it) instead of resolve raising broken on
-        # the repo file.
-        broken = self.repo / "sweep" / "MACHINE.md"
-        broken.parent.mkdir(parents=True)
-        broken.write_text("no frontmatter", encoding="utf-8")
-        user_path = self.store(self.user, "sweep", "The user machine.")
-        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(path, user_path)
-        self.assertEqual(machine.description, "The user machine.")
-
-    def test_one_non_utf8_file_never_poisons_the_listing_scan(self) -> None:
-        # The shared scan skips a non-decodable file like any other broken
-        # one (its warning rides the CLI list surface), so it can neither
-        # break the listing nor reframe an unrelated unknown name.
-        self.store(self.repo, "builder", "Builds.")
-        corrupt = self.user / "zz-corrupt" / "MACHINE.md"
-        corrupt.parent.mkdir(parents=True, exist_ok=True)
-        corrupt.write_bytes(b"\xff\xfe")
-        listed, warnings = _scan_machine_library(repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual([entry["name"] for entry in listed], ["builder"])
-        self.assertTrue(any("not valid UTF-8" in warning for warning in warnings), warnings)
-        with self.assertRaises(MachineResolutionError) as ctx:
-            resolve_machine("missing", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(ctx.exception.broken)
-        self.assertIn("unknown machine 'missing'", str(ctx.exception))
-        self.assertIn("builder", str(ctx.exception))
-
-    def test_env_overrides_drive_the_production_dirs(self) -> None:
-        env = patch.dict(os.environ, {
-            "PRIME_AGENT_MACHINES_DIR": str(self.repo),
-            "PRIME_AGENT_CODING_AGENT_DIR": str(Path(self.repo).parent / "agent-home"),
-        })
-        env.start()
-        self.addCleanup(env.stop)
-        self.store(self.repo, "sweep", "The repo machine.")
-        self.assertEqual(repo_machines_dir(), self.repo)
-        self.assertEqual(user_machines_dir(), Path(self.repo).parent / "agent-home" / "machines")
-        machine, path = resolve_machine("sweep")
-        self.assertEqual(path, self.repo / "sweep" / "MACHINE.md")
-
-    def test_the_bundled_library_ships_inside_the_runtime_package(self) -> None:
-        # The repo level is the packaged library: the machines directory
-        # beside this module (site-packages/rlm/machines in an installed
-        # kernel, src/rlm/machines in a checkout), so an installed kernel
-        # resolves the seeds a checkout does. The env override still wins.
-        packaged = Path(factory_module.__file__).resolve().parent / "machines"
-        repo_dir = repo_machines_dir()
-        self.assertEqual(repo_dir, packaged)
-        self.assertTrue(packaged.is_dir())
-        with patch.dict(os.environ, {"PRIME_AGENT_MACHINES_DIR": str(self.repo)}):
-            self.assertEqual(repo_machines_dir(), self.repo)
-
-    def test_the_shipped_seed_machines_validate_clean(self) -> None:
-        # The repo-level library resolves as the packaged directory and the
-        # shipped examples parse, validate, and canonicalize: a broken seed
-        # fails here before it can ship.
-        repo_dir = repo_machines_dir()
-        names = {entry["name"] for entry in list_machines(repo_dir=repo_dir, user_dir=Path("/nonexistent-user-machines"))}
-        self.assertIn("review-sweep", names)
-        self.assertIn("builder", names)
-        self.assertIn("pr-manager", names)
-        for name in ("review-sweep", "builder", "pr-manager"):
-            machine, path = resolve_machine(name, repo_dir=repo_dir, user_dir=Path("/nonexistent-user-machines"))
-            self.assertEqual(machine.name, name)
-            self.assertEqual(validate_factory_spec(machine.spec), [], name)
-            self.assertEqual(validate_factory_spec(canonicalize_factory_spec(machine.spec)), [], name)
-            machine_two = parse_machine_file(path.read_text(encoding="utf-8"), source=str(path))[0]
-            assert machine_two is not None
-            self.assertEqual(machine_two.spec, machine.spec, name)
-
-
 class MachineCliDispatchTest(unittest.TestCase):
-    """The JSON facade the CLI's factory subcommands drive.
+    """cli_dispatch's one op: the import gate's structural spec check."""
 
-    The payload carries only what the user typed (an op, a path, a name, an
-    out target); the dispatch process resolves every library directory
-    itself through the production env seams (`PRIME_AGENT_MACHINES_DIR`,
-    `PRIME_AGENT_CODING_AGENT_DIR`), so these tests exercise the same
-    resolution a real CLI invocation runs.
-    """
+    def test_validate_answers_ok_or_the_exact_errors(self) -> None:
+        self.assertEqual(cli_dispatch({"op": "validate", "spec": valid_machine()}), {"ok": True})
+        result = cli_dispatch({"op": "validate", "spec": {"states": []}})
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(result["errors"], validate_factory_spec({"states": []}))
 
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.repo = root / "repo-machines"
-        self.agent_home = root / "agent-home"
-        self.sources = root / "sources"
-        self.out_dir = root / "out"
-        self.source_text = machine_file_text(
-            description="A machine that sweeps.", spec_json=json.dumps(valid_dag())
-        )
-        self.sources.mkdir(parents=True, exist_ok=True)
-        self.source_path = self.sources / "machine.MACHINE.md"
-        self.source_path.write_text(self.source_text, encoding="utf-8")
-        env = patch.dict(os.environ, {
-            "PRIME_AGENT_MACHINES_DIR": str(self.repo),
-            "PRIME_AGENT_CODING_AGENT_DIR": str(self.agent_home),
-        })
-        env.start()
-        self.addCleanup(env.stop)
-
-    def test_list_answers_the_levels_and_read_answers_one_machine(self) -> None:
-        listed = cli_dispatch({"op": "list"})
-        self.assertEqual(
-            listed["levels"],
-            [
-                {"source": "repo", "path": str(self.repo)},
-                {"source": "user", "path": str(self.agent_home / "machines")},
-            ],
-        )
-        read = cli_dispatch({"op": "read", "path": str(self.source_path)})
-        self.assertEqual(
-            read,
-            {
-                "ok": True,
-                "name": "sweep",
-                "description": "A machine that sweeps.",
-                "version": read["version"],
-                "author": read["author"],
-                "spec": valid_dag(),
-            },
-        )
-        self.assertEqual(
-            cli_dispatch({"op": "read", "name": "absent"})["ok"],
-            False,
-        )
-        self.assertEqual(
-            cli_dispatch({"op": "read"}),
-            {"ok": False, "errors": ["factory read requires a `path` or `name` string"]},
-        )
-
-    def test_import_dispatch_persists_into_the_user_library(self) -> None:
-        result = cli_dispatch({"op": "import", "path": str(self.source_path)})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["name"], "sweep")
-        destination = self.agent_home / "machines" / "sweep" / "MACHINE.md"
-        self.assertEqual(Path(result["path"]), destination)
-        self.assertEqual(destination.read_text(encoding="utf-8"), self.source_text)
-
-    def test_import_dispatch_surfaces_gate_errors_as_data(self) -> None:
-        bad = self.sources / "bad.MACHINE.md"
-        bad.write_text(
-            machine_file_text(spec_json=json.dumps({"run": {"max_parallel": None}, "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "P."}}
-            ]})),
-            encoding="utf-8",
-        )
-        result = cli_dispatch({"op": "import", "path": str(bad)})
-        self.assertFalse(result["ok"])
-        self.assertFalse((self.agent_home / "machines").exists())
-        self.assertTrue(any("max_parallel must be an integer between 1 and 64" in e for e in result["errors"]), result)
-
-    def test_export_dispatch_resolves_library_machines(self) -> None:
-        import_machine(self.source_path, target_dir=self.repo)
-        result = cli_dispatch({
-            "op": "export",
-            "name": "sweep",
-            "out": str(self.out_dir / "shared.MACHINE.md"),
-        })
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(
-            Path(result["path"]).read_text(encoding="utf-8"), self.source_text
-        )
-
-    def test_export_dispatch_refuses_to_overwrite_the_target(self) -> None:
-        import_machine(self.source_path, target_dir=self.repo)
-        target = self.out_dir / "shared.MACHINE.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("keep me", encoding="utf-8")
-        result = cli_dispatch({
-            "op": "export",
-            "name": "sweep",
-            "out": str(target),
-        })
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("already exists" in e for e in result["errors"]), result)
-        self.assertEqual(target.read_text(encoding="utf-8"), "keep me")
-
-    def test_export_dispatch_resolves_the_library_only(self) -> None:
-        # A fresh CLI process has no session state, so the dispatch resolves
-        # library machines only: a stored factory entry never intercepts
-        # the CLI's export, even when one exists.
-        self.agent_home.mkdir(parents=True, exist_ok=True)
-        (self.agent_home / "settings.json").write_text(
-            json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
-        )
-        harness = HarnessState(Path(self.agent_home) / "harness_state.json")
-        previous_executor = factory_module._DEFAULT_EXECUTOR
-        factory_module._DEFAULT_EXECUTOR = FactoryExecutor(harness=harness)
-        self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
-        harness.create_factory(
-            "sweep", "Stored.",
-            machine={"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
-        )
-        result = cli_dispatch({"op": "export", "name": "sweep", "out": str(self.out_dir / "s.MACHINE.md")})
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("unknown machine 'sweep'" in e for e in result["errors"]), result)
-
-    def test_export_dispatch_reports_unknown_machines(self) -> None:
-        result = cli_dispatch({
-            "op": "export",
-            "name": "ghost",
-            "out": str(self.out_dir / "ghost.MACHINE.md"),
-        })
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("unknown machine 'ghost'" in e for e in result["errors"]), result)
-
-    def test_list_dispatch_lists_the_library_with_warnings(self) -> None:
-        (self.repo / "sweep").mkdir(parents=True)
-        (self.repo / "sweep" / "MACHINE.md").write_text(self.source_text, encoding="utf-8")
-        broken = self.agent_home / "machines" / "broken"
-        broken.mkdir(parents=True)
-        (broken / "MACHINE.md").write_text("no frontmatter", encoding="utf-8")
-        result = cli_dispatch({"op": "list"})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual([m["name"] for m in result["machines"]], ["sweep"])
-        self.assertEqual(result["machines"][0]["source"], "repo")
-        self.assertTrue(any("broken" in warning for warning in result["warnings"]), result)
-
-    def test_dispatch_rejects_bad_payloads(self) -> None:
-        self.assertEqual(cli_dispatch("nope")["ok"], False)
-        missing = cli_dispatch({"op": "import"})
-        self.assertFalse(missing["ok"])
-        self.assertIn("requires a `path` string", missing["errors"][0])
-        unknown_op = cli_dispatch({"op": "wat"})
-        self.assertFalse(unknown_op["ok"])
-        self.assertIn("unknown factory cli op", unknown_op["errors"][0])
-        self.assertIn("'list'", unknown_op["errors"][0])
+    def test_dispatch_rejects_other_payloads(self) -> None:
+        for payload in ([], {"op": "list"}, {"op": "import", "path": "/x"}):
+            self.assertEqual(cli_dispatch(payload)["ok"], False, payload)
 
 
 # ---------------------------------------------------------------------------
 # The mermaid renderer and the library graph seam (the TUI library view's
 # kernel surface).
 # ---------------------------------------------------------------------------
-
-
-class SpecToMermaidTest(unittest.TestCase):
-    """One spec as diagram text: pure, form-driven, deterministic."""
-
-    def test_the_shipped_pr_manager_seed_renders_its_guarded_transitions(self) -> None:
-        machine, _path = resolve_machine("pr-manager")
-        self.assertEqual(
-            spec_to_mermaid(machine.spec),
-            """stateDiagram-v2
-    state "entry" as entry
-    state "reviewing" as reviewing
-    state "fixing" as fixing
-    state "monitoring" as monitoring
-    [*] --> entry
-    entry --> reviewing
-    reviewing --> fixing: verdict.approved eq false
-    reviewing --> monitoring: verdict.approved eq true
-    fixing --> reviewing
-""",
-        )
-
-    def test_the_shipped_review_sweep_seed_renders_the_foreach_annotation(self) -> None:
-        machine, _path = resolve_machine("review-sweep")
-        self.assertEqual(
-            spec_to_mermaid(machine.spec),
-            """flowchart TB
-    files
-    review["review<br/>foreach: over files (max 256)"]
-    report
-    files --> review
-    files --> report
-    review --> report
-""",
-        )
-
-    def test_guard_text_cannot_add_mermaid_syntax(self) -> None:
-        output = 'result;%%"\n'
-        machine = {
-            "states": [
-                {"id": "source", "entry": True, "subagent": "worker",
-                 "outputs": [{"name": output, "type": "json"}]},
-                {"id": "sink", "subagent": "worker"},
-            ],
-            "transitions": [{
-                "from": "source", "to": "sink",
-                "when": {"output": output, "path": "item;%%", "op": "eq", "value": "x;#<>&"},
-            }],
-        }
-        self.assertEqual(validate_factory_spec(machine), [])
-        self.assertEqual(
-            spec_to_mermaid(machine).splitlines()[-1],
-            "    source --> sink: result#59;#37;#37;#34;#10;.item#59;#37;#37; "
-            "eq #34;x#59;#35;#60;#62;#38;#34;",
-        )
-        self.assertEqual(len(spec_to_mermaid(machine).splitlines()), 5)
-
-    def test_foreach_text_cannot_close_its_mermaid_label(self) -> None:
-        over = 'items"]\nrogue-->node;%%'
-        dag = {"nodes": [
-            {"id": "source", "subagent": "worker",
-             "outputs": [{"name": "items", "type": "json"}]},
-            {"id": "review", "subagent": "worker",
-             "inputs": [{"name": over, "type": "json", "from": "source.items"}],
-             "foreach": {"over": over, "max": 2}},
-        ]}
-        self.assertEqual(validate_factory_spec(dag), [])
-        self.assertEqual(
-            spec_to_mermaid(dag),
-            'flowchart TB\n'
-            '    source\n'
-            '    review["review<br/>foreach: over '
-            'items#34;#93;#10;rogue--#62;node#59;#37;#37; (max 2)"]\n'
-            '    source --> review\n',
-        )
-
-    def test_exists_guard_ignores_a_declared_value_in_its_label(self) -> None:
-        machine = valid_machine()
-        guard = machine["transitions"][2]["when"]
-        guard["value"] = False
-        self.assertEqual(validate_factory_spec(machine), [])
-        self.assertTrue(_guard_passes(guard, {"verdict": True}))
-        self.assertEqual(
-            spec_to_mermaid(machine).splitlines()[-2],
-            "    reviewing --> reviewing: verdict exists",
-        )
-
-    def test_ids_mermaid_cannot_read_alias_with_their_spelling_as_the_label(self) -> None:
-        # Keywords parse as statements, so a state or node spelled like one
-        # aliases; a generated dag alias skips ids the spec already uses.
-        machine = {
-            "states": [
-                {"id": "end", "entry": True, "subagent": {"prompt": "P."}},
-                {"id": "note", "subagent": {"prompt": "P."}},
-            ],
-            "transitions": [{"from": "end", "to": "note"}],
-        }
-        self.assertEqual(
-            spec_to_mermaid(machine),
-            'stateDiagram-v2\n'
-            '    state "end" as end_state\n'
-            '    state "note" as note_state\n'
-            '    [*] --> end_state\n'
-            '    end_state --> note_state\n',
-        )
-        dag = {"nodes": [
-            {"id": "m0", "subagent": "worker"},
-            {"id": "end", "subagent": "worker", "depends_on": ["m0"]},
-        ]}
-        self.assertEqual(validate_factory_spec(dag), [])
-        self.assertEqual(spec_to_mermaid(dag), 'flowchart TB\n    m0\n    m1["end"]\n    m0 --> m1\n')
-
-    def test_every_guard_shape_renders_its_own_label(self) -> None:
-        rendered = spec_to_mermaid(valid_machine())
-        self.assertIn("collect --> reviewing\n", rendered)
-        # the valued guard with a path, the valueless exists guard
-        self.assertIn("reviewing --> fixing: verdict.approved eq false\n", rendered)
-        self.assertIn("reviewing --> reviewing: verdict exists\n", rendered)
-        self.assertIn("fixing --> reviewing\n", rendered)
-        self.assertIn("[*] --> collect\n", rendered)
-
-    def test_hyphenated_state_ids_alias_without_merging_nodes(self) -> None:
-        # stateDiagram-v2 ids cannot carry hyphens, so a hyphenated id
-        # aliases to its underscored form — and two ids aliasing to the
-        # same spelling (`a-b` and `a_b`) disambiguate, never merge.
-        machine = {
-            "states": [
-                {"id": "a-b", "entry": True, "subagent": {"prompt": "P."}},
-                {"id": "a_b", "subagent": {"prompt": "P."}},
-                {"id": "c", "subagent": {"prompt": "P."}},
-            ],
-            "transitions": [
-                {"from": "a-b", "to": "c"},
-                {"from": "a_b", "to": "c", "when": {"output": "o", "op": "exists"}},
-            ],
-        }
-        rendered = spec_to_mermaid(machine)
-        self.assertIn('    state "a-b" as a_b\n', rendered)
-        self.assertIn('    state "a_b" as a_b_2\n', rendered)
-        self.assertIn("    a_b --> c\n", rendered)
-        self.assertIn("    a_b_2 --> c: o exists\n", rendered)
-
-    def test_a_join_renders_one_edge_per_source(self) -> None:
-        # stateDiagram-v2 has no multi-source edge: a join renders its
-        # connectivity, one edge per source state.
-        machine = {
-            "states": [
-                {"id": "a", "entry": True, "subagent": {"prompt": "P."}},
-                {"id": "b", "entry": True, "subagent": {"prompt": "P."}},
-                {"id": "c", "subagent": {"prompt": "P."}},
-            ],
-            "transitions": [{"from": ["a", "b"], "to": "c"}],
-        }
-        rendered = spec_to_mermaid(machine)
-        self.assertIn("    a --> c\n", rendered)
-        self.assertIn("    b --> c\n", rendered)
-
-    def test_every_entry_state_is_marked_and_edgeless_states_stay_nodes(self) -> None:
-        machine = {
-            "states": [
-                {"id": "one", "entry": True, "subagent": {"prompt": "P."}},
-                {"id": "two", "entry": True, "subagent": {"prompt": "P."}},
-                # No transitions at all: the edge-less states still render
-                # as declared nodes.
-                {"id": "orphan", "subagent": {"prompt": "P."}},
-            ],
-        }
-        rendered = spec_to_mermaid(machine)
-        self.assertIn("    [*] --> one\n", rendered)
-        self.assertIn("    [*] --> two\n", rendered)
-        self.assertIn('    state "orphan" as orphan\n', rendered)
-
-    def test_dag_effective_edges_include_every_input_source(self) -> None:
-        dag = valid_dag()
-        rendered = spec_to_mermaid(dag)
-        self.assertTrue(rendered.startswith("flowchart TB\n"), rendered)
-        self.assertIn("    collect --> fan-out\n", rendered)
-        self.assertIn("    collect --> review\n", rendered)
-        self.assertIn("    fan-out --> review\n", rendered)
-
-    def test_neither_form_renders_the_machine_header_alone(self) -> None:
-        # The pure renderer renders the shape it is given (the seams feed
-        # it validated specs only): an unrecognized spec renders the
-        # machine header with nothing after it, never a crash.
-        self.assertEqual(spec_to_mermaid(None), "stateDiagram-v2\n")
-        self.assertEqual(spec_to_mermaid({"run": {}}), "stateDiagram-v2\n")
-
-
-class MachineLibraryGraphTest(unittest.TestCase):
-    """The library graph seam: one machine's fields plus its rendering."""
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve()
-        self.repo = root / "repo-machines"
-        self.user = root / "user-machines"
-
-    def store(self, root: Path, name: str, description: str, spec: dict[str, Any]) -> Path:
-        directory = root / name
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "MACHINE.md"
-        path.write_text(
-            machine_file_text(
-                name=name,
-                description=description,
-                spec_json=json.dumps(spec),
-            ),
-            encoding="utf-8",
-        )
-        return path
-
-    def test_library_graph_returns_the_machine_fields_and_its_mermaid(self) -> None:
-        machine = {
-            "run": {"max_parallel": 2},
-            "states": [
-                {
-                    "id": "source",
-                    "entry": True,
-                    "subagent": {"prompt": "P."},
-                    "outputs": [{"name": "o", "type": "json"}],
-                },
-                {"id": "sink", "subagent": {"prompt": "P."}},
-            ],
-            "transitions": [
-                {"from": "source", "to": "sink", "when": {"output": "o", "op": "eq", "value": 1}},
-            ],
-        }
-        self.store(self.repo, "sweep", "The repo machine.", machine)
-        graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(
-            graph["name"], "sweep",
-        )
-        self.assertEqual(graph["description"], "The repo machine.")
-        self.assertEqual(graph["version"], "1")
-        self.assertEqual(graph["author"], "Tester")
-        # the spec is the file's own payload, and the mermaid renders it
-        self.assertEqual(graph["spec"], machine)
-        self.assertEqual(
-            graph["mermaid"],
-            """stateDiagram-v2
-    state "source" as source
-    state "sink" as sink
-    [*] --> source
-    source --> sink: o eq 1
-""",
-        )
-
-    def test_library_graph_resolves_repo_machines_first(self) -> None:
-        machine = {"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]}
-        self.store(self.repo, "sweep", "The repo machine.", machine)
-        self.store(self.user, "sweep", "The user machine.", machine)
-        graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(graph["description"], "The repo machine.")
-        graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(graph["mermaid"], spec_to_mermaid(machine))
-
-    def test_library_graph_serves_user_machines_the_repo_lacks(self) -> None:
-        machine = {"nodes": [{"id": "a", "subagent": {"prompt": "P."}}]}
-        self.store(self.user, "mine", "The user machine.", machine)
-        graph = library_graph("mine", repo_dir=self.repo, user_dir=self.user)
-        self.assertEqual(graph["description"], "The user machine.")
-        self.assertTrue(graph["mermaid"].startswith("flowchart TB\n"))
-
-    def test_library_graph_names_the_library_for_an_unknown_machine(self) -> None:
-        with self.assertRaises(MachineResolutionError) as raised:
-            library_graph("missing", repo_dir=self.repo, user_dir=self.user)
-        self.assertFalse(raised.exception.broken)
-        self.assertIn("unknown machine 'missing'", str(raised.exception))
-        self.assertIn("machines: none", str(raised.exception))
-
-    def test_library_graph_reports_a_broken_machine_as_broken(self) -> None:
-        broken = self.user / "broken" / "MACHINE.md"
-        broken.parent.mkdir(parents=True, exist_ok=True)
-        broken.write_text(
-            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
-        )
-        with self.assertRaises(MachineResolutionError) as raised:
-            library_graph("broken", repo_dir=self.repo, user_dir=self.user)
-        self.assertTrue(raised.exception.broken)
-        self.assertIn("frontmatter description is required", str(raised.exception))
-
-    def test_library_graph_rejects_an_invalid_name_before_scanning(self) -> None:
-        with self.assertRaises(ValueError) as raised:
-            library_graph("Not A Name", repo_dir=self.repo, user_dir=self.user)
-        self.assertIn("machine name contains invalid characters", str(raised.exception))
-
 
 
 class ExportMachineTest(unittest.TestCase):
@@ -11165,47 +9519,17 @@ class ExportMachineTest(unittest.TestCase):
 
         self.addCleanup(restore)
 
-    def test_exports_a_library_machine_verbatim(self) -> None:
-        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
-        out = self.out_dir / "shared.MACHINE.md"
-        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(out.read_text(encoding="utf-8"), text)
-
-    def test_export_refuses_to_silently_overwrite_the_target(self) -> None:
-        # A fresh target only: an existing file refuses (overwrite=True is
-        # the explicit opt-in), so an export never clobbers a user file.
-        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
-        out = self.out_dir / "shared.MACHINE.md"
-        out.write_text("keep me", encoding="utf-8")
-        with self.assertRaises(ValueError) as raised:
-            export_machine("sweep", out, repo_dir=None, user_dir=self.library)
-        self.assertIn("already exists", str(raised.exception))
-        self.assertEqual(out.read_text(encoding="utf-8"), "keep me")
-        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library, overwrite=True)
-        self.assertEqual(result["source"], "library")
-        self.assertEqual(out.read_text(encoding="utf-8"), text)
-
     def test_export_refuses_a_symlinked_target_without_following_it(self) -> None:
         # The no-overwrite path creates the file exclusively, so a symlink
         # planted at the target refuses instead of being followed and its
         # victim keeps its bytes.
-        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
+        self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
         victim = self.out_dir / "victim.txt"
         victim.write_text("keep me", encoding="utf-8")
         link = self.out_dir / "link.MACHINE.md"
         link.symlink_to(victim)
         with self.assertRaises(ValueError) as raised:
-            export_machine("sweep", link, repo_dir=None, user_dir=self.library)
+            export_machine("sweep", link)
         self.assertIn("already exists", str(raised.exception))
         self.assertEqual(victim.read_text(encoding="utf-8"), "keep me")
         self.assertTrue(link.is_symlink())
@@ -11256,19 +9580,18 @@ class ExportMachineTest(unittest.TestCase):
     def test_exports_a_stored_entry_spec_byte_pretty(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
         out = self.out_dir / "sweep.MACHINE.md"
-        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library)
+        result = export_machine("sweep", out)
         self.assertEqual(result["source"], "spec")
-        machine, errors = parse_machine_file(out.read_text(encoding="utf-8"), source=str(out))
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.name, "sweep")
-        self.assertEqual(validate_factory_spec(machine.spec), [])
-        self.assertEqual(canonicalize_factory_spec(machine.spec), canonicalize_factory_spec(valid_dag()))
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("name: sweep\n", text)
+        spec = rendered_spec(text)
+        self.assertEqual(validate_factory_spec(spec), [])
+        self.assertEqual(canonicalize_factory_spec(spec), canonicalize_factory_spec(valid_dag()))
 
     def test_entry_ids_that_are_not_machine_names_are_rejected(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="Sweep Entry", dag=valid_dag())
         with self.assertRaises(ValueError) as ctx:
-            export_machine("Sweep Entry", self.out_dir / "x.MACHINE.md", repo_dir=None, user_dir=self.library)
+            export_machine("Sweep Entry", self.out_dir / "x.MACHINE.md")
         self.assertIn("invalid characters", str(ctx.exception))
 
     def test_exports_a_runs_canonical_machine(self) -> None:
@@ -11279,37 +9602,26 @@ class ExportMachineTest(unittest.TestCase):
         self.executor._runs[run.run_id] = run
         self.assertEqual(run.machine, canonicalize_factory_spec(valid_machine()))
         out = self.out_dir / "run-machine.MACHINE.md"
-        result = export_machine(run.run_id, out, repo_dir=None, user_dir=self.library)
+        result = export_machine(run.run_id, out)
         self.assertEqual(result["source"], "spec")
-        machine, errors = parse_machine_file(out.read_text(encoding="utf-8"), source=str(out))
-        self.assertEqual(errors, [])
-        assert machine is not None
-        self.assertEqual(machine.spec, canonicalize_factory_spec(valid_machine()))
+        self.assertEqual(
+            rendered_spec(out.read_text(encoding="utf-8")), canonicalize_factory_spec(valid_machine())
+        )
 
     def test_unknown_targets_list_every_source(self) -> None:
         with self.assertRaises(ValueError) as ctx:
-            export_machine("ghost", self.out_dir / "ghost.MACHINE.md", repo_dir=None, user_dir=self.library)
-        self.assertIn("unknown machine 'ghost'", str(ctx.exception))
-
-    def test_out_path_must_not_be_a_directory(self) -> None:
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True)
-        (directory / "MACHINE.md").write_text(
-            machine_file_text(description="A machine that sweeps."), encoding="utf-8"
-        )
-        with self.assertRaises(ValueError) as ctx:
-            export_machine("sweep", self.out_dir, repo_dir=None, user_dir=self.library)
-        self.assertIn("is a directory", str(ctx.exception))
+            export_machine("ghost", self.out_dir / "ghost.MACHINE.md")
+        self.assertIn("no stored factory entry or live run 'ghost'", str(ctx.exception))
 
     def test_export_rejects_invalid_specs(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             export_factory_spec(
-                {"run": {"max_parallel": None}, "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
+                {"run": {"failure_policy": "sometimes"}, "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
                 self.out_dir / "bad.MACHINE.md",
                 name="sweep",
                 description="A machine that sweeps.",
             )
-        self.assertIn("max_parallel must be an integer between 1 and 64", str(ctx.exception))
+        self.assertIn("run failure_policy must be one of", str(ctx.exception))
         self.assertFalse((self.out_dir / "bad.MACHINE.md").exists())
 
 
@@ -11351,13 +9663,17 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def store_machine_file(self, name: str, spec: dict[str, Any]) -> Path:
-        directory = self.library / name
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "MACHINE.md"
-        path.write_text(
-            machine_file_text(name=name, description="A machine that sweeps.", spec_json=json.dumps(spec)),
-            encoding="utf-8",
-        )
+        """Script the host's library scan: ``factory.compile`` by name
+        answers this MACHINE.md machine."""
+        path = self.library / name / "MACHINE.md"
+        self.host.compiled[name] = {
+            "name": name,
+            "description": "A machine that sweeps.",
+            "version": "1",
+            "author": "Tester",
+            "spec": spec,
+            "path": str(path),
+        }
         return path
 
     @async_test
@@ -11386,6 +9702,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertEqual(status["state"], "done")
         self.assertEqual(status["spec_id"], "sweep")
         self.assertEqual(len(self.host.calls_of("rlm.run")), 2)
+        self.assertEqual(self.host.calls_of("factory.compile"), [{"name": "sweep", "params": {}}])
 
     @async_test
     async def test_stored_entries_win_over_library_machines(self) -> None:
@@ -11412,120 +9729,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
             await rlm_module.rlm.factory.run("missing-spec")
         except ValueError as error:
             self.assertIn("no stored factory entry", str(error))
-            self.assertIn("no library machine with that name", str(error))
-
-    @async_test
-    async def test_an_invalid_name_still_reports_the_unknown_spec_frame(self) -> None:
-        # A stored-entry id that is not a legal machine name (spaces,
-        # capitals) can never resolve from the library: the lookup must
-        # not surface the bare name-rule sentence, losing the unknown-spec
-        # frame.
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("My Spec")
-        message = str(raised.exception)
-        self.assertIn("unknown factory spec 'My Spec'", message)
-        self.assertIn("not a valid machine name", message)
-        self.assertIn("lowercase a-z, 0-9, hyphens", message)
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_a_broken_library_file_names_its_errors_not_a_missing_name(self) -> None:
-        # A file that exists but fails to parse reports the exact parse
-        # errors; it never pretends the name is unknown.
-        directory = self.library / "broken"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "MACHINE.md").write_text(
-            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
-        )
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("broken")
-        self.assertIn("exists but is broken", str(raised.exception))
-        self.assertIn("frontmatter description is required", str(raised.exception))
-        self.assertNotIn("no library machine with that name", str(raised.exception))
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_a_spec_invalid_library_file_is_broken_not_a_late_rejection(self) -> None:
-        # A file that parses but carries a spec the write-time validator
-        # rejects is the exists-but-broken case at resolve time: the run
-        # refuses with the exact validator sentences naming the file,
-        # never a late canonicalize error after resolution, and nothing
-        # spawns.
-        path = self.store_machine_file("sweep", {"states": []})
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("sweep")
-        message = str(raised.exception)
-        self.assertIn("exists but is broken", message)
-        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
-        self.assertIn(str(path), message)
-        self.assertNotIn("no library machine with that name", message)
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_an_invalid_repo_machine_never_shadows_a_valid_user_machine(self) -> None:
-        # Cursor's follow-up finding: the listing scan skips a spec-invalid
-        # repo machine so a valid user machine of the same name surfaces,
-        # but the run still raised exists-but-broken on the repo file —
-        # `factory list` advertised a machine the run refused. Run, resolve,
-        # and export share the listing's verdict, so the run serves the
-        # user machine the listing advertises; the invalid repo file never
-        # shadows it and never masquerades as usable.
-        self.store_machine_file("sweep", {"states": []})
-        agent_home = Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"])
-        user_file = agent_home / "machines" / "sweep" / "MACHINE.md"
-        user_file.parent.mkdir(parents=True)
-        user_file.write_text(
-            machine_file_text(
-                name="sweep",
-                description="The user machine.",
-                spec_json=json.dumps({"nodes": [{"id": "a", "subagent": "worker"}]}),
-            ),
-            encoding="utf-8",
-        )
-        listed = list_machines()
-        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
-        self.assertEqual(listed[0]["source"], "user")
-        result = await rlm_module.rlm.factory.run("sweep")
-        self.assertEqual(result["spec_id"], "sweep")
-        self.assertEqual(result["machine"], "sweep")
-        self.assertEqual(result["machine_path"], str(user_file))
-        self.assertEqual(result["started"], ["a"])
-        status = await self.settle(result)
-        self.assertEqual(status["state"], "done")
-        self.assertEqual(status["spec_id"], "sweep")
-
-    @async_test
-    async def test_a_non_utf8_library_file_is_broken_not_an_invalid_name(self) -> None:
-        # A machine file that exists but does not decode is a broken library
-        # file: the run reports it in the exists-but-broken frame, never as
-        # an invalid machine name (the name-rule arm must not swallow the
-        # decode error).
-        directory = self.library / "sweep"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "MACHINE.md").write_bytes(b"\xff\xfe\xff not utf-8")
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("sweep")
-        message = str(raised.exception)
-        self.assertIn("exists but is broken", message)
-        self.assertIn("not valid UTF-8", message)
-        self.assertNotIn("not a valid machine name", message)
-        self.assertEqual(self.host.calls, [])
-
-    @async_test
-    async def test_one_corrupt_library_file_never_reframes_unknown_names(self) -> None:
-        # One non-decodable file skips in the listing scan like any broken
-        # file: an unrelated unknown name keeps the unknown-spec frame, never
-        # the name-rule arm the decode error would otherwise reach.
-        corrupt = self.library / "zz-corrupt"
-        corrupt.mkdir(parents=True, exist_ok=True)
-        (corrupt / "MACHINE.md").write_bytes(b"\xff\xfe")
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("missing-spec")
-        message = str(raised.exception)
-        self.assertIn("unknown factory spec 'missing-spec'", message)
-        self.assertIn("no library machine with that name", message)
-        self.assertNotIn("not a valid machine name", message)
-        self.assertEqual(self.host.calls, [])
+            self.assertIn("no library machine named 'missing-spec'", str(error))
 
     @async_test
     async def test_the_opt_in_gate_refuses_library_runs_while_disabled(self) -> None:
@@ -11588,196 +9792,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.fail(f"run {run_id} never left the running state")
 
 
-# ---------------------------------------------------------------------------
-# The installed-runtime library: the wheel a kernel venv actually installs.
-# ---------------------------------------------------------------------------
 
-_INSTALLED_LIBRARY_RUNNER = r"""
-import asyncio
-import importlib
-import json
-
-
-class ScriptedHost:
-    # Deterministic fake for the rlm host bridge: spawn registers a child,
-    # collect settles it with the review-sweep node's scripted answer.
-    def __init__(self):
-        self.children = {}
-        self.counter = 0
-
-    @staticmethod
-    def answer_for(name):
-        # The spawn labels are run-prefixed (run-scoped names), so the
-        # configured name matches anywhere in the label.
-        if "files-source" in name:
-            return "```json\n{\"files\": [\"sample.ts\"]}\n```"
-        if "file-reviewer" in name:
-            return "sample.ts: clean"
-        if "review-aggregator" in name:
-            return "```json\n{\"issues\": [], \"clean\": 1}\n```"
-        return "done"
-
-    async def __call__(self, request_type, payload=None):
-        payload = payload or {}
-        if request_type == "rlm.run":
-            self.counter += 1
-            child_id = f"child-{self.counter}"
-            name = payload["kwargs"]["name"]
-            self.children[child_id] = name
-            return {
-                "rlm_child_id": child_id,
-                "name": name,
-                "session_dir": f"/tmp/{child_id}",
-                "model": "test/worker",
-            }
-        if request_type == "rlm.collect":
-            results = []
-            for target in payload["targets"]:
-                name = self.children.get(target)
-                if name is None:
-                    continue
-                results.append({
-                    "rlm_child_id": target,
-                    "session_name": name,
-                    "session_dir": f"/tmp/{target}",
-                    "status": "done",
-                    "settled": True,
-                    "answer_preview": self.answer_for(name),
-                    "tool_use_count": 1,
-                    "factory_task_busy": False,
-                    "duration_ms": 5,
-                })
-            return {"results": results}
-        if request_type == "rlm.delete_subagent":
-            self.children.pop(payload["target"], None)
-            return {"outcome": "deleted"}
-        return {}
-
-
-async def main():
-    import rlm as rlm_module
-    from rlm.factory import FactoryExecutor
-
-    factory_module = importlib.import_module("rlm.factory")
-
-    rlm_module.host_request = ScriptedHost()
-
-    async def instant_sleep(_seconds):
-        await asyncio.sleep(0)
-
-    factory_module._DEFAULT_EXECUTOR = FactoryExecutor(sleep=instant_sleep)
-    factory = rlm_module.rlm.factory
-    result = await factory.run("review-sweep")
-    status = None
-    for _ in range(500):
-        status = await factory.status(result["run_id"])
-        if status["state"] != "running":
-            break
-        await asyncio.sleep(0.02)
-    print(json.dumps({
-        "state": status["state"],
-        "spec_id": result["spec_id"],
-        "machine": result["machine"],
-        "machine_path": result["machine_path"],
-        "nodes": sorted(node["id"] for node in status["nodes"]),
-        "events": status["events"][-8:],
-    }))
-
-
-asyncio.run(main())
-"""
-
-
-class InstalledRuntimeLibraryTest(unittest.TestCase):
-    """A kernel venv built from a staged runtime runs the bundled machines.
-
-    The kernel installs prime-agent-runtime non-editably into its venv (the
-    bootstrap's ``uv pip install <staged runtime>`` builds the hatchling
-    wheel, whose target package is ``src/rlm``), so the machine library
-    must resolve from the installed package — ``site-packages/rlm/
-    machines`` — not from any source-checkout path. This stages the
-    runtime the way the release does, installs it into a fresh venv, and
-    runs ``rlm.factory.run("review-sweep")`` end-to-end in that interpreter
-    against a scripted host, asserting the machine came from the installed
-    wheel.
-    """
-
-    # Names the release staging drops from the runtime tree (the assemble
-    # script's RUNTIME_EXCLUDED_NAMES): the venv bootstrap installs the
-    # staged layout, so the test stages the same way.
-    STAGING_EXCLUDED = frozenset({"test", "uv.lock", ".venv", "__pycache__", ".pytest_cache"})
-
-    def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name).resolve()
-
-    def stage_runtime(self) -> Path:
-        """Copy the runtime tree the release-staging way, minus its excludes."""
-        runtime_dir = Path(__file__).resolve().parents[1]
-        staged = self.root / "payload" / "prime-agent-runtime"
-        for source in runtime_dir.rglob("*"):
-            relative = source.relative_to(runtime_dir)
-            if any(part in self.STAGING_EXCLUDED for part in relative.parts):
-                continue
-            target = staged / relative
-            if source.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
-        return staged
-
-    def test_kernel_venv_runs_review_sweep_from_the_installed_wheel(self) -> None:
-        if os.name != "posix":
-            self.skipTest("the staged kernel-venv path is POSIX-shaped")
-        uv = shutil.which("uv")
-        if uv is None:
-            self.skipTest("uv is not available to build the kernel venv")
-        staged = self.stage_runtime()
-        venv = self.root / "kernel-venv"
-        agent_home = self.root / "agent-home"
-        agent_home.mkdir(parents=True)
-        (agent_home / "settings.json").write_text(
-            json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
-        )
-        for args in (
-            [uv, "venv", str(venv)],
-            [uv, "pip", "install", "--python", str(venv / "bin" / "python"), "--no-deps", str(staged)],
-        ):
-            install = subprocess.run(
-                args, capture_output=True, text=True, timeout=240, check=False
-            )
-            self.assertEqual(
-                install.returncode, 0,
-                f"{' '.join(args)} failed:\n{install.stdout}\n{install.stderr}",
-            )
-        run_result = subprocess.run(
-            [
-                str(venv / "bin" / "python"), "-I", "-c", _INSTALLED_LIBRARY_RUNNER,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            env={**os.environ, "PRIME_AGENT_CODING_AGENT_DIR": str(agent_home)},
-        )
-        self.assertEqual(
-            run_result.returncode, 0,
-            f"the installed-runtime run failed:\n{run_result.stdout}\n{run_result.stderr}",
-        )
-        payload = json.loads(run_result.stdout)
-        self.assertEqual(payload["state"], "done", payload)
-        self.assertEqual(payload["spec_id"], "review-sweep")
-        self.assertEqual(payload["machine"], "review-sweep")
-        machine_path = Path(payload["machine_path"])
-        self.assertTrue(machine_path.is_file(), machine_path)
-        self.assertIn("site-packages", str(machine_path), machine_path)
-        self.assertIn(os.path.join("rlm", "machines"), str(machine_path), machine_path)
-        # The installed package is the wheel copy, not this checkout's source.
-        self.assertNotIn("prime-agent-runtime", str(machine_path), machine_path)
-        self.assertEqual(payload["nodes"], ["files", "report", "review"])
-        self.assertEqual(payload["nodes"], ["files", "report", "review"])
 class FactoryJoinLiveSourcesTest(_ExecutorTestCase):
     """A join waits for every source's CURRENT round: no firing while a
     source state has a live entry (the review-loop shape — one fresh
@@ -13726,49 +11741,6 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
 
 
 
-    @async_test
-    async def test_an_undecodable_machine_dir_never_reaches_a_frame(self) -> None:
-        # Round-12 R12-02: the listing's OWN glob sent factory.describe
-        # with the raw surrogate path (PEP 383 hands it through with no
-        # raise). The undecodable entry skips with a safe warning.
-        import sys
-        from io import StringIO
-
-        from rlm.factory import library_listing
-
-        captured = StringIO()
-        undecodable = Path("/tmp/\udcb5machine")
-        def fake_glob(self, pattern, *args, **kwargs):
-            # The MACHINE.md scan returns nothing; the machine-DIR scan
-            # returns one undecodable entry (PEP 383 hands it through).
-            if "machine.toml" in str(pattern):
-                return [self / "\udcb5inner" / "machine.toml"]
-            return []
-
-        with patch.object(sys, "stderr", captured), \
-                patch.object(Path, "glob", fake_glob), \
-                patch.object(Path, "is_dir", lambda self: True):
-            machines, warnings = await library_listing(repo_dir=None, user_dir=None)
-        self.assertEqual(machines, [])
-        self.assertTrue(any("decodable" in w for w in warnings), warnings)
-        for w in warnings:
-            w.encode("utf-8")  # every warning is protocol-safe
-
-    def test_an_undecodable_library_entry_skips_with_a_warning(self) -> None:
-        # Round-11 R11-05 (round-9 R9-01's third trigger): an
-        # undecodable name in the machine library broke the listing's own
-        # request frame. The scan skips the fault and warns safely.
-        import sys
-        from io import StringIO
-
-        from rlm.factory import _scan_machine_library
-
-        with patch.object(Path, "glob", side_effect=OSError(5, "Input/output error")), \
-                patch.object(sys.modules["os"], "listdir", side_effect=OSError(5, "I/O")):
-            machines, warnings = _scan_machine_library()
-        self.assertEqual(machines, [])
-        self.assertTrue(any(":" in w for w in warnings))
-
     def test_the_lane_belt_refuses_a_lone_surrogate_frame(self) -> None:
         # Round-11 R11-04 (MD): the belt had no pin. A frame carrying a
         # lone surrogate — in a value OR a key — must trip the belt and
@@ -13813,68 +11785,6 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
         self.assertIn("is unreadable", line)
         line.encode("utf-8")  # the site's print is protocol-safe
 
-
-    def test_an_undecodable_machine_md_dir_never_reaches_a_reply(self) -> None:
-        # Round-13 probe R13-01 (the v1/MACHINE.md half): an undecodable
-        # directory name in the library level reached
-        # _read_library_machine and the raw path rode the warning — and
-        # the CLI's `factory list` stdout. The scan skips it safely.
-        import pathlib
-
-        repo, user = TemporaryDirectory(), TemporaryDirectory()
-        self.addCleanup(repo.cleanup)
-        self.addCleanup(user.cleanup)
-        user_dir = Path(user.name)
-        bad_dir = user_dir / "\udcb5plan"
-        real_glob = pathlib.Path.glob
-        real_read = pathlib.Path.read_text
-
-        def glob(path, pattern):
-            found = list(real_glob(path, pattern))
-            if Path(path) == user_dir and str(pattern).endswith("MACHINE.md"):
-                found.append(bad_dir / "MACHINE.md")
-            return iter(found)
-
-        def read_text(path, *args, **kwargs):
-            if str(path).startswith(str(bad_dir)):
-                return "name: planner\ndescription: p\n"
-            return real_read(path, *args, **kwargs)
-
-        with patch.object(pathlib.Path, "glob", glob), patch.object(pathlib.Path, "read_text", read_text):
-            machines, warnings = factory_module._scan_machine_library(
-                repo_dir=repo.name, user_dir=user.name
-            )
-        from rlm.factory import _frame_has_lone_surrogate
-
-        self.assertFalse(
-            _frame_has_lone_surrogate({"machines": machines, "warnings": warnings}),
-            "an undecodable name rode the library reply",
-        )
-        self.assertTrue(any("decodable" in w for w in warnings), warnings)
-
-    @async_test
-    async def test_the_listings_own_glob_fault_warns(self) -> None:
-        # Round-13 pin MLGG: the listing's own glob guard (the EIO half)
-        # had no pin.
-        import pathlib
-
-        repo, user = TemporaryDirectory(), TemporaryDirectory()
-        self.addCleanup(repo.cleanup)
-        self.addCleanup(user.cleanup)
-        real_glob = pathlib.Path.glob
-
-        def glob(path, pattern):
-            if str(pattern).endswith("machine.toml"):
-                raise OSError(5, "Input/output error")
-            return real_glob(path, pattern)
-
-        from rlm.factory import library_listing
-
-        with patch.object(pathlib.Path, "glob", glob):
-            rows, warnings = await library_listing(
-                repo_dir=repo.name, user_dir=user.name
-            )
-        self.assertTrue(any("Input/output error" in w for w in warnings), warnings)
 
     @async_test
     async def test_a_childs_surrogate_json_output_binds_clean_at_the_decode_point(self) -> None:

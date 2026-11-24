@@ -747,20 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_filters_entries_without_tool_support() {
-        let mut with_tools = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
-        with_tools["supported_parameters"] =
-            json!(["max_tokens", "temperature", "tools", "tool_choice"]);
-        let mut without_tools = wire_entry("meta-llama/Llama-3.2-1B-Instruct", 1.0, 2.0);
-        without_tools["supported_parameters"] = json!(["max_tokens", "temperature", "top_p"]);
-        let undeclared = wire_entry("qwen/qwen3.8-max", 1.0, 4.0);
-        let value = json!({"data": [with_tools, without_tools, undeclared]});
-        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
-        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, vec!["z-ai/glm-5.3", "qwen/qwen3.8-max"]);
-    }
-
-    #[test]
     fn parse_drops_bad_entries_and_rejects_duplicates() {
         let value = json!({"data": [
             wire_entry("good", 1.0, 2.0),
@@ -776,6 +762,20 @@ mod tests {
         ]});
         let entries = parse_prime_inference_model_catalog(&value, false).expect("kept rest");
         assert_eq!(entries.len(), 1);
+        // Routes without tool support or with null specs drop; an
+        // undeclared parameter list stays.
+        let mut with_tools = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
+        with_tools["supported_parameters"] =
+            json!(["max_tokens", "temperature", "tools", "tool_choice"]);
+        let mut without_tools = wire_entry("meta-llama/Llama-3.2-1B-Instruct", 1.0, 2.0);
+        without_tools["supported_parameters"] = json!(["max_tokens", "temperature", "top_p"]);
+        let mut null_specs = wire_entry("openai/gpt-5.6", 1.0, 2.0);
+        null_specs["specs"] = Value::Null;
+        let undeclared = wire_entry("qwen/qwen3.8-max", 1.0, 4.0);
+        let value = json!({"data": [with_tools, without_tools, null_specs, undeclared]});
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["z-ai/glm-5.3", "qwen/qwen3.8-max"]);
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), false).is_err());
         assert!(parse_prime_inference_model_catalog(&json!({"data": []}), true).is_ok());
         assert!(parse_prime_inference_model_catalog(&json!({}), false).is_err());
@@ -806,16 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_drops_entries_with_null_specs() {
-        let mut null_specs = wire_entry("openai/gpt-5.6", 1.0, 2.0);
-        null_specs["specs"] = Value::Null;
-        let value = json!({"data": [wire_entry("z-ai/glm-5.3", 1.0, 2.0), null_specs]});
-        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
-        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, vec!["z-ai/glm-5.3"]);
-    }
-
-    #[test]
     fn build_gates_on_coverage() {
         let compiled = transports::prime_inference_offline_entries();
         let ids: Vec<&str> = compiled.iter().map(|m| m.id.as_str()).take(60).collect();
@@ -831,11 +821,7 @@ mod tests {
             build_prime_inference_models(&compiled, &entries, false, None).is_none(),
             "coverage gate rejects thin fetches"
         );
-    }
 
-    #[test]
-    fn build_requires_full_specs_without_a_template() {
-        let compiled = transports::prime_inference_offline_entries();
         let unknown = json!({"data": [{
             "id": "brand/new-model",
             "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 1.0},
@@ -1203,10 +1189,9 @@ mod tests {
         assert_eq!(compat_bool(live, "supportsReasoningEffort"), Some(false));
         assert_eq!(compat_raw(live, "thinkingFormat"), None);
         assert_eq!(live.thinking_level_map, None);
-    }
 
-    #[test]
-    fn new_live_models_get_the_conservative_default_plus_declared_controls() {
+        // New live models without a template get the conservative default
+        // plus their declared controls.
         let built = build_prime_inference_models(
             &[],
             &[effort_entry("vendor/new"), route_entry("vendor/plain")],
