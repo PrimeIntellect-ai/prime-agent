@@ -1,9 +1,10 @@
 //! The compact-trigger auto-refine machine: the session-side state and the
 //! one gate order the servicing surfaces share — gates first, then the
-//! round. The round is now the refinement child's spawn (the review gate
-//! is gone: the child's own empty-edits judgment is the gate), so the
-//! consumption returns the armed options and the daemon-backed caller
-//! spawns the child; the child-reply wake finishes the round.
+//! round. In the daemon the round spawns a refinement child without a
+//! review (the child's own empty-edits judgment is the gate): the
+//! consumption returns the armed options, the daemon-backed caller spawns
+//! the child, and the reply's apply finishes the round. Print mode reviews
+//! first (`start_auto_refine_after_compaction`).
 
 use super::refine::{
     now_millis, unreviewed_auto_refine_instructions, RefineOptions, AUTO_REFINE_COMPACT_REASON,

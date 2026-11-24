@@ -211,12 +211,15 @@ impl AgentSessionEngine {
         sender_active_session_id: &str,
         message: &str,
     ) -> Option<()> {
-        let flight = self
+        // One flights-lock scope across the whole park: an abandon (which
+        // drains the flights and clears the parked replies under the same
+        // lock) either sees this reply parked or this park sees the
+        // abandoned id.
+        let mut flights = self
             .refine_flights
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(sender_active_session_id);
-        let Some(flight) = flight else {
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(flight) = flights.remove(sender_active_session_id) else {
             return self
                 .abandoned_refine_children
                 .lock()
