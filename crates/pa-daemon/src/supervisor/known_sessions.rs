@@ -187,9 +187,11 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
     let mut seen_children = HashSet::new();
     for ledger in roots.ledgers.values() {
         match walk_passive_rlm_children(ledger, &walk_roots) {
-            Ok(walked) => children.extend(walked.into_iter().filter(|child| {
-                seen_children.insert(canonical_session_path(&child.info.path))
-            })),
+            Ok(walked) => children.extend(
+                walked
+                    .into_iter()
+                    .filter(|child| seen_children.insert(canonical_session_path(&child.info.path))),
+            ),
             Err(error) => {
                 warnings.push(format!("Could not walk passive RLM children: {error:#}"));
             }

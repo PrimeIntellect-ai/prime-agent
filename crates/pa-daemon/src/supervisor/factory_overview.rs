@@ -1758,22 +1758,16 @@ mod tests {
         let agent_dir = dir.path().join("agent");
         // A missing sessions directory: no owners, no warnings.
         let missing = agent_dir.join("sessions-missing");
-        let (owners, _, records, warnings) = catalog_and_records(
-            &no_roots(&missing),
-            &[],
-            &FactoryRecordsCache::default(),
-        );
+        let (owners, _, records, warnings) =
+            catalog_and_records(&no_roots(&missing), &[], &FactoryRecordsCache::default());
         assert!(owners.is_empty() && records.is_empty() && warnings.is_empty());
         // A sessions path that is a regular file (ENOTDIR, the probe's
         // shape): the read failure warns — never a silent empty catalog.
         let unreadable = agent_dir.join("sessions");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
         std::fs::write(&unreadable, "not a directory").expect("regular file");
-        let (owners, _, records, warnings) = catalog_and_records(
-            &no_roots(&unreadable),
-            &[],
-            &FactoryRecordsCache::default(),
-        );
+        let (owners, _, records, warnings) =
+            catalog_and_records(&no_roots(&unreadable), &[], &FactoryRecordsCache::default());
         assert!(owners.is_empty() && records.is_empty());
         assert!(
             warnings
@@ -1993,8 +1987,7 @@ mod tests {
         };
         let cache = FactoryRecordsCache::default();
         let scan = |residents: &[ResidentOwner], cache: &FactoryRecordsCache| {
-            let (owners, _, records, warnings) =
-                catalog_and_records(&roots, residents, cache);
+            let (owners, _, records, warnings) = catalog_and_records(&roots, residents, cache);
             (owners, records, warnings)
         };
         let gone: Vec<ResidentOwner> = Vec::new();
