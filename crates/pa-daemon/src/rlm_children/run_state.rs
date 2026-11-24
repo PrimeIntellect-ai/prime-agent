@@ -223,7 +223,9 @@ mod tests {
         assert!(run.ended_at_ms().is_some());
         run.apply(RunEvent::CancelRefused);
         assert_eq!(run.ended_at_ms(), None);
-        run.apply(RunEvent::IdleRead { final_turn_error: None });
+        run.apply(RunEvent::IdleRead {
+            final_turn_error: None,
+        });
         let ended = run.ended_at_ms();
         assert!(ended.is_some());
         run.apply(RunEvent::Funnel);
