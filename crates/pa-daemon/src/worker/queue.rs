@@ -537,7 +537,7 @@ pub(crate) fn admit_kernel_notice(
     work_notify: &Arc<Notify>,
     notice: crate::engine::KernelNotice,
     session_is_closed: impl Fn() -> bool,
-) {
+) -> bool {
     let crate::engine::KernelNotice { row, preview_label } = notice;
     let content = match &row.content {
         pa_types::ai::UserContent::Text(text) => text.clone(),
@@ -548,8 +548,11 @@ pub(crate) fn admit_kernel_notice(
     let mut core_guard = core.lock().unwrap();
     // A notice that raced past the sink's first check is refused here or wiped
     // by the close's clear — never a completion turn for a closed session.
-    if session_is_closed() {
-        return;
+    if session_is_closed()
+        || (row.custom_type == pa_core::session_engine::messages::BASH_WAITING_NOTICE_CUSTOM_TYPE
+            && (core_guard.busy || core_guard.compacting))
+    {
+        return false;
     }
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
@@ -573,6 +576,70 @@ pub(crate) fn admit_kernel_notice(
             forced_batch: false,
         });
     }
+    // The checkpoint re-locks the core (documented order: recovery lock
+    // first), so the admission's guard must release first.
+    drop(core_guard);
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+    true
+}
+
+/// Admit one turn-held pacing notice: the same steering-lane admission as a
+/// kernel notice, but the daemon-side held gate checks the delivery token
+/// and worker state inside the same lock section as the push. The gate must
+/// never arrive as the `session_is_closed` closure: that seam is invoked
+/// while the admission already holds the core lock, so a re-locking closure
+/// self-deadlocks the session.
+pub(crate) fn admit_turn_held_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    notice: crate::engine::KernelNotice,
+    delivery: &tokio_util::sync::CancellationToken,
+) {
+    let crate::engine::KernelNotice { row, preview_label } = notice;
+    let content = match &row.content {
+        pa_types::ai::UserContent::Text(text) => text.clone(),
+        pa_types::ai::UserContent::Blocks(_) => String::new(),
+    };
+    let mut core_guard = core.lock().unwrap();
+    // A cell in flight is what holds the turn. Without a running tool call
+    // the model is streaming, often its final answer, and a queued row would
+    // only start an extra turn after it.
+    if delivery.is_cancelled()
+        || !core_guard.busy
+        || core_guard.running_tool_calls.is_empty()
+        || !core_guard.steering.is_empty()
+        || core_guard.abort_requested
+        || core_guard.compacting
+        || core_guard.shutdown_requested
+    {
+        // The held gate refused: the delivery settled (or something else
+        // already queued to cut it), so the pacing notice stays quiet.
+        return;
+    }
+    core_guard.steering.push_back(QueuedItem {
+        priority: QueuePriority::Background,
+        preview: Some(format!("{preview_label}: {content}")),
+        message: content,
+        custom_message: Some(crate::session_commands::custom_message_value(&row)),
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
     // The checkpoint re-locks the core (documented order: recovery lock
     // first), so the admission's guard must release first.
     drop(core_guard);

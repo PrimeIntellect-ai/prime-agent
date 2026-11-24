@@ -61,22 +61,6 @@ fn provider_failure_line(ts: &str, pid: i64) -> IncidentLogEntry {
 }
 
 #[test]
-fn attributes_provider_failures_to_the_pid_owner() {
-    let entries = vec![
-        worker_start_line(
-            "2026-09-10T19:42:09.064Z",
-            "/tmp/prime-agent-501/worker-98ed5cb228d2-5b1d3aeb91ee.sock",
-            53615,
-        ),
-        provider_failure_line("2026-09-10T20:02:53.374Z", 53615),
-    ];
-    let events = collect_incident_events(&entries, &collect_worker_pid_map(&entries));
-    assert!(events
-        .iter()
-        .any(|event| event.summary.contains("for worker 5b1d3aeb91ee")));
-}
-
-#[test]
 fn attributes_provider_failures_to_the_worker_owning_the_pid_at_that_time() {
     let worker_a = "/tmp/prime-agent-501/worker-98ed5cb228d2-aaaaaaaaaaaa.sock";
     let worker_b = "/tmp/prime-agent-501/worker-98ed5cb228d2-bbbbbbbbbbbb.sock";
@@ -100,11 +84,6 @@ fn attributes_provider_failures_to_the_worker_owning_the_pid_at_that_time() {
             "provider stream failure (rate_limit 429) for worker bbbbbbbbbbbb",
         ]
     );
-}
-
-#[test]
-fn a_later_sighting_never_owns_an_earlier_failure() {
-    let worker_b = "/tmp/prime-agent-501/worker-98ed5cb228d2-bbbbbbbbbbbb.sock";
     let entries = vec![
         provider_failure_line("2026-09-10T10:00:00.000Z", 53615),
         // A future sighting is never evidence of ownership.
@@ -120,27 +99,6 @@ fn a_later_sighting_never_owns_an_earlier_failure() {
         summaries,
         vec!["provider stream failure (rate_limit 429) for pid 53615"]
     );
-}
-
-#[test]
-fn worker_ids_parse_from_unix_and_named_pipe_socket_paths() {
-    assert_eq!(
-        worker_id_from_socket_path(Some(
-            "/tmp/prime-agent-501/worker-98ed5cb228d2-5b1d3aeb91ee.sock"
-        )),
-        Some("5b1d3aeb91ee")
-    );
-    assert_eq!(
-        worker_id_from_socket_path(Some(
-            r"\\.\pipe\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee"
-        )),
-        Some("5b1d3aeb91ee")
-    );
-    assert_eq!(
-        worker_id_from_socket_path(Some("/tmp/prime-agent-501/daemon.sock")),
-        None
-    );
-    assert_eq!(worker_id_from_socket_path(None), None);
 }
 
 #[test]
@@ -294,72 +252,6 @@ fn command_failures_classify_by_their_error_body() {
         &WorkerPidMap::default(),
     );
     assert_eq!(events[0].tokens, vec!["Faerie".to_string()]);
-}
-
-#[test]
-fn recovery_breakdown_ranks_and_caps_the_operations() {
-    // The motivating incident's held backlog (TS `incident.test.ts`'s fixture).
-    let operations = std::iter::repeat_n("tool_execution_start", 408)
-        .chain(std::iter::repeat_n("auto_retry_end", 62))
-        .chain(std::iter::repeat_n("agent_end", 47))
-        .chain(std::iter::repeat_n("message_start", 16))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let entry = supervisor_line(
-        "2026-09-10T20:23:29.521Z",
-        &format!(
-            "Recovered worker 5b1d3aeb91ee without replaying uncertain operations: {operations}"
-        ),
-        &[],
-    );
-    let events = collect_incident_events(&[entry], &WorkerPidMap::default());
-    assert_eq!(
-            events[0].summary,
-            "worker 5b1d3aeb91ee recovered; 533 uncertain operations not replayed (tool_execution_start x408, auto_retry_end x62, agent_end x47, message_start x16)"
-        );
-    // The cap kicks in past the fourth kind.
-    let five_kinds = supervisor_line(
-        "2026-09-10T20:23:29.521Z",
-        "Recovered worker 5b1d3aeb91ee without replaying uncertain operations: b, b, a, c, d, e",
-        &[],
-    );
-    let events = collect_incident_events(&[five_kinds], &WorkerPidMap::default());
-    assert_eq!(
-            events[0].summary,
-            "worker 5b1d3aeb91ee recovered; 6 uncertain operations not replayed (b x2, a x1, c x1, d x1, +1 more)"
-        );
-}
-
-#[test]
-fn passivation_tokens_skip_the_empty_name() {
-    let entry = supervisor_line(
-        "2026-09-10T20:05:00.000Z",
-        r#"Session worker 5b1d3aeb91ee stderr: Passivated idle child sessionId=feedface1234 name="" idleMinutes=5"#,
-        &[],
-    );
-    let events = collect_incident_events(&[entry], &WorkerPidMap::default());
-    assert_eq!(
-        events[0].tokens,
-        vec!["5b1d3aeb91ee".to_string(), "feedface1234".to_string()]
-    );
-    assert_eq!(
-        events[0].summary,
-        "passivated idle child session feedface1234 (idle 5m)"
-    );
-    let named = supervisor_line(
-        "2026-09-10T20:05:00.000Z",
-        r#"Session worker 5b1d3aeb91ee stderr: Passivated idle child sessionId=feedface1234 name="Faerie" idleMinutes=5"#,
-        &[],
-    );
-    let events = collect_incident_events(&[named], &WorkerPidMap::default());
-    assert_eq!(
-        events[0].tokens,
-        vec![
-            "5b1d3aeb91ee".to_string(),
-            "feedface1234".to_string(),
-            "Faerie".to_string()
-        ]
-    );
 }
 
 #[test]

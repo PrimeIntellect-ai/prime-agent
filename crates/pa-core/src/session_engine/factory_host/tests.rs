@@ -749,7 +749,7 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
     .unwrap();
     std::fs::write(machine_dir.join("prompts/greet.md"), "Greet {{who}}.\n").unwrap();
     let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
-    super::register_factory_compile_host_handler(&mut handlers);
+    super::register_factory_compile_host_handler(&mut handlers, dir.path());
     let handler = handlers
         .get(super::FACTORY_COMPILE_REQUEST_TYPE)
         .unwrap()
@@ -776,6 +776,7 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
                 }],
                 "transitions": [],
             },
+            "path": machine_dir.display().to_string(),
         })
     );
     let error = call(json!({"path": machine_dir.display().to_string()}))
@@ -1106,4 +1107,83 @@ fn concurrent_emits_of_one_file_port_commit_one_calls_bytes() {
         let copies = session_dir.join(super::FACTORY_FILES_DIR).join("design");
         assert_eq!(std::fs::read_dir(copies).unwrap().count(), 1);
     }
+}
+
+/// A name resolves through the one library scan: a directory compiles, a
+/// MACHINE.md answers its spec and refuses params, a broken or missing name
+/// says so.
+#[test]
+fn factory_compile_resolves_names_through_the_library_scan() {
+    let repo = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let dir = repo.path().join("hello");
+    std::fs::create_dir_all(dir.join("prompts")).unwrap();
+    std::fs::write(
+        dir.join("machine.toml"),
+        "format = 1\nname = \"hello\"\nversion = 1\ndescription = \"Say hello\"\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("prompts/greet.md"), "Greet.\n").unwrap();
+    std::fs::create_dir_all(user.path().join("sweep")).unwrap();
+    let md = user.path().join("sweep/MACHINE.md");
+    std::fs::write(
+        &md,
+        "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": {\"prompt\": \"Go.\"}}]}\n```\n",
+    )
+    .unwrap();
+    let levels = [
+        pa_factory::Level {
+            source: "repo".to_string(),
+            dir: repo.path().to_path_buf(),
+        },
+        pa_factory::Level {
+            source: "user".to_string(),
+            dir: user.path().to_path_buf(),
+        },
+    ];
+    let compiled = super::compile_machine(&json!({"name": "hello"}), &levels).unwrap();
+    assert_eq!(compiled["path"], dir.display().to_string());
+    assert_eq!(compiled["spec"]["states"][0]["id"], "greet");
+    let file = super::compile_machine(&json!({"name": "sweep"}), &levels).unwrap();
+    assert_eq!(file["path"], md.display().to_string());
+    assert_eq!(file["spec"]["states"][0]["subagent"]["prompt"], "Go.");
+    assert!(
+        super::compile_machine(&json!({"name": "sweep", "params": {"x": 1}}), &levels)
+            .unwrap_err()
+            .to_string()
+            .starts_with("params apply to machine directories")
+    );
+    assert_eq!(
+        super::compile_machine(&json!({"name": "absent"}), &levels)
+            .unwrap_err()
+            .to_string(),
+        "no library machine named \"absent\" (machines: hello, sweep)"
+    );
+}
+
+/// `factory.limits` answers `{}` for a spec inside the limits, else every
+/// bound it breaks.
+#[tokio::test]
+async fn factory_limits_checks_a_stored_spec() {
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers, Path::new("/nonexistent"));
+    let handler = handlers
+        .get(super::FACTORY_LIMITS_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call =
+        |data: serde_json::Value| handler(crate::kernel::shared::HostRequestPayload { data });
+    assert_eq!(
+        call(json!({"spec": {"run": {"max_parallel": 4}, "states": []}}))
+            .await
+            .unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        call(json!({"spec": {"run": {"max_parallel": 65}, "states": [{"id": "a", "retries": 11}]}}))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "run max_parallel must be an integer between 1 and 64; state a retries must be an integer between 0 and 10"
+    );
 }
