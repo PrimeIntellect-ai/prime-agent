@@ -408,14 +408,15 @@ fn split_harness_scope(id: &str) -> (Scope, &str) {
 }
 
 /// The out-of-band request the bridge sends into the kernel, validated
-/// host-side before the frame: one action with its target and the watch
-/// bound.
+/// host-side before the frame: one action with its target, the watch
+/// bound, and the `node` action's `(entry, instance)` selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactoryActivityRequest {
     pub action: &'static str,
     pub run_id: Option<String>,
     pub spec_id: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub selector: Option<(u64, u64)>,
 }
 
 impl FactoryActivityRequest {
@@ -426,13 +427,15 @@ impl FactoryActivityRequest {
     /// # Errors
     ///
     /// Returns an error when the action is unknown, a required target is
-    /// missing, `peek` carries a target, or the timeout is outside its
-    /// bounds.
+    /// missing, `peek` carries a target, the timeout is outside its
+    /// bounds, or a `node` selector is malformed or half given.
     pub fn parse(
         action: &str,
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&Value>,
+        instance: Option<&Value>,
     ) -> anyhow::Result<Self> {
         let Some(action) = FACTORY_ACTIVITY_ACTIONS
             .iter()
@@ -474,6 +477,26 @@ impl FactoryActivityRequest {
                 ));
             }
         }
+        // The `node` selector picks one instance: both values or neither,
+        // each a non-negative integer. A malformed value fails here instead
+        // of narrowing to `None`, which would select the latest instance.
+        let selector = match (action, entry, instance) {
+            ("node", Some(entry), Some(instance)) => {
+                let entry = entry.as_u64().ok_or_else(|| {
+                    anyhow!("factory activity node entry must be a non-negative integer")
+                })?;
+                let instance = instance.as_u64().ok_or_else(|| {
+                    anyhow!("factory activity node instance must be a non-negative integer")
+                })?;
+                Some((entry, instance))
+            }
+            ("node", Some(_), None) | ("node", None, Some(_)) => {
+                return Err(anyhow!(
+                    "factory activity node entry and instance selectors must be provided together"
+                ));
+            }
+            _ => None,
+        };
         Ok(Self {
             action,
             run_id: run_id
@@ -483,6 +506,7 @@ impl FactoryActivityRequest {
                 .filter(|id| !id.trim().is_empty())
                 .map(str::to_string),
             timeout_ms,
+            selector,
         })
     }
 }

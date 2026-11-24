@@ -133,6 +133,33 @@ impl AgentSessionEngine {
         }
         Some(inbox.push(notice, at_ms))
     }
+
+    /// The identity-checked withdrawal of a heartbeat job's waiting
+    /// fires, under the slot's mutex like [`Self::push_to_live_inbox`]:
+    /// a retired store never journals a withdrawal that could race the
+    /// replacement's reopen of the same journal. `None` when the store
+    /// is no longer the session's published inbox.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the inbox slot lock is poisoned.
+    pub(crate) fn withdraw_heartbeat_from_live_inbox(
+        &self,
+        inbox: &Arc<SessionInbox>,
+        job_id: &str,
+    ) -> Option<Vec<pa_core::session_engine::inbox::InboxMessage>> {
+        let slot = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, inbox))
+        {
+            return None;
+        }
+        Some(inbox.withdraw_heartbeat(job_id))
+    }
 }
 
 /// `agentInbox.enabled` (default on): the kill switch that restores

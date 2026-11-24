@@ -2798,6 +2798,18 @@ fn the_node_view_merge_keeps_the_files_and_fixes_the_selection() {
     assert!(view.error.is_some(), "the malformed reply reports");
 }
 
+/// A mermaid fence with no parseable states (a header only, or a one-line
+/// `graph TD; A-->B`) renders nothing instead of crashing the files page.
+#[test]
+fn a_mermaid_block_without_states_renders_nothing() {
+    for text in ["flowchart TB", "graph TD; A-->B", "stateDiagram-v2"] {
+        assert!(
+            super::mermaid::mermaid_block_lines(&theme(), text).is_empty(),
+            "{text:?}"
+        );
+    }
+}
+
 /// A mermaid flowchart node keeps only the label inside its shape, compound shapes included.
 #[test]
 fn compound_flowchart_shapes_keep_only_their_label() {

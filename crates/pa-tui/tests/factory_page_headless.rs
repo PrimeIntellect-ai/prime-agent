@@ -11,58 +11,19 @@
 //! drill-in before it closes the page. A daemon that advertises no lane
 //! mounts no factory group and opens no page.
 #![cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+mod support;
+
+use std::os::unix::net::UnixListener;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pa_tui::interactive::{
-    run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
-    SessionSelection, UiMode,
-};
+use pa_tui::interactive::{HeadlessPlan, HeadlessStep};
 use serde_json::{json, Value};
-
-struct MockSupervisor {
-    listener: UnixListener,
-    /// The hello's advertised capabilities: `factory_activity` mounts the
-    /// dock's factory and machine-library groups (the opt-in gate).
-    server_capabilities: Vec<String>,
-    /// The `library` list reply (no target): every machine row.
-    library_machines: Value,
-    /// The `library` graph reply for `pr-manager` (the drill-in target).
-    library_graph: Value,
-    /// The scoped `graph` reply: the first call answers `graph_first`,
-    /// every later one `graph_later` (the dock poll's refreshes).
-    graph_first: Value,
-    graph_later: Value,
-    /// The `overview` reply (the page's all-session rows): the first
-    /// call answers `overview_first`, every later one `overview_later`
-    /// (the page-only cadence's refreshes).
-    overview_first: Value,
-    overview_later: Value,
-    /// When set, hold the FIRST `overview` reply this many milliseconds
-    /// before answering (the page's mount-seed pin: the reply's real
-    /// bound is the supervisor's catalog scan, which a large session
-    /// catalog can hold for seconds — the reply never waits on a
-    /// kernel read).
-    overview_delay_first_ms: u64,
-    /// When set, hold every LATER `overview` reply this many milliseconds
-    /// before answering (the warm-reopen pin: the reopen's saved-era
-    /// frames stay on screen while the page-only cadence's refresh is
-    /// in flight).
-    overview_delay_later_ms: u64,
-    /// When set, every `overview` request answers this refusal instead —
-    /// the older-daemon skew (`unknown factory activity action`).
-    overview_error: Option<String>,
-    /// When set, the attach's `sessionName` answers this instead of the
-    /// default display name (the scrub pin's control-carrying name).
-    session_name: Option<String>,
-    /// Every `factory_activity` and child-control request the mock saw,
-    /// for the read-only control assertions.
-    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-}
+use support::{
+    attach_response, create_response, detach_response, respond, respond_failure, serve_connection,
+    session_stats_response, write_json,
+};
 
 /// The mock daemon's whole configurable surface for one headless run:
 /// the hello's advertised capabilities, the scoped `graph`'s first and
@@ -98,483 +59,111 @@ struct MockPlan {
     steps: Vec<HeadlessStep>,
 }
 
-impl MockSupervisor {
-    fn bind_with(socket: &std::path::Path, plan: MockPlan) -> Self {
-        MockSupervisor {
-            listener: UnixListener::bind(socket).expect("bind mock socket"),
-            server_capabilities: plan.server_capabilities,
-            library_machines: library_machines_reply(),
-            library_graph: library_graph_reply(),
-            graph_first: plan.graph_first,
-            graph_later: plan.graph_later,
-            overview_first: plan.overview_first,
-            overview_later: plan.overview_later,
-            overview_delay_first_ms: plan.overview_delay_first_ms,
-            overview_delay_later_ms: plan.overview_delay_later_ms,
-            overview_error: plan.overview_error,
-            session_name: plan.session_name,
-            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        }
-    }
-
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests.
-    // The mock's request loop is one match over every command the page sends; splitting it would
-    // scatter one protocol table.
-    #[allow(clippy::too_many_lines)]
-    fn serve(self) {
-        let MockSupervisor {
-            listener,
-            server_capabilities,
-            library_machines,
-            library_graph,
-            graph_first,
-            graph_later,
-            overview_first,
-            overview_later,
-            overview_delay_first_ms,
-            overview_delay_later_ms,
-            overview_error,
-            session_name,
-            requests,
-        } = self;
-        let (stream, _) = listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-        let mut graph_served = false;
-        let mut overview_served = false;
-        let mut overview_requests_served = 0;
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": server_capabilities,
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
+/// Serve one connection: attach an empty session, then answer the
+/// page's `factory_activity` reads from `plan`, logging every
+/// `factory_activity` and child-control request.
+fn serve(listener: &UnixListener, plan: &MockPlan, requests: &Mutex<Vec<String>>) {
+    let (stream, _) = listener.accept().expect("accept");
+    let capabilities: Vec<&str> = plan
+        .server_capabilities
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut graph_served = false;
+    let mut overview_served = false;
+    let mut overview_requests_served = 0;
+    serve_connection(stream, &capabilities, |writer, request| {
+        let id = request.id;
+        match request.kind {
+            "create" => write_json(writer, &create_response(id)),
+            "attach" => write_json(
+                writer,
+                &attach_response(
+                    id,
+                    plan.session_name.as_deref().unwrap_or("library session"),
+                ),
+            ),
+            "get_session_stats" => write_json(writer, &session_stats_response(id)),
+            "detach" => write_json(writer, &detach_response(id)),
+            "factory_activity" => {
+                // The lane's mock: the `library` action answers the
+                // machine list (no target) or the drilled machine's
+                // graph payload (`pr-manager`); the `overview` action
+                // answers the page's all-session rows (the first call
+                // and every refresh); every other action answers empty
+                // data.
+                let command = &request.command;
+                let action = command.get("action").and_then(Value::as_str);
+                if let Some(action) = action {
+                    requests.lock().expect("request log").push(format!(
+                        "factory_activity:{action}:runId={:?}:specId={:?}",
+                        command.get("runId").and_then(Value::as_str),
+                        command.get("specId").and_then(Value::as_str),
+                    ));
                 }
-                "attach" => {
-                    write_json(&mut writer, &attach_data(id, session_name.as_deref()));
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                "detach" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "detach",
-                            "success": true,
-                        }),
-                    );
-                }
-                "factory_activity" => {
-                    // The lane's mock: the `library` action answers the
-                    // machine list (no target) or the drilled machine's
-                    // graph payload (`pr-manager`); the `overview` action
-                    // answers the page's all-session rows (the first call
-                    // and every refresh); every other action answers empty
-                    // data.
-                    let action = command.get("action").and_then(Value::as_str);
-                    if let Some(action) = action {
-                        requests.lock().expect("request log").push(format!(
-                            "factory_activity:{action}:runId={:?}:specId={:?}",
-                            command.get("runId").and_then(Value::as_str),
-                            command.get("specId").and_then(Value::as_str),
-                        ));
+                let data = match action {
+                    Some("graph") => {
+                        // The refreshed graph reaches the page only
+                        // once the cadence asked the overview twice:
+                        // the refusal test's refreshed-counter needle
+                        // then paints only through a LATER fallback
+                        // fold (a re-asked refusal), never a first
+                        // fold that raced the dock's refresh.
+                        if graph_served && overview_requests_served >= 2 {
+                            plan.graph_later.clone()
+                        } else {
+                            graph_served = true;
+                            plan.graph_first.clone()
+                        }
                     }
-                    let data = match action {
-                        Some("graph") => {
-                            // The refreshed graph reaches the page only
-                            // once the cadence asked the overview twice:
-                            // the refusal test's refreshed-counter needle
-                            // then paints only through a LATER fallback
-                            // fold (a re-asked refusal), never a first
-                            // fold that raced the dock's refresh.
-                            let later = graph_served && overview_requests_served >= 2;
-                            if later {
-                                graph_later.clone()
-                            } else {
-                                graph_served = true;
-                                graph_first.clone()
-                            }
+                    Some("overview") => {
+                        overview_requests_served += 1;
+                        if let Some(message) = &plan.overview_error {
+                            respond_failure(writer, id, "factory_activity", message);
+                            return true;
                         }
-                        Some("overview") => {
-                            overview_requests_served += 1;
-                            if let Some(message) = &overview_error {
-                                write_json(
-                                    &mut writer,
-                                    &json!({
-                                        "type": "response",
-                                        "id": id,
-                                        "command": "factory_activity",
-                                        "success": false,
-                                        "error": message,
-                                    }),
-                                );
-                                continue;
+                        if overview_served {
+                            if plan.overview_delay_later_ms > 0 {
+                                std::thread::sleep(Duration::from_millis(
+                                    plan.overview_delay_later_ms,
+                                ));
                             }
-                            if overview_served {
-                                if overview_delay_later_ms > 0 {
-                                    std::thread::sleep(Duration::from_millis(
-                                        overview_delay_later_ms,
-                                    ));
-                                }
-                                overview_later.clone()
-                            } else {
-                                overview_served = true;
-                                if overview_delay_first_ms > 0 {
-                                    // The held first reply: the
-                                    // supervisor's catalog scan can hold
-                                    // the overview past the page's open
-                                    // (the reply serves the cache and
-                                    // never waits on a kernel read) —
-                                    // the mount seed's window.
-                                    std::thread::sleep(Duration::from_millis(
-                                        overview_delay_first_ms,
-                                    ));
-                                }
-                                overview_first.clone()
+                            plan.overview_later.clone()
+                        } else {
+                            overview_served = true;
+                            if plan.overview_delay_first_ms > 0 {
+                                // The held first reply: the supervisor's
+                                // catalog scan can hold the overview past
+                                // the page's open (the reply serves the
+                                // cache and never waits on a kernel
+                                // read) — the mount seed's window.
+                                std::thread::sleep(Duration::from_millis(
+                                    plan.overview_delay_first_ms,
+                                ));
                             }
+                            plan.overview_first.clone()
                         }
-                        Some("library") => match command.get("specId").and_then(Value::as_str) {
-                            Some("pr-manager") => library_graph.clone(),
-                            Some(_) => json!({}),
-                            None => library_machines.clone(),
-                        },
-                        _ => json!({}),
-                    };
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "factory_activity",
-                            "success": true,
-                            "data": data,
-                        }),
-                    );
-                }
-                "cancel_rlm_child" | "delete_rlm_subagent" => {
-                    requests
-                        .lock()
-                        .expect("request log")
-                        .push(command_type.clone());
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                }
+                    }
+                    Some("library") => match command.get("specId").and_then(Value::as_str) {
+                        Some("pr-manager") => library_graph_reply(),
+                        Some(_) => json!({}),
+                        None => library_machines_reply(),
+                    },
+                    _ => json!({}),
+                };
+                respond(writer, id, "factory_activity", &data);
             }
+            "cancel_rlm_child" | "delete_rlm_subagent" => {
+                requests
+                    .lock()
+                    .expect("request log")
+                    .push(request.kind.to_string());
+                return false;
+            }
+            _ => return false,
         }
-    }
-}
-
-fn write_json(writer: &mut UnixStream, value: &Value) {
-    let mut line = serde_json::to_string(value).expect("serialize mock frame");
-    line.push('\n');
-    // A held overview reply can outlive the plan: the client closed the socket, so the reply
-    // has no reader and the serve loop ends at the next read.
-    match writer
-        .write_all(line.as_bytes())
-        .and_then(|()| writer.flush())
-    {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-            ) => {}
-        Err(error) => panic!("write mock frame: {error}"),
-    }
-}
-
-/// The slim attach result: one empty session, its display name the
-/// plan's override or the shared default.
-fn attach_data(id: &str, session_name: Option<&str>) -> Value {
-    json!({
-        "type": "response",
-        "id": id,
-        "command": "attach",
-        "success": true,
-        "data": {
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "activeSessionId": "s1",
-            "snapshot": {
-                "activeSessionId": "s1",
-                "summary": { "id": "s1", "cwd": "/tmp" },
-                "state": {
-                    "activeSessionId": "s1",
-                    "cwd": "/tmp",
-                    "sessionId": "sess-1",
-                    "sessionName": session_name.unwrap_or("library session"),
-                    "model": null,
-                    "isStreaming": false,
-                    "isCompacting": false,
-                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
-                },
-                "messages": [],
-                "lastEventSequence": 0,
-                "lastEventCursor": null,
-            },
-            "client": { "id": "mock", "capabilities": [] },
-            "lastEventSequence": 0,
-            "lastEventCursor": null,
-        },
-    })
-}
-
-/// A minimal settings seam for the harness: every getter returns its
-/// default with no-op writes (the factory gate is the daemon's lane
-/// advertisement, which the mock's hello carries).
-#[derive(Default)]
-struct RecordingSettings;
-
-impl pa_tui::client_settings::ClientSettings for RecordingSettings {
-    fn compaction_threshold_percent(&self) -> f64 {
-        95.0
-    }
-    fn set_compaction_threshold_percent(&self, _percent: f64) -> Result<()> {
-        Ok(())
-    }
-    fn theme(&self) -> Option<String> {
-        None
-    }
-    fn set_theme(&self, _theme: &str) -> Result<()> {
-        Ok(())
-    }
-    fn show_images(&self) -> bool {
         true
-    }
-    fn set_show_images(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn clear_on_shrink(&self) -> bool {
-        false
-    }
-    fn set_clear_on_shrink(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_terminal_progress(&self) -> bool {
-        false
-    }
-    fn set_show_terminal_progress(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn image_auto_resize(&self) -> bool {
-        true
-    }
-    fn set_image_auto_resize(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn block_images(&self) -> bool {
-        false
-    }
-    fn set_block_images(&self, _blocked: bool) -> Result<()> {
-        Ok(())
-    }
-    fn image_model(&self) -> Option<String> {
-        None
-    }
-    fn enable_skill_commands(&self) -> bool {
-        true
-    }
-    fn set_enable_skill_commands(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn enable_builtin_skills(&self) -> bool {
-        true
-    }
-    fn set_enable_builtin_skills(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn show_hardware_cursor(&self) -> bool {
-        false
-    }
-    fn set_show_hardware_cursor(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn editor_padding_x(&self) -> u64 {
-        0
-    }
-    fn set_editor_padding_x(&self, _padding: u64) -> Result<()> {
-        Ok(())
-    }
-    fn autocomplete_max_visible(&self) -> u64 {
-        5
-    }
-    fn set_autocomplete_max_visible(&self, _max: u64) -> Result<()> {
-        Ok(())
-    }
-    fn quiet_startup(&self) -> bool {
-        false
-    }
-    fn set_quiet_startup(&self, _quiet: bool) -> Result<()> {
-        Ok(())
-    }
-    fn idle_eviction_minutes(&self) -> String {
-        "90".to_string()
-    }
-    fn set_idle_eviction_minutes(&self, _value: &str) -> Result<()> {
-        Ok(())
-    }
-    fn mermaid_rendering_mode(&self) -> String {
-        "streaming".to_string()
-    }
-    fn set_mermaid_rendering_mode(&self, _mode: &str) -> Result<()> {
-        Ok(())
-    }
-    fn tree_filter_mode(&self) -> String {
-        "user-only".to_string()
-    }
-    fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
-        Ok(())
-    }
-    fn default_service_tier(&self) -> String {
-        "default".to_string()
-    }
-    fn set_default_service_tier(&self, _tier: &str) -> Result<()> {
-        Ok(())
-    }
-    fn chat_detail(&self) -> String {
-        "details".to_string()
-    }
-    fn set_chat_detail(&self, _detail: &str) -> Result<()> {
-        Ok(())
-    }
-    fn factory_enabled(&self) -> bool {
-        false
-    }
-    fn set_factory_enabled(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn telemetry_status(&self) -> String {
-        "telemetry enabled".to_string()
-    }
-    fn set_telemetry_enabled(&self, _enabled: bool) -> Result<String> {
-        Ok("telemetry enabled".to_string())
-    }
-    fn warnings_anthropic_extra_usage(&self) -> bool {
-        true
-    }
-    fn set_warnings_anthropic_extra_usage(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
-    fn update_channel(&self) -> Option<String> {
-        None
-    }
-    fn set_update_channel(&self, _channel: &str) -> Result<()> {
-        Ok(())
-    }
-    fn effective_update_channel(&self, _version: &str) -> String {
-        "stable".to_string()
-    }
-}
-
-fn options(socket: PathBuf) -> InteractiveOptions {
-    InteractiveOptions {
-        models: None,
-        socket_path: socket,
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        script_path: None,
-        model_selection: ModelSelection::default(),
-        model_catalog: Vec::new(),
-        model_configured_providers: std::collections::HashSet::default(),
-        model_recent_models: Vec::new(),
-        default_thinking_level: None,
-        no_session: false,
-        session: SessionSelection::New,
-        initial_message: None,
-        show_images: true,
-        fullscreen_mouse: true,
-        theme: "prime".to_string(),
-        code_block_indent: "  ".to_string(),
-        tree_filter_mode: String::new(),
-        branch_summary_skip_prompt: false,
-        version: "0.0.0".to_string(),
-        onboarding: None,
-        telemetry_disabled: None,
-        client_auth: None,
-        traces: None,
-        provider_auth: None,
-        update_commands: None,
-        telemetry: None,
-        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
-        session_rlm_depth: None,
-        prompt_stash: std::sync::Arc::default(),
-        session_has_children: false,
-        restore_dock_focus: false,
-        client_settings: Some(std::sync::Arc::new(RecordingSettings)),
-    }
+    });
 }
 
 /// The harness entry with a configured mock daemon: the hello's
@@ -630,31 +219,22 @@ fn run_plan_overview_mode(
 /// [`run_plan_overview_mode`] with the full [`MockPlan`] surface: the
 /// scoped graph's first and later replies and the first and later
 /// overview replies' holds each configurable.
-fn run_plan_overview_full(plan: MockPlan) -> (Vec<String>, Vec<String>) {
-    std::env::remove_var("TMUX");
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("tui.sock");
-    // The steps run against the mock daemon; the daemon itself serves
-    // only the plan's reply surface, so the steps leave the plan here.
-    let mut plan = plan;
+fn run_plan_overview_full(mut plan: MockPlan) -> (Vec<String>, Vec<String>) {
     let steps = std::mem::take(&mut plan.steps);
-    let supervisor = MockSupervisor::bind_with(&socket, plan);
-    let requests = std::sync::Arc::clone(&supervisor.requests);
-    let handle = std::thread::spawn(move || supervisor.serve());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let plan = HeadlessPlan {
-        steps,
-        width: 100,
-        height: 30,
-    };
-    let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
-        .expect("interactive run");
-    handle.join().expect("mock supervisor finished");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&requests);
+    let outcome = support::run_headless(
+        HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        },
+        support::options,
+        move |socket| {
+            let mock = support::MockSupervisor::bind(socket);
+            move || serve(&mock.listener, &plan, &log)
+        },
+    );
     let requests = requests.lock().expect("request log").clone();
     (outcome.frames, requests)
 }

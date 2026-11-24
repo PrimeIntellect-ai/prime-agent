@@ -147,6 +147,7 @@ impl AgentSessionEngine {
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
             restored_model: std::sync::Mutex::new(None),
+            model_resolution_warning: std::sync::Mutex::default(),
             startup_scope: std::sync::Mutex::new(None),
             initial_selection: std::sync::RwLock::new(selection),
             effective_thinking: std::sync::RwLock::new(None),
@@ -176,8 +177,6 @@ impl AgentSessionEngine {
             rlm_usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
             quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            turn_seats: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            parked_drains: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             autonomous_driver,
             autonomous_driver_default: std::sync::atomic::AtomicBool::new(true),
             held_autonomous_continuation: std::sync::Mutex::new(None),
@@ -776,8 +775,8 @@ impl AgentSessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
-        entry: Option<u64>,
-        instance: Option<u64>,
+        entry: Option<&Value>,
+        instance: Option<&Value>,
     ) -> anyhow::Result<Value> {
         if action == "library" {
             let model = self.resolve_model()?;
@@ -1122,8 +1121,6 @@ impl AgentSessionEngine {
             tools: vec![],
             custom_system_prompt: create_resources.system_prompt,
             prompt_guidelines: create_resources.append_system_prompt,
-            generic_mcp_servers: vec![],
-            allow_recursion: None,
             session_manager: Some(session_manager),
             extra_host_handlers: self.extra_host_handlers(),
             conversation_log_path: session_file,

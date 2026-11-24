@@ -1111,3 +1111,47 @@ fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
         }
     );
 }
+
+/// A provider-qualified `--model` the catalog misses runs on a custom id, never
+/// silently: the resolver's warning reaches stderr once.
+#[test]
+fn print_mode_warns_once_when_the_model_selection_is_inexact() {
+    let home = isolated_home();
+    let agent_dir = home.path().join(".prime/agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({ "providers": { "anthropic": {
+            "api": "openai-completions", "baseUrl": "http://127.0.0.1:9/v1", "apiKey": "synthetic-only",
+            "models": [{ "id": "claude-opus-4-7" }]
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({ "retry": { "enabled": false } }).to_string(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .args([
+            "-p",
+            "hi",
+            "--no-session",
+            "--model",
+            "anthropic/no-such-model",
+        ])
+        .env("HOME", home.path())
+        .env_remove("PRIME_AGENT_FAUX_SCRIPT")
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .env_remove("RLM_DEPTH")
+        .current_dir(home.path())
+        .output()
+        .expect("binary present");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warnings = stderr
+        .lines()
+        .filter(|line| line.starts_with("Warning: ") && line.contains("no-such-model"))
+        .count();
+    assert_eq!(warnings, 1, "stderr: {stderr}");
+}

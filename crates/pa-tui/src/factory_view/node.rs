@@ -109,6 +109,82 @@ impl NodeFiles {
             })
             .unwrap_or_default()
     }
+
+    /// One state's files document: the header, then each file — Markdown
+    /// rendered colored (mermaid fences as diagrams), other files as code.
+    /// `owner` names the run or machine the files belong to.
+    pub(super) fn document(
+        &self,
+        theme: &Theme,
+        width: usize,
+        state: &str,
+        owner: &str,
+    ) -> Vec<Line> {
+        let files = self.node_files(state);
+        let mut document = vec![files_header(theme, width, state, owner, files.len())];
+        if files.is_empty() {
+            document.push(vec![Span::raw("")]);
+            document.push(vec![
+                Span::raw("  "),
+                theme.fg_span(ThemeColor::Muted, "No files recorded for this state."),
+            ]);
+        }
+        let style = MarkdownStyle::from_theme(theme);
+        let inner = width.saturating_sub(4).max(20);
+        for (path, text) in files {
+            document.push(vec![Span::raw("")]);
+            let rule = "─".repeat(inner.saturating_sub(path.chars().count() + 4).min(60));
+            document.push(vec![
+                Span::raw("  "),
+                theme.fg_span(ThemeColor::Accent, format!("── {path} ")),
+                theme.fg_span(ThemeColor::Dim, rule),
+            ]);
+            document.push(vec![Span::raw("")]);
+            let rows: Vec<Line> = if std::path::Path::new(path)
+                .extension()
+                .is_some_and(|ext| ext == "md")
+                || path.starts_with("MACHINE.md")
+            {
+                let mut rows = Vec::new();
+                for segment in split_mermaid_fences(text) {
+                    match segment {
+                        FileSegment::Text(prose) => {
+                            rows.extend(render_markdown(&prose, inner, &style));
+                        }
+                        FileSegment::Mermaid(source) => {
+                            rows.extend(mermaid_block_lines(theme, &source));
+                        }
+                    }
+                }
+                rows
+            } else {
+                text.lines()
+                    .map(|line| vec![theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())])
+                    .collect()
+            };
+            for row in rows {
+                let mut line: Line = vec![Span::raw("  ")];
+                line.extend(row);
+                document.push(truncate_line(&line, width, ""));
+            }
+        }
+        document
+    }
+}
+
+/// The files document's header: `node: <state> · <owner> · N files`.
+fn files_header(theme: &Theme, width: usize, state: &str, owner: &str, count: usize) -> Line {
+    let mut header: Line = vec![Span::raw("  ")];
+    header.push(theme.fg_span(ThemeColor::ToolTitle, "node: "));
+    header.push(theme.fg_span(ThemeColor::Text, state.to_string()));
+    header.push(theme.fg_span(
+        ThemeColor::Muted,
+        format!(
+            " · {owner} · {count} file{}",
+            if count == 1 { "" } else { "s" }
+        ),
+    ));
+    truncate_line(&header, width, "")
 }
 
 /// One instance row (the node report's instance list).
@@ -838,88 +914,24 @@ impl NodeView {
         rows
     }
 
-    /// The node's template files: today's files view, byte-for-byte —
-    /// Markdown files render colored (mermaid fences as diagrams), other
-    /// files as code.
+    /// The node's template files: the machine drill-in's files document,
+    /// or a loading row until the fetch lands.
     fn files_document(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let files = self
-            .files
-            .as_ref()
-            .map(|files| files.node_files(&self.state_id));
-        let file_count = files.as_ref().map_or(0, Vec::len);
-        let mut document: Vec<Line> = Vec::new();
-        let mut header: Line = vec![Span::raw("  ")];
-        header.push(theme.fg_span(ThemeColor::ToolTitle, "node: "));
-        header.push(theme.fg_span(ThemeColor::Text, self.state_id.clone()));
-        header.push(theme.fg_span(
-            ThemeColor::Muted,
-            format!(
-                " · {} · {} file{}",
-                if self.run_name.is_empty() {
-                    self.run_id.clone()
-                } else {
-                    self.run_name.clone()
-                },
-                file_count,
-                if file_count == 1 { "" } else { "s" }
-            ),
-        ));
-        document.push(truncate_line(&header, width, ""));
-        let Some(files) = files else {
-            if self.files_error.is_none() {
-                document.push(vec![Span::raw("")]);
-                document.push(vec![
-                    Span::raw("  "),
-                    theme.fg_span(ThemeColor::Muted, "Loading files…"),
-                ]);
-            }
-            return document;
+        let owner = if self.run_name.is_empty() {
+            &self.run_id
+        } else {
+            &self.run_name
         };
-        if files.is_empty() {
-            document.push(vec![Span::raw("")]);
-            document.push(vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Muted, "No files recorded for this state."),
-            ]);
+        if let Some(files) = &self.files {
+            return files.document(theme, width, &self.state_id, owner);
         }
-        let style = MarkdownStyle::from_theme(theme);
-        let inner = width.saturating_sub(4).max(20);
-        for (path, text) in files {
+        let mut document = vec![files_header(theme, width, &self.state_id, owner, 0)];
+        if self.files_error.is_none() {
             document.push(vec![Span::raw("")]);
-            let rule = "─".repeat(inner.saturating_sub(path.chars().count() + 4).min(60));
             document.push(vec![
                 Span::raw("  "),
-                theme.fg_span(ThemeColor::Accent, format!("── {path} ")),
-                theme.fg_span(ThemeColor::Dim, rule),
+                theme.fg_span(ThemeColor::Muted, "Loading files…"),
             ]);
-            document.push(vec![Span::raw("")]);
-            let rows: Vec<Line> = if std::path::Path::new(path)
-                .extension()
-                .is_some_and(|ext| ext == "md")
-                || path.starts_with("MACHINE.md")
-            {
-                let mut rows = Vec::new();
-                for segment in split_mermaid_fences(text) {
-                    match segment {
-                        FileSegment::Text(prose) => {
-                            rows.extend(render_markdown(&prose, inner, &style));
-                        }
-                        FileSegment::Mermaid(source) => {
-                            rows.extend(mermaid_block_lines(theme, &source));
-                        }
-                    }
-                }
-                rows
-            } else {
-                text.lines()
-                    .map(|line| vec![theme.fg_span(ThemeColor::MdCodeBlock, line.to_string())])
-                    .collect()
-            };
-            for row in rows {
-                let mut line: Line = vec![Span::raw("  ")];
-                line.extend(row);
-                document.push(truncate_line(&line, width, ""));
-            }
         }
         document
     }
