@@ -1975,7 +1975,7 @@ mod tests {
         );
         let roots = KnownSessionRoots {
             catalog_dir: sessions.clone(),
-            default_dir: sessions.clone(),
+            default_dir: sessions,
             residents: Vec::new(),
             roster_files: Vec::new(),
             ledgers,

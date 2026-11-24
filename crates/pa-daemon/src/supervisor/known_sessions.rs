@@ -104,11 +104,11 @@ impl Supervisor {
         dirs.sort();
         dirs.dedup();
         for dir in dirs {
-            if !ledgers.contains_key(&dir) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = ledgers.entry(dir) {
                 let ledger = self
-                    .rlm_spawn_ledger_for(Some(&dir.to_string_lossy()))
+                    .rlm_spawn_ledger_for(Some(&slot.key().to_string_lossy()))
                     .await?;
-                ledgers.insert(dir, ledger);
+                slot.insert(ledger);
             }
         }
         Ok(KnownSessionRoots {
