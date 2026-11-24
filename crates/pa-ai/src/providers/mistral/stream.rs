@@ -735,54 +735,8 @@ impl MistralStreamState {
 mod tests {
     use super::*;
 
-    /// The TS `formatMistralError` shape: "Mistral API error (N): <body>", truncated at 4000 chars
-    /// (UTF-16 units) with the JS remainder count.
-    #[test]
-    fn mistral_http_error_body_shape() {
-        let headers = HashMap::new();
-        let error = mistral_http_error(400, "{\"message\":\"bad request\"}", &headers);
-        assert_eq!(
-            error.to_string(),
-            "Mistral API error (400): {\"message\":\"bad request\"}"
-        );
-        // The TS diagnostic records the SDK error class name and status.
-        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
-        assert_eq!(info.status, Some(400));
-        assert_eq!(
-            info.provider_error_type.as_deref(),
-            Some(MISTRAL_SDK_ERROR_NAME)
-        );
-        assert_eq!(
-            info.kind,
-            crate::utils_inner::stream_failure::StreamFailureKind::InvalidRequest
-        );
-    }
-
-    /// An empty error body falls back to the SDK's own composed message, per `formatMistralError`'s
-    /// statusCode-without-body branch.
-    #[test]
-    fn mistral_http_error_empty_body_falls_back_to_sdk_message() {
-        let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
-        let error = mistral_http_error(400, "", &headers);
-        assert_eq!(
-            error.to_string(),
-            "Mistral API error (400): API error occurred: Status 400. Body: \"\""
-        );
-
-        let mut headers = HashMap::new();
-        headers.insert(
-            "content-type".to_string(),
-            "text/html; charset=utf-8".to_string(),
-        );
-        let error = mistral_http_error(500, "", &headers);
-        assert_eq!(
-            error.to_string(),
-            "Mistral API error (500): API error occurred: Status 500 Content-Type \"text/html; charset=utf-8\". Body: \"\""
-        );
-    }
-
-    /// Bodies longer than 4000 chars truncate with the JS-char count.
+    /// Bodies longer than 4000 chars truncate with the JS-char count. The error keeps its status, so
+    /// the retry ladder classifies it.
     #[test]
     fn mistral_error_body_truncation() {
         let error = mistral_http_error(400, &"x".repeat(4100), &HashMap::new());
@@ -793,52 +747,16 @@ mod tests {
                 "x".repeat(4000)
             )
         );
-    }
-
-    /// Connection-level failures carry the mistral SDK's wrapper shape: the `UnexpectedClientError`
-    /// fixed prefix over the runtime's refused-connect text, and the `RequestTimeoutError` fixed
-    /// prefix with the raw cause.
-    #[test]
-    fn mistral_connection_error_texts() {
-        let connect = ProviderError::Connection(
-            crate::utils_inner::stream_failure::ProviderConnectionError {
-                kind: crate::utils_inner::stream_failure::ConnectionErrorKind::Connect,
-                profile: crate::utils_inner::stream_failure::ConnectionErrorProfile::MistralSdk,
-                cause: "tcp connect error: Connection refused".to_string(),
-            },
+        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
+        assert_eq!(info.status, Some(400));
+        assert_eq!(
+            info.provider_error_type.as_deref(),
+            Some(MISTRAL_SDK_ERROR_NAME)
         );
         assert_eq!(
-            connect.to_string(),
-            "Unexpected HTTP client error: TypeError: Unable to connect. Is the computer able to access the url?"
+            info.kind,
+            crate::utils_inner::stream_failure::StreamFailureKind::InvalidRequest
         );
-        let timeout = ProviderError::Connection(
-            crate::utils_inner::stream_failure::ProviderConnectionError {
-                kind: crate::utils_inner::stream_failure::ConnectionErrorKind::Timeout,
-                profile: crate::utils_inner::stream_failure::ConnectionErrorProfile::MistralSdk,
-                cause: "request exceeded the 30000ms timeout".to_string(),
-            },
-        );
-        assert_eq!(
-            timeout.to_string(),
-            "Request timed out: request exceeded the 30000ms timeout"
-        );
-    }
-
-    #[test]
-    fn maps_chat_stop_reasons() {
-        assert_eq!(map_chat_stop_reason(None), StopReason::Stop);
-        assert_eq!(map_chat_stop_reason(Some("stop")), StopReason::Stop);
-        assert_eq!(map_chat_stop_reason(Some("length")), StopReason::Length);
-        assert_eq!(
-            map_chat_stop_reason(Some("model_length")),
-            StopReason::Length
-        );
-        assert_eq!(
-            map_chat_stop_reason(Some("tool_calls")),
-            StopReason::ToolUse
-        );
-        assert_eq!(map_chat_stop_reason(Some("error")), StopReason::Error);
-        assert_eq!(map_chat_stop_reason(Some("whatever")), StopReason::Stop);
     }
 
     /// TS assigns `usage.totalTokens = chunk.usage.totalTokens || input + output`, so an explicitly

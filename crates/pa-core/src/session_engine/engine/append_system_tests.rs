@@ -44,6 +44,8 @@ async fn assert_prompt_case(case: PromptCase) {
         let provider = Arc::new(ScriptedProvider::new(model.clone()));
         provider.push_text_turn("scripted response");
         let engine = create_session(SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             cwd,
             agent_dir,
             model: Some(model),

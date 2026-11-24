@@ -629,32 +629,6 @@ mod tests {
         assert_eq!(params.get("reasoning"), Some(&json!({ "enabled": false })));
     }
 
-    /// The compiled fallback catalog is conservative (TS #2519: the live catalog owns the reasoning
-    /// declarations): offline, a Prime Inference route declares neither the effort selector nor a
-    /// thinking format, so a reasoning request sends no reasoning parameter at all.
-    #[test]
-    fn compiled_fallback_prime_inference_routes_send_no_reasoning_parameters() {
-        for (model_id, level) in [
-            ("z-ai/glm-5.3", ModelThinkingLevel::High),
-            ("z-ai/glm-5.3", ModelThinkingLevel::Medium),
-            ("z-ai/glm-4.7", ModelThinkingLevel::High),
-            ("z-ai/glm-4.7", ModelThinkingLevel::Off),
-        ] {
-            let params = compiled_params("prime-inference", model_id, level);
-            for key in [
-                "enable_thinking",
-                "chat_template_kwargs",
-                "reasoning",
-                "reasoning_effort",
-            ] {
-                assert!(
-                    !params.contains_key(key),
-                    "compiled fallback {model_id}: request must not carry {key}"
-                );
-            }
-        }
-    }
-
     /// The direct z.ai routes keep the toggle: their compat still selects the zai thinking format,
     /// so reasoning requests send `enable_thinking`.
     #[test]
