@@ -97,6 +97,13 @@ pub(super) async fn serve(
         };
         consecutive_failures = 0;
         recoverable_streak = 0;
+        // A terminal stop pass refuses new clients before the hello: a client
+        // without a hello reads the daemon as not up yet and retries quietly,
+        // while the bound listener keeps the socket live, so no second
+        // supervisor binds over the stop pass.
+        if supervisor.shutting_down.load(Ordering::SeqCst) {
+            continue;
+        }
         let supervisor = Arc::clone(supervisor);
         tokio::spawn(async move {
             if let Err(error) = supervisor.handle_client(stream).await {
@@ -400,6 +407,37 @@ mod tests {
             started.elapsed() < BACKOFF,
             "the backoff ended at the wake, not the full second (elapsed {:?})",
             started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_stop_pass_closes_new_connections_before_the_hello() {
+        use tokio::io::AsyncReadExt as _;
+        let dir = TempDir::new().unwrap();
+        let supervisor = test_supervisor(&dir);
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        let (mut client, accepted) = tokio::io::duplex(4096);
+        let scripted = ScriptedAccepts {
+            results: Arc::new(Mutex::new(
+                vec![Ok(
+                    Box::new(DuplexTransport(Mutex::new(accepted))) as Box<dyn TransportStream>
+                )]
+                .into(),
+            )),
+            supervisor: Arc::clone(&supervisor),
+        };
+        serve(&supervisor, Box::new(scripted))
+            .await
+            .expect("the loop exits at the scripted wake");
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut received))
+            .await
+            .expect("the refused connection closes")
+            .unwrap();
+        assert!(
+            received.is_empty(),
+            "no hello: {}",
+            String::from_utf8_lossy(&received)
         );
     }
 }

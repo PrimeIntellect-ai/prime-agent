@@ -1,0 +1,1 @@
+- Fixed attached windows printing a `reattach failed … Supervisor is shutting down` warning on every retry while the daemon stopped its sessions; they now wait quietly until the daemon is back.

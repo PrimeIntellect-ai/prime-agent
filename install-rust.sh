@@ -2036,6 +2036,10 @@ def kill_supervisor():
         return "unverified"
     current = wait_hello(sock)
     sock.close()
+    if current is None and owner == "rust":
+        # A Rust supervisor in its stop pass closes new connections before
+        # the hello: the identifying hello names that same supervisor.
+        current = hello
     if current is None or (kind == "ts" and classify_hello(current) != owner):
         progress("could not re-identify the daemon on its socket; not signalled")
         return "unverified"
