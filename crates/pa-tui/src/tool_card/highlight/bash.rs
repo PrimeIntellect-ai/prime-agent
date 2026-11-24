@@ -159,6 +159,12 @@ fn double_quoted(rest: &str, plain: &mut String, tokens: &mut Vec<(String, Scope
                 substitution -= 1;
                 j += 1;
             }
+            '\'' if substitution > 0 => {
+                // A single-quoted string inside the substitution: its parens
+                // and quotes are literal, so skip it whole.
+                j += 1;
+                j += rest[j..].find('\'').map_or(rest.len() - j, |end| end + 1);
+            }
             '"' if substitution > 0 => {
                 // A string inside the substitution: skip it whole.
                 j += 1;
@@ -433,6 +439,10 @@ mod tests {
         let code = r#"echo "$(echo "a # b")"; ls"#;
         assert!(scoped(code, Scope::Comment).is_empty());
         assert_eq!(scoped(code, Scope::String), vec![r#""$(echo "a # b")""#]);
+        assert_eq!(scoped(code, Scope::BuiltIn), vec!["echo", "ls"]);
+        // A single-quoted paren inside the substitution never unbalances it.
+        let code = r#"echo "$(grep '(' f)"; ls"#;
+        assert_eq!(scoped(code, Scope::String), vec![r#""$(grep '(' f)""#]);
         assert_eq!(scoped(code, Scope::BuiltIn), vec!["echo", "ls"]);
     }
 
