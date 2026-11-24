@@ -1493,6 +1493,9 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         rtype = req.get("type")
         if rtype == "shutdown":
             rid = req.get("id")
+            # Captured before any await: a cell that settles during the waits
+            # below leaves `_cell_tasks` but still needs the second flush.
+            cells = set(_cell_tasks)
             if req.get("eof"):
                 # Host stdin closed without a shutdown request: the host
                 # process is gone, so this is the last chance to persist.
@@ -1509,8 +1512,8 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             # A cell still running at shutdown gets a short grace (a cell
             # whose host request just failed finishes with that error), then
             # its handler reports the cancellation as its error and done.
-            if _cell_tasks:
-                await asyncio.wait(set(_cell_tasks), timeout=0.5)
+            if cells:
+                await asyncio.wait(cells, timeout=0.5)
                 if _cell_tasks:
                     for task in list(_cell_tasks):
                         task.cancel()

@@ -2203,6 +2203,48 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertIn("next ran", stream_text(events, "stdout"))
 
 
+class EofFinalFlushTest(unittest.TestCase):
+    """In-process check of the EOF shutdown's second final flush."""
+
+    def test_a_cell_that_settles_during_the_mcp_status_wait_is_flushed(self):
+        import rlm.repl as repl_module
+
+        ns = {"x": 1}
+        flushed: list[int] = []
+
+        async def run() -> None:
+            mcp_cancelled = asyncio.Event()
+            cell_wrote = asyncio.Event()
+
+            async def mcp_status() -> None:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    mcp_cancelled.set()
+                    await cell_wrote.wait()
+
+            async def cell() -> None:
+                await mcp_cancelled.wait()
+                ns["x"] = 42
+                cell_wrote.set()
+
+            for tasks, coro in ((repl_module._mcp_status_tasks, mcp_status()), (repl_module._cell_tasks, cell())):
+                task = asyncio.get_running_loop().create_task(coro)
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            # Both tasks reach their first await before the shutdown cancels.
+            await asyncio.sleep(0)
+            queue: asyncio.Queue[dict] = asyncio.Queue()
+            queue.put_nowait({"type": "shutdown", "eof": True})
+            await repl_module._serve(queue, ns)
+
+        handler = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGINT, handler)
+        with mock.patch.object(repl_module, "_flush_final_snapshot", lambda flushed_ns: flushed.append(flushed_ns["x"])):
+            asyncio.run(run())
+        self.assertEqual(flushed, [1, 42])
+
+
 class FinishRequestTest(unittest.TestCase):
     """In-process checks of the parked-interrupt bookkeeping on request finish."""
 
