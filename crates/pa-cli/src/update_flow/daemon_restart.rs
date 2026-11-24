@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use pa_types::daemon::update_flow::{
-    update_prepared_dir, update_roster_path, UpdateId, UpdateTimeoutBudget,
+    update_prepared_dir, update_roster_path, UpdateId, UpdateRoster, UpdateStatusCounts,
+    UpdateTimeoutBudget,
 };
 
 use super::phases::{check_marker_fresh, commit_update, prepare_to_prepared, restore_report};
@@ -19,7 +20,8 @@ use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wai
 pub const RESTORE_FAILURES_EXIT_CODE: i32 = 3;
 
 /// Restart the daemon on `socket_path` from this binary and print the restore counts. Returns
-/// the exit code: 0, or [`RESTORE_FAILURES_EXIT_CODE`] when sessions failed to restore.
+/// the exit code: 0, or [`RESTORE_FAILURES_EXIT_CODE`] when the successor did not report every
+/// roster session restored.
 ///
 /// # Errors
 /// Returns an error when the daemon cannot be reached, refuses the prepare or the commit,
@@ -46,6 +48,11 @@ pub async fn run(socket_path: &Path) -> Result<i32> {
         &update_id,
     );
     check_marker_fresh(&prepared_dir)?;
+    let roster_path = update_roster_path(&prepared_dir);
+    let roster: UpdateRoster =
+        serde_json::from_slice(&std::fs::read(&roster_path).context("read the prepared roster")?)
+            .context("parse the prepared roster")?;
+    let roster_sessions = roster.sessions.len() as u64;
     commit_update(&client, &update_id, &budget).await?;
     client.close();
     if !wait_for_exit(&predecessor, budget.predecessor_exit_ms).await {
@@ -55,7 +62,7 @@ pub async fn run(socket_path: &Path) -> Result<i32> {
     spawn_supervisor(
         &std::env::current_exe()?,
         &socket_path,
-        Some(&update_roster_path(&prepared_dir)),
+        Some(&roster_path),
         &cwd,
     )?;
     wait_for_hello(&socket_path, budget.boot_ms)
@@ -65,7 +72,7 @@ pub async fn run(socket_path: &Path) -> Result<i32> {
     let _ = std::fs::remove_dir_all(&prepared_dir);
     println!(
         "restored {} of {} session(s) ({} failed)",
-        counts.restored, counts.total, counts.failed
+        counts.restored, roster_sessions, counts.failed
     );
     for failure in &failures {
         eprintln!(
@@ -73,9 +80,40 @@ pub async fn run(socket_path: &Path) -> Result<i32> {
             failure.session_file, failure.message
         );
     }
-    Ok(if counts.failed > 0 {
+    Ok(restore_exit_code(roster_sessions, counts))
+}
+
+/// 0 only when every roster session restored: `restore_report` answers zeroed counts when its
+/// budget expires before the restore pass settles.
+fn restore_exit_code(roster_sessions: u64, counts: UpdateStatusCounts) -> i32 {
+    if counts.restored < roster_sessions {
         RESTORE_FAILURES_EXIT_CODE
     } else {
         0
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_restore_of_every_roster_session_exits_zero() {
+        let settled = |restored, failed| UpdateStatusCounts {
+            total: restored + failed,
+            restored,
+            resumed: 0,
+            failed,
+        };
+        assert_eq!(restore_exit_code(2, settled(2, 0)), 0);
+        assert_eq!(
+            restore_exit_code(2, settled(1, 1)),
+            RESTORE_FAILURES_EXIT_CODE
+        );
+        // `restore_report`'s answer when its budget expires mid-restore.
+        assert_eq!(
+            restore_exit_code(2, UpdateStatusCounts::default()),
+            RESTORE_FAILURES_EXIT_CODE
+        );
+    }
 }
