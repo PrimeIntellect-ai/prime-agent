@@ -40,7 +40,7 @@ fn machine_children(data: &Value) -> Vec<(String, String)> {
     for run in runs {
         let name = run
             .get("name")
-            .or_else(|| run.get("spec_id"))
+            .or_else(|| run.get("specId"))
             .and_then(Value::as_str)
             .unwrap_or("run");
         let Some(nodes) = run.get("nodes").and_then(Value::as_array) else {

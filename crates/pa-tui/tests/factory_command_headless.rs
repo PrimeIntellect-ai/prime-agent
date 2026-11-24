@@ -845,9 +845,16 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
             timeout_ms: 5_000,
         },
         HeadlessStep::Paste("zq-stray-paste".to_string()),
+        // The first Esc returns to the machines page, the second closes it and uncovers the
+        // editor, where a leaked paste would show.
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitGone {
             needle: "run: only-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitGone {
+            needle: "machines \u{b7}".to_string(),
             timeout_ms: 5_000,
         },
     ];
@@ -856,6 +863,11 @@ fn a_paste_on_the_factory_page_stays_out_of_the_hidden_editor() {
     assert!(
         all.contains("run: only-run"),
         "the run page mounted before the paste:\n{all}"
+    );
+    let last = flat_text(&frames[frames.len() - 1..]);
+    assert!(
+        !last.contains("machines \u{b7}"),
+        "both pages closed, so the editor shows:\n{last}"
     );
     assert!(
         !all.contains("zq-stray-paste"),
