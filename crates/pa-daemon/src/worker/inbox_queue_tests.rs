@@ -52,7 +52,7 @@ pub(super) type InboxRoutingState = (
     Arc<Worker>,
     Arc<SessionInbox>,
     Arc<Mutex<Vec<pa_core::session_engine::inbox::InboxMessage>>>,
-    Arc<Notify>,
+    Arc<crate::worker::WorkNotify>,
 );
 
 pub(super) fn routing_state() -> InboxRoutingState {
@@ -63,7 +63,7 @@ pub(super) fn routing_state() -> InboxRoutingState {
         .parent()
         .unwrap()
         .to_path_buf();
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     (
         worker,
         Arc::new(pa_core::session_engine::inbox::SessionInbox::open(Some(

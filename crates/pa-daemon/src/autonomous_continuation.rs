@@ -101,19 +101,13 @@ impl AgentSessionEngine {
         // awaiting its completion notice, or a live bash handle) holds the
         // continuation; the durable term keeps the goal-gate hold for
         // shells that outlived their kernel.
-        if self.has_unsettled_rlm_work().await
-            || self.has_live_background_kernel_work()
-            || self.background_bash_handle_count() > 0
-        {
+        if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             // Work that settles between the probe above and this store
             // raced the callback out of its retry: the owed turn would wait
             // for a wake that already fired - re-arm the retry once.
-            if !self.has_live_background_kernel_work()
-                && self.background_bash_handle_count() == 0
-                && !self.has_unsettled_rlm_work().await
-            {
+            if !self.has_live_background_work() && !self.has_unsettled_rlm_work().await {
                 self.retry_owed_autonomous_continuation();
             }
             return Vec::new();
@@ -241,8 +235,7 @@ impl AgentSessionEngine {
         // queued input owns the boundary.
         if self.has_unsettled_rlm_work().await
             || self.session_input_queued()
-            || self.has_live_background_kernel_work()
-            || self.background_bash_handle_count() > 0
+            || self.has_live_background_work()
         {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -250,8 +243,7 @@ impl AgentSessionEngine {
             // that would deliver the owed turn: with every blocker gone the
             // deferral has no wake left - re-arm. Only the fully-cleared
             // deferral re-arms, so the loop cannot spin.
-            if !self.has_live_background_kernel_work()
-                && self.background_bash_handle_count() == 0
+            if !self.has_live_background_work()
                 && !self.has_unsettled_rlm_work().await
                 && !self.session_input_queued()
             {
@@ -360,15 +352,6 @@ mod tests {
         probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
     ) {
         engine.set_test_background_work_probe(probe);
-    }
-
-    /// Inject the engine's background-bash liveness probe (a `1` probe
-    /// = a live background `bash()` handle).
-    fn set_background_bash_probe(
-        engine: &Arc<AgentSessionEngine>,
-        probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
-    ) {
-        engine.set_test_probes(Some(probe), None);
     }
 
     /// The consult's lost-wakeup guard (Macroscope's #2826 review).
@@ -570,7 +553,7 @@ mod tests {
         }));
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "warm".to_string(), &mut events);
-        set_background_bash_probe(&engine, Arc::new(|| 1));
+        set_background_work_probe(&engine, Arc::new(|| 1));
         admit(
             &engine,
             "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
@@ -578,7 +561,7 @@ mod tests {
         );
         admit(&engine, "go".to_string(), &mut events);
         // The kernel handle settles while its notice still waits in the queue.
-        set_background_bash_probe(&engine, Arc::new(|| 0));
+        set_background_work_probe(&engine, Arc::new(|| 0));
         queued.store(true, std::sync::atomic::Ordering::SeqCst);
         engine
             .runtime
