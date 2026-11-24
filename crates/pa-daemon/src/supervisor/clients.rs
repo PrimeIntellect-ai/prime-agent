@@ -852,6 +852,28 @@ impl Supervisor {
                 .await;
                 (vec![line], false)
             }
+            DaemonCommand::ReadRemoteParent { after_seq, .. } => {
+                // A bot guest's outbox for its owner, read over the bot link.
+                let agent_dir = self.options.agent_dir.clone();
+                let after_seq = *after_seq;
+                let read = tokio::task::spawn_blocking(move || {
+                    crate::bots::remote_parent::read_after(&agent_dir, after_seq)
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|read| read);
+                let response = match read {
+                    Ok(entries) => response_success(
+                        Some(&command_id),
+                        &type_name,
+                        Some(json!({ "entries": entries })),
+                    ),
+                    Err(error) => {
+                        response_failure(Some(&command_id), &type_name, &format!("{error:#}"), None)
+                    }
+                };
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::SearchSessionContent {
                 session_dir, query, ..
             } => {

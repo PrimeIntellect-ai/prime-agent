@@ -1,0 +1,1 @@
+feat(bots): a bot's settled turn answers and its own messages to its owner reach the owner once, as agent messages from the bot, also across a Mac daemon restart; a bot pauses 2 minutes after a settled turn when nothing is queued and no TUI is attached, and the daemon boot catches up and pauses idle running bots

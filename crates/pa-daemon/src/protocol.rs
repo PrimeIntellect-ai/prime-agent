@@ -166,6 +166,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "remove_mcp_connection",
     "mark_anthropic_warning_shown",
     "list_persistent_shells",
+    "read_remote_parent",
     "tail_persistent_shell",
     "kill_persistent_shell",
     "get_session_messages",
@@ -943,6 +944,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::CommitUpdateRestart { .. }
         | DaemonCommand::UpdateRestoreStatus { .. }
         | DaemonCommand::ListPersistentShells { .. }
+        | DaemonCommand::ReadRemoteParent { .. }
         | DaemonCommand::SearchSessionContent { .. }
         | DaemonCommand::TailPersistentShell { .. }
         | DaemonCommand::KillPersistentShell { .. }
@@ -995,6 +997,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::TailKernelBash { .. } => "tail_kernel_bash",
         DaemonCommand::KillKernelBash { .. } => "kill_kernel_bash",
         DaemonCommand::ListPersistentShells { .. } => "list_persistent_shells",
+        DaemonCommand::ReadRemoteParent { .. } => "read_remote_parent",
         DaemonCommand::SearchSessionContent { .. } => "search_session_content",
         DaemonCommand::TailPersistentShell { .. } => "tail_persistent_shell",
         DaemonCommand::KillPersistentShell { .. } => "kill_persistent_shell",

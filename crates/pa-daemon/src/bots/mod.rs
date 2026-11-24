@@ -15,6 +15,8 @@ pub mod manager;
 pub mod platform;
 pub mod registry;
 pub mod relay;
+pub mod remote_parent;
+pub mod replies;
 pub mod send;
 pub mod version;
 

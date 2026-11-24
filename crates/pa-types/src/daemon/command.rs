@@ -569,6 +569,15 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// A bot guest's messages to its owner after `after_seq` (the
+    /// `remote-parent.jsonl` outbox). Rust-native extension.
+    ReadRemoteParent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        after_seq: u64,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The saved sessions whose user or assistant message text contains `query`
     /// (case-insensitive). Rust-native extension, advertised by the `session_content_search`
     /// capability.

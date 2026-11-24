@@ -6,6 +6,10 @@
 //! any byte reaches the bot. A row left in `sending` by a killed daemon
 //! becomes `uncertain` at recovery. Nothing ever resends a message: a
 //! message id that already has a row is refused.
+//!
+//! Bot-to-owner deliveries keep two marks with the same states: the last
+//! settled turn handed to the owner and the last guest outbox line. A
+//! mark is written before its delivery starts, so it never moves back.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +30,17 @@ pub enum MessageState {
     Sending,
     Sent,
     Uncertain,
+}
+
+/// The state of one bot-to-owner delivery mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryState {
+    Sending,
+    Sent,
+    Uncertain,
+    /// A turn whose answer the bot already sent as a message to its owner.
+    Replied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,11 +82,40 @@ impl MessageRow {
     }
 }
 
+/// One bot-to-owner delivery mark: a turn's last assistant row id, or an
+/// outbox sequence number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryMark<K> {
+    pub key: K,
+    pub state: DeliveryState,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LedgerDoc {
     #[serde(default)]
     messages: BTreeMap<String, MessageRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivered_turn: Option<DeliveryMark<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_parent: Option<DeliveryMark<u64>>,
+    /// When the latest outbox lines were written (guest clock, ms): a turn
+    /// that settles after its own message was delivered still counts as
+    /// replied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    outbox_times: Vec<u64>,
+}
+
+/// Outbox write times kept for reply attribution.
+const MAX_OUTBOX_TIMES: usize = 64;
+
+/// The bot-to-owner delivery marks of one bot.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeliveryMarks {
+    pub delivered_turn: Option<DeliveryMark<String>>,
+    pub remote_parent: Option<DeliveryMark<u64>>,
+    pub outbox_times: Vec<u64>,
 }
 
 /// The ledger of one bot.
@@ -134,6 +178,69 @@ impl BotLedger {
         })
     }
 
+    /// The bot-to-owner delivery marks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger file cannot be read or parsed.
+    pub fn delivery_marks(&self) -> Result<DeliveryMarks> {
+        let _guard = LEDGER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let doc = self.read()?;
+        Ok(DeliveryMarks {
+            delivered_turn: doc.delivered_turn,
+            remote_parent: doc.remote_parent,
+            outbox_times: doc.outbox_times,
+        })
+    }
+
+    /// Durably set the last delivered turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger cannot be read or written.
+    pub fn mark_turn(&self, turn_id: &str, state: DeliveryState) -> Result<()> {
+        self.update(|doc| {
+            doc.delivered_turn = Some(DeliveryMark {
+                key: turn_id.to_string(),
+                state,
+            });
+            Ok(())
+        })
+    }
+
+    /// Durably set the last delivered outbox line.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger cannot be read or written.
+    pub fn mark_remote_parent(&self, seq: u64, state: DeliveryState) -> Result<()> {
+        self.update(|doc| {
+            doc.remote_parent = Some(DeliveryMark { key: seq, state });
+            Ok(())
+        })
+    }
+
+    /// Durably start the delivery of one outbox line and keep its write
+    /// time for reply attribution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger cannot be read or written.
+    pub fn begin_remote_parent(&self, seq: u64, at_ms: u64) -> Result<()> {
+        self.update(|doc| {
+            doc.remote_parent = Some(DeliveryMark {
+                key: seq,
+                state: DeliveryState::Sending,
+            });
+            doc.outbox_times.push(at_ms);
+            let excess = doc.outbox_times.len().saturating_sub(MAX_OUTBOX_TIMES);
+            doc.outbox_times.drain(..excess);
+            Ok(())
+        })
+    }
+
     /// Mark every `sending` row whose writer process is gone as
     /// `uncertain`, and return those ids. Another live daemon on the same
     /// agent directory keeps its rows.
@@ -150,6 +257,22 @@ impl BotLedger {
                     row.updated_at_ms = now_ms();
                     recovered.push(msg_id.clone());
                 }
+            }
+            if let Some(mark) = doc
+                .delivered_turn
+                .as_mut()
+                .filter(|mark| mark.state == DeliveryState::Sending)
+            {
+                mark.state = DeliveryState::Uncertain;
+                recovered.push(format!("turn {}", mark.key));
+            }
+            if let Some(mark) = doc
+                .remote_parent
+                .as_mut()
+                .filter(|mark| mark.state == DeliveryState::Sending)
+            {
+                mark.state = DeliveryState::Uncertain;
+                recovered.push(format!("outbox line {}", mark.key));
             }
             Ok(())
         })?;
