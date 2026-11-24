@@ -101,7 +101,7 @@ async fn monitor(worker: Arc<Worker>) {
         let parked = worker
             .agent_engine
             .as_ref()
-            .is_some_and(|engine| engine.has_live_background_kernel_work());
+            .is_some_and(|engine| engine.background_work_count() > 0);
         if !parked {
             // A parked-cell episode ended: a later detach starts a fresh
             // hold window.

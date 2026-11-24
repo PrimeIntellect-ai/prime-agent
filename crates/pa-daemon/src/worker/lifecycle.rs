@@ -772,36 +772,32 @@ impl Worker {
     }
 
     /// The background lanes' outstanding work at a quiescence observation:
-    /// live kernel `bash()` handles plus [`Self::pending_background_completions`].
-    /// Zero when nothing will wake the session. The ACP quiescence frames
-    /// report it; the child-idle decision reads the narrower
-    /// [`Self::pending_background_completions`], so a child that leaves a
-    /// server running still settles. Kernel-side work alone: the engine's durable
-    /// shell term would double every healthy handle (the runtime journals
-    /// the same spawn the registry counts) and drag orphaned shells the
-    /// session can no longer observe into a wire-visible field.
+    /// live background work ([`AgentSessionEngine::background_work_count`]:
+    /// detached cells and live `bash()` handles) plus
+    /// [`Self::queued_completion_deliveries`]. Zero when nothing will wake the
+    /// session. The ACP quiescence frames report it; the child-idle decision
+    /// reads the narrower [`Self::pending_background_completions`], so a child
+    /// that leaves a server running still settles.
     ///
     /// # Panics
     ///
     /// Panics when the session-core mutex is poisoned.
     pub(crate) fn outstanding_background_jobs(&self) -> u64 {
-        // The kernel-work aggregate (live `bash()` handles plus detached
-        // cells whose terminal notice is not yet admitted) plus the
-        // completion notices still queued for delivery.
         let live = self
             .agent_engine
             .as_ref()
-            .map_or(0, |engine| engine.background_kernel_work_count());
+            .map_or(0, |engine| engine.background_work_count());
         (live + self.queued_completion_deliveries()) as u64
     }
 
     /// The background completions still owed to this run: detached cells
-    /// whose terminal notice is not yet admitted, plus completion notices
-    /// still queued for delivery (`[bash-done]` rows and pending cell
-    /// deliveries — a full `[cell-done]` row or the coalesced inbox arrival
-    /// that covers one). A live `bash()` handle alone does not count: it may
-    /// never end. `get_state` reports it as `pendingBackgroundCompletions`,
-    /// and the child wait holds on it ([`Self::wait_until_child_idle`]).
+    /// whose terminal notice is not yet admitted, plus
+    /// [`Self::queued_completion_deliveries`]. `get_state` reports it as
+    /// `pendingBackgroundCompletions`, and the child wait holds on it
+    /// ([`Self::wait_until_child_idle`]). The one intentional difference
+    /// from [`AgentSessionEngine::background_work_count`]: a live `bash()`
+    /// handle alone does not count, since it may never end (a child that
+    /// leaves a server running still settles).
     ///
     /// # Panics
     ///
@@ -816,6 +812,9 @@ impl Worker {
         (detached + self.queued_completion_deliveries()) as u64
     }
 
+    /// The completion notices still queued for delivery: `[bash-done]` rows
+    /// and pending cell deliveries (a full `[cell-done]` row or the
+    /// coalesced inbox arrival that covers one).
     fn queued_completion_deliveries(&self) -> usize {
         let core = self.core.lock().unwrap();
         queued_bash_completion_notices(&core) + queued_cell_completion_deliveries(&core)

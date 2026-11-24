@@ -145,6 +145,11 @@ pub struct AgentSessionEngine {
     /// The queued-goal-context purge (TS `_clearQueuedGoalContexts`):
     /// invoked by pause/clear/start and `goal.complete`.
     pub(crate) goal_queue_purge: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// `true` once the current goal deferral armed its one background-skip
+    /// fallback wake (the wake may have fired since); retiring the goal wakes
+    /// (`cancel_goal_wake`: the mint, the goal's transitions, a new arming)
+    /// clears it.
+    pub(crate) background_skip_wake_armed: std::sync::atomic::AtomicBool,
     /// The stale-row guard's DURABLE terminal row, deferred until after the
     /// context adoption; `Some` between the seed and the flush.
     pub(crate) stale_goal_terminal_pending: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
@@ -171,16 +176,6 @@ pub struct AgentSessionEngine {
     /// The queue delivery modes: seeded from the start config, switched live;
     /// `None` keeps the default ("one-at-a-time").
     queue_modes: std::sync::Mutex<(Option<String>, Option<String>)>,
-    /// The durable background-shell term: the worker's orphan journal
-    /// (memoized parse, per-call liveness). `None` (unwired: print mode,
-    /// tests) answers `0`, exactly like the kernel probe.
-    pub(crate) durable_background_shell_journal:
-        Option<pa_core::kernel::orphan_journal::LiveBackgroundShellJournal>,
-    /// The durable term's daemon-owned exit watches, keyed by shell pid and
-    /// recorded start-id: `true` while the watch is armed (the shell holds
-    /// the continuations), `false` once it fired or could not register.
-    pub(crate) durable_shell_exit_watches:
-        std::sync::Mutex<std::collections::HashMap<(i32, Option<String>), bool>>,
     /// `true` while this session still owns an active or paused scheduled job
     /// (must not lose its kernel). `None` keeps the release open.
     pub(crate) registered_jobs_probe:
