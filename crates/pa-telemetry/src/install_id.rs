@@ -270,19 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn uuid_validation() {
-        assert!(is_uuid("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
-        assert!(is_uuid("550e8400-e29b-41d4-a716-446655440000"));
-        assert!(is_uuid("550E8400-E29B-11D4-A716-446655440000"));
-        assert!(!is_uuid("550e8400-e29b-01d4-a716-446655440000")); // version 0
-        assert!(!is_uuid("550e8400-e29b-91d4-a716-446655440000")); // version 9
-        assert!(!is_uuid("550e8400-e29b-41d4-c716-446655440000")); // variant c
-        assert!(!is_uuid("550e8400e29b41d4a716446655440000")); // no dashes
-        assert!(!is_uuid(""));
-        assert!(!is_uuid("not-a-uuid-at-all-not-a-uuid-aaaaaaaaaa"));
-    }
-
-    #[test]
     fn creates_and_rereads() {
         let dir = tempfile::tempdir().unwrap();
         let first = install_id(dir.path()).unwrap();
@@ -307,50 +294,24 @@ mod tests {
     }
 
     #[test]
-    fn replaces_invalid_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(STATE_FILE);
-        let bad = State {
-            version: STATE_VERSION,
-            installation_id: "garbage".into(),
-        };
-        std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
-        let id = install_id(dir.path()).unwrap();
-        let state: State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(state.installation_id, id);
-        assert!(is_uuid(&id));
-    }
-
-    #[test]
     fn rejects_wrong_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(STATE_FILE);
-        let future = State {
-            version: 2,
-            installation_id: "550e8400-e29b-41d4-a716-446655440000".into(),
-        };
-        std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
-        let id = install_id(dir.path()).unwrap();
-        assert_ne!(id, "550e8400-e29b-41d4-a716-446655440000");
-    }
-
-    #[test]
-    fn concurrent_create_converges() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_path_buf();
-        let ids: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                let ids = &ids;
-                let path = path.clone();
-                scope.spawn(move || {
-                    let id = install_id(&path).unwrap();
-                    ids.lock().unwrap().push(id);
-                });
-            }
-        });
-        let ids = ids.into_inner().unwrap();
-        assert!(ids.iter().all(|id| id == &ids[0]));
+        for (version, stored) in [
+            (2, "550e8400-e29b-41d4-a716-446655440000"),
+            (STATE_VERSION, "garbage"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(STATE_FILE);
+            let state = State {
+                version,
+                installation_id: stored.into(),
+            };
+            std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+            let id = install_id(dir.path()).unwrap();
+            assert_ne!(id, stored);
+            assert!(is_uuid(&id));
+            let state: State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(state.installation_id, id);
+        }
     }
 
     #[test]

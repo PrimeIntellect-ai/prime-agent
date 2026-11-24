@@ -1,0 +1,1 @@
+- The kernel owns its SIGINT mask at startup, and a turn-held delivery admits through a gate inside the queue lock with one pacing notice.
