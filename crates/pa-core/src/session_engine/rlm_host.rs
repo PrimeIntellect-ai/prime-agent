@@ -16,10 +16,16 @@ use std::time::Instant;
 
 use serde_json::{json, Map, Value};
 
+/// The typed spawn placement [`RlmSpawnRequest::target`] carries. Re-exported
+/// from the pure RLM-surface module (which owns the placement normalizer and
+/// the placement design note) so the request vocabulary imports from one
+/// place.
+pub use crate::kernel::rlm_runtime::RlmSpawnTarget;
 use crate::kernel::rlm_runtime::{
-    find_rlm_model_matches, kwargs_from_payload, normalize_requested_rlm_subagent_model,
-    normalize_requested_rlm_subagent_session_name, normalize_requested_rlm_subagent_thinking_level,
-    RlmModelInfo, DEFAULT_RLM_MODEL_SEARCH_LIMIT, MAX_RLM_MODEL_SEARCH_LIMIT,
+    find_rlm_model_matches, kwargs_from_payload, normalize_requested_rlm_spawn_target,
+    normalize_requested_rlm_subagent_model, normalize_requested_rlm_subagent_session_name,
+    normalize_requested_rlm_subagent_thinking_level, RlmModelInfo, DEFAULT_RLM_MODEL_SEARCH_LIMIT,
+    MAX_RLM_MODEL_SEARCH_LIMIT,
 };
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 use crate::models::registry::ModelRegistry;
@@ -168,6 +174,10 @@ pub struct RlmSpawnRequest {
     /// The factory run that spawned the child; the daemon records it on
     /// the child's ledger spawn edge.
     pub factory: Option<RlmFactoryTag>,
+    /// Typed placement (`target` kwarg; see [`RlmSpawnTarget`] for the
+    /// placement contract). `Local` when the kwarg is omitted; a
+    /// `Sandbox` target routes to the daemon's bot manager.
+    pub target: RlmSpawnTarget,
 }
 
 /// The factory executor's run tag on a spawned child (`rlm.spawn`'s
@@ -692,7 +702,9 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory", "kind"],
+        &[
+            "name", "model", "thinking", "cwd", "factory", "kind", "target",
+        ],
     )?;
     let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
         None => RlmSpawnKind::Subagent,
@@ -704,6 +716,13 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
             )
         }
     };
+    let target = optional_string_kwarg(&kwargs, "target", OPERATION)?;
+    let target = normalize_requested_rlm_spawn_target(target, OPERATION)?.unwrap_or_default();
+    if kind == RlmSpawnKind::Decision && target == RlmSpawnTarget::Sandbox {
+        anyhow::bail!(
+            "The decision child runs locally; rlm.spawn kind=\"decision\" takes no sandbox target."
+        );
+    }
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -741,6 +760,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         cwd,
         spawned_by_request_id: None,
         factory,
+        target,
     })
 }
 
@@ -1536,6 +1556,49 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "rlm.spawn name must be a string");
+    }
+
+    #[tokio::test]
+    async fn spawn_target_placement_contract() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let spawn_requests = Arc::clone(&host.spawn_requests);
+        let wiring = wired(dir.path(), Some(host));
+
+        let admitted = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w1" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted["rlm_child_id"], "sub-1");
+        assert_eq!(spawn_requests.lock().await[0].target, RlmSpawnTarget::Local);
+
+        call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w2", "target": "sandbox" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            spawn_requests.lock().await[1].target,
+            RlmSpawnTarget::Sandbox
+        );
+
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w3", "target": "edge" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn target must be one of: local, sandbox"
+        );
+        assert_eq!(spawn_requests.lock().await.len(), 2);
     }
 
     #[tokio::test]

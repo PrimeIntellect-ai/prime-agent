@@ -766,6 +766,22 @@ impl Supervisor {
                     .await;
                 (vec![response_line(&response)], false)
             }
+            DaemonCommand::SpawnBot { .. } => (
+                vec![response_line(
+                    &self.handle_spawn_bot(&command_id, command).await,
+                )],
+                false,
+            ),
+            DaemonCommand::DeleteBot { .. } => (
+                vec![response_line(
+                    &self.handle_delete_bot(&command_id, command).await,
+                )],
+                false,
+            ),
+            DaemonCommand::ListBots { .. } => (
+                vec![response_line(&self.handle_list_bots(&command_id, command))],
+                false,
+            ),
             DaemonCommand::SendMessage { .. } => {
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let response = self

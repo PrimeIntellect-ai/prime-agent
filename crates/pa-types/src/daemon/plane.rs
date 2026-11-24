@@ -114,6 +114,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "list",
     "list_saved_sessions",
     "list_agent_peers",
+    "list_bots",
     "get_direct_worker_transport",
     "attach",
     "reattach",

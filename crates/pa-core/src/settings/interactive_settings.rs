@@ -415,6 +415,49 @@ impl SettingsManager {
         self.save_global_scope(&["factory.enabled"])
     }
 
+    /// `bots.enabled` (the hosted-sandbox spawn opt-in): a strict
+    /// raw-global read — the document must carry `bots` as an object
+    /// with an `enabled` boolean, so unset, malformed, and non-boolean
+    /// shapes (an array like `{"bots":[true]}`) all read as the
+    /// disabled default. The daemon's sandbox-admission gate and
+    /// `/bots status` ride this one global read, so a project-scope
+    /// document can never flip the gate under either of them.
+    #[must_use]
+    pub fn get_bots_enabled(&self) -> bool {
+        self.global_raw().is_some_and(|document| {
+            document
+                .get("bots")
+                .and_then(|bots| bots.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+    }
+
+    /// `bots.enabled` setter: persists the opt-in gate to the global
+    /// scope (the same shared settings key the daemon's
+    /// sandbox-admission gate reads).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be
+    /// saved, including the skipped save on a global file that could
+    /// not be read: the manager never rewrites a scope it failed to
+    /// load, so the setter reports that refusal instead of a write
+    /// that never landed.
+    pub fn set_bots_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.global_mut()
+            .bots
+            .get_or_insert_with(Default::default)
+            .enabled = Some(enabled);
+        self.save_global_scope(&["bots.enabled"])?;
+        if let Some(message) = self.global_load_error() {
+            return Err(anyhow!(
+                "bots.enabled not saved: the global settings file could not be read: {message}"
+            ));
+        }
+        Ok(())
+    }
+
     /// `enabledModels` (TS `getEnabledModels`/`setEnabledModels`): the
     /// persisted model-scope patterns (`None` is no filter).
     #[must_use]

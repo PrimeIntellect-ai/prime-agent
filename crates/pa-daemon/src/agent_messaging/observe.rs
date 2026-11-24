@@ -83,7 +83,10 @@ impl LinkAgentObserveController {
     async fn family_summaries(&self) -> anyhow::Result<Vec<AgentObserveSummary>> {
         let (sessions, identity) = self.roster_and_identity().await?;
         let child_ids = self.registry_child_active_ids().await;
-        Ok(summaries_from_roster(sessions, &identity, &child_ids))
+        let bots = super::owned_bot_rows(&self.link, identity.session_id.as_deref()).await;
+        let mut summaries = summaries_from_roster(sessions, &identity, &child_ids);
+        summaries.extend(bots.iter().map(|bot| bot_summary(bot, &identity)));
+        Ok(summaries)
     }
 
     /// The family member `target` names: the one resolution and permission check
@@ -102,6 +105,12 @@ impl LinkAgentObserveController {
         limit: u64,
         roles: Vec<String>,
     ) -> anyhow::Result<Value> {
+        if agent.runtime_kind.as_deref() == Some("bot") {
+            anyhow::bail!(
+                "agent {} is a bot: its transcript lives in its sandbox; message it with agent_message",
+                agent.session_name.as_deref().unwrap_or(&agent.session_id)
+            );
+        }
         let command = pa_types::daemon::DaemonCommand::GetSessionMessages {
             id: None,
             active_session_id: agent.active_session_id.clone().unwrap_or_default(),
@@ -304,6 +313,38 @@ struct SessionMessageRow {
 /// Flatten the supervisor's roster rows into observation summaries of the caller's NUCLEAR
 /// FAMILY: the caller's own row, its parent, its siblings, and its direct children. The
 /// relationship derives from the durable edges, never the row's runtime kind.
+/// A bot as an observe row: a Child of its owner with no local worker.
+fn bot_summary(bot: &Value, identity: &FamilyIdentity) -> AgentObserveSummary {
+    let text = |field: &str| bot.get(field).and_then(Value::as_str).map(str::to_string);
+    let bot_id = text("botId").unwrap_or_default();
+    AgentObserveSummary {
+        active_session_id: Some(bot_id.clone()),
+        session_id: bot_id.clone(),
+        session_name: text("name"),
+        relationship: Some(AgentFamilyRelationship::Child),
+        runtime_kind: Some("bot".to_string()),
+        cwd: None,
+        status: match bot.get("status").and_then(Value::as_str) {
+            Some("creating" | "running") => AgentFamilyStatus::Running,
+            Some("paused") => AgentFamilyStatus::Idle,
+            _ => AgentFamilyStatus::Inactive,
+        },
+        activity: None,
+        is_current: false,
+        is_streaming: false,
+        is_compacting: false,
+        attached_clients: 0,
+        message_count: None,
+        queued_count: 0,
+        is_session_active: false,
+        parent_active_session_id: Some(identity.active_session_id.clone()),
+        parent_session_id: identity.session_id.clone(),
+        rlm_child_id: Some(bot_id),
+        first_message: None,
+        session_file: None,
+    }
+}
+
 pub(super) fn summaries_from_roster(
     sessions: Vec<Value>,
     identity: &FamilyIdentity,

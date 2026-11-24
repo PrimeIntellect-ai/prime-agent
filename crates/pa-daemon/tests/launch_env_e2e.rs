@@ -541,6 +541,7 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
     });
     let handle = children
         .spawn(RlmSpawnRequest {
+            target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             prompt: "ship the lane".to_string(),
             name: Some("worker-a".to_string()),
             model: None,

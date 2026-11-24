@@ -1091,6 +1091,9 @@ mod usage;
 #[cfg(test)]
 mod watch_tests;
 
+#[cfg(all(test, unix))]
+mod bot_spawn_tests;
+
 #[cfg(test)]
 mod usage_emit_tests;
 

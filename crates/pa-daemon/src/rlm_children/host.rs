@@ -144,6 +144,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
+            if request.target == pa_core::kernel::rlm_runtime::RlmSpawnTarget::Sandbox {
+                return spawn_bot(&this, request).await;
+            }
             let identity = this.identity.lock().expect("identity lock").clone();
             if identity.rlm_depth >= identity.rlm_max_depth {
                 bail!(rlm_depth_limit_error(
@@ -174,6 +177,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let admission = async {
                 this.assert_name_available(&name, identity.rlm_depth + 1)
                     .await?;
+                assert_no_bot_named(&this, &identity, &name).await?;
                 // The child's eventual working directory: the create
                 // below runs it there, so the decision model resolves from
                 // the same project-scoped settings the child's engine
@@ -568,6 +572,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let record = record.lock().await;
                 entries.push(SupervisorChildSessions::entry(&record));
             }
+            let identity = this.identity.lock().expect("identity lock").clone();
+            entries.extend(owned_bots(&this, &identity).await.iter().map(bot_entry));
             Ok(entries)
         })
     }
@@ -583,6 +589,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let record = match this.resolve_record(&target, "subagent").await {
                 Ok(record) => record,
                 Err(miss) => {
+                    if let Some(bot) = owned_bot(&this, &target).await {
+                        return delete_bot(&this, &bot).await;
+                    }
                     // Retirement is idempotent (the M5 class): a selector
                     // whose delete receipt already returned answers from
                     // the tombstone instead of erroring, so a re-delete of
@@ -727,10 +736,20 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // immediately to its settled cancelled envelope; unknown
             // selectors keep erroring (a respawned freed name wins first).
             let mut deleted_results: Vec<RlmChildResult> = Vec::new();
+            let identity = this.identity.lock().expect("identity lock").clone();
+            let mut bots: Vec<Value> = if targets.is_empty() {
+                owned_bots(&this, &identity).await
+            } else {
+                Vec::new()
+            };
             for target in &targets {
                 let record = match this.resolve_record(target, "child").await {
                     Ok(record) => record,
                     Err(miss) => {
+                        if let Some(bot) = owned_bot(&this, target).await {
+                            bots.push(bot);
+                            continue;
+                        }
                         let matches = this
                             .deleted_children
                             .lock()
@@ -797,8 +816,46 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 };
                 results.push(result);
             }
-            // Live entries first, the deleted generations' envelopes after.
+            // A bot has no completion event: re-read the selected bots after
+            // the local waits, and poll the running ones inside the budget.
+            if timeout_ms > 0 && !bots.is_empty() {
+                loop {
+                    let fresh = owned_bots(&this, &identity).await;
+                    for bot in &mut bots {
+                        match fresh
+                            .iter()
+                            .find(|row| row.get("botId") == bot.get("botId"))
+                        {
+                            Some(row) => bot.clone_from(row),
+                            // A bot deleted meanwhile settles from its tombstone.
+                            None => bot["status"] = json!("deleted"),
+                        }
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() || bots.iter().all(|bot| bot_result(bot).settled) {
+                        break;
+                    }
+                    tokio::time::sleep(remaining.min(BOT_COLLECT_POLL)).await;
+                }
+            }
+            // Live entries first, the deleted generations' envelopes after,
+            // the bots' snapshots last.
             results.extend(deleted_results);
+            let deleted_children = this
+                .deleted_children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            results.extend(bots.iter().map(|bot| {
+                let bot_id = bot.get("botId").and_then(Value::as_str).unwrap_or_default();
+                match deleted_children
+                    .values()
+                    .find(|deleted| deleted.matches(bot_id))
+                {
+                    Some(deleted) => SupervisorChildSessions::deleted_collect_result(deleted),
+                    None => bot_result(bot),
+                }
+            }));
+            drop(deleted_children);
             Ok(results)
         })
     }
@@ -951,6 +1008,224 @@ fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: 
                     == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
                 && entry.pointer("/details/id").and_then(Value::as_str) == Some(spawn_row_id)
         })
+}
+
+/// How often a waiting `rlm.collect` re-reads a running bot.
+const BOT_COLLECT_POLL: Duration = Duration::from_secs(1);
+/// Budget for `spawn_bot` and `delete_bot`, past the supervisor's own
+/// deadline, so the worker never gives up first.
+const BOT_COMMAND_TIMEOUT: Duration = Duration::from_mins(15);
+
+/// `rlm.spawn(target="sandbox")`: a bot. The worker checks the name and
+/// the model; the supervisor gates on `bots.enabled`, provisions, and
+/// hands the bot its prompt. A bot is never run locally instead.
+async fn spawn_bot(
+    this: &Arc<SupervisorChildSessionsInner>,
+    request: RlmSpawnRequest,
+) -> Result<RlmSpawnHandle> {
+    let identity = this.identity.lock().expect("identity lock").clone();
+    if identity.rlm_depth >= identity.rlm_max_depth {
+        bail!(rlm_depth_limit_error(
+            identity.rlm_depth,
+            identity.rlm_max_depth
+        ));
+    }
+    if request.cwd.is_some() {
+        bail!("rlm.spawn cwd is not supported for a sandbox target: a bot has no local directory");
+    }
+    if request.factory.is_some() {
+        bail!("a factory state cannot spawn a sandbox target: the factory ledger tracks local children only");
+    }
+    let Some(owner_session_id) = identity.session_id.clone() else {
+        bail!("rlm.spawn target \"sandbox\" needs a saved parent session");
+    };
+    let bot_id_hint = format!("bot-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let name = request
+        .name
+        .clone()
+        .unwrap_or_else(|| create_default_rlm_subagent_session_name(&request.prompt, &bot_id_hint));
+    if !this.reserve_spawn_name(&name) {
+        return Err(spawn_name_unavailable_error(&name, identity.rlm_depth + 1));
+    }
+    let _reservation = SpawnNameReservationGuard {
+        inner: Arc::clone(this),
+        name: name.clone(),
+    };
+    this.assert_name_available(&name, identity.rlm_depth + 1)
+        .await?;
+    let model =
+        resolve_child_model_allowlisted(this, request.model.as_deref(), "spawn", "subagent")
+            .await?;
+    assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
+    let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
+    let bot = this
+        .link
+        .request_success(
+            json!({
+                "type": "spawn_bot",
+                "name": name,
+                "ownerSessionId": owner_session_id,
+                "model": model,
+                "thinking": thinking,
+                "prompt": request.prompt,
+                // The bot is a root in its own daemon: its subtree gets
+                // only the depth left below it.
+                "rlmMaxDepth": identity.rlm_max_depth.saturating_sub(identity.rlm_depth + 1),
+            }),
+            BOT_COMMAND_TIMEOUT,
+        )
+        .await?;
+    let bot_id = bot
+        .get("botId")
+        .and_then(Value::as_str)
+        .context("spawn_bot returned no bot id")?
+        .to_string();
+    Ok(RlmSpawnHandle {
+        session_dir: bot_session_dir(&bot_id),
+        rlm_child_id: bot_id,
+        name,
+        model,
+    })
+}
+
+/// A bot's `session_dir`: it has no local session directory.
+fn bot_session_dir(bot_id: &str) -> String {
+    format!("bot://{bot_id}")
+}
+
+/// The bots this session owns, as `list_bots` rows. A session with no
+/// saved id owns none, and an unavailable bot list reads as empty: bots
+/// never block the local child surface.
+async fn owned_bots(
+    this: &SupervisorChildSessionsInner,
+    identity: &super::ParentIdentity,
+) -> Vec<Value> {
+    crate::agent_messaging::owned_bot_rows(&this.link, identity.session_id.as_deref()).await
+}
+
+/// The owned bot `selector` names (its id or its name).
+async fn owned_bot(this: &SupervisorChildSessionsInner, selector: &str) -> Option<Value> {
+    let identity = this.identity.lock().expect("identity lock").clone();
+    owned_bots(this, &identity).await.into_iter().find(|bot| {
+        bot.get("botId").and_then(Value::as_str) == Some(selector)
+            || bot.get("name").and_then(Value::as_str) == Some(selector)
+    })
+}
+
+/// A local spawn may not take a bot's name: both answer to it.
+async fn assert_no_bot_named(
+    this: &SupervisorChildSessionsInner,
+    identity: &super::ParentIdentity,
+    name: &str,
+) -> Result<()> {
+    if owned_bots(this, identity)
+        .await
+        .iter()
+        .any(|bot| bot.get("name").and_then(Value::as_str) == Some(name))
+    {
+        return Err(spawn_name_unavailable_error(name, identity.rlm_depth + 1));
+    }
+    Ok(())
+}
+
+async fn delete_bot(
+    this: &SupervisorChildSessionsInner,
+    bot: &Value,
+) -> Result<RlmDeleteSubagentResult> {
+    let identity = this.identity.lock().expect("identity lock").clone();
+    let deleted = this
+        .link
+        .request_success(
+            json!({
+                "type": "delete_bot",
+                "botId": bot.get("botId").and_then(Value::as_str).unwrap_or_default(),
+                "ownerSessionId": identity.session_id.unwrap_or_default(),
+            }),
+            BOT_COMMAND_TIMEOUT,
+        )
+        .await?;
+    let mut subagent = bot_entry(&deleted);
+    subagent.status = "cancelled";
+    // The supervisor forgets the bot: a repeated delete or collect
+    // answers from this tombstone, like a deleted local child.
+    let deleted = super::DeletedChild {
+        rlm_child_id: subagent.rlm_child_id.clone(),
+        active_session_id: subagent.rlm_child_id.clone(),
+        session_id: subagent.session_id.clone(),
+        session_name: subagent.session_name.clone(),
+        session_dir: subagent.session_dir.clone(),
+        started_at_ms: deleted
+            .get("createdAt")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        status: subagent.status,
+        answer_preview: None,
+        error: "Deleted by parent orchestrator".to_string(),
+    };
+    this.deleted_children
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(deleted.rlm_child_id.clone(), deleted);
+    Ok(RlmDeleteSubagentResult {
+        subagent,
+        outcome: Some("deleted"),
+    })
+}
+
+fn bot_str(bot: &Value, field: &str) -> String {
+    bot.get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A bot's roster row. A paused or stopped bot has no turn running.
+fn bot_entry(bot: &Value) -> RlmSubagentEntry {
+    let bot_id = bot_str(bot, "botId");
+    RlmSubagentEntry {
+        rlm_child_id: bot_id.clone(),
+        active_session_id: Some(bot_id.clone()),
+        session_id: Some(bot_id.clone()),
+        session_name: bot_str(bot, "name"),
+        session_dir: bot_session_dir(&bot_id),
+        status: match bot.get("status").and_then(Value::as_str) {
+            Some("creating" | "running") => "running",
+            Some("error") => "error",
+            _ => "completed",
+        },
+        activity: None,
+        tool_use_count: None,
+        duration_ms: None,
+        answer_preview: None,
+        replied_since_task: None,
+        progress_note: None,
+        label: bot.get("model").and_then(Value::as_str).map(str::to_string),
+        last_activity_at: bot.get("lastTurnAt").and_then(Value::as_u64),
+        activity_stale_ms: None,
+    }
+}
+
+/// A bot's `rlm.collect` snapshot. Its answers arrive as agent messages.
+fn bot_result(bot: &Value) -> RlmChildResult {
+    let entry = bot_entry(bot);
+    let (status, settled) = match entry.status {
+        "running" => ("running", false),
+        "error" => ("error", true),
+        _ => ("done", true),
+    };
+    RlmChildResult {
+        rlm_child_id: entry.rlm_child_id,
+        session_name: Some(entry.session_name),
+        session_dir: Some(entry.session_dir),
+        status,
+        settled,
+        answer_preview: None,
+        answer_text: None,
+        error: None,
+        duration_ms: None,
+        tool_use_count: None,
+        replied_since_task: None,
+    }
 }
 
 #[cfg(test)]

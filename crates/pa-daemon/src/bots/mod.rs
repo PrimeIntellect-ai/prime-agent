@@ -5,15 +5,21 @@
 //! truth; [`registry`] is a private cache. A bot always runs this binary's
 //! exact version ([`version`]).
 
+pub mod commands;
 pub mod credentials;
 pub mod exec_stream;
+pub mod guest;
+pub mod ledger;
 pub mod link;
 pub mod manager;
 pub mod platform;
 pub mod registry;
 pub mod relay;
+pub mod send;
 pub mod version;
 
+#[cfg(all(test, unix))]
+mod send_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 

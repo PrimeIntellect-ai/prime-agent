@@ -462,6 +462,7 @@ async fn sessions_with_fake_child_subagents(
 async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
     sessions
         .spawn(RlmSpawnRequest {
+            target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             prompt: "f20 child task".to_string(),
             name: Some("f20-worker".to_string()),
             model: None,
@@ -482,6 +483,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     sessions
         .spawn(RlmSpawnRequest {
+            target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             prompt: "f20 child task".to_string(),
             name: Some("f20-worker".to_string()),
             model: None,
@@ -1259,6 +1261,7 @@ async fn a_decision_spawn_resolves_the_model_from_the_child_cwd() {
             cwd: Some(child_cwd.to_string_lossy().to_string()),
             spawned_by_request_id: None,
             factory: None,
+            target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
         })
         .await
         .expect("the decision spawn resolves through the child cwd");

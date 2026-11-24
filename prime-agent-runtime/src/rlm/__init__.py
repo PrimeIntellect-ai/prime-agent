@@ -250,6 +250,7 @@ async def spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     kind: str | None = None,
+    target: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -261,8 +262,18 @@ async def spawn(
     to the session cwd.
     ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
     child (the model comes from the ``decisionModel`` setting).
+    ``target`` sets the child placement: 'local' (the default when omitted) or
+    'sandbox'. A sandbox target starts a bot: a child in its own Prime sandbox,
+    managed by the daemon. It requires the global ``bots.enabled`` opt-in
+    (default off): while the setting is off, the daemon refuses the spawn
+    before provisioning and tells you to ask the user to run ``/bots on`` or
+    set ``bots.enabled`` in the daemon settings.json. Do not change this
+    setting yourself. The kwarg is forwarded only when passed, so an omitted
+    ``target`` sends the byte-identical wire payload.
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
+    return await _spawn(
+        prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind, target=target
+    )
 
 
 async def _spawn(
@@ -272,6 +283,7 @@ async def _spawn(
     model: str | None = None,
     thinking: str | None = None,
     cwd: str | None = None,
+    target: str | None = None,
     factory: dict[str, str] | None = None,
     kind: str | None = None,
 ) -> RLMSpawnHandle:
@@ -279,6 +291,8 @@ async def _spawn(
     stateId}``), which the host records on the child's ledger spawn edge."""
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if target is not None and not isinstance(target, str):
+        raise TypeError(f"target must be str, got {type(target).__name__}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
@@ -286,6 +300,8 @@ async def _spawn(
         kwargs["thinking"] = thinking
     if cwd is not None:
         kwargs["cwd"] = cwd
+    if target is not None:
+        kwargs["target"] = target
     if factory is not None:
         kwargs["factory"] = factory
     if kind is not None:
@@ -968,8 +984,11 @@ class _RLMNamespace:
         thinking: str | None = None,
         cwd: str | None = None,
         kind: str | None = None,
+        target: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
+        return await spawn(
+            prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind, target=target
+        )
 
     async def create_session(
         self,

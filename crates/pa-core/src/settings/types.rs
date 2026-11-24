@@ -275,6 +275,16 @@ pub struct FactorySettings {
     pub enabled: Option<bool>,
 }
 
+/// `bots` (the hosted-sandbox spawn opt-in): `bots.enabled` is
+/// unset/false by default, and the `/bots on` client command persists
+/// it. The daemon's sandbox-admission gate reads the same shared
+/// settings key before any provisioning.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotsSettings {
+    pub enabled: Option<bool>,
+}
+
 /// `agentInbox` (the machine-notification inbox): enabled by default;
 /// `enabled: false` is the kill switch that restores direct notice-row
 /// steering. `reminderIntervalMs` (default 10 minutes, `0` disables)
@@ -341,6 +351,7 @@ pub struct Settings {
     pub harness_refinements: Option<bool>,
     pub agent_traces: Option<AgentTracesSettings>,
     pub factory: Option<FactorySettings>,
+    pub bots: Option<BotsSettings>,
     pub agent_inbox: Option<AgentInboxSettings>,
     pub telemetry: Option<TelemetrySettings>,
     pub branch_summary: Option<BranchSummarySettings>,

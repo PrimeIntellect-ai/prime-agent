@@ -272,6 +272,36 @@ impl ClientSettings for CliClientSettings {
         bool
     );
 
+    /// `bots.enabled`: the hosted-sandbox spawn opt-in (unset reads
+    /// as disabled).
+    fn bots_enabled(&self) -> bool {
+        self.manager().get_bots_enabled()
+    }
+
+    /// `/bots on|off`: persists the gate, then reports the change on
+    /// the background settings-event path (the same asynchronous
+    /// delivery `set_compaction_threshold_percent` uses — never
+    /// awaited on the input or paint path).
+    fn set_bots_enabled(&self, enabled: bool) -> Result<()> {
+        self.manager().set_bots_enabled(enabled)?;
+        let settings = self.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let manager = settings.manager();
+                if crate::mode::telemetry_disabled(&manager) {
+                    return;
+                }
+                let client =
+                    pa_core::session_engine::telemetry::build_client(&manager, &settings.agent_dir);
+                let mut properties = pa_telemetry::base_properties("interactive");
+                properties.set("enabled", serde_json::json!(enabled));
+                client.track("bots enabled changed", properties);
+                let _ = client.shutdown().await;
+            });
+        }
+        Ok(())
+    }
+
     /// `updateChannel`: the settings enum's wire value; unset reads as
     /// `None`.
     fn update_channel(&self) -> Option<String> {
@@ -418,5 +448,27 @@ mod tests {
             std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
         assert_eq!(value["factory"]["enabled"], false);
+
+        // The bots opt-in gate (`/bots on|off|status`): the same
+        // contract over its own nested-camelCase key -- the exact key
+        // the daemon's sandbox-admission gate reads, with the factory
+        // key left alone.
+        assert!(!settings.bots_enabled());
+        settings.set_bots_enabled(true).expect("bots enabled");
+        assert!(settings.bots_enabled());
+        let content =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(value["bots"]["enabled"], true);
+        assert_eq!(
+            value["factory"]["enabled"], false,
+            "the factory key is untouched"
+        );
+        settings.set_bots_enabled(false).expect("bots disabled");
+        assert!(!settings.bots_enabled());
+        let content =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(value["bots"]["enabled"], false);
     }
 }

@@ -313,6 +313,12 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
         *self.factory_enabled.lock().expect("factory gate lock") = enabled;
         Ok(())
     }
+    fn bots_enabled(&self) -> bool {
+        false
+    }
+    fn set_bots_enabled(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
     fn telemetry_status(&self) -> String {
         "telemetry enabled".to_string()
     }

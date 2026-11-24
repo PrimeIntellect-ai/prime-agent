@@ -631,6 +631,13 @@ impl RlmSubagentHost for InlineHost {
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
         let node = Arc::clone(&self.0);
         Box::pin(async move {
+            // A bot needs the daemon's bot manager; never run it locally.
+            if request.target == pa_core::session_engine::rlm_host::RlmSpawnTarget::Sandbox {
+                anyhow::bail!(
+                    "rlm.spawn target \"sandbox\" needs the Prime Agent daemon; \
+                     print mode runs local children only"
+                );
+            }
             if node.depth >= node.max_depth {
                 return Err(rlm_depth_limit_error(node.depth, node.max_depth));
             }
@@ -1291,6 +1298,7 @@ mod tests {
         Arc::get_mut(&mut node).unwrap().max_depth = 2;
         let gate = node.spawn_gate.lock().await;
         let mut spawn = InlineHost(Arc::clone(&node)).spawn(RlmSpawnRequest {
+            target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             prompt: "finish the task".to_string(),
             name: Some("late".to_string()),
             model: None,
