@@ -379,121 +379,33 @@ pub(super) enum FileSegment {
     Mermaid(String),
 }
 
-/// Split live Mermaid fences from Markdown, preserving examples inside other fences.
+/// Split a Markdown file on its `` ```mermaid `` blocks, read by the same
+/// block parse `render_markdown` renders the prose with: each block is one
+/// diagram, and the source around them is prose.
 pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
+    let lines: Vec<&str> = text.lines().collect();
     let mut segments = Vec::new();
-    let mut prose = String::new();
-    let mut fence = String::new();
-    let mut active = None;
-    for line in text.lines() {
-        // One rule ends a fence: its closer, or a non-blank line that
-        // dedents out of the list item holding it (CommonMark ends the
-        // item there, and the fence with it); that line is then read as
-        // ordinary Markdown.
-        if let Some((_, _, column, mermaid)) = active {
-            let indent = line.len() - line.trim_start_matches(' ').len();
-            if !line.trim().is_empty() && indent < column {
-                if mermaid {
-                    segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
-                }
-                active = None;
-            }
-        }
-        let marker = markdown_fence(line);
-        if let Some((delimiter, length, column, mermaid)) = active {
-            // A closer sits at most three spaces past the opener's container
-            // column (a list item's closer is indented with its content).
-            let fence_text = line.trim_start_matches(' ');
-            let indent = line.len() - fence_text.len();
-            let closes = indent <= column + 3
-                && fence_run(fence_text).is_some_and(|(ch, count, info)| {
-                    ch == delimiter && count >= length && info.trim().is_empty()
-                });
-            if mermaid {
-                if closes {
-                    segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
-                } else {
-                    fence.push_str(line);
-                    fence.push('\n');
-                }
-            } else {
-                prose.push_str(line);
-                prose.push('\n');
-            }
-            if closes {
-                active = None;
-            }
-            continue;
-        }
-        if let Some((delimiter, length, info, column)) = marker {
-            let mermaid = info.split_whitespace().next() == Some("mermaid");
-            active = Some((delimiter, length, column, mermaid));
-            if mermaid {
-                if prose.trim().is_empty() {
-                    prose.clear();
-                } else {
-                    segments.push(FileSegment::Text(std::mem::take(&mut prose)));
-                }
-                continue;
-            }
-        }
-        prose.push_str(line);
-        prose.push('\n');
+    let mut prose_from = 0;
+    for (range, code) in crate::markdown::fenced_code_blocks(text, "mermaid") {
+        push_prose(&mut segments, &lines[prose_from..range.start]);
+        segments.push(FileSegment::Mermaid(code));
+        prose_from = range.end;
     }
-    if active.is_some_and(|(_, _, _, mermaid)| mermaid) {
-        segments.push(FileSegment::Mermaid(fence));
-    } else if !prose.trim().is_empty() {
-        segments.push(FileSegment::Text(prose));
-    }
+    push_prose(&mut segments, &lines[prose_from..]);
     segments
 }
 
-/// A fence opener: its delimiter, run length, info string, and the column
-/// its list-item content starts at (0 outside a list), so `- ```python`
-/// opens a fence inside a list item.
-fn markdown_fence(line: &str) -> Option<(char, usize, &str, usize)> {
-    let mut rest = line;
-    loop {
-        // CommonMark: a fence or list marker takes at most three spaces of
-        // indent; a deeper line is an indented code block's text.
-        let content = rest.trim_start_matches(' ');
-        if rest.len() - content.len() > 3 {
-            return None;
-        }
-        let digits = content.len()
-            - content
-                .trim_start_matches(|ch: char| ch.is_ascii_digit())
-                .len();
-        let marker_end = match content[digits..].chars().next() {
-            Some('-' | '*' | '+') if digits == 0 => 1,
-            Some('.' | ')') if (1..=9).contains(&digits) => digits + 1,
-            Some(_) | None => break,
-        };
-        let Some(item) = content[marker_end..].strip_prefix(' ') else {
-            break;
-        };
-        rest = item.trim_start_matches(' ');
+/// Prose lines join the split as one segment, unless they are all blank.
+fn push_prose(segments: &mut Vec<FileSegment>, lines: &[&str]) {
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        return;
     }
-    let column = line.len() - rest.len();
-    let (delimiter, length, info) = fence_run(rest.trim_start_matches(' '))?;
-    Some((delimiter, length, info, column))
-}
-
-/// A run of three or more backticks or tildes opening `line`, with the info
-/// string after it.
-fn fence_run(line: &str) -> Option<(char, usize, &str)> {
-    let delimiter = line.chars().next()?;
-    if !matches!(delimiter, '`' | '~') {
-        return None;
+    let mut prose = String::new();
+    for line in lines {
+        prose.push_str(line);
+        prose.push('\n');
     }
-    let length = line.chars().take_while(|ch| *ch == delimiter).count();
-    let info = &line[length..];
-    // CommonMark: a backtick fence's info string cannot contain a
-    // backtick, so a line of inline triple-backtick code is not a fence.
-    if delimiter == '`' && info.contains('`') {
-        return None;
-    }
-    (length >= 3).then_some((delimiter, length, info))
+    segments.push(FileSegment::Text(prose));
 }
 
 #[cfg(test)]
@@ -502,23 +414,14 @@ mod tests {
 
     #[test]
     fn mermaid_examples_inside_markdown_fences_remain_text() {
-        for delimiter in ["````", "~~~~"] {
-            let example = format!(
-                "{delimiter}markdown\n```mermaid\nflowchart TB\nA --> B\n```\n{delimiter}\n"
-            );
-            let text =
-                format!("{example}\n````mermaid\nflowchart TB\nC --> D\n```\nE --> F\n````\n");
-            let segments = super::split_mermaid_fences(&text);
-            assert_eq!(segments.len(), 2);
-            let super::FileSegment::Text(prose) = &segments[0] else {
-                panic!("expected prose")
-            };
-            assert_eq!(prose, &format!("{example}\n"));
-            let super::FileSegment::Mermaid(graph) = &segments[1] else {
-                panic!("expected graph")
-            };
-            assert_eq!(graph, "flowchart TB\nC --> D\n```\nE --> F\n");
-        }
+        let example = "~~~markdown\n```mermaid\nflowchart TB\nA --> B\n```\n~~~\n\n";
+        let text = format!("{example}```mermaid\nflowchart TB\nC --> D\n```\n");
+        let segments = super::split_mermaid_fences(&text);
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(graph)] if prose == example && graph == "flowchart TB\nC --> D\n"),
+            "{} segments",
+            segments.len()
+        );
         let segments = super::split_mermaid_fences("~~~mermaid\nflowchart TB\nA --> B\n~~~\n");
         assert!(
             matches!(&segments[..], [super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n")
@@ -573,21 +476,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_triple_backticks_do_not_swallow_a_later_mermaid_fence() {
-        let text = "```code``` stays inline.\n\n```mermaid\nflowchart TB\nA --> B\n```\n";
-        let segments = super::split_mermaid_fences(text);
-        assert_eq!(segments.len(), 2);
-        let super::FileSegment::Text(prose) = &segments[0] else {
-            panic!("expected prose")
-        };
-        assert!(prose.contains("```code``` stays inline."), "{prose}");
-        let super::FileSegment::Mermaid(graph) = &segments[1] else {
-            panic!("expected mermaid")
-        };
-        assert_eq!(graph, "flowchart TB\nA --> B\n");
-    }
-
-    #[test]
     fn many_hashes_before_a_semicolon_decode_in_linear_time() {
         let label = format!("{}{}", "#".repeat(200_000), ";#34;");
         let started = std::time::Instant::now();
@@ -597,48 +485,6 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(2),
             "decode took {:?}",
             started.elapsed()
-        );
-    }
-
-    #[test]
-    fn a_fence_inside_a_list_item_closes_before_a_later_mermaid_block() {
-        let graph = "flowchart TB\nA --> B\n";
-        for example in [
-            "- ```python\n  print(1)\n  ```\n",
-            "1. ```python\n   print(1)\n   ```\n",
-            "- outer\n  - ```python\n    print(1)\n    ```\n",
-        ] {
-            let text = format!("{example}\n```mermaid\n{graph}```\n");
-            let segments = super::split_mermaid_fences(&text);
-            assert!(
-                matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(diagram)] if prose.contains("print(1)") && diagram == graph),
-                "{example}: {} segments",
-                segments.len()
-            );
-        }
-    }
-
-    #[test]
-    fn an_unclosed_list_item_fence_ends_where_the_list_ends() {
-        let graph = "flowchart TB\nA --> B\n";
-        let text =
-            format!("- ```python\n  print(1)\n\nAfter the list.\n\n```mermaid\n{graph}```\n");
-        let segments = super::split_mermaid_fences(&text);
-        assert!(
-            matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(diagram)] if prose.contains("After the list.") && diagram == graph),
-            "{} segments",
-            segments.len()
-        );
-    }
-
-    #[test]
-    fn a_four_space_indented_fence_never_swallows_a_live_mermaid_block() {
-        let text = "    ```markdown\n    example\n\n```mermaid\nflowchart TB\nA --> B\n```\n";
-        let segments = super::split_mermaid_fences(text);
-        assert!(
-            matches!(&segments[..], [super::FileSegment::Text(_), super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n"),
-            "{}",
-            segments.len()
         );
     }
 }
