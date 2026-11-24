@@ -297,6 +297,14 @@ fn every_load_error_names_its_place() {
         (
             &[(
                 "outputs = { url = \"text\" }",
+                "outputs = { from = \"text\" }",
+            )],
+            &[],
+            "outputs.from: output names are lowercase identifiers (a-z, 0-9, _) and not Python keywords",
+        ),
+        (
+            &[(
+                "outputs = { url = \"text\" }",
                 "outputs = { url = \"Text\" }",
             )],
             &[],

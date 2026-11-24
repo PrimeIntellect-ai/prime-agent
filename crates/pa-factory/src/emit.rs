@@ -10,6 +10,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::load::is_identifier;
 use crate::machine::{Machine, Output};
 use crate::types::{check_value, parse_slot, record_names, Records, Slot};
 
@@ -87,6 +88,12 @@ impl Contract {
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| malformed("an output has no name"))?;
+            // A file port's name becomes a directory under the session.
+            if !is_identifier(name) {
+                return Err(malformed(&format!(
+                    "output name {name:?} is not an identifier"
+                )));
+            }
             let ty = output
                 .get("type")
                 .and_then(Value::as_str)
@@ -200,6 +207,15 @@ mod tests {
                 )],
             )])),
         }
+    }
+
+    #[test]
+    fn a_contract_refuses_an_output_name_that_is_not_an_identifier() {
+        let contract = json!({"outputs": [{"name": "../../x", "type": "file"}], "records": {}});
+        assert_eq!(
+            Contract::from_json(&contract).unwrap_err(),
+            "malformed factory contract: output name \"../../x\" is not an identifier"
+        );
     }
 
     #[test]
