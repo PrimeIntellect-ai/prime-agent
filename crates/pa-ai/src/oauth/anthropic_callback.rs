@@ -460,4 +460,17 @@ mod tests {
             .expect("the settle settled a code");
         assert_eq!(result.code, "the-code");
     }
+
+    /// The Anthropic callback has its own decoder, separate from the one in `callback.rs`.
+    #[test]
+    fn query_and_percent_decoding() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(
+            query_param("code=a+b&state=2", "code"),
+            Some("a b".to_string())
+        );
+        // TS `URLSearchParams` keeps the bare key with an empty value
+        // (`""` is falsy in the flow's missing-params check).
+        assert_eq!(query_param("code&state=2", "code"), Some(String::new()));
+    }
 }
