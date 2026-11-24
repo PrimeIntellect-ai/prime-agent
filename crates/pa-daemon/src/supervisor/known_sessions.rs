@@ -41,8 +41,10 @@ pub(super) struct KnownSessions {
     pub(super) resident_only: Vec<usize>,
     /// The passive RLM children of every root, each once.
     pub(super) children: Vec<PassiveRlmChild>,
-    /// Partial failures: an unreadable catalog, a failed ledger walk.
+    /// An unreadable catalog directory: the rest of the catalog still reads.
     pub(super) warnings: Vec<String>,
+    /// Failed ledger walks: the passive children are incomplete.
+    pub(super) walk_errors: Vec<String>,
 }
 
 impl Supervisor {
@@ -159,7 +161,12 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
         .into_iter()
         .map(|info| {
             let canonical = canonical_session_path(&info.path);
-            let resident = resident_files.iter().position(|file| *file == canonical);
+            // A resident hosts at most one saved row (a symlinked file can
+            // list twice under one canonical path).
+            let resident = resident_files
+                .iter()
+                .enumerate()
+                .position(|(index, file)| *file == canonical && !hosted[index]);
             if let Some(index) = resident {
                 hosted[index] = true;
             }
@@ -184,6 +191,7 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
     // Every ledger walks with every root, so a resident (a root) never
     // reads as another root's passive child.
     let mut children: Vec<PassiveRlmChild> = Vec::new();
+    let mut walk_errors = Vec::new();
     let mut seen_children = HashSet::new();
     for ledger in roots.ledgers.values() {
         match walk_passive_rlm_children(ledger, &walk_roots) {
@@ -193,7 +201,7 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
                     .filter(|child| seen_children.insert(canonical_session_path(&child.info.path))),
             ),
             Err(error) => {
-                warnings.push(format!("Could not walk passive RLM children: {error:#}"));
+                walk_errors.push(format!("Could not walk passive RLM children: {error:#}"));
             }
         }
     }
@@ -202,5 +210,6 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
         resident_only,
         children,
         warnings,
+        walk_errors,
     }
 }
