@@ -105,6 +105,9 @@ pub struct RlmLedgerEdge {
     /// The factory run that spawned the child (spawn records written
     /// before the tag existed read `None`); it survives the tombstone.
     pub factory: Option<RlmFactoryTag>,
+    /// The Decision API child (`rlm.spawn kind="decision"`): the seeded
+    /// roster row and the wakes replay it from the edge.
+    pub decision_child: bool,
 }
 
 /// Inputs for `append_spawn` (validated like a record the reader would refuse to read back).
@@ -116,6 +119,7 @@ pub struct RlmSpawnInput {
     pub depth: u32,
     pub name: String,
     pub factory: Option<RlmFactoryTag>,
+    pub decision_child: bool,
 }
 
 /// One billable tombstoned child (the deleted-spend fold's unit): its
@@ -241,6 +245,7 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                 depth,
                 name,
                 factory,
+                decision_child,
             } if keep(&child_id) => {
                 let key = edge_key(&child_id, &child);
                 let edge = RlmLedgerEdge {
@@ -253,6 +258,7 @@ fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> Repl
                     deleted_usage: None,
                     deleted_usage_by_model: None,
                     factory,
+                    decision_child,
                 };
                 if let Some(at) = state.index.get(&key).copied() {
                     state.edges[at] = edge;
@@ -393,6 +399,9 @@ impl RlmSpawnLedger {
         // Optional: old readers skip the unknown field (no version bump).
         if let Some(factory) = &input.factory {
             record["factory"] = json!(factory);
+        }
+        if input.decision_child {
+            record["decisionChild"] = json!(true);
         }
         self.append_record(&record)
     }

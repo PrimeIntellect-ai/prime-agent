@@ -34,8 +34,6 @@ pub struct SessionEngineConfig {
     pub custom_system_prompt: Option<String>,
     /// Explicit append-system-prompt sources from the host; overrides file discovery.
     pub prompt_guidelines: Vec<String>,
-    pub generic_mcp_servers: Vec<String>,
-    pub allow_recursion: Option<bool>,
     /// In-memory when None.
     pub session_manager: Option<SessionManager>,
     /// Merged over the built-in goal/heartbeat registrations.
@@ -268,6 +266,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         );
     }
 
+    // A handle that outlives the move into the resource loader: the
+    // refinement gate and the system prompt read it.
     let refinement_settings = settings.reopen();
     let service_tier_preference = settings.get_default_service_tier();
     // Captured before `settings` moves into the resource loader: the
@@ -287,7 +287,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // default cell time limit (default 60s, `0` disables).
     let python_cell_timeout_ms = settings.get_python_cell_timeout_ms();
     let web_search_provider = settings.get_web_search_provider();
-    let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
+    let (mcp_skill_overrides, generic_mcp_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
         .mcp_manager
@@ -295,12 +295,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         .unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(built_manager)));
     let mut extra_builtin_skill_overrides = config.extra_builtin_skill_overrides.clone();
     extra_builtin_skill_overrides.extend(mcp_skill_overrides);
-    let mut generic_mcp_servers = config.generic_mcp_servers.clone();
-    for server in mcp_generic_servers {
-        if !generic_mcp_servers.contains(&server) {
-            generic_mcp_servers.push(server);
-        }
-    }
     let resources = load_resources(ResourceLoaderOptions {
         cwd: cwd.clone(),
         agent_dir: config.agent_dir.clone(),
@@ -578,10 +572,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         });
     }
 
-    let prompt_model_selector = format!("{}/{}", model_info.provider, model_info.id);
-    let prompt_vision_capable = Some(model_info.input.contains(&pa_types::ai::ModelInput::Image));
     let model_prompts = crate::prompts::model_prompts::load_model_prompts(
-        Some(&prompt_model_selector),
+        Some(&format!("{}/{}", model_info.provider, model_info.id)),
         &config.agent_dir,
     );
     if !model_prompts.errors.is_empty() {
@@ -594,33 +586,21 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     }
     let system_prompt = crate::prompts::system_prompt::build_system_prompt(
         &crate::prompts::system_prompt::BuildSystemPromptOptions {
-            custom_prompt: resources.system_prompt.clone(),
+            settings: &refinement_settings,
+            resources: &resources,
+            skills: &model_visible_skills,
+            selected_tools: active_tool_names.iter().map(String::as_str).collect(),
             model_prompt_extras: model_prompts.extras.as_deref(),
-            vision_capable: prompt_vision_capable,
+            model_input: &model_info.input,
             cwd: cwd.display().to_string(),
             messages_path: conversation_log.clone(),
-            context_files: resources
-                .agents_files
-                .iter()
-                .map(|file| (file.path.display().to_string(), file.content.clone()))
-                .collect(),
-            skills: model_visible_skills.clone(),
-            selected_tools: Some(
-                active_tool_names
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            ),
-            allow_recursion: config.allow_recursion,
+            generic_mcp_servers,
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
-            rlm_depth: config.rlm_depth,
+            rlm_depth: config.rlm_depth.unwrap_or(0),
             factory_child: config.factory_child,
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
-            generic_mcp_servers,
-            append_system_prompt: Some(resources.append_system_prompt.join("\n\n")),
-            ..Default::default()
         },
     );
 

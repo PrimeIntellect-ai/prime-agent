@@ -9,22 +9,15 @@ author: Prime Agent
 
 ## What this machine does
 
-Builds a documented status report from parallel section writers. One source
-child inspects the working tree and produces a short outline, one writer
-child drafts a section per outline line (up to eight in parallel), and a
-collector child assembles the sections into a single markdown report.
+Builds a documented status report from parallel section writers. One source child inspects the working tree and produces a short outline, one writer child drafts a section per outline line (up to eight in parallel), and a collector child assembles the sections into a single markdown report.
 
-This is the fan-in example: `collect` waits on the joined `sections` text
-port until every writer settles, then merges them. No guards, no loops -
-the simplest multi-child shape the factory runs.
+This is the fan-in example: `collect` waits on the joined `sections` text port until every writer settles, then merges them. No guards, no loops - the simplest multi-child shape the factory runs.
 
 ## How to run it
 
     result = await rlm.factory.run("builder")
 
-Then watch progress with `await rlm.factory.status(result["run_id"])`. The
-collector's `merged` text is the latest settle answer of the `collect`
-state.
+Then watch progress with `await rlm.factory.status(result["run_id"])`. The collector's `merged` text is the latest settle answer of the `collect` state.
 
 ```machine-spec
 {

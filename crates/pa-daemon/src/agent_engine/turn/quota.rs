@@ -414,7 +414,6 @@ impl AgentSessionEngine {
                         agent_message_id: None,
                         custom_message: None,
                         batch: Vec::new(),
-                        streaming_behavior: None,
                     },
                     // A synthetic admission, not a minted continuation: no pending guard.
                     goal_update: None,
