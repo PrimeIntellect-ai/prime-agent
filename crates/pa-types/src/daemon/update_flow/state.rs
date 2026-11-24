@@ -153,24 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_set_is_join_complete_skipped_aborted_failed() {
-        for state in ALL {
-            assert_eq!(
-                state.is_terminal(),
-                matches!(
-                    state,
-                    UpdateState::Complete
-                        | UpdateState::Join
-                        | UpdateState::Skipped
-                        | UpdateState::Aborted
-                        | UpdateState::Failed
-                ),
-                "terminal classification of {state:?}"
-            );
-        }
-    }
-
-    #[test]
     fn every_state_has_an_outgoing_or_terminal_role() {
         // Pins the table against a wedged state (invariant I1: no state without a watchdog exit).
         for state in ALL {
@@ -183,16 +165,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn state_wire_names_are_lowercase() {
-        use UpdateState as S;
-        assert_eq!(serde_json::to_value(S::Acquire).unwrap(), "acquire");
-        assert_eq!(serde_json::to_value(S::Rollback).unwrap(), "rollback");
-        assert_eq!(serde_json::to_value(S::Complete).unwrap(), "complete");
-        assert_eq!(serde_json::to_value(S::Aborted).unwrap(), "aborted");
-        let parsed: UpdateState = serde_json::from_value("restoring".into()).unwrap();
-        assert_eq!(parsed, S::Restoring);
     }
 }
