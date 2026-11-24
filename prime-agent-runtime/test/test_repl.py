@@ -3305,5 +3305,77 @@ class OwnerExitWaitTest(unittest.TestCase):
         sleep.assert_called_once()
 
 
+class InheritedSigintMaskTest(unittest.TestCase):
+    """The kernel owns its SIGINT mask: a host that blocks SIGINT on the
+    spawning thread (tokio-style signal handling) leaks that mask through
+    fork+exec, and the kernel must unblock it at startup, or no user
+    interrupt can ever land in a stuck cell."""
+
+    def test_an_interrupt_lands_even_when_the_host_blocked_sigint(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masks required")
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            repl = ReplProcess()
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        self.addCleanup(repl.close)
+        repl.ready()
+        repl.send({"type": "execute", "id": "stuck", "code": "print('spinning', flush=True)\nn = 0\nwhile True:\n    n += 1"})
+        # Interrupt once the cell is observably running, not after a fixed sleep.
+        events = []
+        while not any(event.get("event") == "stdout" for event in events):
+            events.append(repl.read_event())
+        repl.send({"type": "interrupt", "id": "stuck"})
+        events.extend(repl.until_done("stuck"))
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+
+class ProtocolFrameAtomicityTest(unittest.TestCase):
+    """An interrupt raised by the handler must not tear a protocol frame: the
+    write blocks SIGINT on the main thread, so the signal lands after the last
+    byte instead of splitting the frame the host is parsing."""
+
+    def test_interrupt_during_a_display_write_keeps_the_frame_whole(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        cell = "\n".join(
+            [
+                "import os",
+                "import rlm.repl as repl_module",
+                "real_write = repl_module.os.write",
+                "armed = []",
+                "def write(fd, data):",
+                "    if fd == repl_module._protocol_fd and len(data) > 4096 and not armed:",
+                "        armed.append(True)",
+                "        sent = real_write(fd, bytes(data[:4096]))",
+                # The request-interrupt path: mark the rid, then SIGINT the
+                # main thread while the frame is only partly on the wire.
+                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        return sent",
+                "    return real_write(fd, data)",
+                "repl_module.os.write = write",
+                "try:",
+                "    repl_module.emit({'text/plain': 'x' * 200000})",
+                "finally:",
+                "    repl_module.os.write = real_write",
+            ]
+        )
+        repl.send({"type": "execute", "id": "tear", "code": cell})
+        events = repl.until_done("tear")
+        display = one(events, "display")
+        self.assertIsNotNone(display, f"events: {events}")
+        self.assertEqual(len(display["data"]["text/plain"]), 200000)
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
+
+
 if __name__ == "__main__":
     unittest.main()

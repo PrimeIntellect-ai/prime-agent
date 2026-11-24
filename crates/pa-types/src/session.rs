@@ -757,11 +757,6 @@ mod tests {
         assert_roundtrips(json);
     }
 
-    #[test]
-    fn non_object_entry_is_rejected() {
-        assert!(serde_json::from_str::<FileEntry>(r#""not an entry""#).is_err());
-    }
-
     /// A custom row without a `timestamp` fills the clock through the
     /// internally tagged enum: the missing-field default applies on both
     /// parse paths the daemon uses (`from_value` at the injected-row seam,

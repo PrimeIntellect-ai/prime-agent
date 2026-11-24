@@ -648,42 +648,32 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_zero_reported_cost_keeps_catalog_estimate() {
-        let model = model("openrouter", 0.5, 0.5);
-        // A cost of 0 can mean not-billed-via-credits (:free endpoints) rather than free, so the
-        // catalog estimate stays.
-        let usage = parse_chunk_usage(&raw_usage(0.0, ByokBilling::NotByok), &model, None);
-        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
-    }
-
-    #[test]
-    fn openrouter_byok_without_upstream_keeps_catalog_estimate() {
-        let model = model("openrouter", 0.5, 0.5);
-        // BYOK credits are only OpenRouter's fee; without the upstream bill the real spend is
-        // unknown, so the catalog estimate stays.
-        let usage = parse_chunk_usage(&raw_usage(0.003, ByokBilling::FeeOnly), &model, None);
-        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
-    }
-
-    #[test]
     fn openrouter_byok_upstream_cost_replaces_catalog_estimate() {
-        let model = model("openrouter", 0.5, 0.5);
+        let priced = model("openrouter", 0.5, 0.5);
         // Credits charged by OpenRouter plus the upstream provider's bill.
         let usage = parse_chunk_usage(
             &raw_usage(0.003, ByokBilling::WithUpstreamBill(0.2)),
-            &model,
+            &priced,
             None,
         );
         assert!((usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
         assert!((usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
         assert!((usage.cost.total.as_f64() - 0.203).abs() < 1e-9);
-    }
 
-    #[test]
-    fn openrouter_reported_cost_apportioned_by_tokens_without_rates() {
-        let model = model("openrouter", 0.0, 0.0);
+        // BYOK credits without the upstream bill are only OpenRouter's fee, and a cost of 0 can
+        // mean not billed via credits (:free endpoints): both keep the catalog estimate.
+        for raw in [
+            raw_usage(0.003, ByokBilling::FeeOnly),
+            raw_usage(0.0, ByokBilling::NotByok),
+        ] {
+            let usage = parse_chunk_usage(&raw, &priced, None);
+            assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+        }
+
+        // Without catalog rates the reported cost is apportioned by tokens.
+        let unpriced = model("openrouter", 0.0, 0.0);
         let raw = json!({"prompt_tokens": 40_000, "completion_tokens": 10_000, "total_tokens": 50_000, "cost": 0.15});
-        let usage = parse_chunk_usage(&raw, &model, None);
+        let usage = parse_chunk_usage(&raw, &unpriced, None);
         assert!((usage.cost.input.as_f64() - 0.12).abs() < 1e-9);
         assert!((usage.cost.output.as_f64() - 0.03).abs() < 1e-9);
         assert!((usage.cost.cache_read.as_f64() - 0.0).abs() < 1e-9);

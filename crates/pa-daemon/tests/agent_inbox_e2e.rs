@@ -140,6 +140,27 @@ fn last_user_text(body: &Value) -> String {
     }
 }
 
+/// The readiness gates the mock's `@hold:<name>` directive waits on:
+/// the test opens a gate only after the worker reported the arrival row
+/// queued (`get_queue`), so the cell under test starts against
+/// OBSERVABLE readiness — never a wall-clock sleep racing the arrivals.
+static HOLD_GATES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn open_gate(name: &str) {
+    HOLD_GATES
+        .lock()
+        .expect("hold gates lock")
+        .push(name.to_string());
+}
+
+fn gate_open(name: &str) -> bool {
+    HOLD_GATES
+        .lock()
+        .expect("hold gates lock")
+        .iter()
+        .any(|open| open == name)
+}
+
 fn serve(
     mut stream: TcpStream,
     next: &AtomicUsize,
@@ -175,6 +196,28 @@ fn serve(
     let data = script(request);
     let mut payload = String::new();
     for data in data {
+        // `@sleep:<ms>`: hold the model call open first. A busy window with
+        // no cell running is where the inbox coalesces its wake rows (a
+        // running cell is woken by each arrival instead).
+        if let Some(ms) = data.strip_prefix("@sleep:") {
+            std::thread::sleep(Duration::from_millis(ms.parse().unwrap_or_default()));
+            continue;
+        }
+        // `@hold:<name>`: hold the model call open until the test opens
+        // the gate — the readiness barrier's mock half. The test opens it
+        // only once the worker reported the arrival row queued, so the
+        // cell that follows always starts with the batch already parked.
+        if let Some(name) = data.strip_prefix("@hold:") {
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            while !gate_open(name) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the readiness gate {name} never opened"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            continue;
+        }
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
     payload.push_str("data: [DONE]\n\n");
@@ -211,7 +254,15 @@ fn inbox_script(request: usize) -> Vec<String> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ].to_vec(),
+        // The arrivals' window: the three detached commands finish while this
+        // model call is held open behind the readiness gate (a busy
+        // window with no cell running, so the notices coalesce into ONE
+        // queued wake). The count cell that follows runs with the batch
+        // already parked: under the level wake contract it answers its own
+        // tool result (the settle window lets a quick result win), and
+        // the queued notice steers the very next model request.
         1 => [
+            "@hold:coalesce-arrivals".to_string(),
             chunk(
                 &json!({
                     "role": "assistant",
@@ -221,7 +272,7 @@ fn inbox_script(request: usize) -> Vec<String> {
                         "id": "call-inbox-2",
                         "type": "function",
                         "function": python_cell(
-                            "import asyncio\nawait asyncio.sleep(4)\nfrom rlm import inbox\nc = await inbox.count()\nprint((c.count, c.oldest_arrived_at_ms > 0, dict(c.classes)))"
+                            "from rlm import inbox\nc = await inbox.count()\nprint((c.count, c.oldest_arrived_at_ms > 0, dict(c.classes)))"
                         )
                     }]
                 }),
@@ -229,6 +280,10 @@ fn inbox_script(request: usize) -> Vec<String> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ].to_vec(),
+        // The coalesced arrival delivered at the count's tool boundary, so
+        // this request IS the wake: its prompt is the short notice row.
+        // The woken turn reads the inbox: the read cell runs with an empty
+        // lane (the level is false) and completes its own tool result.
         2 => [
             chunk(
                 &json!({
@@ -315,7 +370,16 @@ fn drain_run_script(request: usize) -> Vec<String> {
             ),
             chunk(&json!({}), Some("tool_calls")),
         ].to_vec(),
+        // The arrivals' window: the detached completion (~2s) lands while
+        // this model call is held open behind the readiness gate, parking
+        // its notice behind the busy run. The read cell that follows runs
+        // with the batch already parked and answers its own tool result
+        // (the settle window lets the quick read win): the drain seam then
+        // sweeps the queued row inside the read's own host handler, so the
+        // model answers the read's tool result and no stale notice ever
+        // delivers.
         1 => [
+            "@hold:drain-arrivals".to_string(),
             chunk(
                 &json!({
                     "role": "assistant",
@@ -325,7 +389,7 @@ fn drain_run_script(request: usize) -> Vec<String> {
                         "id": "call-drain-2",
                         "type": "function",
                         "function": python_cell(
-                            "import asyncio\nawait asyncio.sleep(5)\nfrom rlm import inbox\nmsgs = await inbox.read()\nprint(('drained', len(msgs)))"
+                            "from rlm import inbox\nmsgs = await inbox.read()\nprint(('drained', len(msgs)))"
                         )
                     }]
                 }),
@@ -669,25 +733,68 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
 
     // THE INBOX TURN: three detached commands start; all finish inside the
     // same busy turn, so their notices land in the inbox while the session
-    // is busy; the read then drains.
-    let turn = client.request(
-        "p1",
-        &json!({
-            "type": "prompt_and_wait",
-            "activeSessionId": active_id,
-            "message": "run the three detached commands, count, read, and finish",
-        }),
-    );
+    // is busy. The turn runs on its own connection while the barrier
+    // waits for the coalesced row to park: the gate opens only on the
+    // worker's own queue report (observable readiness), and the count
+    // cell starts only then.
+    let turn_session = active_id.clone();
+    let turn = {
+        std::thread::spawn(move || {
+            let turn = client.request(
+                "p1",
+                &json!({
+                    "type": "prompt_and_wait",
+                    "activeSessionId": turn_session,
+                    "message": "run the three detached commands, count, read, and finish",
+                }),
+            );
+            (turn, client)
+        })
+    };
+    let mut barrier_client = Client::connect(&socket);
+    let _parked = wait_until(Duration::from_secs(120), || {
+        let queue = barrier_client.request(
+            "q1",
+            &json!({ "type": "get_queue", "activeSessionId": active_id.as_str() }),
+        );
+        queue["data"]["steering"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.as_str()
+                        .is_some_and(|text| text.contains("3 new bash-done messages"))
+                })
+            })
+            .then_some(true)
+    });
+    open_gate("coalesce-arrivals");
+    let (turn, client) = turn.join().expect("the turn thread lives");
+    let mut client = client;
     assert_eq!(turn["success"], true, "inbox turn failed: {turn}");
+    // The coalesced notice row delivered at the count's tool boundary:
+    // it steered the very next model request inside the same turn.
+    let _settled_cut = wait_until(Duration::from_secs(120), || {
+        let messages = client.transcript(&active_id);
+        messages
+            .contains("3 new bash-done messages")
+            .then_some(messages)
+    });
+    // The count cell answered its own tool result mid-turn: the parked
+    // arrivals were already queued, and the settle window let the quick
+    // count win (the level wake never backgrounds a cell that is about
+    // to answer).
     let after_cut_turn = client.transcript(&active_id);
     assert!(
         after_cut_turn.contains("(3, True, {'bash-done': 3})"),
         "the mid-turn count saw all three arrivals in the inbox: {after_cut_turn}"
     );
+    assert!(
+        !after_cut_turn.contains("auto-backgrounded"),
+        "the count answered inline; no cell ever detached behind the parked arrivals: {after_cut_turn}"
+    );
 
-    // The coalesced wake: the queued steer cut the busy turn at its
-    // boundary, ONE short steering notice delivered, and the woken turn
-    // read the inbox — no full async_bash_completion custom row steers.
+    // The woken turn's reply: the read completed behind the delivered
+    // notice — no full async_bash_completion custom row ever steers.
     let _settled = wait_until(Duration::from_secs(120), || {
         let messages = client.transcript(&active_id);
         (messages.contains("woken by the inbox notice")).then_some(messages)
@@ -743,7 +850,7 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     // user message — the provider view of the injected row — equals the
     // delivered notice text exactly, so the row's typing change never
     // touched what the model reads.
-    let wake_body = captured_request_body(&bodies, 3);
+    let wake_body = captured_request_body(&bodies, 2);
     assert_eq!(
         last_user_text(&wake_body),
         notice_text,
@@ -865,12 +972,13 @@ fn machine_notices_inbox_coalesce_and_the_kill_switch_restores_steering() {
     drop(supervisor);
 }
 
-/// THE DRAIN-SEAM PIN: a cell that waits past a bash completion and
-/// then reads the inbox itself — the arrival notice queued behind the
-/// busy run — must answer its own tool result. The drain seam withdraws
-/// the queued row AT THE READ, inside the read's own host handler, so
-/// the steering probe sees an empty lane and the run continues with its
-/// tool result answered; no stale notice ever delivers.
+/// THE DRAIN-SEAM PIN (level-wake contract): a cell that waits past a
+/// bash completion backgrounds at once on the parked arrival (pending
+/// wakeable input), so the read runs in the BACKGROUND — and the drain
+/// seam still withdraws the queued bash-done row inside the read's own
+/// host handler: the withdrawn row never delivers, and the read's own
+/// [cell-done] notice is the only wake that follows. No stale notice
+/// ever delivers.
 #[test]
 fn a_read_that_drains_the_inbox_continues_the_run_and_never_wakes_a_stale_notice() {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -931,26 +1039,58 @@ fn a_read_that_drains_the_inbox_continues_the_run_and_never_wakes_a_stale_notice
 
     // ONE run: start the handle; the next cell waits past its completion
     // (the arrival notice queues behind the busy run) and reads the
-    // inbox itself. The read's tool result must get its follow-up
-    // request — the drain seam swept the queued row first.
-    let turn = client.request(
-        "p1",
-        &json!({
-            "type": "prompt_and_wait",
-            "activeSessionId": active_id,
-            "message": "start the handle, wait past its completion, read the inbox, then continue",
-        }),
-    );
+    // inbox itself. The turn runs on its own connection while the
+    // barrier waits for the parked row: the gate opens only on the
+    // worker's own queue report (observable readiness), and the read
+    // cell starts only then. The read's tool result must get its
+    // follow-up request — the drain seam swept the queued row first.
+    let turn_session = active_id.clone();
+    let turn = {
+        std::thread::spawn(move || {
+            let turn = client.request(
+                "p1",
+                &json!({
+                    "type": "prompt_and_wait",
+                    "activeSessionId": turn_session,
+                    "message": "start the handle, wait past its completion, read the inbox, then continue",
+                }),
+            );
+            (turn, client)
+        })
+    };
+    let mut barrier_client = Client::connect(&socket);
+    let _parked = wait_until(Duration::from_secs(120), || {
+        let queue = barrier_client.request(
+            "q1",
+            &json!({ "type": "get_queue", "activeSessionId": active_id.as_str() }),
+        );
+        queue["data"]["steering"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.as_str().is_some_and(|text| text.contains("bash-done")))
+            })
+            .then_some(true)
+    });
+    open_gate("drain-arrivals");
+    let (turn, client) = turn.join().expect("the turn thread lives");
+    let mut client = client;
     assert_eq!(turn["success"], true, "the drain turn failed: {turn}");
     let settled = wait_until(Duration::from_secs(120), || {
         let messages = client.transcript(&active_id);
         (messages.contains("continued after the read")).then_some(messages)
     });
-    // THE FOLLOW-UP REQUEST: the model answered the read's tool result —
-    // the run continued past the drain.
+    // THE DRAIN-SEAM PIN: the read answered its own tool result — the
+    // settle window let the quick read win over the parked arrival, and
+    // the drain seam swept the queued row inside the read's own host
+    // handler, so the run continued with its tool result answered.
     assert!(
         settled.contains("('drained', 1)"),
         "the read drained the completion's message: {settled}"
+    );
+    assert!(
+        !settled.contains("auto-backgrounded"),
+        "the read answered inline; no cell ever detached behind the parked arrival: {settled}"
     );
     assert_eq!(
         NEXT.load(Ordering::SeqCst),

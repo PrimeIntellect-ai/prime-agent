@@ -193,14 +193,22 @@ impl RegistrationTask {
         let stream: Box<dyn TransportStream> = stream;
         let (read_half, mut write_half) = stream.split();
         let mut reader = BufReader::new(read_half);
+        let mut line = Vec::new();
         // The supervisor writes daemon_hello before reading any command.
-        let hello = read_line(&mut reader).await.context("read daemon hello")?;
+        let hello = read_line(&mut reader, &mut line)
+            .await
+            .context("read daemon hello")?;
         if hello.get("type").and_then(Value::as_str) != Some("daemon_hello") {
             bail!("unexpected first line from supervisor");
         }
         let session_id = current_session_id(&self.session_id);
-        self.send_register(&mut reader, &mut write_half, session_id.as_deref())
-            .await?;
+        self.send_register(
+            &mut reader,
+            &mut write_half,
+            &mut line,
+            session_id.as_deref(),
+        )
+        .await?;
         Ok((reader, write_half))
     }
 
@@ -208,6 +216,7 @@ impl RegistrationTask {
         &self,
         reader: &mut BufReader<Box<dyn AsyncReadHalf>>,
         writer: &mut Box<dyn AsyncWriteHalf>,
+        line: &mut Vec<u8>,
         session_id: Option<&str>,
     ) -> Result<()> {
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -227,16 +236,16 @@ impl RegistrationTask {
             "protocol": current_protocol_info(),
             "command": command,
         });
-        let mut line = serde_json::to_string(&envelope)?;
-        line.push('\n');
+        let mut envelope_line = serde_json::to_string(&envelope)?;
+        envelope_line.push('\n');
         writer
-            .write_all(line.as_bytes())
+            .write_all(envelope_line.as_bytes())
             .await
             .context("write registration")?;
         writer.flush().await?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(RESPONSE_TIMEOUT_MS);
         loop {
-            let response = tokio::time::timeout_at(deadline, read_line(reader)).await;
+            let response = tokio::time::timeout_at(deadline, read_line(reader, line)).await;
             let response = match response {
                 Ok(response) => response?,
                 Err(_) => bail!("registration response timed out"),
@@ -260,20 +269,24 @@ impl RegistrationTask {
 
     /// Hold the registration connection open as the liveness watch (its
     /// death triggers re-registration); ends on close or a session-id signal.
+    ///
+    /// The signal arm can win while a broadcast line is half received.
+    /// `read_until` keeps those bytes in `line`, so `send_register` first
+    /// finishes that broadcast line before it reads its own response.
     async fn hold_connection(
         &mut self,
         mut reader: BufReader<Box<dyn AsyncReadHalf>>,
         mut writer: Box<dyn AsyncWriteHalf>,
     ) -> Result<()> {
+        let mut line = Vec::new();
         loop {
-            let mut watch_line = String::new();
-            let read = reader.read_line(&mut watch_line);
             tokio::select! {
-                read = read => match read {
+                read = reader.read_until(b'\n', &mut line) => match read {
                     Ok(0) => bail!("supervisor closed the registration connection"),
                     Ok(_) => {
                         // Broadcast lines (daemon_closing, session events);
                         // registration only watches for connection death.
+                        line.clear();
                     }
                     Err(error) => bail!("registration connection error: {error}"),
                 },
@@ -285,8 +298,13 @@ impl RegistrationTask {
                     Some(RegistrationSignal::SessionCreated { session_id }) => {
                         *self.session_id.lock().unwrap() = Some(session_id);
                         let session_id = current_session_id(&self.session_id);
-                        self.send_register(&mut reader, &mut writer, session_id.as_deref())
-                            .await?;
+                        self.send_register(
+                            &mut reader,
+                            &mut writer,
+                            &mut line,
+                            session_id.as_deref(),
+                        )
+                        .await?;
                     }
                 },
             }
@@ -294,17 +312,22 @@ impl RegistrationTask {
     }
 }
 
-async fn read_line(reader: &mut BufReader<Box<dyn AsyncReadHalf>>) -> Result<Value> {
-    let mut line = String::new();
-    let read = reader.read_line(&mut line).await?;
+/// Read one line into `line` and parse it. `line` may already hold the head
+/// of a line whose earlier read was cancelled; it is emptied once the line is complete.
+async fn read_line(
+    reader: &mut BufReader<Box<dyn AsyncReadHalf>>,
+    line: &mut Vec<u8>,
+) -> Result<Value> {
+    let read = reader.read_until(b'\n', line).await?;
     if read == 0 {
         bail!("connection closed by supervisor");
     }
-    let trimmed = line.trim();
+    let line = std::mem::take(line);
+    let trimmed = line.trim_ascii();
     if trimmed.is_empty() {
         bail!("empty line from supervisor");
     }
-    serde_json::from_str(trimmed).context("invalid supervisor line")
+    serde_json::from_slice(trimmed).context("invalid supervisor line")
 }
 
 fn debug_log(message: &str) {
@@ -667,5 +690,100 @@ mod tests {
             .expect("accept");
         drop(retry);
         drop(handle);
+    }
+
+    /// Reports each read that hands bytes to the worker, so a test knows
+    /// when the worker has taken part of a line.
+    struct ReportingRead<R> {
+        inner: R,
+        delivered: Arc<tokio::sync::Notify>,
+    }
+
+    impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ReportingRead<R> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let before = buf.filled().len();
+            let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+            if buf.filled().len() > before {
+                self.delivered.notify_one();
+            }
+            poll
+        }
+    }
+
+    /// A `SessionCreated` signal that wins while a broadcast line is half
+    /// received must not lose the head of that line. The re-registration
+    /// reads the rest of the broadcast, accepts its own response, and keeps
+    /// the connection.
+    #[tokio::test]
+    async fn a_signal_mid_broadcast_line_keeps_the_registration_connection() {
+        let (worker_side, supervisor_side) = tokio::io::duplex(4096);
+        let (worker_read, worker_write) = tokio::io::split(worker_side);
+        let (supervisor_read, mut supervisor_write) = tokio::io::split(supervisor_side);
+        let mut supervisor_reader = BufReader::new(supervisor_read);
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let reader: Box<dyn AsyncReadHalf> = Box::new(ReportingRead {
+            inner: worker_read,
+            delivered: Arc::clone(&delivered),
+        });
+        let writer: Box<dyn AsyncWriteHalf> = Box::new(worker_write);
+        let (tx, signals) = mpsc::unbounded_channel();
+        let mut task = RegistrationTask {
+            supervisor_socket_path: PathBuf::new(),
+            identity: Identity {
+                active_session_id: "abc123def456".to_string(),
+                socket_path: "worker.sock".to_string(),
+                worker_instance_id: "instance-1".to_string(),
+                token: "bootstrap-token".to_string(),
+            },
+            session_id: Arc::new(std::sync::Mutex::new(None)),
+            retired: Arc::new(tokio::sync::Notify::new()),
+            signals,
+        };
+        let held =
+            tokio::spawn(async move { task.hold_connection(BufReader::new(reader), writer).await });
+
+        let broadcast = b"{\"type\":\"event\",\"event\":{\"type\":\"daemon_roster\"}}\n";
+        let (first_part, rest) = broadcast.split_at(20);
+        supervisor_write
+            .write_all(first_part)
+            .await
+            .expect("write first part");
+        delivered.notified().await;
+        tx.send(RegistrationSignal::SessionCreated {
+            session_id: "session-uuid-1".to_string(),
+        })
+        .expect("signal");
+
+        let mut line = String::new();
+        supervisor_reader
+            .read_line(&mut line)
+            .await
+            .expect("read re-register");
+        let envelope: Value = serde_json::from_str(line.trim()).expect("parse re-register");
+        assert_eq!(envelope["command"]["sessionId"], "session-uuid-1");
+        let response = json!({
+            "id": envelope["id"],
+            "type": "response",
+            "command": "worker_register",
+            "success": true,
+        });
+        supervisor_write.write_all(rest).await.expect("write rest");
+        supervisor_write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .expect("respond");
+        // A closed signal channel ends the hold with `Ok`. An `Err` means the
+        // worker dropped the connection and would re-register.
+        drop(tx);
+        let held = tokio::time::timeout(Duration::from_secs(5), held)
+            .await
+            .expect("the hold ends")
+            .expect("join")
+            .map_err(|error| format!("{error:#}"));
+        assert_eq!(held, Ok(()));
     }
 }

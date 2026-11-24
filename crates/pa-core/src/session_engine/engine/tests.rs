@@ -103,6 +103,8 @@ async fn engine_runs_tool_loop_and_persists() {
         inner_stream(model, context, options)
     });
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -214,6 +216,8 @@ async fn spawned_child_prompt_stamps_its_depth() {
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -288,6 +292,8 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
         stream_fn: pa_agent::stream::StreamFn,
     ) -> SessionEngineConfig {
         SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             on_late_sent_agent_message: None,
             semantic_edges: None,
             cron_store: None,
@@ -420,6 +426,8 @@ async fn create_session_registers_the_kernel_backed_tools_without_cron_wiring() 
     let agent_model = crate::session_engine::provider_adapter::json_round_trip(&model).unwrap();
     let stream_fn = crate::session_engine::provider_adapter::real_stream_fn(None, model.clone());
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cron_store: None,
         cwd: dir.path().to_path_buf(),
         agent_dir: dir.path().to_path_buf(),
@@ -479,6 +487,8 @@ async fn create_session_appends_missing_resume_settings_rows() {
         ))
         .unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -592,6 +602,8 @@ async fn engine_over(
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cron_store,
         cwd: cwd.clone(),
         agent_dir: tmp.path().join("agent"),
@@ -761,6 +773,8 @@ async fn engine_build_restores_late_sent_agent_message_receipts() {
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: cwd.clone(),
         agent_dir: tmp.path().join("agent"),
         model: Some(model),
@@ -863,6 +877,8 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         }),
     };
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,

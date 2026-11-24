@@ -63,6 +63,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
             "session_input_pause",
             "acp_mcp_servers",
             "abort_and_send_queued",
+            "background_cell_abort",
             "agent_roster",
             "direct_peer_transport",
         ])

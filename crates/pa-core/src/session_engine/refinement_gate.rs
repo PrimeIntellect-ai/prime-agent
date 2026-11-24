@@ -141,6 +141,8 @@ mod tests {
                 std::sync::Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
             let engine =
                 super::super::engine::create_session(super::super::engine::SessionEngineConfig {
+                    cell_wake: None,
+                    on_background_cell: None,
                     cwd: tmp.path().to_path_buf(),
                     agent_dir: agent_dir.clone(),
                     model: Some(model.clone()),
