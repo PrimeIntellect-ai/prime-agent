@@ -538,134 +538,69 @@ mod tests {
         );
     }
 
-    /// A tool call id with an empty `fc_` segment (stream items without an id) omits the item `id`
-    /// instead of emitting `id: ""`.
+    /// The `fc_` item id rides only a piped same-model tool call. A different model's call (the
+    /// API would pair it against this model's `rs_` items), an empty `fc_` segment and an empty id
+    /// omit the item `id` instead of emitting `id: ""` (TS: `itemId = undefined`).
     #[test]
-    fn empty_item_id_segment_omits_item_id() {
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("hi"),
-                assistant(vec![tool_call("call_x|")], "gpt-5.1-codex"),
-                tool_result("call_x|"),
-            ],
-        );
-        assert_no_empty_ids(&items);
-        let function_call = items
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
-        let Some(function_call) = function_call else {
-            panic!("missing function_call item in {items:?}");
-        };
-        assert!(function_call.get("id").is_none());
-        assert_eq!(function_call.get("call_id"), Some(&json!("call_x")));
+    fn only_a_piped_same_model_tool_call_keeps_its_item_id() {
+        for (tool_call_id, model, item_id, call_id) in [
+            (
+                "call_x|fc_y",
+                "gpt-5.1-codex",
+                Some(json!("fc_y")),
+                json!("call_x"),
+            ),
+            ("call_x|fc_y", "gpt-5", None, json!("call_x")),
+            ("call_x|", "gpt-5.1-codex", None, json!("call_x")),
+            ("", "gpt-5.1-codex", None, json!("")),
+        ] {
+            let items = convert(
+                &codex_model(),
+                vec![
+                    user("hi"),
+                    assistant(vec![tool_call(tool_call_id)], model),
+                    tool_result(tool_call_id),
+                ],
+            );
+            let function_call = items
+                .iter()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
+            let Some(function_call) = function_call else {
+                panic!("missing function_call item in {items:?}");
+            };
+            assert_eq!(
+                function_call.get("id"),
+                item_id.as_ref(),
+                "{tool_call_id} {model}"
+            );
+            assert_eq!(
+                function_call.get("call_id"),
+                Some(&call_id),
+                "{tool_call_id} {model}"
+            );
+        }
     }
 
-    /// A fully-empty tool call id omits the item `id`; the `call_id` fields stay empty on both
-    /// items, matching the TS reference exactly (the reachable dogfood shape never produces an
-    /// empty tool call id because tool results inherit the tool call id verbatim).
-    #[test]
-    fn empty_tool_call_id_omits_item_id() {
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("hi"),
-                assistant(vec![tool_call("")], "gpt-5.1-codex"),
-                tool_result(""),
-            ],
-        );
-        let function_call = items
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
-        let Some(function_call) = function_call else {
-            panic!("missing function_call item in {items:?}");
-        };
-        assert!(function_call.get("id").is_none());
-        assert_eq!(function_call.get("call_id"), Some(&json!("")));
-    }
-
-    /// Same-provider messages from a different model omit the `fc_` item id so the API does not
-    /// pair it against `rs_` reasoning items tracked for this model (TS: `itemId = undefined`).
-    #[test]
-    fn different_model_fc_item_id_is_omitted() {
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("a"),
-                assistant(vec![tool_call("call_x|fc_y")], "gpt-5"),
-                tool_result("call_x|fc_y"),
-            ],
-        );
-        let function_call = items
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
-        let Some(function_call) = function_call else {
-            panic!("missing function_call item in {items:?}");
-        };
-        assert!(function_call.get("id").is_none());
-        assert_eq!(function_call.get("call_id"), Some(&json!("call_x")));
-    }
-
-    /// A piped same-model tool call keeps its `fc_` item id.
-    #[test]
-    fn piped_tool_call_id_keeps_item_id() {
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("hi"),
-                assistant(vec![tool_call("call_x|fc_y")], "gpt-5.1-codex"),
-                tool_result("call_x|fc_y"),
-            ],
-        );
-        assert_no_empty_ids(&items);
-        let function_call = items
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
-        let Some(function_call) = function_call else {
-            panic!("missing function_call item in {items:?}");
-        };
-        assert_eq!(function_call.get("id"), Some(&json!("fc_y")));
-        assert_eq!(function_call.get("call_id"), Some(&json!("call_x")));
-    }
-
-    /// Assistant text without a signature id falls back to its converted history index instead of
-    /// an empty message id (TS: `msg_${msgIndex}`).
+    /// Assistant text without a signature id, or with an empty one (TS `!msgId`), falls back to
+    /// its converted history index instead of an empty message id (TS: `msg_${msgIndex}`).
     #[test]
     fn message_without_signature_uses_index_fallback_id() {
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("a"),
-                assistant(vec![text_block("one", None)], "gpt-5.1-codex"),
-            ],
-        );
-        let message = items
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("message"));
-        let Some(message) = message else {
-            panic!("missing message item in {items:?}");
-        };
-        assert_eq!(message.get("id"), Some(&json!("msg_1")));
-    }
-
-    /// A signature with an empty id is treated as missing (TS `!msgId`).
-    #[test]
-    fn message_with_empty_signature_id_uses_index_fallback() {
-        let signature = "{\"v\":1,\"id\":\"\"}";
-        let items = convert(
-            &codex_model(),
-            vec![
-                user("a"),
-                assistant(vec![text_block("hello", Some(signature))], "gpt-5.1-codex"),
-            ],
-        );
-        let message = items
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("message"));
-        let Some(message) = message else {
-            panic!("missing message item in {items:?}");
-        };
-        assert_eq!(message.get("id"), Some(&json!("msg_1")));
+        for signature in [None, Some("{\"v\":1,\"id\":\"\"}")] {
+            let items = convert(
+                &codex_model(),
+                vec![
+                    user("a"),
+                    assistant(vec![text_block("one", signature)], "gpt-5.1-codex"),
+                ],
+            );
+            let message = items
+                .iter()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("message"));
+            let Some(message) = message else {
+                panic!("missing message item in {items:?}");
+            };
+            assert_eq!(message.get("id"), Some(&json!("msg_1")), "{signature:?}");
+        }
     }
 
     #[test]
