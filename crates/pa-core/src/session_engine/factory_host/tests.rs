@@ -649,7 +649,7 @@ fn a_spec_without_declared_models_preflights_cleanly() {
 fn factory_activity_requests_validate_like_the_kernel_frame() {
     let parse =
         |action: &str, run_id: Option<&str>, spec_id: Option<&str>, timeout_ms: Option<u64>| {
-            FactoryActivityRequest::parse(action, run_id, spec_id, timeout_ms)
+            FactoryActivityRequest::parse(action, run_id, spec_id, timeout_ms, None, None)
         };
     // the happy shapes
     assert_eq!(
@@ -659,6 +659,7 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: None,
             spec_id: None,
             timeout_ms: None,
+            selector: None,
         }
     );
     assert_eq!(
@@ -686,6 +687,7 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: None,
             spec_id: None,
             timeout_ms: None,
+            selector: None,
         }
     );
     // the library action's target-free pair: the list takes no target,
@@ -698,6 +700,7 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: None,
             spec_id: None,
             timeout_ms: None,
+            selector: None,
         }
     );
     assert_eq!(
@@ -715,6 +718,7 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: Some("run-1".to_string()),
             spec_id: Some("review".to_string()),
             timeout_ms: None,
+            selector: None,
         }
     );
     assert_eq!(
@@ -729,6 +733,52 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             .to_string(),
         "factory activity node requires specId"
     );
+    // the node selector: both values or neither, each a non-negative
+    // integer; a malformed value never narrows to "the latest instance".
+    let node = |entry: Option<serde_json::Value>, instance: Option<serde_json::Value>| {
+        FactoryActivityRequest::parse(
+            "node",
+            Some("run-1"),
+            Some("review"),
+            None,
+            entry.as_ref(),
+            instance.as_ref(),
+        )
+    };
+    assert_eq!(
+        node(Some(json!(0)), Some(json!(2))).unwrap().selector,
+        Some((0, 2))
+    );
+    assert_eq!(node(None, None).unwrap().selector, None);
+    for (entry, instance, error) in [
+        (
+            Some(json!(null)),
+            Some(json!(null)),
+            "factory activity node entry must be a non-negative integer",
+        ),
+        (
+            Some(json!("0")),
+            Some(json!(0)),
+            "factory activity node entry must be a non-negative integer",
+        ),
+        (
+            Some(json!(0)),
+            Some(json!(-1)),
+            "factory activity node instance must be a non-negative integer",
+        ),
+        (
+            Some(json!(0)),
+            None,
+            "factory activity node entry and instance selectors must be provided together",
+        ),
+        (
+            None,
+            Some(json!(0)),
+            "factory activity node entry and instance selectors must be provided together",
+        ),
+    ] {
+        assert_eq!(node(entry, instance).unwrap_err().to_string(), error);
+    }
     // unknown action
     assert_eq!(
         parse("bogus", None, None, None).unwrap_err().to_string(),

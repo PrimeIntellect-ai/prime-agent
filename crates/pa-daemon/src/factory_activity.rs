@@ -82,7 +82,14 @@ impl Worker {
         let reply = match &self.agent_engine {
             Some(engine) => {
                 engine
-                    .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
+                    .factory_activity(
+                        &action,
+                        run_id.as_deref(),
+                        spec_id.as_deref(),
+                        timeout_ms,
+                        payload.get("entry"),
+                        payload.get("instance"),
+                    )
                     .await
             }
             None => Err(anyhow::anyhow!(

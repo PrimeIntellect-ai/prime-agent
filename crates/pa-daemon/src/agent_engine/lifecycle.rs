@@ -775,6 +775,8 @@ impl AgentSessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&Value>,
+        instance: Option<&Value>,
     ) -> anyhow::Result<Value> {
         if action == "library" {
             let model = self.resolve_model()?;
@@ -787,7 +789,7 @@ impl AgentSessionEngine {
             .clone()
             .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
         engine
-            .factory_activity(action, run_id, spec_id, timeout_ms)
+            .factory_activity(action, run_id, spec_id, timeout_ms, entry, instance)
             .await
     }
 
