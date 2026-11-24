@@ -5627,15 +5627,15 @@ class FactoryExecutor:
         return None
 
     async def _announce_task_work_hold(self, run: FactoryRun, state: _StateRun, instance: _NodeInstance) -> None:
-        """Tell the parent that a settled child's background work started
-        holding the run (once per hold of each child); the hold itself ends
-        when that work does."""
+        """Tell the parent that a child whose turn ended started holding the
+        run with background work (once per hold of each child); the hold
+        itself ends when that work does."""
         run.milestones.discard(TASK_WORK_HELD)  # every child's hold is its own notice
         await self._milestone(
             run,
             TASK_WORK_HELD,
-            f"{state.state_id} settled, but its child {instance.child_name or instance.child_id} still runs "
-            "background work, so no next state starts on the shared checkout until it ends; "
+            f"{state.state_id}: its child {instance.child_name or instance.child_id} ended its turn but still "
+            "runs background work, so no new child starts on the shared checkout until it ends; "
             "delete that child to cancel its work",
             node=state.state_id,
         )
@@ -6433,8 +6433,8 @@ class FactoryExecutor:
                         and instance.status != "running"
                         and instance.child_id is not None
                     ):
-                        # The settle left a settled owner (not a retry,
-                        # respawn, or stop).
+                        # The child still owns the checkout (a settled or
+                        # retrying entry); a respawn or a stop released it.
                         await self._announce_task_work_hold(run, state, instance)
                 if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
                     await self._pause_for_unverified_task_activity(run, state, entry, instance)
