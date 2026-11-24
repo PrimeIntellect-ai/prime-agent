@@ -2194,6 +2194,15 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertEqual(interrupted["ename"], "KeyboardInterrupt")
         self.assertIn("next ran", stream_text(events, "stdout"))
 
+    def test_a_cells_degraded_await_writes_its_note_beside_a_newer_cell(self):
+        # The note belongs to the calling cell, not the newest running one.
+        self.repl.send({"type": "execute", "id": "slow", "code": "import rlm\nrlm._set_completion_notices_wired(True)\nh = rlm.bash('sleep 3')\nawait h"})
+        time.sleep(0.3)
+        self.repl.send({"type": "execute", "id": "next", "code": "import asyncio\nawait asyncio.sleep(2)"})
+        events = self.until_both_done()
+        notes = "".join(e["text"] for e in events if e.get("event") == "stderr" and e.get("id") == "slow")
+        self.assertIn("do not await it again this turn", notes)
+
 
 class EofFinalFlushTest(unittest.TestCase):
     """In-process check of the EOF shutdown's second final flush."""
