@@ -171,6 +171,16 @@ mod tests {
         );
     }
 
+    /// The one account-id check behind login, refresh and streaming: a token that is no JWT, or
+    /// that has no `chatgpt_account_id` claim, is rejected.
+    #[test]
+    fn a_token_without_the_account_id_is_rejected() {
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+        assert!(extract_account_id(&format!("header.{payload}.signature")).is_err());
+        assert!(extract_account_id("not-a-jwt").is_err());
+    }
+
     #[test]
     fn builds_expected_headers() {
         let find = |headers: &[(String, String)], name: &str| {

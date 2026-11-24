@@ -615,6 +615,15 @@ mod tests {
             .any(|message| message == "Exchanging authorization code for tokens..."));
     }
 
+    /// A 200 token response without a required field fails the login: no unusable credential is
+    /// stored.
+    #[tokio::test]
+    async fn a_missing_field_exchange_fails_the_login() {
+        let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
+        let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
+        assert!(login_on_a_free_port(&http, &ui).await.is_err());
+    }
+
     #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
         let http = token_http();

@@ -92,6 +92,28 @@ async fn parses_the_repeat_last_response_script_key_into_the_registration() {
     assert!(!parsed.repeat_last_response);
 }
 
+/// #3846: two scripted registrations in one process each keep their own queue.
+#[tokio::test]
+async fn script_registrations_keep_separate_queues() {
+    let script = |reply: &str| {
+        script::parse_faux_script(&serde_json::json!({ "responses": [reply] }))
+            .expect("script parses")
+    };
+    let first = script::register_faux_provider_from_script(&script("first"));
+    let second = script::register_faux_provider_from_script(&script("second"));
+
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let reply = complete(&first.get_model(), &context, None).await.unwrap();
+    assert_eq!(reply.content, vec![faux_text("first")]);
+    assert_eq!(second.get_pending_response_count(), 1);
+    first.unregister();
+    second.unregister();
+}
+
 #[tokio::test]
 async fn overlapping_streams_in_repeat_last_mode_never_hit_the_exhaustion_error() {
     let registration = register();

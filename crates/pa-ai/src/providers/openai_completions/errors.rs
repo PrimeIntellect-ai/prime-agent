@@ -133,5 +133,10 @@ mod tests {
             http.headers.get("x-request-id").map(String::as_str),
             Some("req_1")
         );
+        // The Cerebras context-overflow pattern matches this empty-body text.
+        assert_eq!(
+            openai_sdk_error_message(400, ""),
+            "400 status code (no body)"
+        );
     }
 }

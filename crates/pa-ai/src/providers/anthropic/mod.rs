@@ -570,6 +570,27 @@ impl Provider for AnthropicMessagesProvider {
 }
 
 #[cfg(test)]
+mod always_on_adaptive_thinking_tests {
+    use super::is_always_on_adaptive_thinking_model;
+
+    /// Which ids take always-on adaptive thinking: those reject `thinking: disabled` and sampling
+    /// params, the rest still accept them.
+    #[test]
+    fn always_on_adaptive_thinking_follows_the_model_id() {
+        for (id, always_on) in [
+            ("claude-fable-5", true),
+            ("claude-mythos-5", true),
+            ("claude-opus-5-5", true),
+            ("anthropic/claude-opus-5.5", true),
+            ("claude-opus-5", false),
+            ("claude-sonnet-5", false),
+        ] {
+            assert_eq!(is_always_on_adaptive_thinking_model(id), always_on, "{id}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod subscription_identity_tests {
     use super::build_request_headers;
     use crate::types::{zero_model_cost, Model, ModelInput};

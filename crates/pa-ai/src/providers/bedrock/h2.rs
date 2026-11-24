@@ -453,12 +453,18 @@ mod h2_wire_tests {
         }
     }
 
-    /// A mid-body `RST_STREAM`, GOAWAY or clean close surfaces as a transport error, never as a
-    /// clean end of the body.
+    /// A mid-body `RST_STREAM`, GOAWAY or clean close surfaces as its own transport error, never as
+    /// a clean end of the body. pa-core retries on these prefixes; a GOAWAY stays the session
+    /// error even when a reset follows it.
     #[tokio::test]
     async fn a_mid_body_failure_surfaces_as_an_error() {
-        for action in [MockAction::RstStream, MockAction::GoAway, MockAction::Close] {
-            mid_stream_error(action).await;
+        for (action, prefix) in [
+            (MockAction::RstStream, "Stream closed with error code"),
+            (MockAction::GoAway, "Session closed with error code 1"),
+            (MockAction::Close, "The pending stream has been canceled"),
+        ] {
+            let error = mid_stream_error(action).await;
+            assert!(error.starts_with(prefix), "{error}");
         }
     }
 

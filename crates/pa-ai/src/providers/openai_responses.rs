@@ -567,4 +567,42 @@ mod tests {
             )]
         );
     }
+
+    #[test]
+    fn the_shared_key_only_compat_decodes_for_responses_models() {
+        // TS `getXaiSubscriptionModel`'s compat carries only `supportsLongCacheRetention: false`;
+        // the responses provider reads the responses view directly (the wire object cannot tag its
+        // shape).
+        let model = compat_model(serde_json::json!({ "supportsLongCacheRetention": false }));
+        let compat = get_responses_compat(&model);
+        assert!(!compat.supports_long_cache_retention);
+        assert!(
+            compat.send_session_id_header,
+            "the absent header flag defaults on"
+        );
+    }
+
+    /// A `reasoning: false` model whose map addresses levels (the live catalog's
+    /// `gpt-5.3-chat-latest` shape, served over the Responses API) is thinking-capable: the
+    /// requested effort reaches the request with the map's value. The flag alone must not veto a
+    /// route that declares addressable levels.
+    #[test]
+    fn a_map_addressable_model_sends_the_reasoning_effort_without_the_flag() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gpt-5.3-chat-latest", "name": "GPT-5.3 Chat (latest)",
+            "api": "openai-responses", "provider": "openai",
+            "baseUrl": "https://api.openai.com/v1", "reasoning": false,
+            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 16_384
+        }))
+        .unwrap();
+        let mut options = OpenAIResponsesOptions::from_base(StreamOptions::default());
+        options.reasoning_effort = Some(ModelThinkingLevel::Xhigh);
+        let params = build_params(&model, &Context::default(), &options);
+        assert_eq!(
+            params.get("reasoning"),
+            Some(&json!({ "effort": "xhigh", "summary": "auto" }))
+        );
+    }
 }

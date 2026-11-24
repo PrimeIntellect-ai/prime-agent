@@ -704,4 +704,17 @@ mod tests {
         assert!(body.contains("grant_type=refresh_token"));
         assert!(body.contains("refresh_token=grok-old"));
     }
+
+    #[tokio::test]
+    async fn a_missing_field_token_fails_the_login() {
+        // The login path carries no prior refresh token (the refresh
+        // path keeps the stored one).
+        let http = ScriptedHttp::new()
+            .queue(DEVICE_CODE_URL, vec![device_response("")])
+            .queue(
+                TOKEN_URL,
+                vec![ScriptedHttp::entry(200, r#"{"access_token":"a"}"#)],
+            );
+        assert!(login_xai(&http, &ScriptedUi::new()).await.is_err());
+    }
 }

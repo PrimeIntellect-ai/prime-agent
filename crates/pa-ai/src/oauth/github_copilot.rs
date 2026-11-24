@@ -853,6 +853,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_invalid_copilot_token_response_fails_the_login() {
+        let http = ScriptedHttp::new()
+            .queue(
+                "https://github.com/login/device/code",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
+                )],
+            )
+            .queue(
+                "https://github.com/login/oauth/access_token",
+                vec![ScriptedHttp::entry(200, r#"{"access_token":"gh"}"#)],
+            )
+            .fixed(
+                "https://api.github.com/copilot_internal/v2/token",
+                ScriptedHttp::entry(200, r#"{"token":"t"}"#),
+            );
+        let ui = ScriptedUi::new(ScriptedAnswer::value(""));
+        assert!(login_github_copilot(&http, &ui).await.is_err());
+    }
+
+    #[tokio::test]
     async fn the_refresh_exchanges_the_stored_github_token() {
         let http = ScriptedHttp::new()
             .fixed(

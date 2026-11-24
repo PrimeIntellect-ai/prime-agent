@@ -91,6 +91,89 @@ fn parses_retry_after_headers() {
     assert_eq!(parse_retry_after_ms(&headers), Some(3000));
 }
 
+/// The connection-failure texts per family, verified against the TS binary. pa-core's
+/// `TRANSPORT_DISCLOSURES` prefix-matches these to mark a failure retryable transport.
+#[test]
+fn connection_error_texts() {
+    let aws_http1 = || ConnectionErrorProfile::AwsHttp1 {
+        host: "127.0.0.1".to_string(),
+        port: 1,
+    };
+    let aws_http2 = || ConnectionErrorProfile::AwsHttp2 {
+        host: "127.0.0.1".to_string(),
+        port: 1,
+    };
+    let hint = "\n  Deserialization error: to see the raw response, inspect the hidden field {error}.$response on this object.";
+    let cases = [
+        (
+            ConnectionErrorProfile::Sdk,
+            ConnectionErrorKind::Connect,
+            "Connection error.".to_string(),
+        ),
+        (
+            ConnectionErrorProfile::Sdk,
+            ConnectionErrorKind::Timeout,
+            "Request timed out.".to_string(),
+        ),
+        (
+            ConnectionErrorProfile::RawFetch,
+            ConnectionErrorKind::Connect,
+            "Unable to connect. Is the computer able to access the url?".to_string(),
+        ),
+        (
+            ConnectionErrorProfile::MistralSdk,
+            ConnectionErrorKind::Connect,
+            "Unexpected HTTP client error: TypeError: Unable to connect. Is the computer able to access the url?".to_string(),
+        ),
+        (
+            aws_http1(),
+            ConnectionErrorKind::Connect,
+            "connect ECONNREFUSED 127.0.0.1:1".to_string(),
+        ),
+        (
+            aws_http1(),
+            ConnectionErrorKind::Reset,
+            "read ECONNRESET".to_string(),
+        ),
+        (
+            aws_http2(),
+            ConnectionErrorKind::Connect,
+            "The pending stream has been canceled (caused by: connect ECONNREFUSED 127.0.0.1:1)"
+                .to_string(),
+        ),
+        (
+            aws_http2(),
+            ConnectionErrorKind::H2Request(H2Failure::Protocol),
+            "Protocol error".to_string(),
+        ),
+        (
+            aws_http2(),
+            ConnectionErrorKind::H2MidStream(H2Failure::StreamReset {
+                nghttp2_code: "NGHTTP2_INTERNAL_ERROR".to_string(),
+            }),
+            format!("Stream closed with error code NGHTTP2_INTERNAL_ERROR{hint}"),
+        ),
+        (
+            aws_http2(),
+            ConnectionErrorKind::H2MidStream(H2Failure::SessionClosed { code: 1 }),
+            format!("Session closed with error code 1{hint}"),
+        ),
+        (
+            aws_http2(),
+            ConnectionErrorKind::H2MidStream(H2Failure::Canceled),
+            format!("The pending stream has been canceled{hint}"),
+        ),
+    ];
+    for (profile, kind, text) in cases {
+        let error = ProviderError::Connection(ProviderConnectionError {
+            kind,
+            profile,
+            cause: "transport".to_string(),
+        });
+        assert_eq!(error.to_string(), text);
+    }
+}
+
 /// The TS `extractStreamFailureParts` fallback chain: a body without an error type takes the SDK
 /// error's own class name, and an error-resolved retry wait overrides the raw header.
 #[test]

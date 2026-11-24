@@ -474,6 +474,35 @@ mod supports_adaptive_thinking_tests {
 }
 
 #[cfg(test)]
+mod supports_always_on_adaptive_thinking_tests {
+    use super::supports_always_on_adaptive_thinking;
+
+    /// Which Bedrock ids take always-on adaptive thinking (and so drop sampling params).
+    #[test]
+    fn bedrock_always_on_adaptive_thinking_follows_the_model_id() {
+        for (id, name, always_on) in [
+            (
+                "us.anthropic.claude-opus-5-5-v1",
+                Some("Claude Opus 5.5"),
+                true,
+            ),
+            ("anthropic.claude-fable-5", None, true),
+            (
+                "us.anthropic.claude-opus-5-v1",
+                Some("Claude Opus 5"),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                supports_always_on_adaptive_thinking(id, name),
+                always_on,
+                "{id}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod prompt_caching_gate_tests {
     use super::*;
 

@@ -735,7 +735,8 @@ impl MistralStreamState {
 mod tests {
     use super::*;
 
-    /// Bodies longer than 4000 chars truncate with the JS-char count.
+    /// Bodies longer than 4000 chars truncate with the JS-char count. The error keeps its status, so
+    /// the retry ladder classifies it.
     #[test]
     fn mistral_error_body_truncation() {
         let error = mistral_http_error(400, &"x".repeat(4100), &HashMap::new());
@@ -745,6 +746,16 @@ mod tests {
                 "Mistral API error (400): {}... [truncated 100 chars]",
                 "x".repeat(4000)
             )
+        );
+        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
+        assert_eq!(info.status, Some(400));
+        assert_eq!(
+            info.provider_error_type.as_deref(),
+            Some(MISTRAL_SDK_ERROR_NAME)
+        );
+        assert_eq!(
+            info.kind,
+            crate::utils_inner::stream_failure::StreamFailureKind::InvalidRequest
         );
     }
 
