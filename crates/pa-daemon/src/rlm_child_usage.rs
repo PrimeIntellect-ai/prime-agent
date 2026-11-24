@@ -44,7 +44,10 @@ fn child_usage_origin(entries: &[SessionEntry], assistant_index: usize) -> Child
             .and_then(|details| details.get("id"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        return if is_agent_message && message_id.starts_with("spawn:") {
+        return if is_agent_message
+            && message_id
+                .starts_with(pa_core::session_engine::agent_messaging::SPAWN_KICKOFF_ID_PREFIX)
+        {
             ChildUsageOrigin::SpawnTask
         } else if is_agent_message {
             ChildUsageOrigin::AgentMessage

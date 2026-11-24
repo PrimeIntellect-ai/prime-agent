@@ -672,6 +672,7 @@ mod tests {
                     depth: 1,
                     name: child_id.to_string(),
                     factory: Some(tag.clone()),
+                    decision_child: false,
                 })
                 .unwrap();
         }
@@ -690,6 +691,7 @@ mod tests {
                 depth: 1,
                 name: "twin".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         // The production delete: the tombstone, then the usage amendment.
@@ -785,6 +787,7 @@ mod tests {
                 depth: 1,
                 name: "old".into(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         ledger
@@ -866,6 +869,7 @@ mod tests {
                     depth: 1,
                     name: id.into(),
                     factory: None,
+                    decision_child: false,
                 })
                 .unwrap();
             ledger

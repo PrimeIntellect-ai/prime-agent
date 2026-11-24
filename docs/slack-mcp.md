@@ -1,6 +1,6 @@
 # Slack MCP connector
 
-Open `/mcp` (or `/plugins`), search for **Slack**, and connect. You can also run `/mcp login slack` inside Prime Agent. Complete Slack's consent screen in your browser. The connection becomes available to the current session through the generic `mcp` Python API:
+Open `/mcp` (or `/plugins`), search for **Slack**, and select it to connect. Complete Slack's consent screen in your browser. The connection becomes available to the current session through the generic `mcp` Python API:
 
 ```python
 tools = await mcp.list_tools("slack")
@@ -13,4 +13,4 @@ Slack does not offer dynamic client registration. Workspace administrators still
 
 If port `3118` is occupied, finish or close the other login attempt and retry. Prime Agent reports the conflict instead of redirecting to an unregistered port. For SSH sessions, forward local port `3118` to port `3118` on the host running Prime Agent, or paste the final redirect URL into the auth panel.
 
-Disconnect with `/mcp logout slack`. Connector usage contributes to the existing `mcp_connector_use_count` session telemetry counter; server names and Slack content are not recorded in that counter.
+Disconnect by running `/logout` and selecting slack. Connector usage contributes to the existing `mcp_connector_use_count` session telemetry counter; server names and Slack content are not recorded in that counter.
