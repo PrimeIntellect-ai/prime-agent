@@ -223,7 +223,9 @@ impl Supervisor {
         // that owner.
         let mut live_worker: BTreeMap<&str, String> = BTreeMap::new();
         for (owner, id) in resident_owners.iter().zip(&live_owner_ids) {
-            live_worker.entry(id.as_str()).or_insert_with(|| owner.live_key());
+            live_worker
+                .entry(id.as_str())
+                .or_insert_with(|| owner.live_key());
         }
         let (mut live_rows, live_read_at, live_warnings) = {
             let cache = self.factory_live.lock().unwrap();
@@ -305,10 +307,7 @@ impl Supervisor {
         let cache = &mut *guard;
         // A worker that left the resident list took its kernel with it:
         // its rows go (the session's durable records still answer).
-        cache.resident = owners
-            .iter()
-            .map(ResidentOwner::live_key)
-            .collect();
+        cache.resident = owners.iter().map(ResidentOwner::live_key).collect();
         let resident = &cache.resident;
         cache.rows.retain(|worker, _| resident.contains(worker));
         cache.read_at.retain(|worker, _| resident.contains(worker));
@@ -1432,7 +1431,9 @@ mod tests {
                 live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
                     .expect("the snapshot reply folds"),
             );
-            cache.read_at.insert("w-mem/mem-owner".to_string(), Instant::now());
+            cache
+                .read_at
+                .insert("w-mem/mem-owner".to_string(), Instant::now());
             cache.resident.insert("w-mem/mem-owner".to_string());
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
