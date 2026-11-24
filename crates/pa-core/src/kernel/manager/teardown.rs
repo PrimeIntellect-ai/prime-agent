@@ -178,7 +178,7 @@ impl Inner {
         if had_background_work {
             self.notify_background_work_settled();
         }
-        self.reject_active_execution("Kernel has been shut down");
+        self.reject_active_executions("Kernel has been shut down");
         *lock(&self.stderr_log) = None;
         let child = lock(&self.child).take();
         if let Some(child) = child {

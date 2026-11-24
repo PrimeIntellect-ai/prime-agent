@@ -1231,11 +1231,11 @@ fn is_bash_completion_row(row: &Value) -> bool {
 
 /// Whether one queued steering row is wakeable input for a running cell:
 /// every user and agent row is; a backgrounded cell's own completion row
-/// never is (the kernel runs one cell at a time, so a cell still waiting
-/// when the notice lands started after the backgrounded one settled, and
-/// the notice cannot concern it); an inbox arrival row carries its stored
-/// eligibility bit (a restored row without the bit is conservatively
-/// wakeable — one extra detach, never a lost steer).
+/// never is (a cell still waiting when the notice lands is a different cell,
+/// one that started after the backgrounded one or beside it, so the notice
+/// does not concern it and is read after it); an inbox arrival row carries
+/// its stored eligibility bit (a restored row without the bit is
+/// conservatively wakeable — one extra detach, never a lost steer).
 pub(crate) fn row_wakes_a_cell(item: &QueuedItem) -> bool {
     let Some(row) = item.custom_message.as_ref() else {
         return true;

@@ -1671,12 +1671,13 @@ fi
 # holds a plain call.
 probe_py="${dl}/daemon-stop.py"
 cat > "$probe_py" <<'PROBE_PY'
-import json, os, select, signal, socket, sys, time
+import json, os, select, signal, socket, subprocess, sys, time
 
 path = sys.argv[-1]
 kind = "ts"
 listening_only = False
 force = False
+restart_launcher = ""
 for flag in sys.argv[1:-1]:
     if flag == "--listening":
         listening_only = True
@@ -1684,6 +1685,8 @@ for flag in sys.argv[1:-1]:
         kind = flag[len("--kind="):]
     if flag == "--force=1":
         force = True
+    if flag.startswith("--restart-with="):
+        restart_launcher = flag[len("--restart-with="):]
 
 # The visible progress: on a terminal the installer's renderer reads the
 # active step from PRIME_AGENT_INSTALL_UI_FILE (label, detail); otherwise
@@ -1740,6 +1743,9 @@ STOP_DRAIN_UNKNOWN_S = 30.0
 STOP_DRAIN_CAP_S = 120.0
 FORCE_TERM_WAIT_S = 5.0
 FORCE_KILL_WAIT_S = 3.0
+# The restart mode's exit code for a successor that did not restore every
+# session (pa-cli update_flow::daemon_restart::RESTORE_FAILURES_EXIT_CODE).
+RESTORE_FAILURES_EXIT_CODE = 3
 
 def read_line(sock, deadline, buf):
     # One persistent buffer per connection: a daemon that answers
@@ -1959,6 +1965,52 @@ def drain_confirm_timeout_s():
 
 owner_label = "Rust" if owner == "rust" else "TypeScript"
 sessions_label = "unknown sessions" if count is None else "%d session%s" % (count, "" if count == 1 else "s")
+
+# THE UPDATE RESTART: OUR daemon is restarted, not stopped. The new
+# payload's launcher drives the daemon's update restart (prepare, graceful
+# worker stops, the successor boots from the new payload with the roster
+# and restores the sessions), so attached windows get the update notice
+# and resume instead of losing their daemon. A daemon the restart left
+# running (an older payload without the mode, a refused prepare or commit)
+# falls through to the stop ladder below; one the restart stopped without
+# a successor is down, and the next invocation boots the new daemon.
+if owner == "rust" and restart_launcher:
+    progress("graceful, the sessions resume", label="Restarting the Rust daemon (%s)" % sessions_label)
+    restart_env = dict(os.environ)
+    restart_env.pop("PRIME_AGENT_INSTALL_UI_FILE", None)
+    try:
+        restart = subprocess.run(
+            [restart_launcher, "update", "--internal-update-restart-daemon", "--daemon-socket", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            universal_newlines=True, env=restart_env)
+        restart_returncode = restart.returncode
+        restart_error = (restart.stderr or "").strip().splitlines()[-1:] or ["exit %d" % restart.returncode]
+    except OSError as error:
+        restart_returncode = None
+        restart_error = [str(error)]
+    restarted = restart_returncode == 0
+    if restarted:
+        print("rust:restarted:%s" % count_label)
+        sys.exit(0)
+    if restart_returncode == RESTORE_FAILURES_EXIT_CODE:
+        print("rust:restarted-failures:%s" % count_label)
+        sys.exit(0)
+    progress("the update restart failed (%s)" % restart_error[0])
+    # Only the daemon that never left gets the stop ladder: a successor that
+    # took the socket (whatever its greeting) is never commanded to stop.
+    try:
+        after = connect()
+        after_hello = wait_hello(after)
+        after.close()
+    except OSError:
+        after_hello = None
+        if not listening_flag():
+            print("rust:stopped-restart:%s" % count_label)
+            sys.exit(0)
+    if after_hello is None or after_hello.get("supervisorPid") != hello.get("supervisorPid"):
+        print("rust:restarted-failures:%s" % count_label)
+        sys.exit(0)
+
 bound_s = STOP_CONFIRM_TIMEOUT_S + drain_confirm_timeout_s()
 if force:
     bound_s += FORCE_TERM_WAIT_S + FORCE_KILL_WAIT_S
@@ -2124,7 +2176,7 @@ stop_daemon_candidate() {
     step_start "Checking for a running daemon"
     probe_ui_file=""
     if [ -n "$ui_pid" ]; then probe_ui_file="$ui_active"; fi
-    verdict="$(PRIME_AGENT_INSTALL_UI_FILE="$probe_ui_file" "$UVPY" "$probe_py" "--kind=${candidate_kind}" "--force=${FORCE}" "$socket_path" 4>&2 2>/dev/null)" || verdict="probe-error"
+    verdict="$(PRIME_AGENT_INSTALL_UI_FILE="$probe_ui_file" "$UVPY" "$probe_py" "--kind=${candidate_kind}" "--force=${FORCE}" "--restart-with=${install_probe_launcher}" "$socket_path" 4>&2 2>/dev/null)" || verdict="probe-error"
   else
     verdict="absent"
   fi
@@ -2146,7 +2198,25 @@ stop_daemon_candidate() {
     *) sessions_label="${sessions} sessions" ;;
   esac
   case "$verdict" in
-    ts:stopped:*|ts:stopped-forced:*|ts:stopped-killed:*|rust:stopped:*|rust:stopped-forced:*|rust:stopped-killed:*)
+    rust:restarted:*)
+      ts_stop_found_any="yes"
+      if [ "$sessions" = 0 ]; then
+        step_ok "Restarted the ${daemon_title}"
+      else
+        step_ok "Restarted the ${daemon_title}" "${sessions_label} resumed"
+      fi
+      ts_stop_summary="${ts_stop_summary}rust daemon: restarted on ${socket_path} for this update (${sessions_label}; the new daemon resumed them)
+"
+      ;;
+    rust:restarted-failures:*)
+      ts_stop_found_any="yes"
+      step_fail "Restarted the ${daemon_title}" "not every session resumed"
+      note "! The new daemon did not resume every session; the transcripts stay"
+      note "  saved. Reopen them from Agents View."
+      ts_stop_summary="${ts_stop_summary}rust daemon: WARNING restarted on ${socket_path} for this update, but not every session resumed (${sessions_label}; the transcripts stay saved)
+"
+      ;;
+    ts:stopped:*|ts:stopped-forced:*|ts:stopped-killed:*|rust:stopped:*|rust:stopped-forced:*|rust:stopped-killed:*|rust:stopped-restart:*)
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
       if [ "$daemon_owner" = rust ]; then
@@ -2156,6 +2226,7 @@ stop_daemon_candidate() {
       case "$verdict" in
         *:stopped-forced:*) how="forced"; how_long="forced after the graceful request; no signal sent" ;;
         *:stopped-killed:*) how="killed"; how_long="--force killed it after the shutdown requests failed" ;;
+        *:stopped-restart:*) how="not restarted"; how_long="the update restart stopped it but the new daemon did not start" ;;
         *) how=""; how_long="the graceful request settled it; no signal sent" ;;
       esac
       if [ "$sessions" = 0 ]; then
