@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 
 use pa_types::daemon::DaemonCommand;
 
-use super::AgentView;
+use super::{AgentView, Overlay};
 
 use crate::factory_view::{
     overview_reply_lists_runs, parse_library_machines, parse_library_warnings, parse_overview_runs,
@@ -120,7 +120,11 @@ impl super::SessionUi {
             })
             .collect();
         self.append_uncarried_scoped_rows(&mut runs);
-        view.library_view = Some(LibraryView::new(runs, own_owner_ids, rows));
+        view.overlay = Some(Overlay::Library(LibraryView::new(
+            runs,
+            own_owner_ids,
+            rows,
+        )));
         self.dirty = true;
         self.spawn_library_list_refresh();
         self.spawn_library_overview_refresh();
@@ -138,14 +142,14 @@ impl super::SessionUi {
         let Some(id) = super::key_event_to_id(&key) else {
             return Ok(());
         };
-        let action = view
-            .library_view
-            .as_mut()
-            .map(|library_view| library_view.handle_key(&id, view.editor.keybindings()));
+        let action = match view.overlay.as_mut() {
+            Some(Overlay::Library(page)) => Some(page.handle_key(&id, view.editor.keybindings())),
+            _ => None,
+        };
         match action {
             Some(LibraryViewAction::None) | None => {}
             Some(LibraryViewAction::Close) => {
-                view.library_view = None;
+                view.overlay = None;
                 self.close_panel_to_agents_view();
                 self.dirty = true;
             }
@@ -176,7 +180,7 @@ impl super::SessionUi {
                 } else {
                     "no live read backs it"
                 };
-                if let Some(library_view) = view.library_view.as_mut() {
+                if let Some(library_view) = view.machines_page_mut() {
                     library_view.set_row_notice(Some(format!(
                         "run {run_id} is saved — {backing}; a paused run resumes only through an explicit resume"
                     )));
@@ -188,7 +192,7 @@ impl super::SessionUi {
             // page mounts and no stop/resume/watch or child-control
             // request leaves this session for a run it does not own.
             Some(LibraryViewAction::ForeignRun { owner }) => {
-                if let Some(library_view) = view.library_view.as_mut() {
+                if let Some(library_view) = view.machines_page_mut() {
                     library_view.set_row_notice(Some(format!(
                         "run belongs to session {owner} — open that session to stop or resume it"
                     )));
@@ -220,12 +224,12 @@ impl super::SessionUi {
             .await;
         match reply {
             Ok(data) => {
-                if let Some(library_view) = view.library_view.as_mut() {
+                if let Some(library_view) = view.machines_page_mut() {
                     library_view.apply_detail(&name, &data);
                 }
             }
             Err(error) => {
-                if let Some(library_view) = view.library_view.as_mut() {
+                if let Some(library_view) = view.machines_page_mut() {
                     library_view.set_error(Some(format!("{error:#}")));
                 }
             }
@@ -466,7 +470,7 @@ impl super::SessionUi {
         if session != self.active_session_id || epoch != self.library_overview_epoch {
             return;
         }
-        if let Some(library_view) = view.library_view.as_mut() {
+        if let Some(library_view) = view.machines_page_mut() {
             match payload {
                 Ok(data) => match Self::fold_overview_reply(&mut self.factory_overview, data) {
                     Some((rows, warnings)) => {
@@ -526,7 +530,7 @@ impl super::SessionUi {
         if session != self.active_session_id || epoch != self.library_list_epoch {
             return;
         }
-        if let Some(library_view) = view.library_view.as_mut() {
+        if let Some(library_view) = view.machines_page_mut() {
             match payload {
                 Ok(data) => {
                     if crate::factory_view::library_reply_lists_machines(&data) {

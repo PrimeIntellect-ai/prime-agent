@@ -596,6 +596,43 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
     ));
 }
 
+/// A parent whose only children are hidden Decision API servers (`decisionChild`)
+/// renders no child rows, so it must not arm the expand affordance either.
+#[test]
+fn a_decision_child_never_arms_the_expand_affordance() {
+    let mut decision = child_summary("dc", "p", "system 1");
+    decision["decisionChild"] = json!(true);
+    let key = SelectionKey {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+    };
+    let only_hidden = reconcile_unified_sessions(
+        &[
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("dc", "running", &decision),
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        !has_session_children(&only_hidden, &key),
+        "the hidden child renders no row, so the parent cannot expand"
+    );
+    let with_visible = reconcile_unified_sessions(
+        &[
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("dc", "running", &decision),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        has_session_children(&with_visible, &key),
+        "a visible child still arms the affordance"
+    );
+}
+
 /// A `--no-session` root's live summary publishes an empty `sessionFile`
 /// (the daemon's in-memory store maps its empty path unconditionally):
 /// the scope root reads it as absent, so ctrl+n falls back to a plain new

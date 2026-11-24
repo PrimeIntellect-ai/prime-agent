@@ -702,6 +702,29 @@ impl SettingsManager {
             .unwrap_or(crate::settings::types::DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS)
     }
 
+    /// The idle wake debounce window in milliseconds
+    /// (`agentInbox.idleDebounceMs`; default 5 s). Global scope only, like
+    /// the other `agentInbox` keys.
+    #[must_use]
+    pub fn get_agent_inbox_idle_debounce_ms(&self) -> u64 {
+        self.global
+            .agent_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.idle_debounce_ms)
+            .unwrap_or(crate::settings::types::DEFAULT_AGENT_INBOX_IDLE_DEBOUNCE_MS)
+    }
+
+    /// How long an idle wake caused only by successful bash completions is
+    /// held (`agentInbox.successHoldMs`; default 30 s). Global scope only.
+    #[must_use]
+    pub fn get_agent_inbox_success_hold_ms(&self) -> u64 {
+        self.global
+            .agent_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.success_hold_ms)
+            .unwrap_or(crate::settings::types::DEFAULT_AGENT_INBOX_SUCCESS_HOLD_MS)
+    }
+
     /// The steering queue's delivery mode: `all` co-delivers every queued message at
     /// the next turn boundary; `one-at-a-time` delivers one per turn.
     #[must_use]
@@ -1152,12 +1175,14 @@ mod tests {
         );
         std::fs::write(
             agent_dir.join("settings.json"),
-            r#"{"agentInbox": {"enabled": false, "reminderIntervalMs": 0}}"#,
+            r#"{"agentInbox": {"enabled": false, "reminderIntervalMs": 0, "idleDebounceMs": 250, "successHoldMs": 900}}"#,
         )
         .unwrap();
         let manager = SettingsManager::create(dir.path(), agent_dir);
         assert!(!manager.get_agent_inbox_enabled());
         assert_eq!(manager.get_agent_inbox_reminder_interval_ms(), 0);
+        assert_eq!(manager.get_agent_inbox_idle_debounce_ms(), 250);
+        assert_eq!(manager.get_agent_inbox_success_hold_ms(), 900);
     }
 
     /// Both `agentInbox` keys read the GLOBAL scope only: a cloned repo's

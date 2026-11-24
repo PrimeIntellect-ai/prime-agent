@@ -392,6 +392,10 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         message: String,
+        /// Queue only into a running turn: an idle, paused, or suspended
+        /// session answers `{queued: false}` and starts nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        require_busy: Option<bool>,
         #[serde(flatten)]
         input: PromptInput,
         #[serde(flatten)]
@@ -652,6 +656,9 @@ pub enum DaemonCommand {
         /// (the `wait_for_headless_completion` barrier of the same name).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_for_rlm_quiescence: Option<bool>,
+        /// Maximum time to wait for the session and its optional RLM subtree to become idle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         #[serde(flatten)]
         rest: JsonMap,
     },

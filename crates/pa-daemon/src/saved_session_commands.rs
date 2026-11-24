@@ -1024,6 +1024,7 @@ mod tombstone_usage_tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         let captured = tombstone_saved_session_delete(
@@ -1096,6 +1097,7 @@ mod tombstone_usage_tests {
                 depth: 1,
                 name: "w".into(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         // The delete goes through a final-component symlink: the capture
@@ -1148,6 +1150,7 @@ mod tombstone_usage_tests {
                 depth: 1,
                 name: "w".into(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);
