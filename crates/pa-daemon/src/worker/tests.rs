@@ -309,3 +309,76 @@ async fn a_bill_made_before_a_session_replace_never_lands_in_the_replacement() {
     assert!(store.append_model_usage(original_id, bill()).await.is_err());
     assert_eq!(billed_rows(&worker), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn wait_for_idle_bounds_one_busy_slice_without_stopping_work() {
+    let worker = created_dispatch_worker().await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    worker.core.lock().unwrap().busy = true;
+
+    let waiting_worker = std::sync::Arc::clone(&worker);
+    let mut bounded = tokio::spawn(async move {
+        waiting_worker
+            .dispatch(
+                "wait_for_idle",
+                &json!({"timeoutMs": 25, "waitForRlmQuiescence": true}),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(25)).await;
+    let bounded_response = tokio::time::timeout(Duration::from_millis(1), &mut bounded).await;
+    assert!(
+        worker.core.lock().unwrap().busy,
+        "a wait timeout must not stop the running work"
+    );
+    let state = worker.dispatch("get_state", &json!({})).await;
+    assert!(
+        state.success,
+        "state access failed during a bounded wait: {state:?}"
+    );
+
+    let bounded_response = if let Ok(response) = bounded_response {
+        response.expect("bounded worker task")
+    } else {
+        // Let the old unbounded implementation finish so the regression fails
+        // on its response shape instead of hanging the test process.
+        worker.core.lock().unwrap().busy = false;
+        worker.idle_notify.notify_waiters();
+        bounded.await.expect("unbounded worker task")
+    };
+    assert!(bounded_response.success);
+    assert_eq!(bounded_response.data, Some(json!({"timedOut": true})));
+
+    let zero_busy = worker
+        .dispatch("wait_for_idle", &json!({"timeoutMs": 0}))
+        .await;
+    assert!(zero_busy.success);
+    assert_eq!(zero_busy.data, Some(json!({"timedOut": true})));
+    assert!(worker.core.lock().unwrap().busy);
+
+    worker.core.lock().unwrap().busy = true;
+    let waiting_worker = std::sync::Arc::clone(&worker);
+    let unbounded =
+        tokio::spawn(async move { waiting_worker.dispatch("wait_for_idle", &json!({})).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_hours(1)).await;
+    assert!(
+        !unbounded.is_finished(),
+        "an omitted timeout must keep the long quiescence wait"
+    );
+    worker.core.lock().unwrap().busy = false;
+    worker.idle_notify.notify_waiters();
+    let idle_response = unbounded.await.expect("unbounded worker task");
+    assert!(idle_response.success);
+    let immediate = worker
+        .dispatch("wait_for_idle", &json!({"timeoutMs": 0}))
+        .await;
+    assert!(immediate.success, "an idle worker must answer immediately");
+    assert_eq!(
+        immediate.data, None,
+        "an idle observation keeps the old response shape"
+    );
+}

@@ -3,7 +3,8 @@
 use super::{
     key_event_to_id, parse_heartbeats, picker_viewport_rows, scope_heartbeats, sort_heartbeats,
     AgentView, DaemonCommand, Duration, HeartbeatAction, HeartbeatEntry, HeartbeatsPicker,
-    HeartbeatsPickerAction, KeyEvent, Map, Result, SessionUi, Value, UI_REQUEST_TIMEOUT_MS,
+    HeartbeatsPickerAction, KeyEvent, Map, Overlay, Result, SessionUi, Value,
+    UI_REQUEST_TIMEOUT_MS,
 };
 
 /// A landed heartbeat-catalog refresh: the scoped, sorted rows, or the
@@ -26,16 +27,18 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        let action = view
-            .heartbeats_picker
-            .as_mut()
-            .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
+        let action = match view.overlay.as_mut() {
+            Some(Overlay::Heartbeats(picker)) => {
+                Some(picker.handle_key(&id, view.editor.keybindings()))
+            }
+            _ => None,
+        };
         match action {
             Some(HeartbeatsPickerAction::None) => {
                 self.dirty = true;
             }
             Some(HeartbeatsPickerAction::Close) => {
-                view.heartbeats_picker = None;
+                view.overlay = None;
                 // The exit restores the dock's own group (the operator's 2026-09-26
                 // panel-exit ruling).
                 self.focus_activity_dock(view);
@@ -85,7 +88,7 @@ impl SessionUi {
                     Some(job) => {
                         let stopped = action == HeartbeatAction::Stop;
                         let job_id = job.id.clone();
-                        if let Some(picker) = view.heartbeats_picker.as_mut() {
+                        if let Some(Overlay::Heartbeats(picker)) = view.overlay.as_mut() {
                             picker.apply_managed_job(job.clone(), stopped);
                         }
                         // The activity dock follows the same patch the manager view applied.
@@ -101,7 +104,7 @@ impl SessionUi {
                         }
                     }
                     None => {
-                        if let Some(picker) = view.heartbeats_picker.as_mut() {
+                        if let Some(Overlay::Heartbeats(picker)) = view.overlay.as_mut() {
                             picker.back_to_list();
                         }
                     }
@@ -111,7 +114,7 @@ impl SessionUi {
                 self.dirty = true;
             }
             Err(error) => {
-                if let Some(picker) = view.heartbeats_picker.as_mut() {
+                if let Some(Overlay::Heartbeats(picker)) = view.overlay.as_mut() {
                     picker.set_action_error(format!("{error:#}"));
                 }
                 self.dirty = true;
@@ -227,7 +230,7 @@ impl SessionUi {
         // Stale-while-revalidate: a failed refresh keeps the last catalog, and
         // the failure surfaces only inside an open manager view.
         if let Some(error) = update.fetch_error {
-            if let Some(picker) = view.heartbeats_picker.as_mut() {
+            if let Some(Overlay::Heartbeats(picker)) = view.overlay.as_mut() {
                 picker.set_fetch_error(Some(error));
             }
             self.dirty = true;
@@ -235,7 +238,7 @@ impl SessionUi {
             let mut heartbeats = self.scope_heartbeats(update.heartbeats);
             sort_heartbeats(&mut heartbeats);
             self.heartbeat_catalog.clone_from(&heartbeats);
-            if let Some(picker) = view.heartbeats_picker.as_mut() {
+            if let Some(Overlay::Heartbeats(picker)) = view.overlay.as_mut() {
                 picker.apply_catalog(heartbeats, None);
             }
             self.sync_activity_dock(view);
@@ -254,12 +257,12 @@ impl SessionUi {
         // The view IS the dock's Heartbeats item: every entry path leaves the
         // panel's own group selected, so the close restores the Heartbeats item.
         self.activity_group = crate::chrome::ActivityGroup::Heartbeats;
-        view.heartbeats_picker = Some(HeartbeatsPicker::new(
+        view.overlay = Some(Overlay::Heartbeats(HeartbeatsPicker::new(
             self.heartbeat_catalog.clone(),
             None,
             None,
             picker_viewport_rows(view.terminal_rows()),
-        ));
+        )));
         self.spawn_heartbeat_refresh();
         self.dirty = true;
     }

@@ -155,7 +155,8 @@ impl AgentSession {
 
     /// Execute `/compact`: summarize the pre-cut prefix, persist the entry,
     /// and rebuild the loop context summary-first; a skip leaves the session
-    /// untouched, an aborted run never commits.
+    /// untouched, an aborted run never commits, and a committed run finishes
+    /// its rebuild and kernel notice whatever `abort` does afterwards.
     ///
     /// # Errors
     ///
@@ -204,7 +205,7 @@ impl AgentSession {
         // take the same flight. A row pushed onto the context must not
         // interleave with the replace: it would duplicate in the rebuilt
         // view or vanish under it while staying durable either way.
-        let _flight = self.compaction_flight.lock().await;
+        let _flight = unless_aborted(self.compaction_flight.lock(), abort).await?;
         let mut outcome = self.compaction_attempts(&options, started_at).await?;
         if matches!(outcome, CompactOutcome::Skipped(_)) {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
@@ -292,12 +293,16 @@ impl AgentSession {
                 session_id: self.session_id().await,
                 bill: crate::session_engine::compact_session::SummaryBill::default(),
             };
-            let summarized = crate::session_engine::compact_session::summarize_attempt(
-                &attempt,
-                &attempt_options,
-                &summaries.bill,
+            let summarized = unless_aborted(
+                crate::session_engine::compact_session::summarize_attempt(
+                    &attempt,
+                    &attempt_options,
+                    &summaries.bill,
+                ),
+                options.abort,
             )
-            .await;
+            .await
+            .and_then(|summarized| summarized);
             let mut prepared = match summarized {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -484,6 +489,17 @@ impl AgentSession {
         )
         .await
         .map(|committed| committed.result)
+    }
+}
+
+/// Race pre-commit compaction work against the run's abort signal, if it has one.
+async fn unless_aborted<T>(
+    operation: impl std::future::Future<Output = T>,
+    abort: Option<&pa_agent::abort::AbortSignal>,
+) -> anyhow::Result<T> {
+    match abort {
+        Some(signal) => pa_agent::abort::race_with_abort(operation, signal).await,
+        None => Ok(operation.await),
     }
 }
 

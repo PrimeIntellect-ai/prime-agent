@@ -22,6 +22,17 @@ impl AsyncSafeRuntime {
             runtime: Some(runtime),
         })
     }
+
+    /// Build a single-thread runtime: an engine whose only runtime use is
+    /// `block_on` needs no worker threads.
+    pub(crate) fn new_current_thread() -> anyhow::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        Ok(Self {
+            runtime: Some(runtime),
+        })
+    }
 }
 
 impl Deref for AsyncSafeRuntime {

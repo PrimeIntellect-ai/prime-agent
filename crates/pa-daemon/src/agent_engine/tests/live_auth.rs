@@ -655,7 +655,6 @@ fn run_live_prompt(engine: &AgentSessionEngine) -> Vec<EngineEvent> {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
-            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
