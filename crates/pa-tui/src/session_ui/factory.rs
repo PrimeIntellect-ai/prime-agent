@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use pa_types::daemon::DaemonCommand;
 
-use super::AgentView;
+use super::{AgentView, Overlay};
 
 use crate::factory_view::{
     factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryRow, FactoryView,
@@ -96,12 +96,19 @@ impl super::SessionUi {
         // The mount holds the fold's malformed-reply contract: a cached
         // malformed lane mounts with its error line, never as a silent
         // fake empty state waiting for the first fold.
-        view.factory_view = Some(FactoryView::from_reply(
+        // The run page sits over the machines page it opens from, so its close returns there.
+        let run = FactoryView::from_reply(
             &self.factory_graph,
             picker_viewport_rows(view.terminal_rows()),
-        ));
-        if let (Some(row), Some(factory_view)) = (row, view.factory_view.as_mut()) {
-            factory_view.select(row);
+        );
+        let page = match view.overlay.take() {
+            Some(Overlay::Library(page)) => Some(Box::new(page)),
+            Some(Overlay::Factory { page, .. }) => page,
+            _ => None,
+        };
+        view.overlay = Some(Overlay::Factory { run, page });
+        if let (Some(row), Some(run)) = (row, view.run_page_mut()) {
+            run.select(row);
         }
         self.sync_factory_selection(view);
         self.dirty = true;
@@ -131,7 +138,7 @@ impl super::SessionUi {
         let request_epoch = self.factory_node_epoch;
         let mut fetch_files = false;
         let mut spec_id = None;
-        if let Some(factory_view) = view.factory_view.as_mut() {
+        if let Some(factory_view) = view.run_page_mut() {
             if factory_view.node.is_none() {
                 factory_view.node = Some(crate::factory_view::node::NodeView::loading(
                     run_id, state_id,
@@ -151,8 +158,7 @@ impl super::SessionUi {
             }
         }
         if let Some(node) = view
-            .factory_view
-            .as_mut()
+            .run_page_mut()
             .and_then(|factory_view| factory_view.node.as_mut())
         {
             node.set_request_epoch(request_epoch);
@@ -250,26 +256,26 @@ impl super::SessionUi {
         let Some(id) = super::key_event_to_id(&key) else {
             return Ok(());
         };
-        let action = view
-            .factory_view
-            .as_mut()
-            .map(|factory_view| factory_view.handle_key(&id, view.editor.keybindings()));
+        let action = match view.overlay.as_mut() {
+            Some(Overlay::Factory { run, .. }) => {
+                Some(run.handle_key(&id, view.editor.keybindings()))
+            }
+            _ => None,
+        };
         self.sync_factory_selection(view);
         // The node view's walk: a selection that moved off the fetched
         // instance refetches the document with the instance selector
         // (fetch-on-walk, one request per instance mounted).
-        if let Some((run_id, state_id, selector)) =
-            view.factory_view.as_ref().and_then(|factory_view| {
-                factory_view.node.as_ref().and_then(|node| {
-                    let selected = node.selected_selector()?;
-                    let fetched = node.document_selector();
-                    if fetched.is_some_and(|fetched| fetched == selected) {
-                        return None;
-                    }
-                    Some((node.run_id.clone(), node.state_id.clone(), selected))
-                })
+        if let Some((run_id, state_id, selector)) = view.run_page().and_then(|factory_view| {
+            factory_view.node.as_ref().and_then(|node| {
+                let selected = node.selected_selector()?;
+                let fetched = node.document_selector();
+                if fetched.is_some_and(|fetched| fetched == selected) {
+                    return None;
+                }
+                Some((node.run_id.clone(), node.state_id.clone(), selected))
             })
-        {
+        }) {
             self.open_factory_node(view, &run_id, &state_id, Some(selector));
         }
         match action {
@@ -277,11 +283,15 @@ impl super::SessionUi {
             Some(FactoryViewAction::Close) => {
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
-                view.factory_view = None;
                 // The run page opened from the machines page closes back
                 // to it; the machines page's own close leaves.
-                if view.library_view.is_none() {
-                    self.close_panel_to_agents_view();
+                match view.overlay.take() {
+                    Some(Overlay::Factory {
+                        page: Some(page), ..
+                    }) => view.overlay = Some(Overlay::Library(*page)),
+                    _ => {
+                        self.close_panel_to_agents_view();
+                    }
                 }
                 self.dirty = true;
             }
@@ -315,23 +325,18 @@ impl super::SessionUi {
             self.pending_selection_rlm_depth = rlm_depth;
             self.pending_selection_origin = Some(SelectionOrigin {
                 panel: SessionPanel::FactoryRuns {
-                    row: view
-                        .factory_view
-                        .as_ref()
-                        .and_then(FactoryView::selected_row)
-                        .cloned(),
+                    row: view.run_page().and_then(FactoryView::selected_row).cloned(),
                     // A jump from the node view returns to the node view,
                     // on the instance it jumped from.
                     node: view
-                        .factory_view
-                        .as_ref()
+                        .run_page()
                         .and_then(|factory_view| factory_view.node.as_ref())
                         .map(super::super::factory_view::node::NodeView::target),
                 },
                 closes_to_agents_view: self.panel_returns_to_agents_view,
             });
             self.exit_requested = true;
-        } else if let Some(factory_view) = view.factory_view.as_mut() {
+        } else if let Some(factory_view) = view.run_page_mut() {
             factory_view.set_error(Some(format!(
                 "cannot open {child_id}: no live runtime or saved session yet"
             )));
@@ -410,7 +415,7 @@ impl super::SessionUi {
                 self.toast(&format!("Factory run {run_id} is now {state}"), view);
             }
             Err(error) => {
-                if let Some(factory_view) = view.factory_view.as_mut() {
+                if let Some(factory_view) = view.run_page_mut() {
                     factory_view.set_error(Some(format!("{error:#}")));
                 } else {
                     self.error_row(&format!("{error:#}"), view);
@@ -601,8 +606,7 @@ impl super::SessionUi {
             } => {
                 if session == self.active_session_id {
                     let node = view
-                        .factory_view
-                        .as_mut()
+                        .run_page_mut()
                         .and_then(|factory_view| factory_view.node.as_mut())
                         .filter(|node| node.run_id == run_id && node.state_id == state_id);
                     self.dirty |=
@@ -618,8 +622,7 @@ impl super::SessionUi {
             } => {
                 if session == self.active_session_id {
                     let node = view
-                        .factory_view
-                        .as_mut()
+                        .run_page_mut()
                         .and_then(|factory_view| factory_view.node.as_mut())
                         .filter(|node| node.run_id == run_id && node.state_id == state_id);
                     if let Some(node) = node {
@@ -662,7 +665,7 @@ impl super::SessionUi {
                         crate::agents_view::StatusTone::Muted => self.toast(&message, view),
                         crate::agents_view::StatusTone::Warning
                         | crate::agents_view::StatusTone::Error => {
-                            if let Some(factory_view) = view.factory_view.as_mut() {
+                            if let Some(factory_view) = view.run_page_mut() {
                                 factory_view.set_error(Some(message));
                             } else {
                                 self.toast(&message, view);
@@ -696,13 +699,13 @@ impl super::SessionUi {
                     // fold — this seam never repaints the page (a late
                     // scoped graph must not erase the all-session rows
                     // with the attached session's own list).
-                    if let Some(factory_view) = view.factory_view.as_mut() {
+                    if let Some(factory_view) = view.run_page_mut() {
                         factory_view.set_error(None);
                         factory_view.apply_runs(runs);
                     }
                 }
                 None => {
-                    if let Some(factory_view) = view.factory_view.as_mut() {
+                    if let Some(factory_view) = view.run_page_mut() {
                         factory_view.set_error(Some(
                             crate::factory_view::MALFORMED_REPLY_ERROR.to_string(),
                         ));
@@ -710,7 +713,7 @@ impl super::SessionUi {
                 }
             },
             Err(message) => {
-                if let Some(factory_view) = view.factory_view.as_mut() {
+                if let Some(factory_view) = view.run_page_mut() {
                     factory_view.set_error(Some(message));
                 }
             }
@@ -728,9 +731,8 @@ impl super::SessionUi {
     /// the spawned refresh.
     pub(crate) fn sync_factory_selection(&mut self, view: &AgentView) {
         self.factory_selected_run = view
-            .factory_view
-            .as_ref()
-            .and_then(|factory_view| factory_view.selected_run())
+            .run_page()
+            .and_then(FactoryView::selected_run)
             .map(|run| run.run_id.clone())
             .filter(|run_id| !run_id.is_empty());
     }

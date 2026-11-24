@@ -31,12 +31,13 @@
 //! unchanged); only the transcript row's class moves.
 //!
 //! The inbox notice rows (`inbox_notice`: the daemon agent-inbox arrival
-//! and reminder notices) render in their own class with the same envelope
-//! geometry — daemon-attributed mail, never user input — the notice text
-//! always visible as the body (the count and the read call-to-action never
-//! collapse away).
+//! and reminder notices) render in their own class — daemon-attributed
+//! mail, never user input. Collapsed, a run of consecutive notices paints
+//! one dim counter line (`inbox_counter`); expanded, each notice paints the
+//! envelope summary line over its notice text.
 
 pub(crate) mod geometry;
+pub(crate) mod inbox_counter;
 pub(crate) use geometry::agent_message_body_count;
 pub(crate) mod injected_prompt;
 pub(crate) mod refinement;
@@ -73,6 +74,8 @@ pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 pub const MODEL_PROMPT_ERROR_CUSTOM_TYPE: &str = "model_prompt_error";
 /// Wire twin of `pa_core::session_engine::skill_problems_notice::SKILL_PROBLEMS_CUSTOM_TYPE`.
 pub const SKILL_PROBLEMS_CUSTOM_TYPE: &str = "skill_problems";
+/// Wire twin of `pa_core::session_engine::model_resolution_notice::MODEL_RESOLUTION_WARNING_CUSTOM_TYPE`.
+pub const MODEL_RESOLUTION_WARNING_CUSTOM_TYPE: &str = "model_resolution_warning";
 
 /// Which agent-message side a row renders: the received transcript rows, or the
 /// sent/queued ipython cell receipts. The direction word folds into the
@@ -109,16 +112,16 @@ pub struct AgentMessageRow {
 }
 
 /// One inbox-notice row: the daemon's inbox system announcing waiting
-/// machine messages. The summary line attributes the notice to the inbox
-/// system (the sender, with the class word beside it); the body is the
-/// notice text, always visible — the count and the `rlm.inbox.read()`
-/// call-to-action never collapse away.
+/// machine messages. Collapsed, a run of consecutive notices paints one dim
+/// counter line; expanded, each notice paints the summary line (the inbox
+/// system and how many messages are new or unread) over the notice text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboxNoticeRow {
-    /// `details.sender` (the inbox system's identity).
-    pub sender: String,
     /// `details.class`: `arrival` or `reminder`.
     pub class: String,
+    /// `details.count`: the number the notice announces; absent on rows
+    /// journaled before the field existed.
+    pub count: Option<u64>,
     /// The notice text (the row's content; the model-visible prompt).
     pub text: String,
 }
@@ -219,7 +222,9 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
                 },
             }]
         }
-        MODEL_PROMPT_ERROR_CUSTOM_TYPE | SKILL_PROBLEMS_CUSTOM_TYPE => vec![ChatEntry::Status {
+        MODEL_PROMPT_ERROR_CUSTOM_TYPE
+        | SKILL_PROBLEMS_CUSTOM_TYPE
+        | MODEL_RESOLUTION_WARNING_CUSTOM_TYPE => vec![ChatEntry::Status {
             text: content,
             kind: crate::chat::StatusKind::Warning,
         }],
@@ -379,15 +384,14 @@ fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
     })))
 }
 
-/// The inbox notice decodes with its sender and class attributed: a row
-/// missing either string falls through to the generic box (the file's
-/// dispatch rule for malformed details).
+/// The inbox notice decodes with its class and count: a row missing the
+/// class string falls through to the generic box (the file's dispatch
+/// rule for malformed details).
 fn inbox_notice_entry(message: &Value, details: &Value) -> Option<ChatEntry> {
-    let sender = details.get("sender").and_then(Value::as_str)?;
     let class = details.get("class").and_then(Value::as_str)?;
     Some(ChatEntry::InboxNotice(Box::new(InboxNoticeRow {
-        sender: sender.to_string(),
         class: class.to_string(),
+        count: details.get("count").and_then(Value::as_u64),
         text: custom_content_text(message),
     })))
 }
@@ -805,28 +809,37 @@ mod tests {
         assert!(matches!(entries.as_slice(), [ChatEntry::AgentMessage(_)]));
     }
 
-    /// The inbox notices decode to their own class: the sender and the
-    /// class ride the row, the notice text is the body (the class
-    /// assertion is the mutation pin — routing the type back through the
-    /// user or injected-prompt arms fails it).
+    /// The inbox notices decode to their own class: the class and count
+    /// ride the row, the notice text is the body (the class assertion is
+    /// the mutation pin — routing the type back through the user or
+    /// injected-prompt arms fails it). A row journaled before `count`
+    /// existed decodes without it.
     #[test]
-    fn inbox_notice_rows_decode_with_sender_class_and_body() {
+    fn inbox_notice_rows_decode_with_class_count_and_body() {
         let arrival = "[inbox 19:14 UTC] 1 new message (bash-done); total waiting: 1. Read them with rlm.inbox.read().";
         let reminder = "[inbox reminder] 2 messages still waiting (oldest waited 5m) \u{2014} rlm.inbox.read()";
-        for (class, text) in [("arrival", arrival), ("reminder", reminder)] {
+        for (class, text, count) in [
+            ("arrival", arrival, Some(1)),
+            ("reminder", reminder, Some(2)),
+            ("reminder", reminder, None),
+        ] {
+            let mut details = json!({ "sender": "Agent inbox", "class": class });
+            if let Some(count) = count {
+                details["count"] = json!(count);
+            }
             let entries = decoded(&json!({
                 "role": "custom",
                 "customType": INBOX_NOTICE_CUSTOM_TYPE,
                 "content": text,
                 "display": true,
-                "details": { "sender": "Agent inbox", "class": class },
+                "details": details,
                 "timestamp": 1_730_000_000_000u64,
             }));
             assert_eq!(
                 entries,
                 vec![ChatEntry::InboxNotice(Box::new(InboxNoticeRow {
-                    sender: "Agent inbox".to_string(),
                     class: class.to_string(),
+                    count,
                     text: text.to_string(),
                 }))],
                 "{class} notice row"
@@ -848,14 +861,12 @@ mod tests {
         assert!(entries.is_empty(), "{entries:?}");
     }
 
-    /// Malformed details (missing or non-string sender/class) fall through
-    /// to the generic box, the file's dispatch rule.
+    /// Malformed details (a missing or non-string class) fall through to
+    /// the generic box, the file's dispatch rule.
     #[test]
     fn inbox_notice_malformed_details_fall_to_the_generic_panel() {
         for details in [
-            json!({ "class": "arrival" }),
             json!({ "sender": "Agent inbox" }),
-            json!({ "sender": 1, "class": "arrival" }),
             json!({ "sender": "Agent inbox", "class": null }),
         ] {
             let entries = decoded(&json!({
@@ -988,8 +999,8 @@ mod tests {
             content: body.clone(),
         };
         let inbox = InboxNoticeRow {
-            sender: "Agent inbox".to_string(),
             class: "arrival".to_string(),
+            count: Some(1),
             text: body.clone(),
         };
         let compacted = format!(" {body}");
@@ -1034,7 +1045,7 @@ mod tests {
             (
                 None,
                 render::render_inbox_notice(&inbox, &theme, 60, true),
-                vec!["", " \u{2709} Agent inbox \u{b7} arrival"],
+                vec!["", " \u{2709} Agent inbox \u{b7} 1 new message"],
             ),
             (
                 Some((

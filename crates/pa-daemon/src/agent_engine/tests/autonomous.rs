@@ -111,7 +111,6 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
                 source: "user".to_string(),
                 agent_message_id: None,
                 custom_message: None,
-                streaming_behavior: None,
             },
             &|| false,
             &mut |event| {
@@ -231,7 +230,6 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
             source: "user".to_string(),
             agent_message_id: None,
             custom_message: None,
-            streaming_behavior: None,
         },
         &|| false,
         &mut |event| {
@@ -259,5 +257,69 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
     assert_eq!(
         driver.accounted.load(std::sync::atomic::Ordering::SeqCst),
         2
+    );
+}
+
+#[test]
+fn a_turn_whose_emit_panics_leaves_no_listener_accounting_later_runs() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(
+                serde_json::json!({ "responses": ["one", "two", "three"] }).to_string(),
+            ),
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    engine.register_arc();
+    let driver = std::sync::Arc::new(ScriptedDriver {
+        follow_ups: std::sync::Mutex::new(Vec::new()),
+        accounted: std::sync::atomic::AtomicUsize::new(0),
+    });
+    engine
+        .set_autonomous_driver(std::sync::Arc::clone(&driver)
+            as std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>);
+    let request = |message: &str| PromptRequest {
+        batch: Vec::new(),
+        images: Vec::new(),
+        message: message.to_string(),
+        source: "user".to_string(),
+        agent_message_id: None,
+        custom_message: None,
+    };
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.run_prompt(0, request("go"), &|| false, &mut |event| {
+            assert!(
+                !matches!(event, EngineEvent::AssistantUpdate { .. }),
+                "emit panics mid-run"
+            );
+            true
+        });
+    }));
+    assert!(panicked.is_err());
+    let accounted = driver.accounted.load(std::sync::atomic::Ordering::SeqCst);
+
+    let mut events: Vec<EngineEvent> = Vec::new();
+    engine.run_prompt(0, request("again"), &|| false, &mut |event| {
+        events.push(event);
+        true
+    });
+    assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
+    assert_eq!(
+        driver.accounted.load(std::sync::atomic::Ordering::SeqCst),
+        accounted + 1,
+        "the next run's message is accounted exactly once"
     );
 }
