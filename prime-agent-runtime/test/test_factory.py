@@ -8087,31 +8087,35 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(len(self.host.spawn_calls("build")), 1)
 
     @async_test
-    async def test_background_jobs_that_never_end_pause_the_run_instead_of_holding_it(self) -> None:
+    async def test_a_background_work_hold_tells_the_parent_once_and_ends_with_the_work(self) -> None:
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = True
-        started_at = self.clock.now
+        owner_poll = self.host.gate("rlm.collect", 3)
         started = await self.start()
-        status = await self.settle(started)
+        await self.host.gate_entered("rlm.collect", 3).wait()
 
-        self.assertEqual(status["state"], "paused")
-        self.assertIn("still runs background jobs", status["pause_reason"])
-        self.assertGreaterEqual(self.clock.now - started_at, factory_module.TASK_WORK_WAIT_SECONDS)
-        self.assertEqual(self.node_status(status, "design")["status"], "done")
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 1)
+        [design] = self.executor._runs[started["run_id"]].states["design"].entries[0].instances
+        self.assertIn(design.child_name, held[0]["detail"])
         self.assertEqual(self.host.spawn_calls("build"), [])
-        self.assertIn("child-1", self.host.children)
-        self.assertIn("factory_task_work_held", [event["kind"] for event in status["events"]])
+
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        owner_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("build")), 1)
 
     @async_test
-    async def test_deleting_the_held_child_and_resuming_starts_the_next_state(self) -> None:
+    async def test_deleting_the_held_child_starts_the_next_state(self) -> None:
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = True
+        owner_poll = self.host.gate("rlm.collect", 2)
         started = await self.start()
-        status = await self.settle(started)
-        self.assertIn("still runs background jobs", status["pause_reason"])
+        await self.host.gate_entered("rlm.collect", 2).wait()
 
         await rlm_module.rlm.delete_subagent("child-1")
-        await rlm_module.rlm.factory.resume(started["run_id"])
+        owner_poll.set()
         status = await self.settle(started)
 
         self.assertEqual(status["state"], "done")
@@ -8119,9 +8123,7 @@ class FactoryEmitTest(_ExecutorTestCase):
 
     @async_test
     async def test_a_stale_owner_poll_cannot_reopen_a_stopped_run(self) -> None:
-        # Collect 2 arms the background-job deadline; the clock jump makes
-        # collect 3 read it as expired, and stop() lands while that poll's
-        # busy result is in flight.
+        # stop() lands while an owner poll's busy result is in flight.
         stale = StaleCollectHost(clock=self.clock, stale_collect=3)
         stale.session_root = self.host.session_root
         stale.outcomes = self.host.outcomes
@@ -8129,7 +8131,6 @@ class FactoryEmitTest(_ExecutorTestCase):
         repatch = patch.object(rlm_module, "host_request", self.host)
         repatch.start()
         self.addCleanup(repatch.stop)
-        self.clock.advance_per_collect = factory_module.TASK_WORK_WAIT_SECONDS
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = True
         started = await self.start()
@@ -8382,25 +8383,6 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
             ["Do the work carefully.\n\n## Inputs\n- design: the design\n"],
         )
         self.assertEqual(len(self.host.spawn_calls("design")), 1)
-
-    @async_test
-    async def test_the_background_job_deadline_survives_a_restart(self) -> None:
-        self.host.outcomes["design"] = {"status": "done", "answer": "designed", "factory_task_busy": True}
-        gate = self.host.gate("rlm.collect", 3)
-        self.addCleanup(gate.set)
-        result = await self.start()
-        run_id = result["run_id"]
-        await self.host.gate_entered("rlm.collect", 3).wait()
-        run = self.executor._runs[run_id]
-        [design] = run.states["design"].entries[0].instances
-        self.assertIsNotNone(design.task_work_until)
-
-        run.task.cancel()
-        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
-        restarted.rehydrate_registry()
-
-        [adopted] = restarted._runs[run_id].states["design"].entries[0].instances
-        self.assertEqual(adopted.task_work_until, design.task_work_until)
 
     @async_test
     async def test_an_admission_inside_the_throttle_window_survives_via_its_journal(self) -> None:
