@@ -145,7 +145,7 @@ pub(crate) enum Connection {
 /// One input to [`Connection::on`].
 pub(crate) enum ConnectionEvent {
     /// A `daemon_closing` update frame (§10.2).
-    UpdateNotice { est_seconds: u64 },
+    UpdateNotice,
     /// A `daemon_closing` frame announcing the daemon's own shutdown (TS #2458).
     ShutdownNotice,
     /// The event stream closed without a notice: a daemon hiccup.
@@ -209,12 +209,9 @@ impl Connection {
         match (event, &mut *self) {
             // An update closing outranks a shutdown or hiccup recovery in flight (TS #2458): the
             // §10.2 resume contract replaces it.
-            (Event::UpdateNotice { est_seconds }, _) => {
+            (Event::UpdateNotice, _) => {
                 *self = Connection::Recovering(ReconnectLoop::start_update());
-                ConnectionEffect::Note(format!(
-                    "the daemon is restarting for an update (about {}s) — reconnecting…",
-                    est_seconds.max(1)
-                ))
+                ConnectionEffect::Note("the daemon is restarting for an update — reconnecting…".to_string())
             }
             // TS #2458 `reconnectAfterShutdown`: the announced closing keeps the pane mounted and
             // waits bounded (the recovery never relaunches the daemon — an explicit stop stays

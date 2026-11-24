@@ -335,18 +335,12 @@ impl SessionUi {
                         .join(", ");
                     view.push_entry(crate::chat::ChatEntry::Status {
                         text: format!(
-                            "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
-                            update.est_seconds.max(1),
+                            "Prime Agent is updating — restarting the daemon. {} will resume automatically.",
                             if names.is_empty() { "Your session".to_string() } else { names }
                         ),
                         kind: crate::chat::StatusKind::Info,
                     });
-                    self.connection_event(
-                        ConnectionEvent::UpdateNotice {
-                            est_seconds: update.est_seconds,
-                        },
-                        view,
-                    );
+                    self.connection_event(ConnectionEvent::UpdateNotice, view);
                 } else {
                     self.note(&format!("the daemon is shutting down ({reason})"), view);
                     // The announcement is what arms the shutdown recovery: a bare session stop

@@ -51,7 +51,6 @@ const CONNECT_RETRY_BACKOFF_MS: u64 = 1_000;
 #[derive(Debug, Clone)]
 pub struct DaemonClosingUpdate {
     pub update_id: String,
-    pub est_seconds: u64,
     /// The stopped sessions `[{sessionId, name}]`: reattach targets after the restart.
     pub sessions: Vec<Value>,
 }
@@ -178,10 +177,6 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
-                        est_seconds: payload
-                            .get("estSeconds")
-                            .and_then(Value::as_u64)
-                            .unwrap_or_default(),
                         sessions: payload
                             .get("sessions")
                             .and_then(Value::as_array)

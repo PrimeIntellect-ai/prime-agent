@@ -727,8 +727,12 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         .install_command_channel(stopped.begin_connection(), stopped_tx)
         .await;
     let pump_resident = Arc::clone(&stopped);
+    // What a client has already received when the first worker is told to stop.
+    let mut client_events = supervisor.events.subscribe();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let request = stopped_rx.recv().await.expect("the stop routes a shutdown");
+        let _ = seen_tx.send(client_events.try_recv().ok().map(|(_, frame)| frame));
         let reply = pump_resident
             .pending
             .lock()
@@ -772,6 +776,15 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         .handle_commit_update_restart("commit-1", "commit_update_restart", &command)
         .await;
     assert!(!ok, "the refusal abandons the update: {lines:?}");
+    let seen = seen_rx
+        .await
+        .unwrap()
+        .expect("a frame before the first stop");
+    assert_eq!(
+        (seen["type"].as_str(), seen["reason"].as_str()),
+        (Some("daemon_closing"), Some("update")),
+        "the update notice reaches clients before any worker stops"
+    );
 
     // The stopped worker's failed relaunch re-arms supervision: the give-up
     // (the resident's budget was at the cap) removes the resident instead

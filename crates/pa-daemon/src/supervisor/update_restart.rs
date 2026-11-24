@@ -331,6 +331,51 @@ impl Supervisor {
             ),
             PrepareOp::Applied(_) => {
                 let residents = self.registry.list().await;
+                // Spec §10.1: every client learns the update resume contract BEFORE the
+                // workers stop - the close frame is an instruction (reattach by durable id
+                // after the restart), not an error, and a client whose direct worker link
+                // dropped first would report a lost connection instead. While the workers
+                // stop, the accept loop greets no new client, so a reconnecting window keeps
+                // retrying until the successor (or, after an abandon, this supervisor) serves.
+                let mut sessions: Vec<Value> = Vec::new();
+                for resident in &residents {
+                    let descriptor = resident.descriptor.lock().await;
+                    let session_id = descriptor
+                        .root_session_id
+                        .clone()
+                        .or_else(|| {
+                            descriptor.session_file.as_deref().and_then(|file| {
+                                Path::new(file)
+                                    .file_stem()
+                                    .map(|stem| stem.to_string_lossy().to_string())
+                            })
+                        })
+                        .unwrap_or_else(|| resident.worker_id.clone());
+                    sessions.push(json!({
+                        "sessionId": session_id,
+                        "name": descriptor
+                            .create_command
+                            .rest
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    }));
+                }
+                let est_seconds =
+                    (self.update_budget.boot_ms + self.update_budget.restore_overall_ms) / 1000;
+                let closing = json!({
+                    "type": "daemon_closing",
+                    "reason": "update",
+                    "payload": {
+                        "updateId": update_id.to_string(),
+                        "resume": true,
+                        "estSeconds": est_seconds,
+                        "sessions": sessions,
+                    }
+                });
+                let _ = self
+                    .events
+                    .send((ClientRouting::Broadcast, std::sync::Arc::new(closing)));
                 let verdicts = stop_workers_gracefully(self, &residents, &self.update_budget).await;
                 let refused: Vec<&str> = verdicts
                     .iter()
@@ -394,48 +439,6 @@ impl Supervisor {
                 self.log_line(&format!(
                     "update {update_id}: all {stopped} worker(s) stopped; exiting for the update"
                 ));
-                // Spec §10.1: every client learns the update resume contract BEFORE the
-                // sockets close - the close frame is an instruction (reattach by durable id
-                // after the restart), not an error.
-                let mut sessions: Vec<Value> = Vec::new();
-                for resident in &residents {
-                    let descriptor = resident.descriptor.lock().await;
-                    let session_id = descriptor
-                        .root_session_id
-                        .clone()
-                        .or_else(|| {
-                            descriptor.session_file.as_deref().and_then(|file| {
-                                Path::new(file)
-                                    .file_stem()
-                                    .map(|stem| stem.to_string_lossy().to_string())
-                            })
-                        })
-                        .unwrap_or_else(|| resident.worker_id.clone());
-                    sessions.push(json!({
-                        "sessionId": session_id,
-                        "name": descriptor
-                            .create_command
-                            .rest
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    }));
-                }
-                let est_seconds =
-                    (self.update_budget.boot_ms + self.update_budget.restore_overall_ms) / 1000;
-                let closing = json!({
-                    "type": "daemon_closing",
-                    "reason": "update",
-                    "payload": {
-                        "updateId": update_id.to_string(),
-                        "resume": true,
-                        "estSeconds": est_seconds,
-                        "sessions": sessions,
-                    }
-                });
-                let _ = self
-                    .events
-                    .send((ClientRouting::Broadcast, std::sync::Arc::new(closing)));
                 // The response is written before the accept loop exits; the 100ms drain only
                 // orders the exit behind it — the coordinator's Booting phase recovers a lost
                 // ack by design.

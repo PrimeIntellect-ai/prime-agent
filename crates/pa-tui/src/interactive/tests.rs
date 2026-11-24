@@ -74,7 +74,7 @@ fn an_update_notice_replaces_the_shutdown_recovery() {
     assert!(
         matches!(&connection, Connection::Recovering(driver) if driver.kind == RecoveryKind::Shutdown)
     );
-    connection.on(ConnectionEvent::UpdateNotice { est_seconds: 30 });
+    connection.on(ConnectionEvent::UpdateNotice);
     assert!(
         matches!(&connection, Connection::Recovering(driver) if driver.kind == RecoveryKind::Update)
     );
