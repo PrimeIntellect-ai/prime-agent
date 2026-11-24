@@ -712,7 +712,6 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             model: None,
             thinking: None,
             kind: RlmSpawnKind::Subagent,
-            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
