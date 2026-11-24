@@ -4,16 +4,16 @@
 use super::{json, AgentSessionEngine, EngineEvent, Value};
 
 /// Which boundary outcome armed a goal wake: the no-progress backoff's
-/// retry window, or the fallback that bounds how long a live background
-/// `bash()` handle can hold an owed continuation. One pending-wake slot
+/// retry window, or the fallback that bounds how long live background work
+/// can hold an owed continuation silently. One pending-wake slot
 /// serves both — the consult outcomes are mutually exclusive, and a
 /// successful mint retires whichever is armed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GoalWakeKind {
     /// The no-progress backoff retry window.
     Backoff,
-    /// The background-shell skip window (a hung shell must not stall the
-    /// goal; the shell's own `[bash-done]` notice is the normal wake).
+    /// The background-work skip window (hung work must not stall the goal
+    /// silently; the work's own completion notice is the normal wake).
     BackgroundSkip,
 }
 
@@ -77,7 +77,7 @@ impl AgentSessionEngine {
     /// Arm the background-skip fallback wake one window out, once per
     /// deferral: the deferred mint sites share the arming, and a later
     /// boundary of the same deferral (a user prompt, a steering notice, the
-    /// fired wake's own marker turn) arms nothing. A shell that is still
+    /// fired wake's own marker turn) arms nothing. Work that is still
     /// running after the one marker turn holds the goal until it ends; the
     /// next deferral (after a mint, or after a goal transition retired the
     /// wake) arms again. The check and the store write run under the goal
@@ -90,12 +90,12 @@ impl AgentSessionEngine {
         };
         let job = {
             let driver = live.goal.driver.lock().await;
-            // The handle probe repeats under the lock: a shell that settled
-            // after the caller's probe already retried the continuation
+            // The work probe repeats under the lock: work that settled after
+            // the caller's probe already retried the continuation
             // (and may have armed its backoff wake), so it arms nothing.
             if !driver.owes_continuation()
                 || !driver.owns_continuation_wakeup()
-                || !self.has_live_background_bash_handles()
+                || self.background_work_count() == 0
                 || self
                     .background_skip_wake_armed
                     .load(std::sync::atomic::Ordering::SeqCst)
@@ -123,8 +123,8 @@ impl AgentSessionEngine {
     /// Arm a goal wake: a durable one-shot cron job at `wake_at_ms` whose
     /// prompt is the kind's wake marker. The backoff kind serves the
     /// no-progress retry (without it the advertised 10s/20s/40s window would
-    /// never run); the background-skip kind bounds how long a live
-    /// background `bash()` handle can hold an owed continuation. Best
+    /// never run); the background-skip kind bounds how long live
+    /// background work can hold an owed continuation silently. Best
     /// effort: `None` outside a daemon worker.
     pub(crate) async fn schedule_goal_wake(
         &self,

@@ -107,9 +107,19 @@ impl Inner {
             }
             Err(error) => {
                 self.append_diagnostic(&format!("state snapshot error: {error:#}"));
+                // A failed capture stays owed: the next backgrounded cell's
+                // settle (any status, kernel alive) retries it. No re-check
+                // of the detached cell here: it may settle between the
+                // failure and a re-check, which would drop the capture.
+                self.snapshot_owed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
         }
+    }
+
+    pub(crate) fn is_running_state(&self) -> bool {
+        lock(&self.guarded).lifecycle.is_running()
     }
 
     /// The recurring capture-freshness skip (see `CaptureFreshness`):

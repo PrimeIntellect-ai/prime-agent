@@ -71,11 +71,13 @@ pub struct ExecuteResult {
     /// The cell's `rlm.session.messages` reads (`transcriptReads` on the
     /// tool-result details).
     pub transcript_reads: Vec<serde_json::Value>,
+    /// `Some` when this call did not wait for the cell: the wait returned
+    /// early (a user/inbox interrupt, or the wait budget) and the cell keeps
+    /// running; its completion arrives as a notice.
+    pub detached: Option<crate::kernel::shared::DetachedCell>,
     /// The messages the cell's `rlm.inbox.read` calls returned
     /// (`inboxMessages` on the tool-result details).
     pub inbox_messages: Vec<serde_json::Value>,
-    /// The time limit that interrupted this cell, if one did.
-    pub timed_out_after_ms: Option<u64>,
     /// The cell ended the turn via the sanctioned `rlm.end_turn()` call:
     /// the host marked the execution, and this result terminates the tool
     /// batch (the "turn ended" note on the tool-result text).
@@ -166,6 +168,13 @@ pub trait IpythonKernelProvisioner: Send + Sync {
 
     /// Kill the kernel immediately, losing all in-memory state.
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Whether the kernel this provisioner serves restarted because a
+    /// forced stop retired its predecessor (a cell that ignored its stop
+    /// interrupt); reading takes the note, so exactly one foreground
+    /// result reports the restart.
+    fn take_kernel_restart_note(&self) -> bool {
+        false
+    }
 }
 
 pub fn kernel_restart_notice() -> &'static str {
@@ -173,6 +182,18 @@ pub fn kernel_restart_notice() -> &'static str {
 }
 
 // Tool definition
+
+/// The image-mime attachments of one settled cell, in order: the
+/// background completion notice turns them into content blocks (the
+/// foreground tool result does the same for its image blocks).
+#[must_use]
+pub fn image_attachments(result: &ExecuteResult) -> Vec<&KernelAttachment> {
+    result
+        .attachments
+        .iter()
+        .filter(|a| IMAGE_MIME_TYPES.contains(&a.mime_type.as_str()))
+        .collect()
+}
 
 /// Turn kernel image attachments into image blocks; non-images are dropped.
 pub fn image_blocks_from_attachments(attachments: &[KernelAttachment]) -> Vec<ToolContentBlock> {
@@ -198,28 +219,44 @@ pub fn video_blocks_from_attachments(attachments: &[KernelAttachment]) -> Vec<To
         .collect()
 }
 
-fn format_execute_text(
-    result: &ExecuteResult,
-    background_output: Option<&str>,
-    kernel_restarted: bool,
-) -> String {
+fn format_execute_text(result: &ExecuteResult, background_output: Option<&str>) -> String {
+    if let Some(detached) = &result.detached {
+        // The detach note rides the foreground result; the settled output
+        // under it is the cell's partial text.
+        let mut text = settled_cell_output_text(result, background_output);
+        text.push_str(if text.is_empty() { "" } else { "\n" });
+        text.push_str(&background_cell_message(detached));
+        return text;
+    }
+    settled_cell_output_text(result, background_output)
+}
+
+/// The settled-output text of one cell: stdout, stderr, the result value,
+/// a failed cell's failure, and the bounded unattributed background
+/// output. The composition the foreground tool result and the background
+/// completion notice share (the foreground appends its own detach and
+/// kernel-restart notes on top). A failure renders its traceback, or its
+/// error name and value when the traceback is empty — a host-generated
+/// stop (an ignored cancel retiring the kernel) has no traceback, so its
+/// cause must reach the model text, never only the structured details.
+#[must_use]
+pub fn settled_cell_output_text(result: &ExecuteResult, background_output: Option<&str>) -> String {
     let mut text = result.stdout.clone();
-    if !result.stderr.is_empty() {
-        text.push_str(if text.is_empty() { "" } else { "\n" });
-        text.push_str(&result.stderr);
-    }
-    if let Some(result_text) = &result.result {
-        text.push_str(if text.is_empty() { "" } else { "\n" });
-        text.push_str(result_text);
-    }
-    if let Some(limit_ms) = result.timed_out_after_ms {
-        // Replaces the KeyboardInterrupt traceback, which only says where the cell was.
-        text.push_str(if text.is_empty() { "" } else { "\n" });
-        text.push_str(&cell_timeout_message(limit_ms, kernel_restarted));
-    } else if result.status == ExecuteStatus::Error {
-        if let Some(error) = &result.error {
+    let mut push = |part: &str| {
+        if !part.is_empty() {
             text.push_str(if text.is_empty() { "" } else { "\n" });
-            text.push_str(&error.traceback.join("\n"));
+            text.push_str(part);
+        }
+    };
+    push(&result.stderr);
+    if let Some(result_text) = &result.result {
+        push(result_text);
+    }
+    if let Some(error) = &result.error {
+        if error.traceback.is_empty() {
+            push(&format!("{}: {}", error.ename, error.evalue));
+        } else {
+            push(&error.traceback.join("\n"));
         }
     }
     if let Some(background) = background_output {
@@ -232,20 +269,79 @@ fn format_execute_text(
     text
 }
 
-/// The model-facing cause and fix for a cell interrupted at its time limit.
-fn cell_timeout_message(limit_ms: u64, kernel_restarted: bool) -> String {
-    let mut message = format!(
-        "This cell was interrupted after {}: long blocking work stops the session. Make it \
-non-blocking: start the work as a task (`task = asyncio.create_task(...)`; wrap blocking libraries \
-with `asyncio.to_thread`) and check `task.done()` / `task.result()` in later cells. Run shell \
-commands with `bash()`. A cell that legitimately needs longer can pass a larger `timeout` (max \
-{PYTHON_REPL_TIMEOUT_MAX_S} s), but long work belongs in tasks.",
-        humanize_ms(limit_ms)
-    );
-    if kernel_restarted {
-        message.push_str(" The cell did not stop on the interrupt, so the kernel was restarted.");
+/// Merge one settled cell's structured details into `details`: the
+/// bash-command summary, transcript reads, the error fields, rendered
+/// diffs, and sent-agent-message receipts. The composition the foreground
+/// tool result and the background completion notice share; the callers add
+/// their own identity keys (status, ids, restarts) around it.
+pub fn settled_cell_details(details: &mut serde_json::Value, result: &ExecuteResult) {
+    if let Some(bash) = &result.bash_commands {
+        details["bashCommands"] = json!({
+            "first": bash.first,
+            "count": bash.count,
+            "lines": bash.lines,
+        });
     }
-    message
+    if !result.transcript_reads.is_empty() {
+        details["transcriptReads"] = json!(result.transcript_reads);
+    }
+    if let Some(error) = &result.error {
+        details["error"] = json!({
+            "ename": error.ename,
+            "evalue": error.evalue,
+            "traceback": error.traceback,
+        });
+        details["errorEname"] = json!(error.ename);
+    }
+    if !result.diffs.is_empty() {
+        details["diffs"] = json!(result
+            .diffs
+            .iter()
+            .map(|diff| {
+                let start_line = diff
+                    .start_line
+                    .and_then(|line| usize::try_from(line).ok())
+                    .unwrap_or(1);
+                json!({
+                    "path": diff.path,
+                    "diff": generate_diff_string(&diff.old_str, &diff.new_str, 4, start_line),
+                })
+            })
+            .collect::<Vec<_>>());
+    }
+    if !result.sent_agent_messages.is_empty() {
+        details["sentAgentMessages"] = json!(result
+            .sent_agent_messages
+            .iter()
+            .map(sent_agent_message_json)
+            .collect::<Vec<_>>());
+    }
+}
+
+/// The model-facing note for a call that returned early while its cell keeps
+/// running (the auto-background): names the cause, the cell, and the
+/// completion contract — another cell cannot start until the cell settles,
+/// the completion arrives as a notice, and backgrounded work is stoppable.
+fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> String {
+    use crate::kernel::shared::DetachReason;
+    let cause = match detached.reason {
+        DetachReason::Interrupted => "A new message interrupted the wait".to_string(),
+        DetachReason::WaitBudget(ms) => {
+            format!(
+                "The cell outlived this call's {} wait budget",
+                humanize_ms(ms)
+            )
+        }
+    };
+    format!(
+        "{cause}; the cell was auto-backgrounded (cell {}) and keeps running — nothing was killed. \
+No other cell can start until it settles, so do not call python_repl again: answer the incoming \
+message or end the turn, and read the cell's state only after its completion notice arrives (the \
+inbox carries it, or a full session row when it carries rich output). The user can cancel \
+backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired, which may \
+lose unsnapshotted state.",
+        detached.cell_id
+    )
 }
 
 /// Milliseconds as one plain reading: whole seconds when the value divides,
@@ -270,13 +366,9 @@ async fn execute_cell(
         .ensure(Some(report_startup_progress), execute.signal.clone())
         .await?;
     let result = manager.execute(code, execute).await?;
-    // The cell outlived its limit and ignored the interrupt: restart the kernel.
-    let kernel_restarted =
-        result.timed_out_after_ms.is_some() && result.status == ExecuteStatus::Aborted;
-    if kernel_restarted {
-        provisioner.kill().await;
-    }
-    Ok((result, kernel_restarted))
+    // A forced-stop retirement (an ignored cancel interrupt) revived a fresh
+    // kernel under this call: the note rides this foreground result, once.
+    Ok((result, provisioner.take_kernel_restart_note()))
 }
 
 pub struct IpythonToolOptions {
@@ -297,7 +389,7 @@ pub fn ipython_tool_schema() -> serde_json::Value {
             "timeout": {
                 "type": "integer",
                 "description": format!(
-                    "Seconds before this cell is interrupted (default {} unless the user configured otherwise, max {PYTHON_REPL_TIMEOUT_MAX_S}).",
+                    "Seconds this call waits before auto-backgrounding a still-running cell (default {} unless the user configured otherwise, max {PYTHON_REPL_TIMEOUT_MAX_S}). The cell keeps running and its completion notice arrives in the inbox, or as a full session row when it carries rich output.",
                     DEFAULT_PYTHON_CELL_TIMEOUT_MS / 1000
                 )
             }
@@ -372,7 +464,7 @@ pub async fn execute_ipython(
     // message hides the actual cause of kernel failures.
     let (r, kernel_restarted) = result.map_err(|err| anyhow::anyhow!("{err:#}"))?;
 
-    let mut text = format_execute_text(&r, r.background_output.as_deref(), kernel_restarted);
+    let mut text = format_execute_text(&r, r.background_output.as_deref());
     if kernel_restarted {
         text = if text.is_empty() {
             kernel_restart_notice().to_string()
@@ -393,12 +485,10 @@ pub async fn execute_ipython(
     content.extend(image_blocks);
     content.extend(video_blocks);
 
-    // A timed-out cell is an error even when it had to be force-aborted:
-    // nobody aborted it.
     let status = match r.status {
         ExecuteStatus::Ok => "ok",
-        ExecuteStatus::Aborted if r.timed_out_after_ms.is_none() => "aborted",
-        ExecuteStatus::Error | ExecuteStatus::Aborted => "error",
+        ExecuteStatus::Aborted => "aborted",
+        ExecuteStatus::Error => "error",
     };
     let mut details = json!({
         "status": status,
@@ -416,53 +506,13 @@ pub async fn execute_ipython(
     if let Some(result_text) = &r.result {
         details["result"] = json!(result_text);
     }
-    if let Some(bash) = &r.bash_commands {
-        details["bashCommands"] = json!({
-            "first": bash.first,
-            "count": bash.count,
-            "lines": bash.lines,
-        });
-    }
-    if !r.transcript_reads.is_empty() {
-        details["transcriptReads"] = json!(r.transcript_reads);
-    }
     if !r.inbox_messages.is_empty() {
         details["inboxMessages"] = json!(r.inbox_messages);
     }
     if let Some(background) = &r.background_output {
         details["backgroundOutput"] = json!(background);
     }
-    if let Some(error) = &r.error {
-        details["error"] = json!({
-            "ename": error.ename,
-            "evalue": error.evalue,
-            "traceback": error.traceback,
-        });
-        details["errorEname"] = json!(error.ename);
-    }
-    if !r.diffs.is_empty() {
-        details["diffs"] = json!(r
-            .diffs
-            .iter()
-            .map(|diff| {
-                let start_line = diff
-                    .start_line
-                    .and_then(|line| usize::try_from(line).ok())
-                    .unwrap_or(1);
-                json!({
-                    "path": diff.path,
-                    "diff": generate_diff_string(&diff.old_str, &diff.new_str, 4, start_line),
-                })
-            })
-            .collect::<Vec<_>>());
-    }
-    if !r.sent_agent_messages.is_empty() {
-        details["sentAgentMessages"] = json!(r
-            .sent_agent_messages
-            .iter()
-            .map(sent_agent_message_json)
-            .collect::<Vec<_>>());
-    }
+    settled_cell_details(&mut details, &r);
 
     // The flagged cell ends the turn: the batch rule terminates the run's
     // turn once every call in the message has executed.

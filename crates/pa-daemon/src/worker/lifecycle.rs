@@ -1,9 +1,10 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
-    json, queue_lanes, queued_bash_completion_notices, response_failure, response_success,
-    session_snapshot, AgentSessionEngine, DaemonResponse, QueueCheckpoint, QueuePriority,
-    QueuedItem, SessionFile, TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
+    json, queue_lanes, queued_bash_completion_notices, queued_cell_completion_deliveries,
+    response_failure, response_success, session_snapshot, AgentSessionEngine, DaemonResponse,
+    QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value, Worker,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 /// How long the shutdown waits for the connections' fan-outs to flush.
@@ -746,10 +747,13 @@ impl Worker {
         response_success(None, "wait_for_idle", data)
     }
 
-    /// The bash lane's outstanding work at a quiescence observation: live
-    /// kernel `bash()` handles plus `[bash-done]` notices still queued for
-    /// delivery. Zero when nothing will wake the session from the bash
-    /// lane. Reported only — never a close/wake behavior.
+    /// The background lanes' outstanding work at a quiescence observation:
+    /// live background work ([`AgentSessionEngine::background_work_count`]:
+    /// detached cells and live `bash()` handles) plus completion notices
+    /// still queued for delivery (`[bash-done]` rows and pending cell
+    /// deliveries — a full `[cell-done]` row or the coalesced inbox arrival
+    /// that covers one). Zero when nothing will wake the session. Reported
+    /// only — never a close/wake behavior.
     ///
     /// # Panics
     ///
@@ -758,8 +762,11 @@ impl Worker {
         let live = self
             .agent_engine
             .as_ref()
-            .map_or(0, |engine| engine.background_bash_handle_count());
-        let queued = queued_bash_completion_notices(&self.core.lock().unwrap());
+            .map_or(0, |engine| engine.background_work_count());
+        let queued = {
+            let core = self.core.lock().unwrap();
+            queued_bash_completion_notices(&core) + queued_cell_completion_deliveries(&core)
+        };
         (live + queued) as u64
     }
 
