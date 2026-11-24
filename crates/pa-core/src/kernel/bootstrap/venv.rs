@@ -169,10 +169,11 @@ pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
 /// The old venv is renamed to `<venv>.stale-<unix-ms>` first and is never
 /// deleted here. The live path is absent only between the two renames; a
 /// killed process can leave it so, and the next lock holder restores the
-/// retired copy. A failed candidate move restores the old venv at once. Only
+/// retired copy. An incomplete candidate is rejected before the live venv is
+/// touched, and a failed candidate move restores the old venv at once. Only
 /// after a complete replacement are old retired copies pruned.
 pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Result<()> {
-    if candidate.exists() && !venv_structure_complete(candidate) {
+    if !venv_structure_complete(candidate) {
         anyhow::bail!("candidate venv {} is incomplete", candidate.display());
     }
     if !venv.exists() {
@@ -196,18 +197,6 @@ pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Res
         }
         return Err(error)
             .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
-    }
-    if !venv_structure_complete(venv) {
-        std::fs::remove_dir_all(venv)
-            .with_context(|| format!("removing incomplete replacement venv {}", venv.display()))?;
-        crate::platform::rename_onto(&retired, venv).with_context(|| {
-            format!(
-                "restoring {} from {} after incomplete replacement",
-                venv.display(),
-                retired.display()
-            )
-        })?;
-        anyhow::bail!("replacement venv {} is incomplete", venv.display());
     }
     prune_retired_venvs(venv, &retired);
     Ok(())

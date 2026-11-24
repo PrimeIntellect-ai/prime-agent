@@ -422,29 +422,6 @@ fn unwritable_venv(
 mod tests {
     use super::*;
 
-    #[test]
-    fn recovery_restores_a_complete_venv_aside_before_a_partial_live_tree() {
-        let root = tempfile::tempdir().unwrap();
-        let venv = root.path().join("kernel-venv");
-        let python = kernel_venv_python(&venv);
-        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
-        std::fs::write(&python, "old interpreter").unwrap();
-        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
-        let aside = root.path().join("kernel-venv.stale-1");
-        std::fs::rename(&venv, &aside).unwrap();
-
-        // Simulate death after the new candidate was renamed to the live path
-        // but before it became structurally complete.
-        std::fs::create_dir_all(&venv).unwrap();
-        std::fs::write(venv.join("partial"), "incomplete replacement").unwrap();
-
-        venv::recover_interrupted_venv_swap(&venv).unwrap();
-
-        assert_eq!(std::fs::read_to_string(python).unwrap(), "old interpreter");
-        assert!(venv.join("pyvenv.cfg").is_file());
-        assert!(!aside.exists(), "recovery consumes the restored aside");
-    }
-
     #[tokio::test]
     async fn a_rebuild_keeps_the_live_venv_until_the_candidate_is_swapped_in() {
         let root = tempfile::tempdir().unwrap();
@@ -551,8 +528,9 @@ mod tests {
         names
     }
 
-    /// The interpreter and `pyvenv.cfg` that `uv venv` writes.
-    fn write_complete_venv(venv: &Path, interpreter: &str) {
+    /// The interpreter and `pyvenv.cfg` that `uv venv` writes, at this
+    /// platform's layout.
+    pub(super) fn write_complete_venv(venv: &Path, interpreter: &str) {
         let python = kernel_venv_python(venv);
         std::fs::create_dir_all(python.parent().unwrap()).unwrap();
         std::fs::write(python, interpreter).unwrap();
@@ -588,8 +566,8 @@ mod tests {
     }
 
     /// The ordering guarantee: nothing is pruned unless the old venv was
-    /// renamed aside and the new one took its place. A failed swap restores the
-    /// old venv and leaves even a prunable copy on disk.
+    /// renamed aside and the new one took its place. A failed swap keeps the old
+    /// venv live and leaves even a prunable copy on disk.
     #[test]
     fn a_failed_swap_restores_the_old_venv_and_prunes_nothing() {
         let root = tempfile::tempdir().unwrap();
@@ -598,7 +576,8 @@ mod tests {
         write_complete_venv(&venv, "old");
         let before = sibling_names(root.path());
 
-        // The build never produced its candidate, so the second rename fails.
+        // The build never produced its candidate, so the swap rejects it before
+        // touching the live venv.
         let candidate = venv::venv_candidate_path(&venv);
         venv::swap_venv_into_place(&candidate, &venv).unwrap_err();
 

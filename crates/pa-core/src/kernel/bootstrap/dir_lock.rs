@@ -244,9 +244,6 @@ pub(crate) async fn acquire_bootstrap_lock(
                     return Ok(None);
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    if ready() {
-                        return Ok(None);
-                    }
                     anyhow::bail!(
                         "Timed out after {} seconds waiting for the Python kernel bootstrap lock at {}. \
                          Another Prime Agent process may still be setting up this runtime. \
@@ -269,6 +266,7 @@ pub(crate) async fn acquire_bootstrap_lock(
 mod tests {
     use super::*;
     use crate::kernel::bootstrap::kernel_venv_python;
+    use crate::kernel::bootstrap::tests::write_complete_venv;
 
     /// A pid that is certainly dead: a child that has already exited. A huge
     /// constant will not do: the maximum pid casts to -1, and a signal probe
@@ -287,15 +285,6 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         pid
-    }
-
-    /// The interpreter and `pyvenv.cfg` that `uv venv` writes, at this
-    /// platform's layout.
-    fn write_complete_venv(venv: &Path, interpreter: &str) {
-        let python = kernel_venv_python(venv);
-        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
-        std::fs::write(python, interpreter).unwrap();
-        std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
     }
 
     #[test]

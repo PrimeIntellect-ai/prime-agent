@@ -2,9 +2,10 @@
 
 use super::{default_rlm_extra_uv_args, BootstrapPythonSkill, BootstrapVersion, Path};
 
-/// Schema of `.bootstrap-version`; a mismatch rebuilds the venv, so bump it
-/// whenever the default packages or the skill install mode change.
-pub(super) const BOOTSTRAP_SCHEMA: u64 = 11;
+/// Schema of `.bootstrap-version`; a mismatch rebuilds the venv. Bump it for
+/// changes the file does not record, such as the skill install mode. Default
+/// packages need no bump: they are recorded as `extra_uv_args` and compared.
+pub(super) const BOOTSTRAP_SCHEMA: u64 = 10;
 pub(super) const STATE_SNAPSHOT_REQUIREMENT: &str = "dill";
 const BOOTSTRAP_VERSION_FILE: &str = ".bootstrap-version";
 pub(super) fn read_bootstrap_version(venv: &Path) -> Option<BootstrapVersion> {
