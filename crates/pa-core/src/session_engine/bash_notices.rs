@@ -127,18 +127,23 @@ pub fn register_kernel_notice_host_handlers(
 }
 
 /// TS `createAsyncBashCompletionHostHandler` validation: a positive
-/// integer pid, a non-empty string command, an integer exit code.
+/// integer pid, a non-empty string command, an integer exit code. The
+/// optional `outputTail` rides into the row's details, so an inbox wake
+/// row can show it.
 fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
     let consumed = validate_consumed(data)?;
     let exit_code = data
         .get("exitCode")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("bash.completed exitCode must be an integer"))?;
-    Ok(KernelNotice::bash_completion(
-        consumed.pid,
-        &consumed.command,
-        exit_code,
-    ))
+    let mut notice = KernelNotice::bash_completion(consumed.pid, &consumed.command, exit_code);
+    if let (Some(details), Some(tail)) = (
+        notice.row.details.as_mut(),
+        data.get("outputTail").and_then(Value::as_str),
+    ) {
+        details["outputTail"] = tail.into();
+    }
+    Ok(notice)
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
@@ -301,6 +306,22 @@ mod tests {
         let mut handlers = HostRequestHandlers::default();
         register_in_process_kernel_notice_handlers(&wake, &slot, &mut handlers);
         (agent, slot, wakes, handlers)
+    }
+
+    #[test]
+    fn completed_details_carry_the_output_tail() {
+        let mut payload = completed_payload(4321, "make", 0);
+        payload["outputTail"] = "done\n".into();
+        let notice = validate_completion(&payload).expect("a valid completion");
+        assert_eq!(
+            notice.row.details,
+            Some(serde_json::json!({
+                "pid": 4321,
+                "command": "make",
+                "exitCode": 0,
+                "outputTail": "done\n",
+            }))
+        );
     }
 
     #[tokio::test]
