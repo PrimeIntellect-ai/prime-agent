@@ -599,11 +599,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth.unwrap_or(0),
-            factory_child: config.factory_child.then_some(if config.factory_contract.is_some() {
-                crate::prompts::FactoryChild::Emit
-            } else {
-                crate::prompts::FactoryChild::FinalMessage
-            }),
+            factory_child: config
+                .factory_child
+                .then_some(if config.factory_contract.is_some() {
+                    crate::prompts::FactoryChild::Emit
+                } else {
+                    crate::prompts::FactoryChild::FinalMessage
+                }),
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
         },
