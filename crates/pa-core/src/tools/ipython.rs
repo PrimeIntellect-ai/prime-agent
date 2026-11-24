@@ -71,6 +71,9 @@ pub struct ExecuteResult {
     /// The cell's `rlm.session.messages` reads (`transcriptReads` on the
     /// tool-result details).
     pub transcript_reads: Vec<serde_json::Value>,
+    /// The messages the cell's `rlm.inbox.read` calls returned
+    /// (`inboxMessages` on the tool-result details).
+    pub inbox_messages: Vec<serde_json::Value>,
     /// The time limit that interrupted this cell, if one did.
     pub timed_out_after_ms: Option<u64>,
     /// The cell ended the turn via the sanctioned `rlm.end_turn()` call:
@@ -422,6 +425,9 @@ pub async fn execute_ipython(
     }
     if !r.transcript_reads.is_empty() {
         details["transcriptReads"] = json!(r.transcript_reads);
+    }
+    if !r.inbox_messages.is_empty() {
+        details["inboxMessages"] = json!(r.inbox_messages);
     }
     if let Some(background) = &r.background_output {
         details["backgroundOutput"] = json!(background);

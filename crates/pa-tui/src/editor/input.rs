@@ -3,6 +3,7 @@
 
 use super::text_utils::{char_at, decode_printable};
 use super::{Editor, EditorEvent, JumpDirection};
+use crate::autocomplete::SuggestionKind;
 use crate::keybindings::TUI_KEYBINDINGS;
 
 impl Editor {
@@ -155,6 +156,16 @@ impl Editor {
             if self.kb_matches(input, "tui.input.tab")
                 || self.kb_matches(input, "tui.select.confirm")
             {
+                // A parked request means keys arrived after the slash menu was built, so
+                // its selection answers an older query. The stale menu closes: Enter
+                // submits the text as typed, and Tab completes the current text afresh.
+                let slash_menu = self
+                    .autocomplete
+                    .as_ref()
+                    .is_some_and(|s| s.kind == Some(SuggestionKind::SlashCommand));
+                if slash_menu && self.pending_autocomplete.is_some() {
+                    self.cancel_autocomplete();
+                }
                 let selected = self
                     .autocomplete
                     .as_ref()
@@ -369,6 +380,16 @@ mod tests {
         assert_eq!(e.get_cursor(), (0, 6));
     }
 
+    fn submitted(e: &mut Editor) -> Vec<String> {
+        e.take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EditorEvent::Submitted(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A keystroke burst (typed command + Enter in one batch, the tmux
     /// send-keys pattern) submits as typed: the request is parked, so the
     /// dropdown never opens between the keys.
@@ -380,16 +401,30 @@ mod tests {
         }
         assert!(!e.is_showing_autocomplete(), "dropdown parks its request");
         e.handle_input("enter");
-        let events = e.take_events();
-        let submitted = events
-            .iter()
-            .filter_map(|event| match event {
-                EditorEvent::Submitted(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(submitted, vec!["/goal"]);
+        assert_eq!(submitted(&mut e), vec!["/goal"]);
         assert_eq!(e.get_text(), "");
+    }
+
+    /// Full-speed typing after the dropdown opened on `/`: the rest of the
+    /// command and Enter land in one batch, so the open menu still selects
+    /// the `/` query's first row (`settings`). Enter submits the typed
+    /// command, never that stale row.
+    #[test]
+    fn fast_typing_past_an_open_dropdown_submits_the_typed_command() {
+        for command in ["/login", "/compact", "/clear", "/stop", "/status"] {
+            let mut e = ed();
+            e.handle_input("/");
+            e.materialize_autocomplete();
+            assert!(e.is_showing_autocomplete(), "dropdown opens on {command}");
+            for ch in command.chars().skip(1) {
+                e.handle_input(&ch.to_string());
+            }
+            e.handle_input("enter");
+            assert_eq!(
+                (submitted(&mut e), e.get_text()),
+                (vec![command.to_string()], String::new())
+            );
+        }
     }
 
     /// The TS async-suggestion behavior for character-by-character typing

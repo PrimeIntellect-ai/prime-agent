@@ -1226,17 +1226,9 @@ their files retired at the terminal persist already, so this is memory
 bookkeeping only; an evicted run answers ``unknown factory run`` exactly
 like a run of a previous boot (F-12's second half)."""
 
-PERSIST_MIN_INTERVAL = 1.0
-"""Seconds (on the executor's clock) between two registry snapshots of one
-run in the same run state: the ledger events between snapshots replay
-idempotently after a restart (a settle re-collects a child that stayed
-settled under the supervisor), so the bounded staleness trades a small
-replay for a write volume a thousand-state machine can afford. A run state
-change forces the next snapshot immediately."""
-
 ADMISSIONS_JOURNAL_SUFFIX = ".admissions.jsonl"
-"""A run's mutation journal: one ordered line per durable mutation the
-throttle window could otherwise lose — an entry's prepared instance batch
+"""A run's mutation journal: one ordered line per durable mutation made
+between two snapshots — an entry's prepared instance batch
 (``kind: "batch"``, one line when ``_prepare_entry`` binds a prompt per
 instance) and one admitted child (``kind: "admission"``, appended the
 moment the spawn handle lands). The rehydrate replays the lines the
@@ -1245,9 +1237,10 @@ durable at O(small) per line; a persist failure degrades durability
 loudly (a ``persist_failed`` ledger row), never the run itself."""
 
 TERMINAL_RUN_STATES = ("done", "failed", "stopped")
-"""The run states past which the durable registry retires a run's files:
-the registry keeps the run in memory for this boot, and a restart forgets
-it — the durable archive holds only runs a restart must continue."""
+"""The run states past which the durable registry retires a run's files once
+it owns no live child: the registry keeps the run in memory for this boot,
+and a restart forgets it — the durable archive holds only runs a restart
+must continue or stop."""
 
 RUN_LOST_PYTHON_CALL = (
     "the kernel restart lost this state's running python call "
@@ -1322,7 +1315,7 @@ PYTHON_STDERR_TAIL_CAP = 2000
 """How much of a failed python call's stderr its error text carries."""
 
 PYTHON_RUNNER = r"""
-import asyncio, importlib, inspect, json, os, sys
+import asyncio, importlib, importlib.util, inspect, json, os, sys
 sys.path.insert(0, os.getcwd())
 if len(sys.argv) > 3:
     sys.path.insert(0, sys.argv[3])
@@ -1330,7 +1323,16 @@ inputs = json.load(sys.stdin.buffer)
 result_stream = os.fdopen(os.dup(1), "w")
 os.dup2(2, 1)
 sys.stdout = sys.stderr
-result = getattr(importlib.import_module(sys.argv[1]), sys.argv[2])(inputs)
+if len(sys.argv) > 3:
+    spec = importlib.util.spec_from_file_location(
+        sys.argv[1], os.path.join(sys.argv[3], sys.argv[1] + ".py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(sys.argv[1], module)
+    spec.loader.exec_module(module)
+else:
+    module = importlib.import_module(sys.argv[1])
+result = getattr(module, sys.argv[2])(inputs)
 if inspect.iscoroutine(result):
     result = asyncio.run(result)
 json.dump(result, result_stream)
@@ -1339,8 +1341,10 @@ result_stream.close()
 """The ``python -I -c`` program that runs one python state call: inputs
 arrive as JSON on stdin, everything the call prints (its own subprocesses
 included) goes to stderr, and the returned dict is the only thing written
-to stdout. A target's optional ``path`` (a machine directory's ``nodes/``)
-is searched before the working directory."""
+to stdout. A target with a ``path`` (a machine directory's ``nodes/``)
+loads ``<path>/<import>.py`` by file, so a node named like a module the
+runner already imported (``select.py``, ``types.py``) still runs; the
+``path`` is also searched first, so a node can import its sibling files."""
 
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
@@ -2036,10 +2040,14 @@ def _shown(name: str) -> str:
 
 
 def _runs_dir() -> Path | None:
-    """The run registry directory, or ``None`` without a session artifact dir.
+    """The run registry directory, or ``None`` without a session artifact dir
+    or on a daemonless host (a ``--print`` run's children die with its
+    process, so its runs are never saved).
 
     Set-but-empty env values behave as unset (mirrors ``harness._env_dir``).
     """
+    if _daemonless_host():
+        return None
     value = (os.environ.get("RLM_SESSION_DIR") or "").strip()
     return Path(value).expanduser() / RUNS_DIR_NAME if value else None
 
@@ -2355,9 +2363,8 @@ class FactoryExecutor:
     ``rlm.spawn``, settlement via ``rlm.collect``, cancellation via
     ``rlm.delete_subagent``); this executor owns the run state in kernel
     memory, snapshotted to the session artifact dir
-    (``$RLM_SESSION_DIR/factory-runs/<run id>.json``, atomic writes,
-    forced on run state changes and settle evaluations, otherwise
-    throttled to once per ``PERSIST_MIN_INTERVAL`` in the same state) with
+    (``$RLM_SESSION_DIR/factory-runs/<run id>.json``, atomic writes at
+    the control loop's consistent points) with
     a mutation journal for the batches and admissions between snapshots,
     so a kernel restart loses only the control-loop tasks: the registry
     rehydrates on the next factory use and the runs continue. Every host
@@ -2399,18 +2406,12 @@ class FactoryExecutor:
         # Run ids whose snapshots this executor loaded off disk: the
         # boot-once arming queue (each id is armed exactly once per boot).
         self._rehydrated: set[str] = set()
-        # The same ids, kept after arming: on a daemonless host their
-        # children died with the process that spawned them.
-        self._loaded: set[str] = set()
         # (run id, writer) pairs whose write already failed once: a dead
         # disk must not wedge the loop with a ledger row per event, and a
         # writer that recovers clears its own mark.
         self._persist_failed: set[tuple[str, str]] = set()
-        # The throttle marks: run id -> (the run state the last snapshot
-        # persisted, when it persisted). A state change forces the next
-        # snapshot (the operator-visible truth never trails); the same
-        # state re-snapshots at most once per PERSIST_MIN_INTERVAL.
-        self._persist_marks: dict[str, tuple[str, float]] = {}
+        # Run id -> the run revision the last write persisted.
+        self._persist_marks: dict[str, int] = {}
         # Run ids the unscoped graph's per-run guard already reported this
         # boot (round-9 probe R9-03): the TUI polls every 2 seconds, and
         # a line per poll filled the kernel's background buffer with one
@@ -2419,39 +2420,35 @@ class FactoryExecutor:
 
     # -- registry persistence -----------------------------------------------
 
-    def _persist_run(self, run: FactoryRun, *, force: bool = False) -> None:
-        """Snapshot one run to the session artifact dir (atomic write),
-        throttled per run state; terminal runs retire their files instead.
+    def _persist_run(self, run: FactoryRun) -> None:
+        """Snapshot one run to the session artifact dir (atomic write) when it
+        changed since the last write; a finished run retires its files instead.
 
-        A run state change (running, stopping, paused) forces the snapshot —
-        the operator-visible truth never trails — and the same state
-        re-snapshots at most once per PERSIST_MIN_INTERVAL: the mutations
-        between snapshots replay from the journal (prepared batches,
+        Callers persist only at consistent points: the control loop's
+        iteration boundary (before it waits on its children), a fired
+        transition, the loop's exit, and the run/stop/arm entry points. A
+        snapshot therefore never holds a half-applied settle; the mutations
+        made inside one iteration replay from the journal (prepared batches,
         admissions) or re-derive (a settle re-collects a child that stayed
-        settled under the supervisor). A terminal state (done, failed,
-        stopped) retires the snapshot and the journal: the registry keeps
-        the run in memory for this boot, and a restart forgets it — the
-        same shape the in-memory registry always had, so the durable
-        archive holds only live runs. Best-effort, exactly once per run and
-        writer when it fails: the run keeps running (the registry's memory
-        copy is the truth the loop reads); the durability loss is a ledger
-        row, never a wedge.
+        settled under the supervisor). A terminal run (done, failed,
+        stopped) that owns no live actor retires the snapshot and the
+        journal: the registry keeps the run in memory for this boot, and a
+        restart forgets it, so the durable archive holds only runs that can
+        still act. A terminal run with a live resident or in-flight child
+        keeps its snapshot, so ``stop`` still finds it after a restart.
+        Best-effort, exactly once per run and writer when it fails: the run
+        keeps running (the registry's memory copy is the truth the loop
+        reads); the durability loss is a ledger row, never a wedge.
         """
         directory = _runs_dir()
         if directory is None:
-            return  # no session artifact dir: kernel-memory-only registry
-        now = self._now_fn()
-        if run.state in TERMINAL_RUN_STATES:
+            return  # no session artifact dir, or a daemonless host: memory only
+        if self._persist_marks.get(run.run_id) == run.revision:
+            return  # nothing changed since the last write
+        self._persist_marks[run.run_id] = run.revision
+        if run.state in TERMINAL_RUN_STATES and not self._has_unresolved_actor(run):
             self._retire_run_files(run, directory)
             return
-        mark = self._persist_marks.get(run.run_id)
-        if (
-            not force
-            and mark is not None
-            and mark[0] == run.state
-            and now - mark[1] < PERSIST_MIN_INTERVAL
-        ):
-            return  # the same state snapshotted recently; the journal holds the deltas
         staging = directory / f".{run.run_id}.json.tmp"
         try:
             payload = _run_json(run, {"wall": time.time(), "mono": self._now_fn()})
@@ -2459,7 +2456,6 @@ class FactoryExecutor:
             with open(staging, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
             os.replace(staging, directory / f"{run.run_id}.json")
-            self._persist_marks[run.run_id] = (run.state, now)
             self._persist_failed.discard((run.run_id, "snapshot"))
             # A recovered write clears any stale persist-failed marker.
             try:
@@ -2575,8 +2571,6 @@ class FactoryExecutor:
                 os.unlink(path)
             except OSError:
                 pass  # already gone, or never written: nothing to retire
-
-        self._persist_marks.pop(run.run_id, None)
 
     def _retired_record(self, run_id: str) -> dict[str, Any] | None:
         """The tombstone ledger's record for a run id, or None.
@@ -2846,7 +2840,6 @@ class FactoryExecutor:
                 continue
             self._runs[run.run_id] = run
             self._rehydrated.add(run.run_id)
-            self._loaded.add(run.run_id)
         # A marker whose snapshot is ABSENT names the run's FIRST write
         # (round-8 probe R8-03): the marker exists because the snapshot
         # does not, so no snapshot walk ever surfaces it — the run is
@@ -3117,6 +3110,7 @@ class FactoryExecutor:
                 await self._resolve_admission_intents(run)
                 if run.state == "stopping":
                     await self._complete_stop(run, "stopped; rehydrated after a kernel restart")
+                    self._persist_run(run)
                     continue
                 for state_id in list(run.order):
                     state = run.states[state_id]
@@ -3131,6 +3125,7 @@ class FactoryExecutor:
                                 )
                 if run.state == "running":
                     self._start_loop(run)
+                self._persist_run(run)
             except Exception as error:  # noqa: BLE001 - the last shared loop
                 import sys
 
@@ -3238,6 +3233,7 @@ class FactoryExecutor:
             # A budget pause during the initial admission leaves the run
             # paused with no loop: resuming is the operator's decision.
             self._start_loop(run)
+        self._persist_run(run)
         return {
             "run_id": run.run_id,
             "spec_id": run.spec_id,
@@ -3328,7 +3324,9 @@ class FactoryExecutor:
         if run.state != "stopping":
             run.state = "stopping"
             self._touch(run)
+            self._persist_run(run)
         stopped = await self._complete_stop(run, "stopped")
+        self._persist_run(run)
         return {"run_id": run.run_id, "state": run.state, "cancelled": stopped}
 
     async def resume(self, run_id: str) -> dict[str, Any]:
@@ -3344,7 +3342,7 @@ class FactoryExecutor:
         ``ValueError`` when the run is not paused, and on a daemonless
         (``--print``) host for any run this kernel did not start.
         """
-        if _daemonless_host() and (run_id not in self._runs or run_id in self._loaded):
+        if _daemonless_host() and run_id not in self._runs:
             raise ValueError(
                 f"factory run {run_id!r} did not start in this process: {PRINT_RUNS_NOT_DURABLE}"
             )
@@ -4197,7 +4195,8 @@ class FactoryExecutor:
 
         Stages follow the spec: ``arrived`` (a child answer settled and was
         captured), ``recorded`` (everything else), ``shown`` (a milestone
-        notice was injected into the parent conversation), and ``delivered``
+        notice was handed to the parent, as a direct row or an inbox
+        message), and ``delivered``
         (the parent read the ledger via ``status()``).
         """
         event: dict[str, Any] = {
@@ -4253,24 +4252,25 @@ class FactoryExecutor:
             del self._runs[run_id]
 
     def _touch(self, run: FactoryRun) -> None:
-        """Bump the run's watch revision, wake every registered watcher, and
-        snapshot the registry: every observable mutation — the events that
-        funnel here and the direct transitions (a stop's ``stopping`` mark,
-        a resume's ``running`` one) — is the last state a kernel restart
-        may recover, so the durable copy never trails the truth."""
+        """Bump the run's watch revision and wake every registered watcher.
+        The revision also tells ``_persist_run`` the run changed."""
         run.revision += 1
         for waiter in run.watchers:
             if not waiter.done():
                 waiter.set_result(run.revision)
         run.watchers = []
-        self._persist_run(run)
 
-    def _mark_paused(self, run: FactoryRun) -> None:
-        """Record the pause moment: the budget excludes paused time
-        (elapsed = now - started_at - paused_ms), so every pause arms
-        its start; the resume folds it into ``paused_ms``."""
+    async def _pause(
+        self, run: FactoryRun, reason: str, kind: str, detail: str, *, node: str | None = None
+    ) -> None:
+        """Pause the run and tell the parent. The budget excludes paused time
+        (elapsed = now - started_at - paused_ms), so every pause records its
+        start; the resume folds it into ``paused_ms``."""
+        run.state = "paused"
         if run.pause_started_at is None:
             run.pause_started_at = self._now_fn()
+        run.pause_reason = reason
+        await self._milestone(run, kind, detail, node=node)
 
     def _fold_paused(self, run: FactoryRun) -> None:
         """Fold the completed pause into the budget's paused total."""
@@ -4418,16 +4418,9 @@ class FactoryExecutor:
             run.max_transitions_reported = True
             entry.consumed = False
             run.pending_evaluations.insert(0, (state.state_id, entry.index, position))
-            run.state = "paused"
-            # The budget's pause tracking (F-08 / round-3 probe R3A): the
-            # refactor moved this pause out of _evaluate_settles, and the
-            # move silently dropped the mark — a 2h operator wait then
-            # counted as ACTIVE time and the first resume re-paused on the
-            # run budget.
-            self._mark_paused(run)
-            run.pause_reason = "max_transitions exceeded"
-            await self._milestone(
+            await self._pause(
                 run,
+                "max_transitions exceeded",
                 "max_transitions_exceeded",
                 f"max_transitions {run.max_transitions} exceeded; no new entries; "
                 f"resume with await rlm.factory.resume('{run.run_id}')",
@@ -4548,10 +4541,10 @@ class FactoryExecutor:
             fired = fired or outcome == "fired"
         if fired:
             # A fired transition consumed a settle and entered a target:
-            # both must be durable before the throttle window can lose them,
-            # or a restart replays the settle and re-fires — a max_entries
-            # guard would self-heal, a multi-entry target would double-work.
-            self._persist_run(run, force=True)
+            # both must be durable before the iteration's next await, or a
+            # restart replays the settle and re-fires — a max_entries guard
+            # would self-heal, a multi-entry target would double-work.
+            self._persist_run(run)
 
     # -- readiness, binding, admission --------------------------------------
 
@@ -4632,12 +4625,10 @@ class FactoryExecutor:
         the run resumes. Resuming after the milestone is an explicit operator
         decision, so no further budget pauses fire (budget_reported)."""
         elapsed_ms = self._run_budget_active_ms(run)
-        run.state = "paused"
-        self._mark_paused(run)
-        run.pause_reason = "run budget exceeded"
         run.budget_reported = True
-        await self._milestone(
+        await self._pause(
             run,
+            "run budget exceeded",
             "budget_exceeded",
             f"run budget_ms {run.run_budget_ms} exceeded after {int(elapsed_ms)}ms; no new spawns; "
             f"resume with await rlm.factory.resume('{run.run_id}')",
@@ -4658,12 +4649,10 @@ class FactoryExecutor:
         Children already in flight keep running. Resuming after the
         milestone is an explicit operator decision, so no further
         child-budget pauses fire (max_children_reported)."""
-        run.state = "paused"
-        self._mark_paused(run)
-        run.pause_reason = "max_children exceeded"
         run.max_children_reported = True
-        await self._milestone(
+        await self._pause(
             run,
+            "max_children exceeded",
             "max_children_exceeded",
             f"run max_children {run.max_children} exceeded after {run.spawn_count} children; "
             f"no new spawns; resume with await rlm.factory.resume('{run.run_id}')",
@@ -4974,6 +4963,12 @@ class FactoryExecutor:
             )
         except RuntimeError as exc:
             instance.ownership_change_in_progress = False
+            if run.state != "running":
+                # stop() ran while the spawn was in flight and waited for it;
+                # no child came of it, so the stop can finish now.
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
+                return "stopped"
             last_error = str(exc)
             if _is_rate_limit_error(last_error):
                 if allow_backoff:
@@ -5342,6 +5337,7 @@ class FactoryExecutor:
                 await self._settle_emitted(run, state, entry)
                 return
             capture_failure = await self._capture_outputs(run, state, entry)
+            failed = [instance]
             if entry.status != "running":
                 return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
@@ -5361,22 +5357,16 @@ class FactoryExecutor:
                     failed_instance.provisional = True
                     failed_instance.capture_failed = True
                 generation = run.loop_generation
-                for index, failed_instance in enumerate(failed):
+                for failed_instance in failed:
                     await self._apply_instance_failure(
                         run, state, entry, failed_instance, capture_failure, retry=True
                     )
                     if run.loop_generation != generation:
                         return  # resume() re-admitted the entry; this list is stale
-                    if entry.status == "error":
-                        # This instance spent its retries and failed the
-                        # entry; the other omitted instances settle as
-                        # errors under the same failure.
-                        for other in failed[index + 1:]:
-                            await self._apply_instance_failure(
-                                run, state, entry, other, capture_failure, retry=True
-                            )
-                        return
-                    if entry.status != "running":
+                    # Once one instance spent its retries and failed the
+                    # entry, the other omitted instances still settle as
+                    # errors under the same failure.
+                    if entry.status not in ("running", "error"):
                         return
                 return
             entry.status = "done"
@@ -5630,15 +5620,13 @@ class FactoryExecutor:
         )
         return None
 
-    def _pause_for_unverified_task_activity(
+    async def _pause_for_unverified_task_activity(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance
     ) -> None:
         if run.state != "running":
             return
         instance.factory_task_activity = "unverified"
-        run.state = "paused"
-        self._mark_paused(run)
-        run.pause_reason = (
+        reason = (
             f"factory task activity UNVERIFIED for {state.state_id}; "
             f"child ownership remains with {instance.child_id or 'this instance'}"
         )
@@ -5649,9 +5637,15 @@ class FactoryExecutor:
             entry=entry.index,
             instance=instance.index,
             child=instance.child_id,
-            detail=run.pause_reason,
+            detail=reason,
         )
-        self._touch(run)
+        await self._pause(
+            run,
+            reason,
+            "paused",
+            f"{reason}; resume with await rlm.factory.resume('{run.run_id}')",
+            node=state.state_id,
+        )
 
     async def _poll_repair(
         self,
@@ -5682,7 +5676,7 @@ class FactoryExecutor:
                 await self._settle_emitted(run, state, entry)
             return
         if task_busy is None:
-            self._pause_for_unverified_task_activity(run, state, entry, instance)
+            await self._pause_for_unverified_task_activity(run, state, entry, instance)
             return
         if not task_busy and self._now_fn() >= instance.awaiting_outputs_until:
             instance.awaiting_outputs_until = None
@@ -5958,11 +5952,9 @@ class FactoryExecutor:
             if run.state != "running":
                 return  # stop() landed during the cancellations; it wins
             if self._has_unresolved_actor(run):
-                run.state = "paused"
-                self._mark_paused(run)
-                run.pause_reason = "child retirement failed; the actor remains owned by this run"
-                await self._milestone(
+                await self._pause(
                     run,
+                    "child retirement failed; the actor remains owned by this run",
                     "paused",
                     "failure cascade could not confirm child retirement; resume after the child is safe to replace",
                     node=state.state_id,
@@ -5985,11 +5977,9 @@ class FactoryExecutor:
         elif policy == "continue":
             pass  # the entry stays error; dependents see the error settle at binding
         else:  # escalate (default)
-            run.state = "paused"
-            self._mark_paused(run)
-            run.pause_reason = reason
-            await self._milestone(
+            await self._pause(
                 run,
+                reason,
                 "paused",
                 f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}') "
                 "to re-admit the failed entry as a fresh attempt",
@@ -6294,6 +6284,7 @@ class FactoryExecutor:
 
         try:
             await self._loop_body(run, generation)
+            self._persist_run(run)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -6320,6 +6311,7 @@ class FactoryExecutor:
                     await self._milestone(run, "failed", f"executor error: {exc}")
                 except Exception:
                     pass
+                self._persist_run(run)
 
     async def _loop_body(self, run: FactoryRun, generation: int) -> None:
         import asyncio
@@ -6332,6 +6324,9 @@ class FactoryExecutor:
         # so this task exits at its next check instead of continuing as a
         # second concurrent control loop.
         while self._loop_alive(run, generation):
+            # The iteration boundary is a consistent point: every settle the
+            # last iteration applied is complete before the loop waits again.
+            self._persist_run(run)
             in_flight = [
                 (run.states[state_id], entry, instance)
                 for state_id in run.order
@@ -6405,7 +6400,7 @@ class FactoryExecutor:
                 )
                 if state.spec.get("emit") is not None and missing:
                     if result.factory_task_busy is None and state.lifecycle != "resident":
-                        self._pause_for_unverified_task_activity(run, state, entry, instance)
+                        await self._pause_for_unverified_task_activity(run, state, entry, instance)
                         return
                     if result.factory_task_busy is True:
                         task_work_waiting = True
@@ -6414,7 +6409,7 @@ class FactoryExecutor:
                 if result.factory_task_busy is True and state.lifecycle != "resident":
                     task_work_waiting = True
                 if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
-                    self._pause_for_unverified_task_activity(run, state, entry, instance)
+                    await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
             for state, entry, instance in owner_polls:
                 if run.loop_generation != generation:
@@ -6422,11 +6417,13 @@ class FactoryExecutor:
                 result = results_by_child.get(instance.child_id or "")
                 if result is None or not result.settled or result.factory_task_busy is None:
                     instance.factory_task_activity = "unverified"
-                    self._pause_for_unverified_task_activity(run, state, entry, instance)
+                    await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
                 task_work_waiting = task_work_waiting or result.factory_task_busy
-            if task_work_waiting and not python_calls and not repairing:
+            if task_work_waiting and not children and not python_calls and not repairing:
+                # Only settled owners were collected, so the collect returned
+                # at once; a running child's collect already waited.
                 await self._sleep_fn(REPAIR_POLL_SECONDS)
             for state, entry, instance in repairing:
                 if run.loop_generation != generation:
@@ -6713,8 +6710,8 @@ def boot_arm_persisted_runs() -> bool:
     test process) stays on the lazy first-call path.
     """
     global _BOOT_ARM_TASK
-    if _BOOT_ARM_TASK is not None or _DEFAULT_EXECUTOR is not None:
-        return False  # already armed, or a test executor owns the namespace
+    if _BOOT_ARM_TASK is not None:
+        return False  # already armed
     if not factory_enabled():
         return False  # the opt-in gate stays authoritative, even at boot
     if not _runs_dir_snapshots():
@@ -8887,7 +8884,8 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   failure; `name=` labels the run in status and the TUI.
 - Pause and failure notices (escalate, budget, max_transitions,
   max_children, failed, finished) arrive as quiet notices in the
-  conversation once per kind per run (an escalate pause notifies again
+  conversation, or as `factory-progress` inbox messages in sessions with
+  the agent inbox, once per kind per run (an escalate pause notifies again
   after each resume), the pause notices with the resume call spelled
   out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
