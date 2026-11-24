@@ -21,7 +21,7 @@ mod layout;
 pub(crate) mod lazy;
 mod panels;
 mod restyle;
-pub(crate) mod rows;
+mod rows;
 
 use layout::EntryLayout;
 
@@ -218,10 +218,17 @@ fn chunk_selection(
 }
 
 impl AgentView {
-    /// Agent messages, tool calls, bash executions, and shell completions
-    /// render flush against each other.
+    /// Agent messages, tool calls, bash executions, shell completions, and
+    /// the inbox notices render flush against each other.
     pub(super) fn is_compact_neighbor(entry: &ChatEntry) -> bool {
-        rows::ChatRowCtx::is_compact_neighbor(entry)
+        matches!(
+            entry,
+            ChatEntry::Tool(_)
+                | ChatEntry::AgentMessage(_)
+                | ChatEntry::InboxNotice(_)
+                | ChatEntry::ShellCompletion(_)
+                | ChatEntry::BashExecution(_)
+        )
     }
 
     /// One paste routed by the open overlay, the key dispatch's order:

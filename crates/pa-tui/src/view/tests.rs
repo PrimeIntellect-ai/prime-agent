@@ -111,11 +111,6 @@ fn injected_terminal_links_are_not_clickable() {
     assert!(!rows.is_empty() && links.is_empty(), "{links:?}");
 }
 
-/// The hardware caret never sits over the factory page: the page is an
-/// input-less replacement view, so `frame_cursor` suppresses the stale
-/// editor dock position while it is open (the settings menu's guard
-/// family — Macroscope review finding: the factory page left the caret
-/// parked at the previous editor position over the panel).
 #[test]
 fn the_factory_page_fills_the_parent_area() {
     let mut v = view();
@@ -150,6 +145,11 @@ fn the_factory_page_fills_the_parent_area() {
     );
 }
 
+/// The hardware caret never sits over the factory page: the page is an
+/// input-less replacement view, so `frame_cursor` suppresses the stale
+/// editor dock position while it is open (the settings menu's guard
+/// family — Macroscope review finding: the factory page left the caret
+/// parked at the previous editor position over the panel).
 #[test]
 fn the_factory_page_suppresses_the_stale_editor_cursor() {
     let mut v = view();

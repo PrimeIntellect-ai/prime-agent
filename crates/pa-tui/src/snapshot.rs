@@ -85,33 +85,26 @@ pub struct Reconstructed {
     pub(crate) backfill_seam: BackfillSeam,
 }
 
-/// Fold one raw message into `chat`: a `toolResult` that completes a
-/// pending card adds no row; an unmatched one keeps its standalone
-/// orphan card. The incremental fold a whole-transcript replay shares
-/// with the hosted conversation page's live pushes.
-pub fn fold_message(chat: &mut Vec<ChatEntry>, message: &Value) {
-    if let Some(result) = tool_result_message_view(message) {
-        if let Some(view) = apply_tool_result(chat, result) {
-            chat.push(ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
-                id: view.id,
-                name: view.name,
-                args: serde_json::Value::Null,
-                started: true,
-                result: Some(view.view),
-                ..Default::default()
-            })));
-        }
-        return;
-    }
-    chat.extend(message_value_to_entries(message));
-}
-
 impl Reconstructed {
     /// Fold one raw message into the chat entries: a `toolResult` that
     /// completes a pending card adds no row; an unmatched one keeps its
     /// standalone orphan card.
     pub fn push_message(&mut self, message: &Value) {
-        fold_message(&mut self.chat, message);
+        if let Some(result) = tool_result_message_view(message) {
+            if let Some(view) = apply_tool_result(&mut self.chat, result) {
+                self.chat
+                    .push(ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+                        id: view.id,
+                        name: view.name,
+                        args: serde_json::Value::Null,
+                        started: true,
+                        result: Some(view.view),
+                        ..Default::default()
+                    })));
+            }
+            return;
+        }
+        self.chat.extend(message_value_to_entries(message));
     }
 }
 
