@@ -517,6 +517,7 @@ async fn collect_reports_factory_task_work_separately_from_turn_settlement() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
@@ -588,6 +589,7 @@ async fn factory_task_activity_is_written_inside_the_direct_observation() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
@@ -673,6 +675,7 @@ async fn a_deleted_factory_child_confirms_task_quiescence() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
@@ -708,6 +711,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
@@ -1531,6 +1535,7 @@ async fn a_decision_child_keeps_its_display_running_through_the_watcher_settle()
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
+        factory_task_busy: None,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(
