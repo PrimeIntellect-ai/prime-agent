@@ -5342,6 +5342,7 @@ class FactoryExecutor:
                 await self._settle_emitted(run, state, entry)
                 return
             capture_failure = await self._capture_outputs(run, state, entry)
+            failed = [instance]
             if entry.status != "running":
                 return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
