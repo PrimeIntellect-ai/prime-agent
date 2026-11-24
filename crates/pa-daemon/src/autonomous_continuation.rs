@@ -97,17 +97,16 @@ impl AgentSessionEngine {
         if self.requested_compaction_scheduled().await {
             return Vec::new();
         }
-        // Unsettled RLM work or live background kernel work (a detached cell
+        // Unsettled RLM work or live background work (a detached cell
         // awaiting its completion notice, or a live bash handle) holds the
-        // continuation; the durable term keeps the goal-gate hold for
-        // shells that outlived their kernel.
-        if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
+        // continuation.
+        if self.has_unsettled_rlm_work().await || self.background_work_count() > 0 {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             // Work that settles between the probe above and this store
             // raced the callback out of its retry: the owed turn would wait
             // for a wake that already fired - re-arm the retry once.
-            if !self.has_live_background_work() && !self.has_unsettled_rlm_work().await {
+            if self.background_work_count() == 0 && !self.has_unsettled_rlm_work().await {
                 self.retry_owed_autonomous_continuation();
             }
             return Vec::new();
@@ -230,12 +229,11 @@ impl AgentSessionEngine {
             return;
         }
         // Keep the deferral while descendant work stays unsettled, live
-        // background kernel work runs (a detached cell or a bash handle,
-        // including the durable shells that outlived their kernel), or
+        // background work runs (a detached cell or a bash handle), or
         // queued input owns the boundary.
         if self.has_unsettled_rlm_work().await
             || self.session_input_queued()
-            || self.has_live_background_work()
+            || self.background_work_count() > 0
         {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -243,7 +241,7 @@ impl AgentSessionEngine {
             // that would deliver the owed turn: with every blocker gone the
             // deferral has no wake left - re-arm. Only the fully-cleared
             // deferral re-arms, so the loop cannot spin.
-            if !self.has_live_background_work()
+            if self.background_work_count() == 0
                 && !self.has_unsettled_rlm_work().await
                 && !self.session_input_queued()
             {
@@ -344,14 +342,14 @@ mod tests {
     use crate::agent_engine::tests::{admit, faux_engine_with_settings, FAUX_TEST_LOCK};
     use crate::engine::EngineEvent;
 
-    /// Inject the engine's aggregate background-work probe (a `1` probe
+    /// Inject the engine's background-work probe (a `1` probe
     /// = a detached cell awaiting its completion, or a live background
     /// `bash()` handle): the count the continuation gates read.
     fn set_background_work_probe(
         engine: &Arc<AgentSessionEngine>,
         probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
     ) {
-        engine.set_test_background_work_probe(probe);
+        engine.set_test_probes(Some(probe), None);
     }
 
     /// The consult's lost-wakeup guard (Macroscope's #2826 review).
@@ -396,189 +394,6 @@ mod tests {
                 .autonomous_awaits_rlm_work
                 .load(std::sync::atomic::Ordering::SeqCst),
             "the delivered turn consumed the owed flag"
-        );
-    }
-
-    /// A shell that outlived its kernel (live, in the worker's orphan
-    /// journal, absent from the empty kernel registry) holds the
-    /// /autonomous continuation while it runs, and its exit alone delivers
-    /// the owed turn: no settle consult, no kernel callback, no timer.
-    /// Without the daemon-owned exit watch the owed turn never lands. With
-    /// the mode off, the same shell never keeps the worker resident.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_durable_shell_holds_the_autonomous_continuation_until_its_exit_wakes_it() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::TempDir::new().unwrap();
-        crate::agent_engine::tests::write_compaction_settings(dir.path(), u64::MAX);
-        let journal = dir.path().join("worker.orphans.jsonl");
-        // The engine wires the journal at construction (the worker's
-        // orphan-journal config field), so the durable term reads it.
-        let engine = Arc::new(
-            AgentSessionEngine::new(crate::agent_engine::AgentEngineConfig {
-                cwd: dir.path().to_path_buf(),
-                agent_dir: dir.path().join("agent"),
-                provider: None,
-                model: None,
-                api_key: None,
-                thinking: None,
-                session_dir: None,
-                session_file: None,
-                faux_script: Some(
-                    serde_json::json!({ "responses": [
-                        {"text": "warm ok"},
-                        {"text": "plain ok"},
-                        {"text": "working"},
-                    ] })
-                    .to_string(),
-                ),
-                supervisor_link: None,
-                telemetry_disabled: None,
-                cron_store: None,
-                queued_steering_probe: None,
-                orphan_journal_path: Some(journal.clone()),
-            })
-            .unwrap(),
-        );
-        engine.register_arc();
-        let (admit_tx, admit_rx) = std::sync::mpsc::channel::<String>();
-        engine.set_autonomous_admission(std::sync::Arc::new(move |text| {
-            let _ = admit_tx.send(text);
-        }));
-        let mut events: Vec<EngineEvent> = Vec::new();
-        admit(&engine, "warm".to_string(), &mut events);
-        // The post-loss state: no kernel handle, and the journal records a
-        // live shell in the runtime's shape whose kernel is gone.
-        let mut shell = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let identity = pa_core::kernel::orphan_journal::get_process_start_id(shell.id() as i32)
-            .expect("live shell identity");
-        std::fs::write(
-            &journal,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "version": 1, "pid": i64::from(shell.id()),
-                    "ownerPid": i64::from(std::process::id()), "kernelPid": 999_999,
-                    "active": true, "processStartId": identity,
-                    "recordedAt": "2026-11-13T00:00:00Z",
-                })
-            ),
-        )
-        .unwrap();
-        // With /autonomous off the turn-end consult still records the hold
-        // (it runs before the mode check), but no loop waits on the shell.
-        admit(&engine, "plain".to_string(), &mut events);
-        assert!(
-            engine
-                .autonomous_awaits_rlm_work
-                .load(std::sync::atomic::Ordering::SeqCst),
-            "the consult records the hold before it reads the mode"
-        );
-        assert!(
-            engine
-                .runtime
-                .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)),
-            "a session without /autonomous never stays resident behind a durable shell"
-        );
-        admit(
-            &engine,
-            "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
-            &mut events,
-        );
-        admit(&engine, "go".to_string(), &mut events);
-        assert!(
-            engine
-                .autonomous_awaits_rlm_work
-                .load(std::sync::atomic::Ordering::SeqCst),
-            "the live shell must hold the continuation"
-        );
-        engine
-            .runtime
-            .block_on(async { engine.autonomous_children_settled().await });
-        assert!(
-            admit_rx.try_recv().is_err(),
-            "no continuation while the shell runs"
-        );
-        assert_eq!(engine.autonomous.blocking_lock().continuations_used, 0);
-        assert!(
-            !engine
-                .runtime
-                .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)),
-            "the owed turn keeps the worker that watches the shell resident"
-        );
-        // The shell exits and stays unreaped (a zombie still probes live):
-        // the exit watch alone delivers the owed turn.
-        shell.kill().unwrap();
-        let text = admit_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the shell's exit delivered the owed continuation");
-        assert!(text.starts_with("[autonomous-continuation"));
-        let _ = shell.wait();
-        assert!(admit_rx.try_recv().is_err(), "exactly one delivery");
-        assert_eq!(engine.autonomous.blocking_lock().continuations_used, 1);
-        assert!(engine
-            .runtime
-            .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
-    }
-
-    /// The owed flag can outlive its hold: a settle retry that finds the
-    /// `[bash-done]` notice still queued keeps the flag, and the notice
-    /// turn's consult continues the loop in-run without clearing it. No
-    /// durable shell waits behind that flag, so the worker may passivate.
-    #[test]
-    fn an_owed_flag_with_no_durable_shell_left_does_not_pin_the_worker() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (engine, _dir) = faux_engine_with_settings(
-            &serde_json::json!({ "responses": [
-                {"text": "warm ok"},
-                {"text": "working"},
-                {"text": "notice read"},
-                {"text": "continued"},
-                {"text": "finalized"},
-            ] }),
-            u64::MAX,
-        );
-        engine.set_autonomous_admission(std::sync::Arc::new(|_| {}));
-        let queued = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let queued_probe = Arc::clone(&queued);
-        *engine.goal_input_probe.lock().expect("goal probe lock") = Some(Arc::new(move || {
-            queued_probe.load(std::sync::atomic::Ordering::SeqCst)
-        }));
-        let mut events: Vec<EngineEvent> = Vec::new();
-        admit(&engine, "warm".to_string(), &mut events);
-        set_background_work_probe(&engine, Arc::new(|| 1));
-        admit(
-            &engine,
-            "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
-            &mut events,
-        );
-        admit(&engine, "go".to_string(), &mut events);
-        // The kernel handle settles while its notice still waits in the queue.
-        set_background_work_probe(&engine, Arc::new(|| 0));
-        queued.store(true, std::sync::atomic::Ordering::SeqCst);
-        engine
-            .runtime
-            .block_on(async { engine.autonomous_children_settled().await });
-        queued.store(false, std::sync::atomic::Ordering::SeqCst);
-        admit(&engine, "the bash-done notice".to_string(), &mut events);
-        assert!(
-            engine
-                .autonomous_awaits_rlm_work
-                .load(std::sync::atomic::Ordering::SeqCst),
-            "the owed flag outlived its hold"
-        );
-        assert!(
-            engine
-                .runtime
-                .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)),
-            "an owed flag with no durable shell behind it must not keep the worker resident"
         );
     }
 

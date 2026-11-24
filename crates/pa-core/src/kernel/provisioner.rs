@@ -269,9 +269,8 @@ impl IpythonKernelProvisioner {
     }
 
     /// The session's live background kernel work: detached cells awaiting
-    /// their terminal admission plus live `bash()` handles. The passivation
-    /// gates read this aggregate; the bash-only count stays on the bash
-    /// handle APIs.
+    /// their terminal admission plus live `bash()` handles. The daemon's
+    /// background-work gates read this count.
     #[must_use]
     pub fn background_work_count(&self) -> usize {
         self.pending_detached_completions()

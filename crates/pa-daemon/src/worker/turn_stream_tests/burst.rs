@@ -189,7 +189,6 @@ async fn streamed_turn_pipeline_benchmark() {
                 telemetry_disabled: Some(true),
                 cron_store: None,
                 queued_steering_probe: None,
-                orphan_journal_path: None,
             })
             .unwrap(),
         );
@@ -234,7 +233,6 @@ async fn the_last_parked_update_carries_the_final_content() {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );

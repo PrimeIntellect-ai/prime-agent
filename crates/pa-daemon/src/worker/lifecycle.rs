@@ -748,27 +748,21 @@ impl Worker {
     }
 
     /// The background lanes' outstanding work at a quiescence observation:
-    /// live kernel `bash()` handles, detached cells whose terminal notice
-    /// is not yet admitted, and completion notices still queued for
-    /// delivery (`[bash-done]` rows and pending cell deliveries — a full
-    /// `[cell-done]` row or the coalesced inbox arrival that covers one).
-    /// Zero when nothing will wake the session. Reported only — never a
-    /// close/wake behavior. Kernel-side work alone: the engine's durable
-    /// shell term would double every healthy handle (the runtime journals
-    /// the same spawn the registry counts) and drag orphaned shells the
-    /// session can no longer observe into a wire-visible field.
+    /// live background work ([`AgentSessionEngine::background_work_count`]:
+    /// detached cells and live `bash()` handles) plus completion notices
+    /// still queued for delivery (`[bash-done]` rows and pending cell
+    /// deliveries — a full `[cell-done]` row or the coalesced inbox arrival
+    /// that covers one). Zero when nothing will wake the session. Reported
+    /// only — never a close/wake behavior.
     ///
     /// # Panics
     ///
     /// Panics when the session-core mutex is poisoned.
     pub(crate) fn outstanding_background_jobs(&self) -> u64 {
-        // The kernel-work aggregate (live `bash()` handles plus detached
-        // cells whose terminal notice is not yet admitted) plus the
-        // completion notices still queued for delivery.
         let live = self
             .agent_engine
             .as_ref()
-            .map_or(0, |engine| engine.background_kernel_work_count());
+            .map_or(0, |engine| engine.background_work_count());
         let queued = {
             let core = self.core.lock().unwrap();
             queued_bash_completion_notices(&core) + queued_cell_completion_deliveries(&core)

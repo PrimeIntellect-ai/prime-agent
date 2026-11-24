@@ -89,7 +89,6 @@ fn create_config_flags_reach_the_engine_model_resolution() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     engine.configure_model(EngineModelSelection {
@@ -132,7 +131,6 @@ fn settings_default_drives_unflagged_resolution() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let model = engine.resolve_registry_model().expect("resolved model");
@@ -325,7 +323,6 @@ fn restore_test_engine(
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .expect("engine")
 }
@@ -354,7 +351,6 @@ fn the_startup_chain_refuses_models_outside_the_allowlist() {
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let error = engine
@@ -867,7 +863,6 @@ fn switch_model_never_poisons_the_selection_with_a_refused_candidate() {
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let model = engine.resolve_registry_model().expect("resolved model");
@@ -915,7 +910,6 @@ fn switch_model_propagates_the_new_model_to_the_child_identity() {
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let children = engine
@@ -957,7 +951,6 @@ fn configure_model_merges_only_present_fields() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     engine.configure_model(EngineModelSelection {
@@ -1013,7 +1006,6 @@ fn agent_engine_reports_model_resolution_failures() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -1082,7 +1074,6 @@ fn configure_model_thinking_clamps_to_the_models_supported_levels() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     // Without an explicit flag the TS default applies (medium, clamped).
@@ -1183,7 +1174,6 @@ fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let model = engine.resolve_model().expect("resolves mock-reason");
@@ -1469,7 +1459,6 @@ fn an_inexact_model_selection_shows_one_warning_row_across_turns() {
                 telemetry_disabled: Some(true),
                 cron_store: None,
                 queued_steering_probe: None,
-                orphan_journal_path: None,
             })
             .unwrap(),
         );
