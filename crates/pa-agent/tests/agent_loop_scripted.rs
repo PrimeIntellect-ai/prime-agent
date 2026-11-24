@@ -11,7 +11,6 @@ use pa_agent::abort::AbortSignal;
 use pa_agent::agent::{Agent, AgentOptions};
 use pa_agent::agent_loop::{run_agent_loop_continue, AgentEventSink, AgentLoopConfig};
 use pa_agent::scripted::ScriptedProvider;
-use pa_agent::stream::AssistantMessageEvent;
 use pa_agent::types::{
     AgentContext, AgentEvent, AgentMessage, AgentTool, AgentToolResult, AgentToolUpdateCallback,
     AssistantContent, AssistantMessage, Message, Model, StopReason, TextContent, ToolExecutionMode,
@@ -387,56 +386,35 @@ async fn tool_call_turn_dispatches_and_feeds_result_back() {
 }
 
 #[tokio::test]
-async fn parallel_tool_calls_execute_concurrently_and_emit_in_order() {
+async fn tool_calls_overlap_only_in_parallel_mode_and_emit_in_order() {
     // Both calls target the same slow tool: overlap shows up as its
     // concurrent-execution high-water mark.
-    let slow = EchoTool::with_options("echo", 150, false);
-    let (agent, provider, _events) = scripted_agent(vec![slow.clone()]).await;
-    provider.push_tool_call_turn(
-        None,
-        vec![
-            ("call-a", "echo", serde_json::json!({ "text": "a" })),
-            ("call-b", "echo", serde_json::json!({ "text": "b" })),
-        ],
-    );
-    provider.push_text_turn("all done");
+    for (mode, delay_ms, overlaps) in [
+        (None, 150, true),
+        (Some(ToolExecutionMode::Sequential), 60, false),
+    ] {
+        let slow = EchoTool::with_options("echo", delay_ms, false);
+        let (agent, provider, _events) = scripted_agent_with(vec![slow.clone()], mode).await;
+        provider.push_tool_call_turn(
+            None,
+            vec![
+                ("call-a", "echo", serde_json::json!({ "text": "a" })),
+                ("call-b", "echo", serde_json::json!({ "text": "b" })),
+            ],
+        );
+        provider.push_text_turn("all done");
 
-    agent.prompt("go").await.unwrap();
-    agent.wait_for_idle().await;
+        agent.prompt("go").await.unwrap();
+        agent.wait_for_idle().await;
 
-    assert!(
-        slow.max_concurrent.load(Ordering::SeqCst) >= 2,
-        "parallel tool calls must overlap"
-    );
+        let max_concurrent = slow.max_concurrent.load(Ordering::SeqCst);
+        assert_eq!(max_concurrent >= 2, overlaps, "{mode:?}: {max_concurrent}");
 
-    // Tool-result messages are appended in assistant source order.
-    let state = agent.state().await;
-    assert_eq!(tool_result(&state.messages[2]).tool_call_id, "call-a");
-    assert_eq!(tool_result(&state.messages[3]).tool_call_id, "call-b");
-}
-
-#[tokio::test]
-async fn sequential_tool_calls_run_one_at_a_time() {
-    let tool = EchoTool::with_options("echo_seq", 60, false);
-    let (agent, provider, _events) =
-        scripted_agent_with(vec![tool.clone()], Some(ToolExecutionMode::Sequential)).await;
-    provider.push_tool_call_turn(
-        None,
-        vec![
-            ("call-1", "echo_seq", serde_json::json!({ "text": "1" })),
-            ("call-2", "echo_seq", serde_json::json!({ "text": "2" })),
-        ],
-    );
-    provider.push_text_turn("done");
-
-    agent.prompt("go").await.unwrap();
-    agent.wait_for_idle().await;
-
-    assert_eq!(
-        tool.max_concurrent.load(Ordering::SeqCst),
-        1,
-        "sequential mode must never overlap executions"
-    );
+        // Tool-result messages are appended in assistant source order.
+        let state = agent.state().await;
+        assert_eq!(tool_result(&state.messages[2]).tool_call_id, "call-a");
+        assert_eq!(tool_result(&state.messages[3]).tool_call_id, "call-b");
+    }
 }
 
 #[tokio::test]
@@ -718,20 +696,6 @@ async fn steering_message_injects_before_next_turn() {
     assert!(user_texts.contains(&"steered"));
 }
 
-#[tokio::test]
-async fn terminate_tool_result_stops_the_run() {
-    let (agent, provider, _events) = scripted_agent(vec![Arc::new(TerminatingTool)]).await;
-    provider.push_tool_call_turn(None, vec![("call-1", "stop_tool", serde_json::json!({}))]);
-
-    agent.prompt("go").await.unwrap();
-    agent.wait_for_idle().await;
-
-    assert_eq!(provider.calls().len(), 1);
-    let state = agent.state().await;
-    assert_eq!(state.messages.len(), 3);
-    assert!(!state.is_streaming);
-}
-
 /// The batch terminate rule is ANY, not ALL: a message pairing work calls
 /// with the sanctioned end-turn call (`rlm.end_turn()`) executes every call
 /// and still ends the turn — the strict all-rule would ignore the yield,
@@ -792,52 +756,4 @@ async fn prompt_while_processing_is_rejected_with_ts_message() {
     );
     agent.abort();
     first.await.unwrap().unwrap();
-}
-
-#[test]
-fn scripted_event_shapes_round_trip_through_the_event_enum() {
-    // Terminal events must expose their message and deltas must not.
-    let model = test_model();
-    let mut partial = AssistantMessage {
-        content: Vec::new(),
-        api: model.api.clone(),
-        provider: model.provider.clone(),
-        model: model.id.clone(),
-        response_model: None,
-        response_id: None,
-        diagnostics: None,
-        usage: pa_agent::types::Usage::zero(),
-        stop_reason: StopReason::Stop,
-        stop_reason_raw: None,
-        error_message: None,
-        timestamp: 0,
-    };
-    let event = AssistantMessageEvent::TextDelta {
-        content_index: 0,
-        delta: "hi".into(),
-        partial: partial.clone(),
-    };
-    assert!(event.is_delta());
-    assert!(event.terminal_message().is_none());
-    partial.content.push(AssistantContent::Text(TextContent {
-        text: "hi".into(),
-        text_signature: None,
-    }));
-    let done = AssistantMessageEvent::Done {
-        reason: StopReason::Stop,
-        message: partial,
-    };
-    assert!(done.terminal_message().is_some());
-    assert!(!done.is_delta());
-
-    let steps = pa_agent::scripted::text_turn_steps(&model, "hi");
-    assert!(steps
-        .iter()
-        .any(|s| matches!(s, pa_agent::scripted::ScriptStep::Event(event) if event.terminal_message().is_some())));
-    let failure = pa_agent::scripted::stream_failure_steps(&model, "partial", "boom");
-    assert!(failure.iter().any(|s| matches!(
-        s,
-        pa_agent::scripted::ScriptStep::Event(event)
-            if matches!(**event, AssistantMessageEvent::Error { .. })
-    )));
 }

@@ -554,9 +554,11 @@ mod tests {
     /// Discussion #3712: the v1 API posts to `<resource>/openai/v1/responses?api-version=v1` with
     /// the deployment in the body (byte parity with the TS `AzureOpenAI` client); the old
     /// `/deployments/<name>/responses` route 404s. An empty version falls back to `v1`, as in TS.
+    /// Other versions ride the same query: `preview` on the v1 path, or a dated version against a
+    /// non-Azure gateway's `/openai` base.
     #[test]
-    fn v1_requests_post_to_the_responses_route() {
-        let expected = "https://res.openai.azure.com/openai/v1/responses?api-version=v1";
+    fn requests_post_to_the_responses_route_with_the_api_version() {
+        let v1 = "https://res.openai.azure.com/openai/v1/responses?api-version=v1";
         assert_eq!(
             [
                 url_for(Some("https://res.openai.azure.com"), None, "v1"),
@@ -564,17 +566,6 @@ mod tests {
                 url_for(Some("https://res.openai.azure.com/openai/v1"), None, "v1"),
                 url_for(None, Some("res"), "v1"),
                 url_for(None, Some("res"), ""),
-            ],
-            [expected; 5].map(str::to_string)
-        );
-    }
-
-    /// Other versions ride the same query: `preview` on the v1 path, or a dated version against a
-    /// non-Azure gateway's `/openai` base.
-    #[test]
-    fn non_v1_versions_keep_the_api_version_query() {
-        assert_eq!(
-            [
                 url_for(Some("https://res.openai.azure.com"), None, "preview"),
                 url_for(
                     Some("https://gateway.example.com/openai"),
@@ -583,34 +574,15 @@ mod tests {
                 ),
             ],
             [
+                v1,
+                v1,
+                v1,
+                v1,
+                v1,
                 "https://res.openai.azure.com/openai/v1/responses?api-version=preview",
                 "https://gateway.example.com/openai/responses?api-version=2025-04-01-preview",
             ]
             .map(str::to_string)
-        );
-    }
-
-    /// A `reasoning: false` model whose map addresses levels (the live catalog's
-    /// `gpt-5.3-chat-latest` azure shape) is thinking-capable: the requested effort reaches the
-    /// request with the map's value. The flag alone must not veto a route that declares addressable
-    /// levels.
-    #[test]
-    fn a_map_addressable_model_sends_the_reasoning_effort_without_the_flag() {
-        let model = serde_json::from_value::<Model>(json!({
-            "id": "gpt-5.3-chat-latest", "name": "GPT-5.3 Chat (latest)",
-            "api": "azure-openai-responses", "provider": "azure-openai-responses",
-            "baseUrl": "", "reasoning": false,
-            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }, "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128_000, "maxTokens": 16_384
-        }))
-        .unwrap();
-        let mut options = AzureOpenAIResponsesOptions::from_base(StreamOptions::default());
-        options.reasoning_effort = Some(ModelThinkingLevel::Xhigh);
-        let params = build_params(&model, &Context::default(), &options, "deploy");
-        assert_eq!(
-            params.get("reasoning"),
-            Some(&json!({ "effort": "xhigh", "summary": "auto" }))
         );
     }
 

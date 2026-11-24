@@ -573,20 +573,20 @@ impl Provider for AnthropicMessagesProvider {
 mod always_on_adaptive_thinking_tests {
     use super::is_always_on_adaptive_thinking_model;
 
+    /// Which ids take always-on adaptive thinking: those reject `thinking: disabled` and sampling
+    /// params, the rest still accept them.
     #[test]
-    fn always_on_models_reject_thinking_disabled_and_sampling_params() {
-        assert!(is_always_on_adaptive_thinking_model("claude-fable-5"));
-        assert!(is_always_on_adaptive_thinking_model("claude-mythos-5"));
-        assert!(is_always_on_adaptive_thinking_model("claude-opus-5-5"));
-        assert!(is_always_on_adaptive_thinking_model(
-            "anthropic/claude-opus-5.5"
-        ));
-    }
-
-    #[test]
-    fn optional_thinking_models_still_accept_disabled() {
-        assert!(!is_always_on_adaptive_thinking_model("claude-opus-5"));
-        assert!(!is_always_on_adaptive_thinking_model("claude-sonnet-5"));
+    fn always_on_adaptive_thinking_follows_the_model_id() {
+        for (id, always_on) in [
+            ("claude-fable-5", true),
+            ("claude-mythos-5", true),
+            ("claude-opus-5-5", true),
+            ("anthropic/claude-opus-5.5", true),
+            ("claude-opus-5", false),
+            ("claude-sonnet-5", false),
+        ] {
+            assert_eq!(is_always_on_adaptive_thinking_model(id), always_on, "{id}");
+        }
     }
 }
 
