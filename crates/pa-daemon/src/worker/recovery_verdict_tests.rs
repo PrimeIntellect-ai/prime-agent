@@ -54,7 +54,7 @@ async fn idle_time_injected_admission_is_busy_evidence() {
         !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
         "the settled session proves nothing"
     );
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_autonomous_follow_up(
         &worker.recovery,
         &worker.core,
@@ -83,7 +83,7 @@ async fn idle_time_injected_admission_is_busy_evidence() {
 async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() {
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,
@@ -144,7 +144,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
 async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row() {
     let worker = created_worker_with_journal().await;
     worker.core.lock().unwrap().busy = true;
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,
@@ -165,7 +165,7 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
 async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,

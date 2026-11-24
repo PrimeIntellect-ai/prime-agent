@@ -7,8 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
-use tokio::sync::Notify;
-
 use pa_core::session_engine::inbox::{InboxNotice, SessionInbox};
 
 use crate::agent_engine::AgentSessionEngine;
@@ -117,7 +115,7 @@ pub(crate) struct InboxRouter {
     engine: Weak<AgentSessionEngine>,
     core: Arc<Mutex<SessionCore>>,
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-    work_notify: Arc<Notify>,
+    work_notify: Arc<crate::worker::WorkNotify>,
     events: Arc<EventPump>,
     agent_dir: PathBuf,
 }
@@ -127,7 +125,7 @@ impl InboxRouter {
         engine: &Arc<AgentSessionEngine>,
         core: &Arc<Mutex<SessionCore>>,
         recovery: &Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-        work_notify: &Arc<Notify>,
+        work_notify: &Arc<crate::worker::WorkNotify>,
         events: &Arc<EventPump>,
         agent_dir: &Path,
     ) -> Self {

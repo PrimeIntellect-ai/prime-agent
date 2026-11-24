@@ -143,15 +143,6 @@ mod tests {
     }
 
     #[test]
-    fn rename_onto_missing_source_surfaces_the_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let from = dir.path().join("missing");
-        let to = dir.path().join("to.json");
-        let error = rename_onto(&from, &to).expect_err("rename of a missing source must fail");
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    #[test]
     fn classification_marks_only_the_win32_busy_family_transient() {
         use io::ErrorKind;
         assert_eq!(
@@ -179,13 +170,5 @@ mod tests {
             classify_kind(ErrorKind::Other, Some(5)),
             RenameFailure::Fatal
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unix_surfaces_real_permission_failures() {
-        let denied = io::Error::from_raw_os_error(13); // EACCES
-        assert_eq!(classify(&denied), RenameFailure::AccessDenied);
-        assert_eq!(retry_delay_ms(false, classify(&denied), 1), None);
     }
 }

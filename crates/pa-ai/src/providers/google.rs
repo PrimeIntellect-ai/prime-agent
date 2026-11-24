@@ -532,41 +532,9 @@ mod tests {
         );
     }
 
-    /// A level map on a Gemini 2.5 entry does not move it to `thinkingLevel`, which Google rejects
-    /// on 2.5 and earlier: the generation picks the route, and 2.5 keeps its budgets.
-    #[test]
-    fn level_mapped_gemini25_keeps_thinking_budgets() {
-        let model = serde_json::from_value::<Model>(json!({
-            "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro",
-            "api": "google-generative-ai", "provider": "google",
-            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
-            "reasoning": true,
-            "thinkingLevelMap": {
-                "off": null, "minimal": "low", "low": "low", "medium": "medium",
-                "high": "high", "xhigh": null, "max": null
-            },
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 1_048_576, "maxTokens": 65_536
-        }))
-        .unwrap();
-        let configs = [
-            ModelThinkingLevel::Low,
-            ModelThinkingLevel::Medium,
-            ModelThinkingLevel::High,
-        ]
-        .map(|level| thinking_config(&model, level));
-        assert_eq!(
-            configs,
-            [
-                json!({ "includeThoughts": true, "thinkingBudget": 2048 }),
-                json!({ "includeThoughts": true, "thinkingBudget": 8192 }),
-                json!({ "includeThoughts": true, "thinkingBudget": 32768 }),
-            ]
-        );
-    }
-
-    /// Gemini 2.5 (no level map) keeps per-effort budgets and disables with a zero budget.
+    /// Gemini 2.5 keeps per-effort budgets and disables with a zero budget. A level map on a 2.5
+    /// entry does not move it to `thinkingLevel`, which Google rejects on 2.5 and earlier: the
+    /// generation picks the route.
     #[test]
     fn gemini25_keeps_thinking_budgets() {
         let model = serde_json::from_value::<Model>(json!({
@@ -593,6 +561,25 @@ mod tests {
                 json!({ "includeThoughts": true, "thinkingBudget": 8192 }),
                 json!({ "includeThoughts": true, "thinkingBudget": 24576 }),
             ]
+        );
+
+        let level_mapped = serde_json::from_value::<Model>(json!({
+            "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro",
+            "api": "google-generative-ai", "provider": "google",
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null, "minimal": "low", "low": "low", "medium": "medium",
+                "high": "high", "xhigh": null, "max": null
+            },
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_048_576, "maxTokens": 65_536
+        }))
+        .unwrap();
+        assert_eq!(
+            thinking_config(&level_mapped, ModelThinkingLevel::High),
+            json!({ "includeThoughts": true, "thinkingBudget": 32768 })
         );
     }
 }

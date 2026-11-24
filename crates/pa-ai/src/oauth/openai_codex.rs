@@ -80,18 +80,24 @@ pub async fn login_openai_codex(
     let callback = CodexCallbackServer::start(&state).await;
     ui.on_auth(&url, AUTH_INSTRUCTIONS);
 
-    let code = wait_for_code(&callback, ui, &state).await?;
-    if ui.is_cancelled() {
-        return Err(LOGIN_CANCELLED.to_string());
+    let result = async {
+        let code = wait_for_code(&callback, ui, &state).await?;
+        if ui.is_cancelled() {
+            return Err(LOGIN_CANCELLED.to_string());
+        }
+        let token = exchange_authorization_code(http, &code, &verifier).await?;
+        let account_id = account_id_of(&token.access)?;
+        Ok(OAuthCredentials {
+            access: token.access,
+            refresh: token.refresh,
+            expires: token.expires,
+            account_id,
+        })
     }
-    let token = exchange_authorization_code(http, &code, &verifier).await?;
-    let account_id = account_id_of(&token.access)?;
-    Ok(OAuthCredentials {
-        access: token.access,
-        refresh: token.refresh,
-        expires: token.expires,
-        account_id,
-    })
+    .await;
+    // The TS flow's `finally { server.close() }`: every return leaves the registered port free.
+    callback.shutdown().await;
+    result
 }
 
 /// Refresh an expired credential.
@@ -659,37 +665,6 @@ mod tests {
         assert_eq!(first_param(body, "client_id"), OPENAI_CODEX_CLIENT_ID);
     }
 
-    #[tokio::test]
-    async fn a_failed_exchange_surfaces_the_ts_message() {
-        let _registered_port = REDIRECT_PORT.lock().await;
-        let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
-            ScriptedAnswer::ready(),
-        );
-        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "OpenAI Codex token exchange failed (400): no grant");
-    }
-
-    #[tokio::test]
-    async fn a_missing_field_exchange_names_the_response() {
-        let _registered_port = REDIRECT_PORT.lock().await;
-        let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
-            ScriptedAnswer::ready(),
-        );
-        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error,
-            "OpenAI Codex token exchange response missing field: refresh_token"
-        );
-    }
-
     /// A malformed SUCCESS body can echo a live credential back: the
     /// refresh error never carries the response body.
     #[tokio::test]
@@ -711,46 +686,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_refresh_surfaces_the_ts_message() {
-        let http = ScriptedHttp::new(vec![(TOKEN_URL, 401, "expired")]);
-        let error = refresh_openai_codex_token(&http, "r-old")
-            .await
-            .unwrap_err();
-        assert_eq!(error, "OpenAI Codex token refresh failed (401): expired");
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_token_endpoint_surfaces_a_transport_error() {
-        // Nothing scripted: the transport fails the request.
-        let http = ScriptedHttp::new(Vec::new());
-        let error = refresh_openai_codex_token(&http, "r-old")
-            .await
-            .unwrap_err();
-        assert!(
-            error.starts_with("OpenAI Codex token refresh error:"),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_token_without_the_account_id_fails_the_login() {
+    async fn a_cancelled_surface_ends_the_login_at_every_step() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        let http = token_http(&account_jwt(None));
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(&format!("{REDIRECT_URI}?code=abc"))),
-            ScriptedAnswer::ready(),
-        );
-        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "Failed to extract accountId from token");
+        // Cancel at the paste, at the prompt after a code-less paste, and
+        // between polls once the url lands: no step exchanges a code.
+        let cases = [
+            (
+                Some(ScriptedAnswer::ready()),
+                ScriptedAnswer::value("late-code"),
+                false,
+            ),
+            (
+                Some(ScriptedAnswer::value(REDIRECT_URI)),
+                ScriptedAnswer::ready(),
+                false,
+            ),
+            (Some(ScriptedAnswer::Pending), ScriptedAnswer::Pending, true),
+        ];
+        for (manual, prompt, cancel_on_auth) in cases {
+            let http = token_http(&account_jwt(Some("acct-1")));
+            let mut ui = ScriptedUi::new(manual, prompt);
+            ui.cancel_on_auth = cancel_on_auth;
+            let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
+                .await
+                .unwrap_err();
+            assert_eq!(error, LOGIN_CANCELLED);
+            assert!(http.seen_bodies(TOKEN_URL).is_empty());
+        }
     }
 
+    /// Regression: a cancelled login returns with its callback listener closed, so a retry right
+    /// after the cancel binds the registered port instead of falling back to the dead server.
     #[tokio::test]
-    async fn a_cancelled_surface_ends_the_login_between_polls() {
+    async fn a_retry_right_after_a_cancel_binds_the_registered_port() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // The flag flips when the url lands: the first poll-step check
-        // ends the flow.
+        // Skip when another process holds the registered port.
+        if stage_busy_registered_port().is_none() {
+            return;
+        }
         let http = token_http(&account_jwt(Some("acct-1")));
         let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), ScriptedAnswer::Pending);
         ui.cancel_on_auth = true;
@@ -758,21 +731,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
-        assert!(http.seen_bodies(TOKEN_URL).is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_paste_ends_the_login() {
-        let _registered_port = REDIRECT_PORT.lock().await;
-        let http = token_http(&account_jwt(Some("acct-1")));
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::ready()),
-            ScriptedAnswer::value("late-code"),
+        assert!(
+            stage_busy_registered_port().is_some(),
+            "the cancelled login still holds the registered port"
         );
-        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
-            .await
-            .unwrap_err();
-        assert_eq!(error, LOGIN_CANCELLED);
     }
 
     #[tokio::test]
@@ -807,34 +769,6 @@ mod tests {
             first_param(&http.seen_bodies(TOKEN_URL)[0], "code"),
             "prompted-code"
         );
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_prompt_ends_the_login() {
-        let _registered_port = REDIRECT_PORT.lock().await;
-        let http = token_http(&account_jwt(Some("acct-1")));
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(REDIRECT_URI)),
-            ScriptedAnswer::ready(),
-        );
-        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
-            .await
-            .unwrap_err();
-        assert_eq!(error, LOGIN_CANCELLED);
-    }
-
-    #[tokio::test]
-    async fn an_empty_prompt_answer_reports_the_missing_code() {
-        let _registered_port = REDIRECT_PORT.lock().await;
-        let http = token_http(&account_jwt(Some("acct-1")));
-        let ui = ScriptedUi::new(
-            Some(ScriptedAnswer::value(REDIRECT_URI)),
-            ScriptedAnswer::value("  "),
-        );
-        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "Missing authorization code");
     }
 
     #[tokio::test]

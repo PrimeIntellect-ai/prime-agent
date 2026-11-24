@@ -730,3 +730,183 @@ async fn mail_waiting_at_a_replacement_moves_to_the_new_session() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].covers, waiting_ids(&inbox));
 }
+
+/// One cell-completion arrival (a `[cell-done]` message the
+/// backgrounded cell's terminal notice pushed).
+fn cell_done(cell_id: &str) -> InboxNotice {
+    InboxNotice {
+        class: pa_types::inbox_notice::INBOX_CLASS_CELL_DONE,
+        sender: Some(cell_id.to_string()),
+        text: format!("[cell-done id:{cell_id} status:ok duration:1.0s]"),
+        meta: json!({ "cellId": cell_id, "status": "ok" }),
+    }
+}
+
+/// The arrival row's stored bits: the wake eligibility and the pending
+/// cell-delivery flag.
+fn arrival_row_bits(worker: &Worker) -> Option<(bool, bool)> {
+    let core = worker.core.lock().unwrap();
+    let item = core
+        .steering
+        .iter()
+        .find(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))?;
+    let details = item.custom_message.as_ref()?.get("details")?;
+    Some((
+        details.get("wakesCell").and_then(Value::as_bool)?,
+        details.get("coversCellDone").and_then(Value::as_bool)?,
+    ))
+}
+
+/// A cell-done-only batch never marks its row wakeable (its delivery waits
+/// for its own turn boundary), but it IS the covered cell's pending
+/// delivery: the quiescence observation counts it. Withdrawing the only
+/// wakeable message from a mixed batch flips the eligibility bit with the
+/// row.
+#[tokio::test]
+async fn the_arrival_rows_cell_bits_follow_its_covered_batch() {
+    let fx = fixture();
+    fx.worker.core.lock().unwrap().busy = true;
+    fx.route(cell_done("cell-1"), Lane::Steering);
+    assert_eq!(arrival_row_bits(&fx.worker), Some((false, true)));
+    assert_eq!(fx.worker.outstanding_background_jobs(), 1);
+
+    fx.route(bash_done(4242, "sleep 2; echo done"), Lane::Steering);
+    assert_eq!(arrival_row_bits(&fx.worker), Some((true, true)));
+    withdraw_bash_completion_notice(
+        &fx.worker.recovery,
+        &fx.worker.core,
+        &crate::engine::BashConsumedNotice {
+            pid: 4242,
+            command: "sleep 2; echo done".to_string(),
+        },
+        Some(fx.engine().as_ref()),
+    );
+    assert_eq!(
+        arrival_row_bits(&fx.worker),
+        Some((false, true)),
+        "the withdrawn bash-done left a cell-done-only batch"
+    );
+    assert_eq!(fx.worker.outstanding_background_jobs(), 1);
+}
+
+/// A bash-only batch is wakeable but nobody's cell delivery, and a full
+/// `[cell-done]` row queued on the steering lane (the inbox-disabled lane)
+/// counts as a pending delivery.
+#[tokio::test]
+async fn the_full_row_and_bash_only_counts_pin_the_quiescence_observation() {
+    let fx = fixture();
+    fx.worker.core.lock().unwrap().busy = true;
+    fx.route(bash_done(7777, "echo only"), Lane::Steering);
+    assert_eq!(arrival_row_bits(&fx.worker), Some((true, false)));
+    assert_eq!(fx.worker.outstanding_background_jobs(), 0);
+    fx.worker
+        .core
+        .lock()
+        .unwrap()
+        .steering
+        .push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            preview: Some("[cell-done]".to_string()),
+            message: "[cell-done id:cell-9 status:ok duration:1.0s]".to_string(),
+            custom_message: Some(
+                serde_json::to_value(
+                    pa_core::session_engine::messages::create_background_cell_completion_message(
+                        "cell-9",
+                        "ok",
+                        1_000,
+                        "wait-budget:1000",
+                        "done",
+                        &[],
+                        0,
+                    ),
+                )
+                .expect("the full cell-done row"),
+            ),
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+    assert_eq!(fx.worker.outstanding_background_jobs(), 1);
+}
+
+/// The wake predicate classifies the queued rows: a bash-done arrival row
+/// is wakeable input, a cell-done-only arrival row is not (its own turn
+/// boundary delivers it), a backgrounded cell's full completion row is
+/// not, and a restored arrival row without the stored bit stays
+/// conservatively wakeable.
+#[test]
+fn the_wake_predicate_classifies_the_queued_rows() {
+    fn item(custom_message: Option<serde_json::Value>) -> QueuedItem {
+        QueuedItem {
+            priority: crate::worker::QueuePriority::Background,
+            preview: None,
+            message: "row".to_string(),
+            custom_message,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: crate::worker::TurnPolicy::Injected,
+            forced_batch: false,
+        }
+    }
+    // A plain user row (no custom twin) is wakeable.
+    assert!(row_wakes_a_cell(&item(None)));
+    // A bash-done arrival row (the stored bit from a wakeable batch) is wakeable.
+    let bash_arrival = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 12:00 UTC] 1 new message (bash-done)",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1,
+        true,
+        false,
+        1_730_000_000_000,
+    );
+    assert!(row_wakes_a_cell(&item(Some(bash_arrival))));
+    // A cell-done-only arrival batch never ends a running cell's wait.
+    let cell_only_arrival = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 12:00 UTC] 1 new message (cell-done)",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1,
+        false,
+        false,
+        1_730_000_000_000,
+    );
+    assert!(!row_wakes_a_cell(&item(Some(cell_only_arrival))));
+    // A backgrounded cell's own completion row never wakes a later cell.
+    let cell_done_row = serde_json::to_value(
+        pa_core::session_engine::messages::create_background_cell_completion_message(
+            "cell-1",
+            "ok",
+            1_200,
+            "wait-budget:200",
+            "done",
+            &[],
+            1_730_000_000_000,
+        ),
+    )
+    .unwrap();
+    assert!(!row_wakes_a_cell(&item(Some(cell_done_row))));
+    // A restored arrival row without the eligibility bit is conservatively
+    // wakeable: one extra detach, never a lost steer.
+    let mut restored = pa_core::session_engine::inbox::create_inbox_notice_row(
+        "[inbox 12:00 UTC] 1 new message (cell-done)",
+        pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+        1,
+        true,
+        false,
+        1_730_000_000_000,
+    );
+    restored
+        .get_mut("details")
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap()
+        .remove("wakesCell");
+    assert!(row_wakes_a_cell(&item(Some(restored))));
+}

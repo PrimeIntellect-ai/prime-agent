@@ -5,9 +5,10 @@
 use super::{
     artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
     BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, GoalWakeKind,
+    ParentIdentity, PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine,
+    SideQuestionOutcome, SideQuestionRequest, StartupScope, TurnPrompt, Value,
+    DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -89,9 +90,18 @@ impl SessionEngine for AgentSessionEngine {
         let last_turn = self.last_loop_assistant_message();
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
-            // The quiescence arm: unsettled work defers the mint (owed, not consumed).
-            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+            // The quiescence arm: unsettled work defers the mint (owed, not
+            // consumed). Live background work also arms the fallback wake
+            // (once per deferral): its completion notice is the normal retry,
+            // and work that never completes gets one marker turn after one
+            // window.
+            let background_work = self.background_work_count() > 0;
+            if self.has_unsettled_rlm_work().await || background_work {
                 driver.mark_continuation_owed();
+                if background_work {
+                    drop(driver);
+                    self.arm_background_skip_wake().await;
+                }
                 return None;
             }
             // Now the failed pair can leave the loop (`last_turn` still
@@ -126,7 +136,8 @@ impl SessionEngine for AgentSessionEngine {
                 drop(driver);
                 live.publish_goal(&state);
                 if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
+                    self.schedule_goal_wake(GoalWakeKind::Backoff, wake_at)
+                        .await;
                 }
                 return None;
             }
@@ -136,7 +147,7 @@ impl SessionEngine for AgentSessionEngine {
             let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = live.publish_goal(&driver.state_with_creation_elapsed());
             drop(driver);
-            self.cancel_goal_backoff_wake();
+            self.cancel_goal_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
@@ -1513,6 +1524,21 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(agent) = agent {
             agent.abort();
         }
+        // The session's kernel stops its current user cell too (attached or
+        // detached): the run's own signal cannot reach a cell the run left
+        // behind (an auto-backgrounded one), so the abort path targets the
+        // execution directly. The interrupt is nonblocking; the kernel's
+        // watcher owns the grace and any retirement.
+        self.abort_kernel_user_execution();
+    }
+
+    /// The scoped idle cancel: stop ONLY a detached (backgrounded) kernel
+    /// cell. The queues, the running turn, and attached work stay exactly as
+    /// they are; a session without a detached cell answers `false` and
+    /// changes nothing.
+    fn abort_background_cell(&self) -> bool {
+        self.kernel_manager()
+            .is_some_and(|manager| manager.abort_detached_execution())
     }
 
     /// `set_steering_mode` / `set_follow_up_mode`: the queue delivery modes

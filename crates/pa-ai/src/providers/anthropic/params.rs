@@ -195,30 +195,24 @@ mod tests {
     }
 
     /// Discussion #3710: Haiku 5.x rejects `thinking.type: "enabled"` with a 400 and needs
-    /// adaptive thinking with an effort, in both the dashed and dotted id spellings.
+    /// adaptive thinking with an effort, in both the dashed and dotted id spellings. Haiku 4.5
+    /// still takes budget-based thinking.
     #[test]
-    fn haiku_5_requests_adaptive_thinking() {
-        for model_id in ["claude-haiku-5-5", "claude-haiku-5.5"] {
-            assert_eq!(
-                thinking_params(model_id),
-                (
-                    json!({ "type": "adaptive", "display": "summarized" }),
-                    json!({ "effort": "medium" }),
-                ),
-                "{model_id}"
-            );
-        }
-    }
-
-    /// Haiku 4.5 still takes budget-based thinking.
-    #[test]
-    fn haiku_4_5_keeps_budget_thinking() {
-        assert_eq!(
-            thinking_params("claude-haiku-4-5"),
-            (
-                json!({ "type": "enabled", "budget_tokens": 2048, "display": "summarized" }),
-                serde_json::Value::Null,
-            )
+    fn haiku_thinking_follows_the_model_generation() {
+        let adaptive = (
+            json!({ "type": "adaptive", "display": "summarized" }),
+            json!({ "effort": "medium" }),
         );
+        let budget = (
+            json!({ "type": "enabled", "budget_tokens": 2048, "display": "summarized" }),
+            serde_json::Value::Null,
+        );
+        for (model_id, expected) in [
+            ("claude-haiku-5-5", &adaptive),
+            ("claude-haiku-5.5", &adaptive),
+            ("claude-haiku-4-5", &budget),
+        ] {
+            assert_eq!(&thinking_params(model_id), expected, "{model_id}");
+        }
     }
 }

@@ -111,10 +111,26 @@ _handoff_interrupted = False
 
 
 def _send(event: dict[str, Any]) -> None:
-    """Write one protocol frame; the locked single write keeps frames atomic."""
+    """Write one protocol frame; the locked single write keeps frames atomic.
+
+    The frame is atomic against the interrupt path too: SIGINT is blocked on
+    the main thread for the write, so an abort signal that
+    arrives meanwhile stays pending and lands after the last byte. Without
+    that mask, a KeyboardInterrupt raised inside the write loop leaves a
+    partial frame on the wire, and the next frame's bytes complete a corrupt
+    line that the host answers by replacing the kernel. The interrupt path
+    targets the main thread, so other threads need no mask; platforms without
+    `pthread_sigmask` cancel the task instead of raising into the write.
+    """
     data = (json.dumps(event, separators=(",", ":")) + "\n").encode()
+    mask_sigint = threading.current_thread() is threading.main_thread() and hasattr(
+        signal, "pthread_sigmask"
+    )
     with _write_lock:
         view = memoryview(data)
+        previous_mask = (
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}) if mask_sigint else None
+        )
         try:
             while view:
                 view = view[os.write(_protocol_fd, view) :]
@@ -123,6 +139,9 @@ def _send(event: dict[str, Any]) -> None:
                 os.write(_host_stderr_fd, f"rlm.repl: dropped protocol frame: {err}\n".encode())
             except OSError:
                 pass
+        finally:
+            if previous_mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _check_payload(event: str, data: dict[str, Any]) -> None:
@@ -1767,6 +1786,14 @@ def main() -> None:
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    # The kernel owns its signal mask. A host that blocks SIGINT on the
+    # spawning thread (tokio-style signal handling) leaks that mask through
+    # fork+exec — an inherited-blocked SIGINT silences the whole interrupt
+    # machinery: a user interrupt raises a signal that never delivers, and a
+    # stuck cell wedges the session until the agent clock. Unblock before
+    # arming the handler.
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 
