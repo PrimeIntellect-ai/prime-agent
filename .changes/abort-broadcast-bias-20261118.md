@@ -1,0 +1,1 @@
+- Fixed a requested abort sometimes losing to a result that was ready in the same poll, so an aborted turn could settle as a normal reply instead of the cancelled row. A compaction that saved its summary now finishes and reports success even when the abort lands afterwards, so its success event, kernel notice, and retry still land.

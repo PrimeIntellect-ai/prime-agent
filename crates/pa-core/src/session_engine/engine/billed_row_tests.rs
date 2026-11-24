@@ -48,8 +48,6 @@ async fn scripted_engine(
         tools: vec![],
         custom_system_prompt: None,
         prompt_guidelines: vec![],
-        generic_mcp_servers: vec![],
-        allow_recursion: None,
         session_manager: None,
         extra_host_handlers: None,
         conversation_log_path: None,

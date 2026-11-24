@@ -1,0 +1,1 @@
+- ACP mode supports the steering extension (`_session/steering`, advertised in the `initialize` `_meta`): a client can add a message to the running prompt turn, and steering without a running turn answers `promptRequired` without starting one.

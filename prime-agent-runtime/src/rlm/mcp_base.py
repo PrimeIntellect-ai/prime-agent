@@ -44,7 +44,7 @@ class NotEnabled(RuntimeError):
         self.server = server
         super().__init__(
             f"The '{server}' integration is not enabled: no credentials found. "
-            f"Tell the user to run `/mcp login {server}` in Prime Agent to connect it. "
+            f"Tell the user to open `/mcp` and select {server} in Prime Agent to connect it. "
             f"Do not ask them to set environment variables."
         )
 

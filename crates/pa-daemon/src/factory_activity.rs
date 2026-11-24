@@ -21,16 +21,12 @@ use crate::worker::Worker;
 /// so a disabled factory never surfaces its lane — no capability, no
 /// dock group, no page. Both hello surfaces (the supervisor's and the
 /// worker's) advertise the lane only while the setting reads enabled.
-///
-/// The read is the kernel's strict gate, `factory_enabled` in
-/// `pa_core::refinement` (the mirror of the runtime's
-/// `rlm.factory.factory_enabled`): a malformed `factory` block — an
-/// array like `{"factory":[true]}` — reads as the fail-closed disabled
-/// default, never as a positional misparse of `enabled`, so every
-/// daemon gate surface (the overview arm, both hellos, the
-/// saved-session listing) refuses exactly what the kernel refuses.
 pub(crate) fn factory_lane_enabled(agent_dir: &Path) -> bool {
-    pa_core::refinement::factory_enabled(agent_dir)
+    pa_core::settings::SettingsManager::create(
+        std::env::current_dir().unwrap_or_default(),
+        agent_dir,
+    )
+    .get_factory_enabled()
 }
 
 /// A session's own stored factory specs: the factory entries of its local harness store, read
@@ -83,57 +79,10 @@ impl Worker {
             .and_then(Value::as_str)
             .map(str::to_string);
         let timeout_ms = payload.get("timeoutMs").and_then(Value::as_u64);
-        // The `node` action's selectors ride the flattened rest map. Validate
-        // present values before narrowing them: a malformed selector must not
-        // turn into `None` and silently select the latest entry or instance.
-        let (entry, instance) = if action == "node" {
-            match (payload.get("entry"), payload.get("instance")) {
-                (None, None) => (None, None),
-                (Some(entry), Some(instance)) => {
-                    let Some(entry) = entry.as_u64() else {
-                        return response_failure(
-                            None,
-                            "factory_activity",
-                            "factory activity node entry must be a non-negative integer",
-                            None,
-                        );
-                    };
-                    let Some(instance) = instance.as_u64() else {
-                        return response_failure(
-                            None,
-                            "factory_activity",
-                            "factory activity node instance must be a non-negative integer",
-                            None,
-                        );
-                    };
-                    (Some(entry), Some(instance))
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    return response_failure(
-                        None,
-                        "factory_activity",
-                        "factory activity node entry and instance selectors must be provided together",
-                        None,
-                    );
-                }
-            }
-        } else {
-            (
-                payload.get("entry").and_then(Value::as_u64),
-                payload.get("instance").and_then(Value::as_u64),
-            )
-        };
         let reply = match &self.agent_engine {
             Some(engine) => {
                 engine
-                    .factory_activity(
-                        &action,
-                        run_id.as_deref(),
-                        spec_id.as_deref(),
-                        timeout_ms,
-                        entry,
-                        instance,
-                    )
+                    .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
                     .await
             }
             None => Err(anyhow::anyhow!(
@@ -277,71 +226,6 @@ mod tests {
         let _ = worker.dispatch("kill", &serde_json::json!({})).await;
     }
 
-    #[tokio::test]
-    async fn malformed_explicit_node_selectors_are_rejected_before_kernel_dispatch() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let sessions = dir.path().join("sessions");
-        std::fs::create_dir_all(&sessions).expect("sessions dir");
-        let worker = Worker::new(
-            crate::worker::WorkerConfig {
-                socket_path: dir.path().join("worker.sock"),
-                supervisor_socket_path: std::path::PathBuf::new(),
-                token: "token".to_string(),
-                worker_instance_id: String::new(),
-                active_session_id: "malformed-selectors".to_string(),
-                agent_dir: dir.path().join("agent"),
-                recovery_journal_path: dir.path().join("recovery.jsonl"),
-                telemetry_disabled: Some(true),
-                script: Some(serde_json::json!({ "responses": [] })),
-            },
-            None,
-        );
-        let created = worker
-            .dispatch(
-                "create",
-                &serde_json::json!({ "cwd": "/tmp", "sessionDir": sessions }),
-            )
-            .await;
-        assert!(created.success, "{created:?}");
-
-        let cases = [
-            (
-                "null pair",
-                serde_json::json!({ "action": "node", "entry": null, "instance": null }),
-                "factory activity node entry must be a non-negative integer",
-            ),
-            (
-                "malformed entry",
-                serde_json::json!({ "action": "node", "entry": "0", "instance": 0 }),
-                "factory activity node entry must be a non-negative integer",
-            ),
-            (
-                "malformed instance",
-                serde_json::json!({ "action": "node", "entry": 0, "instance": -1 }),
-                "factory activity node instance must be a non-negative integer",
-            ),
-            (
-                "entry without instance",
-                serde_json::json!({ "action": "node", "entry": 0 }),
-                "factory activity node entry and instance selectors must be provided together",
-            ),
-            (
-                "instance without entry",
-                serde_json::json!({ "action": "node", "instance": 0 }),
-                "factory activity node entry and instance selectors must be provided together",
-            ),
-        ];
-        for (label, payload, expected_error) in cases {
-            let response = worker.dispatch("factory_activity", &payload).await;
-            assert_eq!(
-                response.error.as_deref(),
-                Some(expected_error),
-                "{label}: {response:?}"
-            );
-        }
-        let _ = worker.dispatch("kill", &serde_json::json!({})).await;
-    }
-
     /// The opt-in default: no settings file, no factory lane.
     #[test]
     fn the_factory_lane_stays_unadvertised_until_enabled() {
@@ -388,48 +272,5 @@ mod tests {
                 .any(|capability| capability == "factory_activity"),
             "the disabled factory lane leaves the advertisement: {disabled_again:?}"
         );
-    }
-
-    /// The malformed opt-in shapes: a typed settings read parses a
-    /// positional array into the nested `factory` object
-    /// (`{"factory":[true]}` reads as `enabled`), but the kernel's
-    /// strict gate requires the `factory` block to be an object and
-    /// refuses every shape here. The lane reads that same strict gate,
-    /// so no malformed document ever surfaces it.
-    #[test]
-    fn the_factory_lane_stays_unadvertised_for_malformed_settings_shapes() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let agent_dir = dir.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).expect("agent dir");
-        let settings = agent_dir.join("settings.json");
-        let unadvertised = |shape: &str| {
-            let capabilities = advertised_server_capabilities(&agent_dir);
-            assert!(
-                !capabilities
-                    .iter()
-                    .any(|capability| capability == "factory_activity"),
-                "the `{shape}` settings shape must not surface the lane: {capabilities:?}"
-            );
-        };
-        let shapes = [
-            ("array-true", r#"{"factory": [true]}"#),
-            ("array-string", r#"{"factory": ["true"]}"#),
-            ("array-extra", r#"{"factory": [true, false]}"#),
-            ("enabled-string", r#"{"factory": {"enabled": "true"}}"#),
-            ("enabled-integer", r#"{"factory": {"enabled": 1}}"#),
-            ("enabled-null", r#"{"factory": {"enabled": null}}"#),
-            ("corrupt", r#"{"factory": {"enabled": tru"#),
-            ("empty", "{}"),
-        ];
-        for (shape, content) in shapes {
-            std::fs::write(&settings, content).expect("write settings");
-            unadvertised(shape);
-        }
-        // A missing settings file reads as the disabled default.
-        std::fs::remove_file(&settings).expect("remove settings");
-        unadvertised("missing");
-        // A settings directory fails the read, which fails closed.
-        std::fs::create_dir(&settings).expect("settings dir");
-        unadvertised("directory");
     }
 }

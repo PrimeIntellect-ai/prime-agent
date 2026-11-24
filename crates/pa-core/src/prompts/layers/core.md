@@ -25,6 +25,19 @@ The harness often sends messages to the agent. These are user messages starting 
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
 - `attach_video(*paths: str) -> str`: loads short MP4/WebM clips directly into context if the agent's model declares video input, errors otherwise; only OpenAI-compatible chat-completions providers receive the video, others see a placeholder
 - `rlm.end_turn()`: async; the sanctioned terminal programmatic call — returns the turn to the user; the turn ends when the batch's end-turn call finishes Ok (any other tool calls in the same message still execute first, one end-turn is enough, no further assistant response follows); background work keeps running after the turn returns, and the remaining jobs' completion notices collect the results; raises where the host does not support it, never a silent no-op
+- `rlm.inbox.read(sender: str | None = None, inbox_class: str | None = None, since_ms: int | None = None, before_ms: int | None = None) -> list[RLMInboxMessage]`: drains and returns the messages waiting in this session's inbox, oldest first; only available to daemon-backed sessions; each given filter narrows the read (exact `sender` and `inbox_class`, arrival time from `since_ms` inclusive to `before_ms` exclusive, in epoch milliseconds) and only the matching messages leave the inbox; read messages are gone from the inbox, so assign the result
+- `rlm.inbox.count() -> RLMInboxCount`: the waiting count, oldest arrival, and per-class counts, without draining
+- `RLMInboxMessage`
+  - `id: str`
+  - `inbox_class: Literal["bash-done", "factory-progress", "agent-message", "child-exited", "child-failed", "heartbeat"]`
+  - `arrived_at_ms: int`: milliseconds since the epoch
+  - `sender: str | None`: the command, factory run id, agent name, child session name, or heartbeat job id
+  - `text: str`: the full notice
+  - `meta: dict`
+- `RLMInboxCount`
+  - `count: int`
+  - `oldest_arrived_at_ms: int | None`
+  - `classes: dict[str, int]`
 
 ## Subagents
 
@@ -32,7 +45,7 @@ prime-agent is a recursive harness. Each session builds a tree of agents, starti
 
 The following programmatic tools are available in the REPL for subagent management:
 
-- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None, cwd: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; `cwd` starts the child in that directory (relative paths resolve against the session cwd; it must exist) and loads its project context; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short
+- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None, cwd: str | None = None, kind: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; `cwd` starts the child in that directory (relative paths resolve against the session cwd; it must exist) and loads its project context; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short; `kind="decision"` spawns the Decision API child (the model comes from the `decisionModel` setting): send it a JSON decision request `{"seq": <int>, "state": ..., "questions": {...}}` and its answer comes back as a tagged agent_message reply `{"type": "decision_api.decision", "seq": <the request's seq>, ...}` that lands in the caller's inbox like every agent message: read it with `rlm.inbox.read(sender=<the child's name>)`, where each message's text carries the reply JSON after its `[agent-message from ...]` header; the spawn prompt's ready answer comes back the same way with a null `seq` ("Decision child ready."), and a request without a `seq` still answers with `seq: null`; a message that is not a valid decision request answers with an `"error"` reply instead of a decision. A reply wakes an idle caller with a short inbox notice; replies that arrive while the caller is busy coalesce into one notice and one extra turn after its current turn, and a running cell can read waiting replies with `rlm.inbox.read` without waiting for its turn to end. A request may carry at most 4 data-URL images, and the whole request rides one agent message capped at 16,384 chars (~12 KB of image base64)
 - `rlm.create_session(prompt: str, name: str | None = None, model: str | None = None, thinking: str | None = None, cwd: str | None = None) -> RLMCreateSessionHandle`: creates another depth-0 session; only available to agents at depth 0 backed by a daemon; returns after the session is successfully created and the first prompt sent
 - `rlm.find_models(query: str = '', limit: int = 8) -> list[RLMModel]`
 - `rlm.list_subagents() -> list[RLMSubagent]`: direct child handles
@@ -185,10 +198,3 @@ prime-agent has support for programmatic tools that are defined in the MCP forma
 prime-agent provides multiple executable skills, described by their SKILL.md and executable code. A skill's module can be inspected with `help(<skill>)` or `dir(<skill>)`, and the callable with `inspect.signature(<skill>.<function>)`, if information is missing. The executable code is always pre-imported in the REPL as a programmatic tool, and a callable skill module can be called directly (`await <skill>(...)`).
 
 All programmatic tools described above except for `bash`, `rlm.*`, and `mcp.*` are implemented as executable skills and will be listed again in the dynamic tail of this prompt. Additional executable and non-executable skills may exist as well; non-executable (markdown) skills are documentation read from disk, and each skill is also available as a shell command by the same name.
-
-## Factory children
-
-A factory machine run spawns one child session per machine state. A child whose state declares an `emit` contract sees two extra host tools, and its generated Outputs section asks for `factory.emit`; any other factory child hands its outputs back in a fenced JSON block in its final answer.
-
-- `factory.emit(**outputs: Any) -> dict[str, Any]`: a factory child hands its state's outputs back with one call, one keyword per output port (`await rlm.factory.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `FactoryEmitError` naming the field — fix it and call again
-- `factory.inputs() -> dict[str, Any]`: this factory child's bound inputs (and the machine's params) as values

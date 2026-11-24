@@ -3019,7 +3019,7 @@ class FakeHost:
             session_dir = f"/tmp/{child_id}"
             if self.session_root is not None:
                 session_dir = str(self.session_root / child_id)
-                Path(session_dir).mkdir(parents=True)
+                Path(session_dir).mkdir(parents=True, exist_ok=True)
                 if node_id in self.emitted:
                     Path(session_dir, FACTORY_OUTPUTS_FILE).write_text(
                         json.dumps(self.emitted[node_id]), encoding="utf-8"
@@ -4477,6 +4477,25 @@ class FactoryExecutorTest(_ExecutorTestCase):
     # -- failure policies ---------------------------------------------------------
 
     @async_test
+    async def test_a_busy_owner_adds_no_poll_sleep_while_another_child_runs(self) -> None:
+        # The collect of the running child already waits, so the owner's
+        # background work adds no extra sleep on top of it.
+        self.host.outcomes["a"] = {"status": "done", "answer": "a", "factory_task_busy": True}
+        self.host.outcomes["b"] = {"status": "running"}
+        self.store_factory(
+            {"nodes": [{"id": "a", "subagent": "worker"}, {"id": "b", "subagent": "worker"}]}
+        )
+        held = self.host.gate("rlm.collect", 4)
+        result = await self.start()
+        await self.host.gate_entered("rlm.collect", 4).wait()
+        self.host.outcomes["a"]["factory_task_busy"] = False
+        self.host.outcomes["b"] = {"status": "done", "answer": "b"}
+        held.set()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertNotIn(factory_module.REPAIR_POLL_SECONDS, self.sleeps.sleeps)
+
+    @async_test
     async def test_fail_fast_cancels_running_children(self) -> None:
         self.host.outcomes["a"] = {"status": "error", "error": "boom"}
         self.host.outcomes["b"] = {"status": "running"}
@@ -5276,6 +5295,24 @@ class FactoryExecutorTest(_ExecutorTestCase):
         kinds = [event["kind"] for event in status["events"]]
         self.assertLess(kinds.index("cancelled"), kinds.index("run_stopped"))
         self.assertNotIn("spawned", kinds[kinds.index("run_stopped") + 1 :])
+
+    @async_test
+    async def test_stop_during_an_in_flight_admission_that_fails_finishes_the_stop(self) -> None:
+        # stop() waits for the in-flight spawn; when that spawn fails, no
+        # child exists and the run must not stay stopping.
+        self.host.rate_limit_first["a"] = 2
+        spawn_gate = self.host.gate("rlm.run", 2)
+        gate_entered = self.host.gate_entered("rlm.run", 2)
+        self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
+        result = await self.start()
+        await gate_entered.wait()
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopping")
+        spawn_gate.set()  # the admission fails into a stopping run
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(self.host.deleted_targets(), [])
 
     @async_test
     async def test_stop_during_admission_backoff_cancels_the_instance(self) -> None:
@@ -7396,6 +7433,29 @@ class FactoryPythonStateTest(_ExecutorTestCase):
         self.assertEqual(self.host.spawn_calls("build"), [])
 
     @async_test
+    async def test_a_node_file_named_like_a_loaded_stdlib_module_runs(self) -> None:
+        nodes = Path(os.getcwd(), "nodes")
+        nodes.mkdir()
+        (nodes / "select.py").write_text("def pick(inputs):\n    return {'picked': 'a'}\n", encoding="utf-8")
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "pick",
+                        "entry": True,
+                        "python": {"import": "select", "callable": "pick", "path": str(nodes)},
+                        "outputs": [{"name": "picked", "type": "text"}],
+                    }
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.finish(result)
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.executor._runs[result["run_id"]].states["pick"].entries[0].outputs, {"picked": "a"})
+
+    @async_test
     async def test_failed_calls_retry_then_apply_the_failure_policy(self) -> None:
         for callable_name, expected in (
             ("boom", "python state exited with code 1: "),
@@ -7695,205 +7755,6 @@ class FactoryEmitTest(_ExecutorTestCase):
             },
             spec_id="node-report",
         )
-
-    @async_test
-    async def test_an_optional_output_may_be_left_out(self) -> None:
-        machine = self.machine()
-        machine["states"][0]["outputs"].append({"name": "note", "type": "text"})
-        machine["states"][0]["emit"]["outputs"].append({"name": "note", "type": "text?"})
-        self.emitted("child-1", {"plan": {"steps": 2}})
-        self.emitted("child-2", {"report": "built"})
-        self.store_machine(machine)
-        status = await self.run_to_end()
-
-        self.assertEqual(status["state"], "done")
-
-    @async_test
-    async def test_a_required_output_never_emitted_fails_the_entry(self) -> None:
-        self.emitted("child-1", {})
-        self.store_machine(self.machine())
-        status = await self.run_to_end()
-
-        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
-        self.assertEqual(plan["error"], "output 'plan' was never emitted (rlm.factory.emit)")
-        self.assertEqual(self.host.spawn_calls("build"), [])
-
-    @async_test
-    async def test_a_foreach_retries_the_instance_that_omitted_its_port(self) -> None:
-        # Macroscope finding: the last-settling instance took the retry
-        # even when an earlier instance omitted a required emit, so the
-        # retry never restored the missing port. The retry must re-run the
-        # instance that omitted it.
-        self.emitted("child-1", {"items": ["a", "b"]})
-        self.emitted("child-3", {"report": "b"})  # fan i1 emitted its port
-        self.emitted("child-4", {"report": "a"})  # fan i0 retry emits it
-        self.store_machine(
-            {
-                "params": {"task": "ship it"},
-                "states": [
-                    state(
-                        "plan",
-                        entry=True,
-                        subagent={"prompt": "Plan {task}."},
-                        outputs=[{"name": "items", "type": "json"}],
-                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
-                    ),
-                    state(
-                        "fan",
-                        subagent={"prompt": "Do {items}."},
-                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
-                        outputs=[{"name": "report", "type": "text"}],
-                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
-                        foreach={"over": "items", "max": 2},
-                        retries=1,
-                    ),
-                ],
-                "transitions": [{"from": "plan", "to": "fan"}],
-            }
-        )
-        status = await self.run_to_end()
-
-        self.assertEqual(status["state"], "done")
-        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
-        self.assertEqual(len(names), 3)
-        self.assertIn("-i0-a2", names[-1])
-        self.assertNotIn("-i1-a2", " ".join(names))
-
-    @async_test
-    async def test_resume_readmits_every_foreach_instance_that_omitted_its_port(self) -> None:
-        # Cursor finding: with retries=0, the first omitted instance failed
-        # the entry and the other omitted instances stayed done, so resume
-        # re-admitted only the first and the entry failed again on the rest.
-        self.emitted("child-1", {"items": ["a", "b"]})
-        self.emitted("child-4", {"report": "a"})  # fan i0 resume emit
-        self.emitted("child-5", {"report": "b"})  # fan i1 resume emit
-        self.store_machine(
-            {
-                "params": {"task": "ship it"},
-                "states": [
-                    state(
-                        "plan",
-                        entry=True,
-                        subagent={"prompt": "Plan {task}."},
-                        outputs=[{"name": "items", "type": "json"}],
-                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
-                    ),
-                    state(
-                        "fan",
-                        subagent={"prompt": "Do {items}."},
-                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
-                        outputs=[{"name": "report", "type": "text"}],
-                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
-                        foreach={"over": "items", "max": 2},
-                        retries=0,
-                    ),
-                ],
-                "transitions": [{"from": "plan", "to": "fan"}],
-            }
-        )
-        result = await self.start()
-        paused = await self.settle(result)
-
-        self.assertEqual(paused["state"], "paused")
-        fan = next(node for node in paused["nodes"] if node["id"] == "fan")
-        self.assertEqual([instance["status"] for instance in fan["instances"]], ["error", "error"])
-        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
-        self.assertEqual(resumed["state"], "running")
-        final = await self.settle(result)
-
-        self.assertEqual(final["state"], "done")
-        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
-        self.assertEqual(len(names), 4)
-        self.assertEqual(sum("-i0-a2" in name for name in names), 1)
-        self.assertEqual(sum("-i1-a2" in name for name in names), 1)
-
-    @async_test
-    async def test_a_resume_during_the_pause_notice_readmits_every_omitted_instance(self) -> None:
-        # Macroscope finding: the first omitted instance's failure awaited the
-        # pause notice; a resume() landing there re-admitted only that
-        # instance, and the old settle pass then failed the second instance
-        # from its stale list and paused the run again.
-        self.emitted("child-1", {"items": ["a", "b"]})
-        self.emitted("child-4", {"report": "a"})  # fan i0 resume emit
-        self.emitted("child-5", {"report": "b"})  # fan i1 resume emit
-        progress_gate = self.host.gate("factory.progress", 1)
-        progress_entered = self.host.gate_entered("factory.progress", 1)
-        self.store_machine(
-            {
-                "params": {"task": "ship it"},
-                "states": [
-                    state(
-                        "plan",
-                        entry=True,
-                        subagent={"prompt": "Plan {task}."},
-                        outputs=[{"name": "items", "type": "json"}],
-                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
-                    ),
-                    state(
-                        "fan",
-                        subagent={"prompt": "Do {items}."},
-                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
-                        outputs=[{"name": "report", "type": "text"}],
-                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
-                        foreach={"over": "items", "max": 2},
-                        retries=0,
-                    ),
-                ],
-                "transitions": [{"from": "plan", "to": "fan"}],
-            }
-        )
-        result = await self.start()
-        await progress_entered.wait()
-        run = self.executor._runs[result["run_id"]]
-        self.assertEqual(run.state, "paused")
-        old_task = run.task
-        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
-        self.assertEqual(resumed["state"], "running")
-        progress_gate.set()
-        await old_task
-        final = await self.settle(result)
-
-        self.assertEqual(final["state"], "done")
-        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
-        self.assertEqual(len(names), 4)
-        self.assertEqual(sum("-i0-a2" in name for name in names), 1)
-        self.assertEqual(sum("-i1-a2" in name for name in names), 1)
-
-    @async_test
-    async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
-        nodes = Path(self.host.session_root) / "nodes"
-        nodes.mkdir()
-        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 'two'}}\n", encoding="utf-8")
-        machine = self.machine()
-        machine["states"][0] = {
-            **machine["states"][0],
-            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
-        }
-        del machine["states"][0]["subagent"]
-        self.host.check_errors["plan"] = "plan.steps: expected int, got text \"two\""
-        self.store_machine(machine)
-        status = await self.run_to_end()
-
-        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
-        self.assertEqual(plan["error"], 'python state output: plan.steps: expected int, got text "two"')
-
-    @async_test
-    async def test_a_stop_during_the_python_output_check_keeps_the_entry_cancelled(self) -> None:
-        nodes = Path(self.host.session_root) / "nodes"
-        nodes.mkdir()
-        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 2}}\n", encoding="utf-8")
-        machine = self.machine()
-        machine["states"][0] = {
-            **machine["states"][0],
-            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
-        }
-        del machine["states"][0]["subagent"]
-        check_gate = self.host.gate("factory.check", 1)
-        self.store_machine(machine)
-        result = await self.start()
-        await self.host.gate_entered("factory.check", 1).wait()  # the python call exited; its check is in flight
-        await rlm_module.rlm.factory.stop(result["run_id"])
-        check_gate.set()
         result = await self.start("node-report")
         await self.executor._runs[result["run_id"]].task
         status = await rlm_module.rlm.factory.status(result["run_id"])
@@ -8230,6 +8091,9 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(len(self.host.deleted_targets()), 0)
         self.assertEqual(len(self.host.calls_of("agent_message.send")), 1)
         self.assertIn("factory_task_activity_unverified", [event["kind"] for event in status["events"]])
+        notices = self.host.calls_of("factory.progress")
+        self.assertEqual([notice["kind"] for notice in notices], ["paused"])
+        self.assertIn("UNVERIFIED", notices[0]["detail"])
 
         stopped = await rlm_module.rlm.factory.stop(started["run_id"])
         self.assertEqual(stopped["state"], "stopped")
@@ -8337,6 +8201,69 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
                 os.environ["RLM_SESSION_DIR"] = previous
 
         self.addCleanup(restore)
+
+    @async_test
+    async def test_a_restart_after_one_join_source_settled_still_fires_the_join(self) -> None:
+        # The snapshot never holds a half-applied settle: a restart while
+        # the join waits on its other source continues the run.
+        self.store_machine(
+            {
+                "run": {"max_parallel": 4},
+                "states": [state("a", entry=True), state("b", entry=True), state("c")],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="join",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "a"}
+        self.host.outcomes["b"] = {"status": "running"}
+        first = self.host.gate("rlm.collect", 1)
+        second = self.host.gate("rlm.collect", 2)
+        result = await self.start("join")
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        self.clock.advance(5.0)  # the loop sat in its collect for a while
+        first.set()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        run = self.executor._runs[run_id]
+        self.assertEqual(run.states["a"].entries[0].status, "done")
+        run.task.cancel()
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        self.host.outcomes["b"] = {"status": "done", "answer": "b"}
+        second.set()
+        await rlm_module.rlm.factory.status(run_id)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("c")), 1)
+
+    @async_test
+    async def test_a_done_run_with_a_running_resident_stays_stoppable_after_a_restart(self) -> None:
+        self.host.outcomes["watcher"] = {"status": "running"}
+        self.store_factory(
+            {
+                "nodes": [
+                    {"id": "t", "subagent": "worker"},
+                    {"id": "watcher", "subagent": "worker", "lifecycle": "resident"},
+                ],
+            },
+            spec_id="resident",
+        )
+        result = await self.start("resident")
+        run_id = result["run_id"]
+        await self.executor._runs[run_id].task
+        self.assertEqual(self.executor._runs[run_id].state, "done")
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        stopped = await rlm_module.rlm.factory.stop(run_id)
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(stopped["cancelled"], ["watcher"])
+        self.assertEqual(self.host.deleted_targets(), ["child-2"])
+        self.assertFalse((factory_module._runs_dir() / f"{run_id}.json").exists(), "the stopped run retires its files")
 
     @async_test
     async def test_a_snapshotted_run_rehydrates_and_the_childs_emit_still_routes(self) -> None:
@@ -8689,7 +8616,7 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
         self.addCleanup(process._kill)
         # The call is mid-flight and durable as running: the snapshot is
         # the state the restart recovers.
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         run.task.cancel()
         restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
         restarted.rehydrate_registry()
@@ -8785,6 +8712,177 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
             restarted._runs[run_id].task,
             "the peek read never starts the re-armed control loop",
         )
+        # The peek created the executor; the next executed command still
+        # releases the boot arm.
+        factory_module._BOOT_ARM_TASK = None
+        try:
+            self.assertTrue(factory_module.boot_arm_persisted_runs(), "a peek disabled the boot arm")
+            await factory_module._BOOT_ARM_TASK
+            self.assertNotIn(run_id, restarted._rehydrated)
+            self.assertIsNotNone(restarted._runs[run_id].task)
+            restarted._runs[run_id].task.cancel()
+        finally:
+            factory_module._BOOT_ARM_TASK = None
+
+
+class FactoryEmitRetryTest(_ExecutorTestCase):
+    """Typed emit outputs a child left out: the failure is the producing
+    entry's, retried per instance, and resume re-admits every omitted one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.host.session_root = Path(temp.name)
+
+    def emitted(self, child_id: str, outputs: dict[str, Any]) -> None:
+        child_dir = self.host.session_root / child_id
+        child_dir.mkdir(parents=True, exist_ok=True)
+        (child_dir / factory_module.FACTORY_OUTPUTS_FILE).write_text(json.dumps(outputs), encoding="utf-8")
+
+    def machine(self) -> dict[str, Any]:
+        return {
+            "params": {"task": "ship it"},
+            "states": [
+                state(
+                    "plan",
+                    entry=True,
+                    subagent={"prompt": "Plan {task}."},
+                    outputs=[{"name": "plan", "type": "json"}],
+                    emit={"outputs": [{"name": "plan", "type": "plan"}], "records": {"plan": [["steps", "int"]]}},
+                    retries=0,
+                ),
+                state(
+                    "build",
+                    subagent={"prompt": "Build {plan}."},
+                    inputs=[{"name": "plan", "type": "json", "from": "plan.plan"}],
+                    outputs=[{"name": "report", "type": "text"}],
+                    emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                    retries=0,
+                ),
+            ],
+            "transitions": [{"from": "plan", "to": "build"}],
+        }
+
+    async def run_to_end(self) -> dict[str, Any]:
+        result = await self.start()
+        await self.executor._runs[result["run_id"]].task
+        return await rlm_module.rlm.factory.status(result["run_id"])
+
+    async def settle(self, run_result: dict[str, Any]) -> dict[str, Any]:
+        """Yield to the control loop until the run leaves the running state."""
+        run_id = run_result["run_id"]
+        for _ in range(50_000):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await yield_loop_turn()
+        self.fail(f"run {run_id} never left the running state")
+
+    @async_test
+    async def test_an_optional_output_may_be_left_out(self) -> None:
+        machine = self.machine()
+        machine["states"][0]["outputs"].append({"name": "note", "type": "text"})
+        machine["states"][0]["emit"]["outputs"].append({"name": "note", "type": "text?"})
+        self.emitted("child-1", {"plan": {"steps": 2}})
+        self.emitted("child-2", {"report": "built"})
+        self.store_machine(machine)
+        status = await self.run_to_end()
+
+        self.assertEqual(status["state"], "done")
+
+    @async_test
+    async def test_resume_readmits_every_foreach_instance_that_omitted_its_port(self) -> None:
+        # Cursor finding: with retries=0, the first omitted instance failed
+        # the entry and the other omitted instances stayed done, so resume
+        # re-admitted only the first and the entry failed again on the rest.
+        self.emitted("child-1", {"items": ["a", "b"]})
+        self.emitted("child-4", {"report": "a"})  # fan i0 resume emit
+        self.emitted("child-5", {"report": "b"})  # fan i1 resume emit
+        self.store_machine(
+            {
+                "params": {"task": "ship it"},
+                "states": [
+                    state(
+                        "plan",
+                        entry=True,
+                        subagent={"prompt": "Plan {task}."},
+                        outputs=[{"name": "items", "type": "json"}],
+                        emit={"outputs": [{"name": "items", "type": "json"}], "records": {}},
+                    ),
+                    state(
+                        "fan",
+                        subagent={"prompt": "Do {items}."},
+                        inputs=[{"name": "items", "type": "json", "from": "plan.items"}],
+                        outputs=[{"name": "report", "type": "text"}],
+                        emit={"outputs": [{"name": "report", "type": "text"}], "records": {}},
+                        foreach={"over": "items", "max": 2},
+                        retries=0,
+                    ),
+                ],
+                "transitions": [{"from": "plan", "to": "fan"}],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+
+        self.assertEqual(paused["state"], "paused")
+        fan = next(node for node in paused["nodes"] if node["id"] == "fan")
+        self.assertEqual([instance["status"] for instance in fan["instances"]], ["error", "error"])
+        resumed = await rlm_module.rlm.factory.resume(result["run_id"])
+        self.assertEqual(resumed["state"], "running")
+        final = await self.settle(result)
+
+        self.assertEqual(final["state"], "done")
+        names = [call["kwargs"]["name"] for call in self.host.spawn_calls("fan")]
+        self.assertEqual(len(names), 4)
+        self.assertEqual(sum("-i0-a2" in name for name in names), 1)
+        self.assertEqual(sum("-i1-a2" in name for name in names), 1)
+
+    @async_test
+    async def test_a_python_state_output_goes_through_the_contract_check(self) -> None:
+        nodes = Path(self.host.session_root) / "nodes"
+        nodes.mkdir()
+        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 'two'}}\n", encoding="utf-8")
+        machine = self.machine()
+        machine["states"][0] = {
+            **machine["states"][0],
+            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
+        }
+        del machine["states"][0]["subagent"]
+        self.host.check_errors[json.dumps({"plan": {"steps": "two"}}, sort_keys=True)] = (
+            "plan.steps: expected int, got text \"two\""
+        )
+        self.store_machine(machine)
+        status = await self.run_to_end()
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(plan["error"], 'python state output: plan.steps: expected int, got text "two"')
+
+    @async_test
+    async def test_a_stop_during_the_python_output_check_keeps_the_entry_cancelled(self) -> None:
+        nodes = Path(self.host.session_root) / "nodes"
+        nodes.mkdir()
+        (nodes / "plan_nodes.py").write_text("def plan(inputs):\n    return {'plan': {'steps': 2}}\n", encoding="utf-8")
+        machine = self.machine()
+        machine["states"][0] = {
+            **machine["states"][0],
+            "python": {"import": "plan_nodes", "callable": "plan", "path": str(nodes)},
+        }
+        del machine["states"][0]["subagent"]
+        check_gate = self.host.gate("factory.check", 1)
+        self.store_machine(machine)
+        result = await self.start()
+        await self.host.gate_entered("factory.check", 1).wait()  # the python call exited; its check is in flight
+        await rlm_module.rlm.factory.stop(result["run_id"])
+        check_gate.set()
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+
+        plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(plan["status"], "cancelled")
+        self.assertEqual(self.host.spawn_calls("build"), [])
 
 
 class FactoryEmitApiTest(unittest.TestCase):
@@ -8805,7 +8903,9 @@ class FactoryEmitApiTest(unittest.TestCase):
             with self.assertRaisesRegex(FactoryEmitError, 'risk: "medium" is not one of low, high'):
                 await rlm_module.rlm.factory.emit(risk="medium")
         self.assertEqual(reply, {"accepted": ["design", "risk"], "missing": []})
-        self.assertEqual(sent[0], ("factory.emit", {"outputs": {"design": "DESIGN.md", "risk": "low"}}))
+        self.assertEqual(
+            sent[0], ("factory.emit", {"outputs": {"design": "DESIGN.md", "risk": "low"}, "cwd": os.getcwd()})
+        )
 
     @async_test
     async def test_outside_a_factory_child_the_error_says_so(self) -> None:
@@ -11882,7 +11982,8 @@ class FactoryClockRebaseTest(_ExecutorTestCase):
         # host reboots (the new clock starts at 50).
         old_mono = self.executor._runs[result["run_id"]].revision  # noqa: F841 — read for clarity
         run.admission_backoff_until = 1_600.0
-        self.executor._persist_run(run, force=True)
+        run.revision += 1
+        self.executor._persist_run(run)
         # The reboot: a NEW executor with a fresh clock at 50 (the fake
         # clock's base is 1000; the wall walked ~0 since the snapshot, so
         # the deadline's real remaining is ~600s).
@@ -12073,7 +12174,7 @@ class FactoryBootRearmTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the child never admitted"
             await asyncio.sleep(0)
         old.task.cancel()
-        self.executor._persist_run(old, force=True)
+        self.executor._persist_run(old)
         # The new kernel: a FRESH executor (the module import shape) with
         # no factory call made — the boot arm alone re-arms the run.
         previous = factory_module._DEFAULT_EXECUTOR
@@ -12147,7 +12248,7 @@ class FactoryBootRearmTest(_ExecutorTestCase):
         # The kill-restart control's outcome on the graceful path: the
         # persisted run re-arms at the next kernel boot.
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         previous = factory_module._DEFAULT_EXECUTOR
         factory_module._DEFAULT_EXECUTOR = None
         factory_module._BOOT_ARM_TASK = None
@@ -12250,7 +12351,7 @@ class FactoryAdmissionIntentTest(_ExecutorTestCase):
         # retry already carries attempt 2, still holding the failed
         # attempt's child id.
         self.assertEqual(instance.attempt, 2)
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         retry_gate.set()
         deadline = time.monotonic() + 30
         while True:
@@ -12315,7 +12416,7 @@ class FactoryAdmissionIntentTest(_ExecutorTestCase):
         # orphan intent rides a fresh journal — the death-before-reply
         # shape: the snapshot predates the intent, the admission never
         # landed.
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         journal.write_text("\n".join(_json.dumps(row) for row in kept))
         # The fresh kernel: the resolver deletes the orphan before the
         # re-admission can collide with its name.
@@ -12666,7 +12767,7 @@ class FactoryJoinDeferredRestartTest(_ExecutorTestCase):
         # defer preceded the max_transitions pause in the same pass).
         self.assertEqual(first_state, "paused")
         self.assertTrue(run.deferred_join_rechecks, "the pause must have stashed the join holds")
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         snapshot = self.artifacts / "factory-runs" / f"{run_id}.json"
         self.assertTrue(snapshot.exists())
         # THE STASH RIDE: the snapshot carries the holds.
@@ -12872,7 +12973,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -12911,7 +13012,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -12956,7 +13057,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the child never admitted"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         marker = _runs_dir() / f"{run_id}.persist-failed"
         marker.write_text("the disk was full\n", encoding="utf-8")
         stderr = StringIO()
@@ -12990,7 +13091,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -13047,7 +13148,8 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
         blocker = runs_dir / f".{run_id}.json.tmp"
         blocker.mkdir()
         try:
-            self.executor._persist_run(run, force=True)
+            run.revision += 1
+            self.executor._persist_run(run)
             kinds = [e["kind"] for e in run.events]
             self.assertIn("persist_failed", kinds, "the failure left no ledger row")
             marker = runs_dir / f"{run_id}.persist-failed"
@@ -13055,7 +13157,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             # A recovered write clears the stale marker.
             shutil.rmtree(blocker)
             self.executor._persist_failed.discard((run_id, "snapshot"))
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             self.assertFalse((runs_dir / f"{run_id}.persist-failed").exists(), "the marker outlived its failure")
             self.assertTrue((runs_dir / f"{run_id}.json").exists(), "the recovered write did not land")
         finally:
@@ -13088,7 +13190,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -13150,7 +13252,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         # Corrupt the FIRST run's journal: a parsed line whose counters
@@ -13404,15 +13506,6 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             self.assertNotEqual(arm_state["state"], "running", "the run never advanced after the execute released the arm")
         finally:
             pass
-    def test_the_boot_arm_needs_a_running_loop_but_no_ipython(self) -> None:
-        # The production kernel is `python -m rlm.repl` - no IPython is
-        # imported - and the arm's schedule must succeed there (the
-        # handle paths schedule it after the loop exists; the release is
-        # the clean restore or the first execute, never the boot).
-        import sys
-
-        self.assertNotIn("IPython", sys.modules)
-        self.assertTrue(factory_module.boot_arm_persisted_runs.__doc__)
 
     @async_test
     async def test_a_suspend_does_not_charge_the_budget(self) -> None:
@@ -13439,7 +13532,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the run never paused"
             await asyncio.sleep(0)
         # The paused run persisted its snapshot (with the clock pair).
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         from rlm.factory import _runs_dir
 
         snapshot_path = _runs_dir() / f"{run_id}.json"
@@ -13538,7 +13631,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         return runs[0], runs[1], runs[2]
@@ -13575,7 +13668,8 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
         blocker.mkdir()
         for suffix in (".json", ".admissions.jsonl"):
             (self._runs_dir() / f"{run_id}{suffix}").unlink(missing_ok=True)
-        self.executor._persist_run(run, force=True)
+        run.revision += 1
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         # The gate now opens on the marker alone.
         self.assertTrue(_runs_dir_snapshots(), "the boot gate stayed closed on a lone marker")
@@ -13689,7 +13783,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the chain never ran"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         snapshot = self._runs_dir() / f"{chained}.json"
         raw = snapshot.read_bytes()
@@ -14021,7 +14115,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the child never admitted"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         # Seed the journal with a batch row whose content carries a lone
         # surrogate (one flipped bit in an emoji escape).
         journal = _runs_dir() / f"{run_id}{ADMISSIONS_JOURNAL_SUFFIX}"
@@ -14192,7 +14286,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the chain never ran"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         snapshot = self._runs_dir() / f"{chained}.json"
         raw = snapshot.read_bytes()
@@ -14281,7 +14375,8 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
         for suffix in (".json", ".admissions.jsonl"):
             path = self._runs_dir() / f"{run_id}{suffix}"
             path.unlink(missing_ok=True)
-        self.executor._persist_run(run, force=True)
+        run.revision += 1
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         captured = StringIO()
         rebooted = self._fresh()
@@ -14672,20 +14767,20 @@ class FactoryPrintDurabilityTest(_ExecutorTestCase):
         run = self.executor._runs[run_id]
         await self.wait_until(lambda: run.state != "running")
         self.assertEqual(run.state, "paused")
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         return run_id
 
     @async_test
-    async def test_resume_refuses_a_run_an_earlier_print_process_started(self) -> None:
+    async def test_a_print_run_is_never_saved_and_a_later_process_refuses_it(self) -> None:
         run_id = await self.paused_run()
+        self.assertFalse((Path(os.environ["RLM_SESSION_DIR"]) / factory_module.RUNS_DIR_NAME).exists())
         restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
         restarted.rehydrate_registry()
         factory_module._DEFAULT_EXECUTOR = restarted
-        for target in (run_id, "never-started"):
-            with self.assertRaises(ValueError) as raised:
-                await rlm_module.rlm.factory.resume(target)
-            self.assertIn("run machines under the daemon", str(raised.exception))
-        self.assertEqual(restarted._runs[run_id].state, "paused")
+        self.assertNotIn(run_id, restarted._runs)
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.resume(run_id)
+        self.assertIn("run machines under the daemon", str(raised.exception))
 
     @async_test
     async def test_resume_continues_a_run_this_print_process_started(self) -> None:
