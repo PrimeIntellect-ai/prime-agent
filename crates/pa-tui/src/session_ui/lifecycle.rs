@@ -1006,6 +1006,61 @@ mod backfill_tests {
         .expect("mock session open, node mount and rebind complete within ten seconds");
     }
 
+    /// A node reply addressed to the active id a reattach replaced still settles its request:
+    /// the epoch alone names the request, so the run refresh keeps refetching the node.
+    #[tokio::test]
+    async fn a_node_reply_for_a_replaced_active_id_settles_its_request() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("reply.sock");
+            let (mut session, server) = mock_session_with_capabilities(
+                &socket,
+                mpsc::unbounded_channel().0,
+                &["factory_activity"],
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::FactoryRuns {
+                    row: Some(crate::factory_view::FactoryRow::header("run-1")),
+                    node: Some(crate::factory_view::node::NodeTarget {
+                        run_id: "run-1".to_string(),
+                        state_id: "worker".to_string(),
+                        instance: None,
+                    }),
+                },
+                true,
+                &mut view,
+            );
+            let in_flight = |view: &AgentView| {
+                view.run_page()
+                    .and_then(|factory_view| factory_view.node.as_ref())
+                    .is_some_and(crate::factory_view::node::NodeView::request_in_flight)
+            };
+            assert!(in_flight(&view), "the mount sends the node request");
+            let request_epoch = session.factory_node_epoch;
+            // A same-session reattach replaces the active id while the request is out.
+            session.active_session_id = "reattached-worker".to_string();
+            session.apply_factory_update(
+                crate::session_ui::FactoryUpdate::Node {
+                    run_id: "run-1".to_string(),
+                    state_id: "worker".to_string(),
+                    request_epoch,
+                    result: Err("worker replaced".to_string()),
+                },
+                &mut view,
+            );
+            assert!(!in_flight(&view), "the reply settles the request");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open, node mount and reply complete within ten seconds");
+    }
+
     /// A same-session rebind while the node's template-files fetch is out sends a new fetch on
     /// the reattached active session: the old fetch's reply names the replaced session and is
     /// dropped, so the view must not keep waiting on it.

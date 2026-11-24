@@ -44,7 +44,6 @@ pub(crate) enum FactoryUpdate {
     /// state it answers, the request epoch that rejects older selector
     /// replies, and the reply payload or its request error.
     Node {
-        session: String,
         run_id: String,
         state_id: String,
         request_epoch: u64,
@@ -190,7 +189,7 @@ impl super::SessionUi {
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
                 client.request_ok(DaemonCommand::FactoryActivity {
                     id: None,
-                    active_session_id: active_session_id.clone(),
+                    active_session_id,
                     action: "node".to_string(),
                     run_id: Some(run_id.clone()),
                     spec_id: Some(state_id.clone()),
@@ -205,7 +204,6 @@ impl super::SessionUi {
                 Err(_) => Err("the node request timed out".to_string()),
             };
             let _ = tx.send(FactoryUpdate::Node {
-                session: active_session_id,
                 run_id,
                 state_id,
                 request_epoch,
@@ -594,21 +592,22 @@ impl super::SessionUi {
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
         let update = match update {
+            // The epoch alone names a node request: it is unique per session UI, and a
+            // cross-session switch unmounts the page. A reply addressed to the active id a
+            // same-session reattach replaced still settles its request, so the run refresh
+            // keeps refetching the node.
             FactoryUpdate::Node {
-                session,
                 run_id,
                 state_id,
                 request_epoch,
                 result,
             } => {
-                if session == self.active_session_id {
-                    let node = view
-                        .run_page_mut()
-                        .and_then(|factory_view| factory_view.node.as_mut())
-                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
-                    self.dirty |=
-                        node.is_some_and(|node| node.apply_request_result(request_epoch, result));
-                }
+                let node = view
+                    .run_page_mut()
+                    .and_then(|factory_view| factory_view.node.as_mut())
+                    .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                self.dirty |=
+                    node.is_some_and(|node| node.apply_request_result(request_epoch, result));
                 return;
             }
             FactoryUpdate::NodeFiles {
