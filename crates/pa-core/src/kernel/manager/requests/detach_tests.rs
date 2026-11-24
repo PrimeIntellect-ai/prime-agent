@@ -592,18 +592,22 @@ async fn a_user_cancel_force_aborts_an_attached_ignoring_cell_and_keeps_the_kern
 
 /// `rlm.end_turn()` from a cell that already backgrounded answers an
 /// error: the cell's turn returned at the detach, so a success answer
-/// would claim a turn end that never happens.
+/// would claim a turn end that never happens. The request names its cell,
+/// so a newer foreground cell running beside it keeps its turn.
 #[tokio::test]
 async fn end_turn_in_a_backgrounded_cell_answers_an_error() {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let python = dir.path().join("end-turn-kernel");
+    // The first cell stays silent until the second cell arrives; then it
+    // calls rlm.end_turn() while the second cell runs.
     std::fs::write(
         &python,
         r#"#!/usr/bin/env python3
-import json, sys, time
+import json, sys
 print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+first = None
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -611,12 +615,14 @@ while True:
     req = json.loads(line)
     if req.get("type") != "execute":
         continue
-    rid = req.get("id")
-    time.sleep(0.6)
-    print(json.dumps({"event": "host_request", "id": "end-1", "data": {"type": "rlm.end_turn"}}), flush=True)
+    if first is None:
+        first = req["id"]
+        continue
+    print(json.dumps({"event": "host_request", "id": "end-1", "data": {"type": "rlm.end_turn", "cell": first}}), flush=True)
     reply = json.loads(sys.stdin.readline())
-    print(json.dumps({"event": "stdout", "id": rid, "text": json.dumps(reply["data"])}), flush=True)
-    print(json.dumps({"event": "done", "id": rid, "status": "ok"}), flush=True)
+    print(json.dumps({"event": "stdout", "id": first, "text": json.dumps(reply["data"])}), flush=True)
+    print(json.dumps({"event": "done", "id": first, "status": "ok"}), flush=True)
+    print(json.dumps({"event": "done", "id": req["id"], "status": "ok"}), flush=True)
 "#,
     )
     .expect("write fake kernel");
@@ -631,7 +637,7 @@ while True:
         .await
         .expect("ready handshake");
     let (outcomes, callback) = background_cell_outcomes();
-    let result = manager
+    let backgrounded = manager
         .execute(
             "await rlm.end_turn()",
             ExecuteOptions {
@@ -642,7 +648,12 @@ while True:
         )
         .await
         .expect("the bounded call detaches");
-    assert!(result.detached.is_some(), "{result:?}");
+    assert!(backgrounded.detached.is_some(), "{backgrounded:?}");
+    let foreground = manager
+        .execute("x = 1", ExecuteOptions::default())
+        .await
+        .expect("the foreground cell runs beside the backgrounded one");
+    assert!(!foreground.ended_turn, "{foreground:?}");
     wait_until(
         Duration::from_secs(5),
         "the backgrounded cell never completed",

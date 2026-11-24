@@ -190,6 +190,11 @@ def is_active() -> bool:
     return _protocol_fd >= 0
 
 
+def current_cell_id() -> str | None:
+    """The id of the cell whose code (or a task it started) is running here."""
+    return _current_cell.get()
+
+
 def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
     """Return the calling cell's completion barrier and owning execution task."""
     execution = _current_cell_execution.get()
