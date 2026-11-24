@@ -692,6 +692,113 @@ fn archive_check_answers_synchronously_without_publishing() {
     sandbox.assert_session_preserved();
 }
 
+/// A running daemon of this product takes the update restart: the installer
+/// runs the new payload's restart mode instead of the shutdown ladder, so the
+/// old supervisor exits and a new one greets on the same socket.
+#[test]
+fn an_installer_run_restarts_the_running_daemon() {
+    let sandbox = Sandbox::new();
+    let live = sandbox.prefix.join("share/prime-agent");
+    std::fs::create_dir_all(&live).expect("payload dir");
+    let binary = live.join("prime-agent");
+    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    std::fs::write(
+        live.join(".prime-agent-install"),
+        "install-rust.sh channel beta\nversion 9.9.9\n",
+    )
+    .expect("install marker");
+    // The release archive carries this build too, so the new payload can run the restart.
+    let version = env!("CARGO_PKG_VERSION");
+    let payload = sandbox.root.join("payload-restart");
+    std::fs::create_dir_all(&payload).expect("payload dir");
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_prime-agent"),
+        payload.join("prime-agent"),
+    )
+    .expect("copy this build");
+    let platform = pa_core::update::install::current_platform_alias();
+    let archive = sandbox
+        .root
+        .join(format!("prime-agent-{version}-{platform}.tar.gz"));
+    let status = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&payload)
+        .arg("prime-agent")
+        .status()
+        .expect("run tar");
+    assert!(status.success(), "tar the release");
+
+    // The daemon on the socket the launcher pins (the installer's own rule).
+    let uid = String::from_utf8(Command::new("id").arg("-u").output().expect("id -u").stdout)
+        .expect("utf-8 uid");
+    let socket = sandbox
+        .root
+        .join(format!("tmp/prime-agent-rust-{}/daemon.sock", uid.trim()));
+    let mut daemon = Command::new(&binary);
+    installer_env(&mut daemon, &sandbox);
+    daemon
+        .args(["--mode", "daemon", "--daemon-socket"])
+        .arg(&socket)
+        .env(
+            "PRIME_AGENT_CODING_AGENT_DIR",
+            sandbox.root.join("home/.prime/agent"),
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut old_daemon = daemon.spawn().expect("start the daemon");
+    let old_pid = supervisor_pid_after(&socket, None).expect("the daemon greets");
+
+    let mut command = Command::new(&binary);
+    command.arg("update").arg("--archive").arg(&archive);
+    installer_env(&mut command, &sandbox);
+    let output = command.output().expect("run the installed build");
+    let new_pid = supervisor_pid_after(&socket, Some(old_pid));
+    // The installer always takes the old daemon down: restarted or stopped.
+    let _ = old_daemon.wait();
+    if let Some(pid) = new_pid {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_ran(&output, "update --archive");
+    assert!(
+        format!("{stdout}{stderr}").contains("Restarted the previous Rust daemon"),
+        "the summary reports the restart:\n{stdout}\n{stderr}"
+    );
+    assert!(new_pid.is_some(), "a new supervisor greets on the socket");
+}
+
+/// The `supervisorPid` the daemon on `socket` greets with, once it differs from `previous`.
+fn supervisor_pid_after(socket: &Path, previous: Option<u64>) -> Option<u64> {
+    use std::io::BufRead as _;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        if let Ok(stream) = std::os::unix::net::UnixStream::connect(socket) {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut hello = String::new();
+            if std::io::BufReader::new(stream)
+                .read_line(&mut hello)
+                .is_ok()
+            {
+                let pid = serde_json::from_str::<serde_json::Value>(&hello)
+                    .ok()
+                    .and_then(|hello| {
+                        hello
+                            .get("supervisorPid")
+                            .and_then(serde_json::Value::as_u64)
+                    });
+                if let Some(pid) = pid.filter(|pid| Some(*pid) != previous) {
+                    return Some(pid);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    None
+}
+
 /// A release archive whose payload answers `reported` under the archive
 /// name `named` (the mis-naming fixture for the check-mode test).
 fn fake_release_payload(sandbox: &Sandbox, named: &str, reported: &str) -> PathBuf {

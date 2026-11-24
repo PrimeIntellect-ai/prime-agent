@@ -619,8 +619,9 @@ impl MockSupervisor {
                     };
                     // The overflow recovery: the failed attempt's agent_end follows
                     // the recovery's compaction_start; the next /copy settles the
-                    // compaction (re-issuing the turn, or giving up). A threshold
-                    // compaction follows a settled run the same way.
+                    // compaction (re-issuing the turn, or giving up). The threshold
+                    // route opens a run, the next /copy settles it, and the two
+                    // after start and end its compaction.
                     let compaction_route = match command.get("message").and_then(Value::as_str) {
                         Some(route @ ("overflow-recover" | "overflow-fail")) => Some((
                             vec![
@@ -651,12 +652,12 @@ impl MockSupervisor {
                             }],
                         )),
                         Some("threshold") => Some((
+                            vec![json!({ "type": "turn_start" })],
                             vec![
-                                json!({ "type": "turn_start" }),
-                                json!({ "type": "turn_end", "message": { "role": "assistant", "stopReason": "stop" } }),
-                                json!({ "type": "agent_end" }),
-                            ],
-                            vec![
+                                vec![
+                                    json!({ "type": "turn_end", "message": { "role": "assistant", "stopReason": "stop" } }),
+                                    json!({ "type": "agent_end" }),
+                                ],
                                 vec![json!({ "type": "compaction_start", "reason": "threshold" })],
                                 vec![json!({
                                     "type": "compaction_end", "reason": "threshold",

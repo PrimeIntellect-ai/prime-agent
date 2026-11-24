@@ -341,9 +341,9 @@ fn post_compaction_goal_continuation_mint() {
     // Admission releases the pending guard: the item's OWN handle,
     // never the mutable mirror.
     AgentSessionEngine::release_goal_continuation_handle(minted.pending_handle.as_ref());
-    // TS #2465: a live background bash handle holds the post-compaction
-    // mint the same way: the mint defers (owed, not consumed) until the
-    // handle settles.
+    // TS #2465: live background kernel work holds the post-compaction
+    // mint the same way: the mint defers (owed, not consumed) until it
+    // settles.
     let live_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 1);
     engine.set_test_probes(Some(live_probe), None);
     assert!(

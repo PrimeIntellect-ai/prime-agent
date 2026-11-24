@@ -74,7 +74,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
         core,
         input_pauses: crate::session_input_pause::InputPauseTable::new(),
         prompt_admissions: crate::prompt_admission::WorkerAdmissions::new(),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         idle_notify: Arc::new(Notify::new()),
         events,
         engine,

@@ -1,7 +1,6 @@
 //! The kernel notice seam (the TS async-bash-completion wake): the
-//! `bash.completed`/`bash.consumed` notices, the `bash.waiting` keepalive,
-//! plus the `factory.progress` run-milestone notice that rides the same
-//! steering delivery. Here live
+//! `bash.completed`/`bash.consumed` notices plus the `factory.progress`
+//! run-milestone notice that rides the same steering delivery. Here live
 //! the shared notice types, the TS payload validation, and the
 //! host-handler registration, plus the in-process sinks a daemonless
 //! embedding uses — the notice row steers onto the session's own agent
@@ -17,7 +16,7 @@ use pa_types::session::CustomMessage;
 
 use super::messages::{
     self, ASYNC_BASH_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-    FACTORY_PROGRESS_PREVIEW_LABEL,
+    BACKGROUND_CELL_PREVIEW_LABEL, FACTORY_PROGRESS_PREVIEW_LABEL,
 };
 use super::{session_message_to_loop, SessionAgentMessage};
 
@@ -48,31 +47,57 @@ impl KernelNotice {
         }
     }
 
-    /// The `[turn-held]` pacing notice for one delivery that outlived the
-    /// worker's turn-held window: it rides the same steering lane as a
-    /// bash completion, so the queued row cuts the held turn at its next
-    /// boundary and delivers as the next turn's injected prompt.
+    /// The `[cell-done]` notice for one auto-backgrounded cell's completion:
+    /// the cell kept running after its call returned early, and this row
+    /// wakes the session with the outcome. The completion composes through
+    /// the ONE settled-result conversion and formatter the foreground tool
+    /// result uses (`convert_execute_result` + `settled_cell_output_text`),
+    /// so the two lanes can never drift; a host stop's cause rides the
+    /// model-visible text. Rich completions (image attachments) ride
+    /// content blocks — the inbox's text-only route declines them, so those
+    /// rows deliver through the full-row lane while text-only completions
+    /// stay in the inbox.
     #[must_use]
-    pub fn turn_held(elapsed_ms: u64) -> Self {
+    pub fn background_cell_completion(
+        outcome: &crate::kernel::shared::BackgroundCellOutcome,
+    ) -> Self {
+        let result =
+            crate::session_engine::runtime_wiring::convert_execute_result(outcome.result.clone());
+        let status = match result.status {
+            crate::tools::ipython::ExecuteStatus::Ok => "ok",
+            crate::tools::ipython::ExecuteStatus::Error => "error",
+            crate::tools::ipython::ExecuteStatus::Aborted => "aborted",
+        };
+        let reason = match outcome.reason {
+            crate::kernel::shared::DetachReason::Interrupted => "interrupted".to_string(),
+            crate::kernel::shared::DetachReason::WaitBudget(ms) => format!("wait-budget:{ms}"),
+        };
+        let duration_ms = result.duration_ms.unwrap_or_default();
+        let output = crate::tools::ipython::settled_cell_output_text(
+            &result,
+            result.background_output.as_deref(),
+        );
+        let images: Vec<crate::kernel::shared::KernelAttachment> =
+            crate::tools::ipython::image_attachments(&result)
+                .into_iter()
+                .cloned()
+                .map(|attachment| crate::kernel::shared::KernelAttachment {
+                    mime_type: attachment.mime_type,
+                    data: attachment.data,
+                    path: None,
+                })
+                .collect();
         Self {
-            row: messages::create_turn_held_message(elapsed_ms, crate::autonomous::now_millis()),
-            preview_label: messages::TURN_HELD_PREVIEW_LABEL,
-        }
-    }
-
-    /// The `[waiting]` keepalive for a parked session whose background
-    /// commands are still running: one paced notice per window so idle
-    /// clocks never close a session mid-wait.
-    #[must_use]
-    pub fn bash_waiting(pids: &[u32], commands: &[String], count: usize) -> Self {
-        Self {
-            row: messages::create_bash_waiting_message(
-                pids,
-                commands,
-                count,
+            row: messages::create_background_cell_completion_message(
+                &outcome.cell_id,
+                status,
+                duration_ms,
+                &reason,
+                &output,
+                &images,
                 crate::autonomous::now_millis(),
             ),
-            preview_label: messages::BASH_WAITING_PREVIEW_LABEL,
+            preview_label: BACKGROUND_CELL_PREVIEW_LABEL,
         }
     }
 }
@@ -80,7 +105,7 @@ impl KernelNotice {
 /// The queue-admission seam for one kernel notice (the daemon worker's
 /// steering lane + runner wake + recovery busy-evidence; the in-process
 /// sinks below steer onto the session's own agent).
-pub type KernelNoticeSink = Arc<dyn Fn(KernelNotice) -> bool + Send + Sync>;
+pub type KernelNoticeSink = Arc<dyn Fn(KernelNotice) + Send + Sync>;
 
 /// The kernel read a finished command's result before its notice
 /// delivered (the `bash.consumed` host request): the queued notice is stale.
@@ -97,8 +122,8 @@ pub type BashConsumedSink = Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
 /// notice admits its row, so the embedding resumes the idle run.
 pub type BashNoticeWake = Arc<dyn Fn() + Send + Sync>;
 
-/// The `bash.completed`/`bash.consumed`/`bash.waiting`/`factory.progress`
-/// kernel host handlers (TS `createAsyncBashCompletionHostHandler`,
+/// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
+/// handlers (TS `createAsyncBashCompletionHostHandler`,
 /// `createAsyncBashConsumedHostHandler`, `createFactoryProgressHostHandler`).
 pub fn register_kernel_notice_host_handlers(
     notice: KernelNoticeSink,
@@ -128,18 +153,6 @@ pub fn register_kernel_notice_host_handlers(
                 let notice = validate_consumed(&payload.data)?;
                 consumed(notice);
                 Ok(serde_json::json!({}))
-            })
-        }),
-    );
-    let waiting = Arc::clone(&notice);
-    handlers.register(
-        "bash.waiting",
-        host_handler(move |payload| {
-            let waiting = waiting.clone();
-            Box::pin(async move {
-                let notice = validate_bash_waiting(&payload.data)?;
-                let admitted = waiting(notice);
-                Ok(serde_json::json!({ "admitted": admitted }))
             })
         }),
     );
@@ -173,51 +186,6 @@ fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
         details["outputTail"] = tail.into();
     }
     Ok(notice)
-}
-
-/// The kernel's waiting keepalive payload (`_waiting_keepalive_loop` in
-/// `rlm/bash.py`): one non-empty array of positive integer pids, the
-/// same-length array of non-empty command strings, and a `count` of live
-/// commands at least as large as the pid list (the payload caps the
-/// described commands).
-fn validate_bash_waiting(data: &Value) -> anyhow::Result<KernelNotice> {
-    let pids: Vec<u32> = data
-        .get("pids")
-        .and_then(Value::as_array)
-        .filter(|pids| !pids.is_empty())
-        .and_then(|pids| {
-            pids.iter()
-                .map(|pid| {
-                    pid.as_u64()
-                        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
-                        .map(|pid| pid as u32)
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| anyhow::anyhow!("bash.waiting pids must be positive integers"))?;
-    let commands: Vec<String> = data
-        .get("commands")
-        .and_then(Value::as_array)
-        .filter(|commands| commands.len() == pids.len())
-        .and_then(|commands| {
-            commands
-                .iter()
-                .map(|command| {
-                    command
-                        .as_str()
-                        .filter(|command| !command.is_empty())
-                        .map(str::to_string)
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| anyhow::anyhow!("bash.waiting commands must be non-empty strings"))?;
-    let count = data
-        .get("count")
-        .and_then(Value::as_u64)
-        .filter(|count| *count >= pids.len() as u64)
-        .ok_or_else(|| anyhow::anyhow!("bash.waiting count must cover the pids"))?
-        as usize;
-    Ok(KernelNotice::bash_waiting(&pids, &commands, count))
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
@@ -286,21 +254,13 @@ pub fn register_in_process_kernel_notice_handlers(
     let notice_slot = Arc::clone(agent_slot);
     let notice: KernelNoticeSink = Arc::new(move |notice| {
         let Some(agent) = bound_agent(&notice_slot) else {
-            return false;
+            return;
         };
-        let waiting = notice.row.custom_type == messages::BASH_WAITING_NOTICE_CUSTOM_TYPE;
         let Some(row) = session_message_to_loop(&SessionAgentMessage::Custom(notice.row)) else {
-            return false;
+            return;
         };
-        if waiting {
-            if !agent.steer_if_idle(row) {
-                return false;
-            }
-        } else {
-            agent.steer(row);
-        }
+        agent.steer(row);
         notice_wake();
-        true
     });
     let consumed_slot = Arc::clone(agent_slot);
     let consumed: BashConsumedSink = Arc::new(move |notice| {
@@ -388,6 +348,116 @@ mod tests {
         let mut handlers = HostRequestHandlers::default();
         register_in_process_kernel_notice_handlers(&wake, &slot, &mut handlers);
         (agent, slot, wakes, handlers)
+    }
+
+    /// One settled cell result for the notice tests: the identity fields
+    /// of the notice under test, every other field empty.
+    fn settled_result(
+        status: crate::kernel::shared::ExecuteStatus,
+        duration_ms: u64,
+        stdout: &str,
+    ) -> crate::kernel::shared::ExecuteResult {
+        crate::kernel::shared::ExecuteResult {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            result: None,
+            diffs: None,
+            attachments: None,
+            sent_agent_messages: None,
+            bash_commands: None,
+            transcript_reads: None,
+            inbox_messages: None,
+            background_output: None,
+            ended_turn: false,
+            status,
+            error: None,
+            duration_ms,
+            detached: None,
+        }
+    }
+
+    /// One auto-backgrounded cell's outcome for the notice tests.
+    fn outcome(
+        cell_id: &str,
+        reason: crate::kernel::shared::DetachReason,
+        result: crate::kernel::shared::ExecuteResult,
+    ) -> crate::kernel::shared::BackgroundCellOutcome {
+        crate::kernel::shared::BackgroundCellOutcome {
+            cell_id: cell_id.to_string(),
+            reason,
+            result,
+        }
+    }
+
+    /// A rich completion carries its image attachments as content blocks
+    /// (the inbox declines block content, so it rides the full-row lane);
+    /// the row's details keep the cell's identity only (the structured
+    /// result details are the foreground tool result's own).
+    #[test]
+    fn a_rich_completion_carries_images_as_blocks() {
+        let mut result = settled_result(
+            crate::kernel::shared::ExecuteStatus::Ok,
+            1_234,
+            "work finished",
+        );
+        result.attachments = Some(vec![crate::kernel::shared::KernelAttachment {
+            mime_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+            path: None,
+        }]);
+        let notice = KernelNotice::background_cell_completion(&outcome(
+            "cell-7",
+            crate::kernel::shared::DetachReason::WaitBudget(200),
+            result,
+        ));
+        let content = &notice.row.content;
+        let pa_types::ai::UserContent::Blocks(blocks) = content else {
+            panic!("a rich completion rides blocks: {content:?}")
+        };
+        assert_eq!(
+            blocks.len(),
+            2,
+            "the text header plus the image: {blocks:?}"
+        );
+        assert!(
+            notice
+                .row
+                .content
+                .text()
+                .starts_with("[cell-done id:cell-7 status:ok"),
+            "the blocks keep a readable text preview: {}",
+            notice.row.content.text()
+        );
+        let details = notice.row.details.as_ref().expect("the details row");
+        assert_eq!(
+            details.get("cellId").and_then(serde_json::Value::as_str),
+            Some("cell-7")
+        );
+        assert!(
+            details.get("bashCommands").is_none(),
+            "the unread structured result details are not duplicated onto the row: {details}"
+        );
+        assert!(
+            serde_json::to_value(&notice.row)
+                .expect("the row serializes")
+                .to_string()
+                .contains("aGVsbG8="),
+            "the image payload rides the row"
+        );
+    }
+
+    /// A text-only completion stays a plain text row (the inbox route).
+    #[test]
+    fn a_text_completion_stays_plain_text() {
+        let notice = KernelNotice::background_cell_completion(&outcome(
+            "cell-8",
+            crate::kernel::shared::DetachReason::Interrupted,
+            settled_result(crate::kernel::shared::ExecuteStatus::Error, 1_000, "boom"),
+        ));
+        assert!(matches!(
+            notice.row.content,
+            pa_types::ai::UserContent::Text(_)
+        ));
     }
 
     #[test]
@@ -545,70 +615,6 @@ mod tests {
                 })),
             )
         );
-    }
-
-    #[tokio::test]
-    async fn in_process_waiting_refuses_an_active_run_without_a_wake() {
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let stream_started = Arc::clone(&started);
-        let stream_release = Arc::clone(&release);
-        let agent = Arc::new(pa_agent::agent::Agent::new(pa_agent::agent::AgentOptions {
-            stream_fn: Some(Arc::new(move |_, _, _| {
-                let started = Arc::clone(&stream_started);
-                let release = Arc::clone(&stream_release);
-                Box::pin(async move {
-                    started.notify_one();
-                    release.notified().await;
-                    anyhow::bail!("the stream probe finished")
-                })
-            })),
-            ..Default::default()
-        }));
-        let slot = Arc::new(Mutex::new(Some(Arc::downgrade(&agent))));
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let wake: BashNoticeWake = {
-            let wakes = Arc::clone(&wakes);
-            Arc::new(move || {
-                wakes.fetch_add(1, Ordering::SeqCst);
-            })
-        };
-        let mut handlers = HostRequestHandlers::default();
-        register_in_process_kernel_notice_handlers(&wake, &slot, &mut handlers);
-        let run_agent = Arc::clone(&agent);
-        let run = tokio::spawn(async move { run_agent.prompt("work").await });
-        started.notified().await;
-        let handler = handlers.get("bash.waiting").unwrap();
-        let payload = serde_json::json!({ "pids": [42], "commands": ["build"], "count": 1 });
-        let refused = dispatch(handler, payload.clone()).await.unwrap();
-        assert_eq!(refused["admitted"], false);
-        assert!(!agent.has_queued_messages());
-        assert_eq!(wakes.load(Ordering::SeqCst), 0);
-        release.notify_one();
-        assert!(run.await.unwrap().is_err());
-        let accepted = dispatch(handler, payload).await.unwrap();
-        assert_eq!(accepted["admitted"], true);
-        assert_eq!(agent.remove_queued_messages(|_| true).len(), 1);
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn waiting_reply_reports_the_sink_admission() {
-        for admitted in [false, true] {
-            let mut handlers = HostRequestHandlers::default();
-            register_kernel_notice_host_handlers(
-                Arc::new(move |_| admitted),
-                Arc::new(|_| {}),
-                &mut handlers,
-            );
-            let reply = dispatch(
-                handlers.get("bash.waiting").unwrap(),
-                serde_json::json!({ "pids": [42], "commands": ["build"], "count": 1 }),
-            )
-            .await
-            .unwrap();
-            assert_eq!(reply["admitted"], admitted);
-        }
     }
 
     #[test]
