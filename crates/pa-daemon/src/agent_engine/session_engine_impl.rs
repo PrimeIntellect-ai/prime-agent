@@ -111,11 +111,7 @@ impl SessionEngine for AgentSessionEngine {
             // shell-specific. The durable term keeps the goal-gate hold:
             // a shell that outlived its kernel still defers the mint and
             // arms behind its exit watch.
-            let live_background_work = self.has_live_background_kernel_work();
-            if self.has_unsettled_rlm_work().await
-                || live_background_work
-                || self.background_bash_handle_count() > 0
-            {
+            if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
                 driver.mark_continuation_owed();
                 if self.has_live_background_bash_handles() {
                     drop(driver);

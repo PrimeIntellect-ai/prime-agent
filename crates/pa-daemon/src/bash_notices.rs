@@ -30,14 +30,6 @@ impl AgentSessionEngine {
             .expect("bash consumed sink lock") = Some(consumed);
     }
 
-    /// Fire the session's cell wake: a user message or inbox arrival ends a
-    /// running cell's wait early (the cell keeps running and auto-backgrounds;
-    /// its completion lands in the inbox). Requests with no live cell wait are
-    /// inert — a subscription only fires on requests after it armed.
-    pub(crate) fn fire_cell_wake(&self) {
-        self.cell_wake.request();
-    }
-
     /// Route one auto-backgrounded cell's completion into the worker's kernel
     /// notice seam (the same lane `bash.completed` rides: inbox when enabled,
     /// else a steering row). The notice composes the cell's WHOLE settled

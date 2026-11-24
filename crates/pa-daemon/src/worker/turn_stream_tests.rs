@@ -65,7 +65,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         core,
         input_pauses: crate::session_input_pause::InputPauseTable::new(),
         prompt_admissions: crate::prompt_admission::WorkerAdmissions::new(),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         idle_notify: Arc::new(Notify::new()),
         events: Arc::new(EventPump::new()),
         engine,

@@ -34,11 +34,6 @@ pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;
 /// inline (one model turn saved), while a long cell backgrounds promptly
 /// and the steer proceeds.
 pub const KERNEL_LEVEL_WAKE_SETTLE_MS: u64 = 250;
-/// How long a request write caught by a wake or the wait budget may stay
-/// blocked before the execution stops out-of-band: the write is the
-/// cannot-yield class (the kernel never received the frame, so a steer
-/// cannot detach it), and this ceiling bounds the failed handoff.
-pub const KERNEL_WRITE_CEILING_MS: u64 = 1_000;
 pub const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS: usize = 256;
 pub const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE: &str = "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
 /// The message when a new cell cannot start because a backgrounded cell is
@@ -274,19 +269,6 @@ pub struct BackgroundCellOutcome {
     pub cell_id: String,
     pub reason: DetachReason,
     pub result: ExecuteResult,
-}
-
-/// Why a captured execution was stopped out-of-band: the typed cause lets
-/// the forced stop report its real reason (an ignored user cancel names
-/// the kernel retirement) instead of a bare abort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionStopCause {
-    /// A user cancel: the run's abort or the session's abort path.
-    UserCancel,
-    /// The write ceiling: a wake or the wait budget fired while the
-    /// request frame was still unwritten, and the blocked write did not
-    /// finish within the ceiling.
-    WriteCeiling,
 }
 
 /// The session's count of detached cells whose terminal outcome is not yet

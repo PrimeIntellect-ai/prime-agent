@@ -17,7 +17,7 @@ pub(super) struct TurnRunner {
     /// The prompt-admission registry: an admitted prompt clears when its
     /// turn settles.
     pub(super) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
-    pub(super) work_notify: Arc<Notify>,
+    pub(super) work_notify: Arc<super::WorkNotify>,
     pub(super) idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
     pub(super) engine: std::sync::Arc<dyn SessionEngine>,

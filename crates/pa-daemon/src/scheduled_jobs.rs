@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::oneshot;
 
 use pa_core::cron::scheduler::{AgentCronScheduler, AgentCronSchedulerHooks};
 use pa_core::cron::store::{
@@ -49,7 +49,7 @@ struct InboxSeam {
 /// The scheduler hooks: how a claimed job reaches this session.
 pub(crate) struct QueueHooks {
     core: Arc<Mutex<SessionCore>>,
-    work_notify: Arc<Notify>,
+    work_notify: Arc<crate::worker::WorkNotify>,
     user_bash: Arc<crate::user_bash::UserBash>,
     store: Arc<AgentCronJobStore>,
     /// The worker recovery journal (the fire checkpoint's busy evidence).
@@ -130,7 +130,7 @@ impl QueueHooks {
         let inbox = engine.inbox()?;
         let closed_engine = Arc::clone(&engine);
         let closed = move || closed_engine.session_is_closed();
-        let (admitted, lane) = {
+        let admitted = {
             let mut core = self
                 .core
                 .lock()
@@ -176,7 +176,7 @@ impl QueueHooks {
                 Lane::Steering
             };
             // A fired heartbeat is a scheduled turn: it wakes at once.
-            let admitted = admit_inbox_notice_locked(
+            admit_inbox_notice_locked(
                 &mut core,
                 &inbox,
                 &seam.arrivals,
@@ -185,8 +185,7 @@ impl QueueHooks {
                 lane,
                 closed,
                 Some(engine.as_ref()),
-            );
-            (admitted, lane)
+            )
         };
         admitted.ok()?;
         crate::worker::checkpoint_queue_recovery(
@@ -197,11 +196,6 @@ impl QueueHooks {
             },
         );
         self.work_notify.notify_one();
-        // A steering fire ends a running cell's wait early, like any other
-        // steering arrival.
-        if lane == Lane::Steering {
-            engine.fire_cell_wake();
-        }
         let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
         Some(RoutedFire::Ran)
     }
@@ -361,7 +355,7 @@ pub(crate) struct ScheduledJobs {
 impl ScheduledJobs {
     pub(crate) fn new(
         core: Arc<Mutex<SessionCore>>,
-        work_notify: Arc<Notify>,
+        work_notify: Arc<crate::worker::WorkNotify>,
         user_bash: Arc<crate::user_bash::UserBash>,
         events: Arc<crate::worker::EventPump>,
         recovery: Arc<Mutex<Option<crate::journal::WorkerRecoveryJournal>>>,

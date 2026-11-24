@@ -280,17 +280,6 @@ impl IpythonKernelProvisioner {
                 .map_or(0, |manager| manager.background_bash_handle_count())
     }
 
-    /// The session's live background `bash()` handles alone: the kernel
-    /// term of the daemon's shell count, which holds continuations next to
-    /// the aggregate and alone arms the goal skip wake. A detached cell's
-    /// terminal notice is the guaranteed retry, so only a shell arms the
-    /// marker turn.
-    #[must_use]
-    pub fn background_bash_handle_count(&self) -> usize {
-        self.manager()
-            .map_or(0, |manager| manager.background_bash_handle_count())
-    }
-
     /// The Python skills pre-imported at kernel bootstrap.
     #[cfg(test)]
     #[must_use]
