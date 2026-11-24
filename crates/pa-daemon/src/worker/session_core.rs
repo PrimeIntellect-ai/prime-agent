@@ -103,10 +103,6 @@ pub(crate) struct SessionCore {
     /// (`preparing` at pickup, `committing` at the first row, `running` at the
     /// first assistant frame) and clears it once the turn settles.
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
-    /// The earliest instant the queued inbox arrival row may start a turn on
-    /// an idle session (the success hold or the debounce, see
-    /// `inbox_router::wake_delay`); cleared when the row delivers.
-    pub(crate) inbox_wake_due: Option<tokio::time::Instant>,
     /// The inbox items the picked arrival row shows: its accepted
     /// transcript row withdraws them, so a turn that never accepts the row
     /// leaves them waiting.
@@ -132,25 +128,19 @@ impl SessionCore {
         input_pauses.paused() || self.queued_input_suspended || self.compacting
     }
 
-    /// The instant the turn runner waits for instead of taking queued work:
-    /// `Some` only while the inbox arrival row is the only queued item (in
-    /// either lane), its due time is still ahead, and the last run ended on
-    /// its own. Any other
-    /// queued work starts a turn the row joins, and a run cut at a tool
-    /// boundary continues at once with the row that cut it.
-    pub(crate) fn inbox_wake_hold(
-        &self,
-        now: tokio::time::Instant,
-    ) -> Option<tokio::time::Instant> {
+    /// Whether the turn runner may hold the queued inbox arrival row instead
+    /// of taking it: only while that row is the only queued item (in either
+    /// lane) and the last run ended on its own. Any other queued work starts
+    /// a turn the row joins, and a run cut at a tool boundary continues at
+    /// once with the row that cut it. The row's batch and the session's
+    /// background work decide the rest (`TurnRunner::inbox_row_held`).
+    pub(crate) fn inbox_row_holdable(&self) -> bool {
         let mut queued = self.steering.iter().chain(self.follow_up.iter());
         let only_the_arrival_row = matches!(
             (queued.next(), queued.next()),
             (Some(item), None) if item.queue_key.as_deref() == Some(super::INBOX_ARRIVAL_QUEUE_KEY)
         );
-        if !only_the_arrival_row || self.run_cut_at_tool_boundary {
-            return None;
-        }
-        self.inbox_wake_due.filter(|due| *due > now)
+        only_the_arrival_row && !self.run_cut_at_tool_boundary
     }
 
     /// A created session core for command modules' unit tests (the private
@@ -200,7 +190,6 @@ impl SessionCore {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
-            inbox_wake_due: None,
             inbox_shown_unaccepted: std::collections::BTreeSet::new(),
             run_cut_at_tool_boundary: false,
         }

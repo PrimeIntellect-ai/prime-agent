@@ -139,6 +139,7 @@ impl AgentSessionEngine {
             kernel_notice_sink: std::sync::Mutex::new(None),
             cell_wake: std::sync::Arc::new(pa_core::kernel::cell_wake::CellWake::new()),
             bash_consumed_sink: std::sync::Mutex::new(None),
+            background_work_settled_sink: std::sync::Mutex::new(None),
             inbox: std::sync::Mutex::new(None),
             inbox_read_hook: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
@@ -1149,8 +1150,14 @@ impl AgentSessionEngine {
             .expect("progress note emit lock")
             .clone();
         // The kernel's last live background `bash()` handle settling
-        // (or a mid-run teardown) retries the owed continuations. No
-        // registered arc wires nothing.
+        // (or a mid-run teardown) retries the owed continuations and wakes
+        // the worker's turn runner for a held wake row. No registered arc
+        // wires nothing.
+        let settled_sink = self
+            .background_work_settled_sink
+            .lock()
+            .expect("background work settled sink lock")
+            .clone();
         let on_background_work_settled = self
             .self_weak
             .lock()
@@ -1161,6 +1168,9 @@ impl AgentSessionEngine {
                     if let Some(engine) = weak.upgrade() {
                         engine.retry_owed_goal_continuation();
                         engine.retry_owed_autonomous_continuation();
+                    }
+                    if let Some(sink) = &settled_sink {
+                        sink();
                     }
                 }) as pa_core::kernel::shared::BackgroundWorkSettledCallback
             });

@@ -9,6 +9,7 @@ use super::{
     WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
+use super::inbox_router::only_successes;
 use std::sync::{Arc, Mutex};
 
 pub(super) struct TurnRunner {
@@ -49,14 +50,17 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
-            // The live inbox store, fetched before the core lock (its slot
-            // has its own mutex): a picked arrival row consumes from it.
-            let inbox = self
+            // The live inbox store and the background-work count, read
+            // before the core lock (each has its own lock): a picked arrival
+            // row consumes from the store, and the count decides its hold.
+            let agent_engine = self
                 .inbox_engine
                 .as_ref()
-                .and_then(std::sync::Weak::upgrade)
-                .and_then(|engine| engine.inbox());
-            let mut inbox_hold = None;
+                .and_then(std::sync::Weak::upgrade);
+            let inbox = agent_engine.as_ref().and_then(|engine| engine.inbox());
+            let background_work = agent_engine
+                .as_ref()
+                .is_some_and(|engine| engine.background_work_count() > 0);
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
@@ -68,12 +72,10 @@ impl TurnRunner {
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
-                if core.queued_input_parked(&self.input_pauses) {
+                if core.queued_input_parked(&self.input_pauses)
+                    || (background_work && self.inbox_row_held(&core))
+                {
                     core.busy = false;
-                    None
-                } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
-                    core.busy = false;
-                    inbox_hold = Some(due);
                     None
                 } else if core.steering.front().is_some() {
                     Some((
@@ -128,16 +130,6 @@ impl TurnRunner {
                 // refinement is still parked.
                 self.apply_parked_refine_replies().await;
                 self.idle_notify.notify_waiters();
-                // A held inbox row (`SessionCore::inbox_wake_hold`) is not
-                // idle: no activity stamp, no kernel release. It wakes the
-                // runner at its due time; any queued work wakes it sooner.
-                if let Some(due) = inbox_hold {
-                    tokio::select! {
-                        () = self.work_notify.notified() => {}
-                        () = tokio::time::sleep_until(due) => {}
-                    }
-                    continue;
-                }
                 // Every park re-stamps the activity end: the idle-eviction
                 // window measures from the TRUE last activity.
                 {
@@ -192,6 +184,16 @@ impl TurnRunner {
                 );
             }
         }
+    }
+
+    /// Whether the queued inbox arrival row waits while background work
+    /// runs (the caller checks the work): it covers only successful bash
+    /// completions. The work's settle wakes the runner
+    /// (`on_background_work_settled`), and any other queued work takes the
+    /// row with it. A held row parks like idle: the live work already keeps
+    /// the kernel and the worker resident.
+    fn inbox_row_held(&self, core: &SessionCore) -> bool {
+        core.inbox_row_holdable() && only_successes(&self.inbox_arrivals.lock().unwrap())
     }
 
     /// Take the next delivery from `lane` and mark the session busy with

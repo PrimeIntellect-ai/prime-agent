@@ -227,7 +227,7 @@ impl AgentSessionEngine {
     /// terminal admission plus live `bash()` handles in the kernel
     /// registry. The one answer to "is background work running": the goal
     /// and autonomous continuation gates, the fallback wake's arming, the
-    /// passivation gates, the supervisor-lost gate, and ACP's
+    /// inbox wake row's hold, the passivation gates, the supervisor-lost gate, and ACP's
     /// `outstandingBackgroundJobs` read it. The probe reads the session
     /// provisioner without the session mutex (the consult can run inside a
     /// compaction turn, which holds it). An unbuilt session answers `0`.
