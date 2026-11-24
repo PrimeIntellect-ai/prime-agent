@@ -299,11 +299,14 @@ mod tests {
                 agent_message: None,
                 queue_key: None,
                 admission_id: None,
+                client_admission_id: None,
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
                 policy: crate::worker::TurnPolicy::Queued,
                 forced_batch: false,
+                kernel_notice: false,
+                delivery_scoped: false,
             });
         }
         // Clear a create-time permit so acquisition must wake this waiter.

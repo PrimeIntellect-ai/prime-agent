@@ -1238,6 +1238,39 @@ const UPDATE_EVENTS: &[EventRule] = &[
     },
 ];
 
+/// `a2a request served` (v2): the A2A server mode's adoption event, one
+/// per served JSON-RPC request. The method vocabulary is the served
+/// A2A surface; the outcome is the wire verdict.
+const A2A_REQUEST_SERVED: EventRule = EventRule {
+    name: "a2a request served",
+    since: 2,
+    properties: &[
+        (
+            "method",
+            required(enum_rule(
+                &[
+                    "SendMessage",
+                    "SendStreamingMessage",
+                    "GetTask",
+                    "ListTasks",
+                    "CancelTask",
+                    "SubscribeToTask",
+                    "CreateTaskPushNotificationConfig",
+                    "GetTaskPushNotificationConfig",
+                    "ListTaskPushNotificationConfigs",
+                    "DeleteTaskPushNotificationConfig",
+                    "GetExtendedAgentCard",
+                ],
+                "unknown",
+            )),
+        ),
+        (
+            "outcome",
+            required(enum_rule(&["ok", "error", "stream"], "error")),
+        ),
+    ],
+};
+
 const HARNESS_REFINEMENTS_CHANGED: EventRule = EventRule {
     name: "harness refinements changed",
     since: 2,
@@ -1275,6 +1308,7 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &SESSION_ARCHIVED,
         &TUI_EXIT,
         &TUI_IPYTHON_BASH_RENDERED,
+        &A2A_REQUEST_SERVED,
     ];
     all.extend(UPDATE_EVENTS.iter());
     all
@@ -1393,6 +1427,8 @@ mod tests {
     /// Every property key matches the platform backend's key pattern
     /// (`^[a-zA-Z][a-zA-Z0-9_]*$`, at most 64 chars; a bad key drops the
     /// whole event there) and every event stays under its 128-key cap.
+    /// Event names stay lowercase words with spaces, underscores, and
+    /// digits (protocol names like a2a carry a digit).
     #[test]
     fn every_key_passes_the_backend_pattern() {
         for rule in catalog() {
@@ -1412,10 +1448,15 @@ mod tests {
                 );
             }
             assert!(
-                rule.name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c == ' ' || c == '_'),
+                rule.name.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == ' ' || c == '_'
+                }),
                 "{}",
+                rule.name
+            );
+            assert!(
+                !rule.name.starts_with(|c: char| c.is_ascii_digit()),
+                "{} starts with a digit",
                 rule.name
             );
         }

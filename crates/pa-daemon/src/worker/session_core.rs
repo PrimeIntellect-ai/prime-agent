@@ -21,6 +21,30 @@ pub(crate) struct SessionCore {
     pub(crate) busy: bool,
     pub(crate) created: bool,
     pub(crate) attached_client_ids: Vec<String>,
+    /// The running turn's client admission ids (the delivery's own
+    /// identity): set at the batch pickup beside
+    /// [`SessionCore::running_admission_ids`], read by the engine's
+    /// continuation mint so a minted goal/autonomous row carries the
+    /// owning delivery's client id — an identity-scoped withdrawal of
+    /// that id then stops the session's own continuation work.
+    pub(crate) running_client_admissions: Vec<String>,
+    /// The running turn's wire admission ids (the supervisor-assigned
+    /// halves, or the worker-minted id of
+    /// [`crate::worker::queue::running_wire_admissions`]): set at the
+    /// batch pickup beside
+    /// [`SessionCore::running_client_admissions`], read by the
+    /// continuation mint as the IDENTITY FALLBACK — a plain daemon
+    /// prompt carries no client id AND the supervisor assigns it no
+    /// wire id, so the pickup mints one and the continuation its turn
+    /// mints carries that instead of no identity at all, so an event
+    /// consumer can tell it from the session's own work.
+    pub(crate) running_wire_admissions: Vec<String>,
+    /// Whether the running batch is a delivery-scoped delivery (the A2A
+    /// prompt's `deliveryScoped` flag): the child registry stamps only
+    /// such a delivery's children, so a plain client's child notices
+    /// keep main's inbox routing while a task's notices stay the
+    /// delivery's own continuation.
+    pub(crate) running_delivery_scoped: bool,
     pub(crate) abort_requested: bool,
     /// Explicit cancellation of this picked delivery; graceful shutdown is excluded.
     pub(crate) turn_cancelled: bool,
@@ -41,6 +65,26 @@ pub(crate) struct SessionCore {
     /// sequence under, and seeded from the session file when a worker opens
     /// it, so a revived session never resets the count.
     pub(crate) tool_use_count: u64,
+    /// The kernel `bash()` launches the session observed, pid -> the
+    /// delivery identity whose turn ran at the launch (the worker's
+    /// launch observer records it), plus whether that batch was
+    /// delivery-scoped (the A2A task's `deliveryScoped` prompt): a
+    /// completion notice names only its pid and arrives long after the
+    /// creating turn, so the notice's admission resolves the creator
+    /// here. A scoped row's notice keeps the delivery's own route (its
+    /// continuation turn credits the task); every other notice keeps
+    /// main's inbox routing. Bounded FIFO — the OLDEST launch's binding
+    /// leaves at the bound, and the activity-end observation drops an
+    /// in-cell-consumed handle's binding; a worker restart loses the
+    /// table (a notice that lands after it arrives unstamped, the
+    /// session-owned class).
+    pub(crate) kernel_bash_creators: std::collections::VecDeque<(u32, String, bool)>,
+    /// The binding table's change wake (the worker's shared `Notify`):
+    /// fires when a launch's binding leaves — the in-cell consumption's
+    /// activity end, or the completion notice's admission consuming its
+    /// creator — so a barrier holding a delivery's own background bash
+    /// observes the table settle without polling.
+    pub(crate) kernel_bash_activity: std::sync::Arc<tokio::sync::Notify>,
     /// Admission ids belonging to the current in-flight turn. The queue
     /// handoff and owned cancellation both inspect this under the core lock.
     pub(crate) running_admission_ids: std::collections::HashSet<String>,
@@ -171,6 +215,9 @@ impl SessionCore {
             busy: false,
             created: true,
             attached_client_ids: Vec::new(),
+            running_client_admissions: Vec::new(),
+            running_wire_admissions: Vec::new(),
+            running_delivery_scoped: false,
             abort_requested: false,
             turn_cancelled: false,
             turn_completed: false,
@@ -180,6 +227,8 @@ impl SessionCore {
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
+            kernel_bash_creators: std::collections::VecDeque::new(),
+            kernel_bash_activity: std::sync::Arc::new(tokio::sync::Notify::new()),
             tool_use_count: 0,
             auto_compaction_enabled: true,
             last_action_snapshot: Some(SessionActionSnapshot::default()),

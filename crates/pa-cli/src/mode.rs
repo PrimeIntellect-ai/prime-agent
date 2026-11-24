@@ -12,6 +12,7 @@ pub enum AppMode {
     Json,
     Rpc,
     Acp,
+    A2a,
     Daemon,
 }
 
@@ -24,6 +25,7 @@ impl AppMode {
             Some(Mode::Daemon) => AppMode::Daemon,
             Some(Mode::Rpc) => AppMode::Rpc,
             Some(Mode::Acp) => AppMode::Acp,
+            Some(Mode::A2a) => AppMode::A2a,
             Some(Mode::Json) => AppMode::Json,
             _ => {
                 if parsed.print || !stdin_is_tty {
@@ -43,6 +45,7 @@ impl AppMode {
             AppMode::Json => "json",
             AppMode::Rpc => "rpc",
             AppMode::Acp => "acp",
+            AppMode::A2a => "a2a",
             AppMode::Daemon => "daemon",
         }
     }
@@ -116,6 +119,11 @@ pub struct RunOptions {
     pub messages: Vec<String>,
     pub file_args: Vec<String>,
     pub daemon_socket: Option<String>,
+    /// The A2A server mode's bind flags (the token comes from the
+    /// `PRIME_AGENT_A2A_TOKEN` environment variable or the
+    /// `a2a.token` setting, never from a flag).
+    pub a2a_host: Option<String>,
+    pub a2a_port: Option<u16>,
     pub list_models: Option<Option<String>>,
     /// The combined first prompt (stdin + @file text + first message).
     pub initial_message: Option<String>,

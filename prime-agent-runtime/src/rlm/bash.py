@@ -1391,6 +1391,7 @@ def bash(
             _BASH_COMMAND_MIME: {
                 "command": _capped(command),
                 "lines": sum(1 for line in command.splitlines() if line.strip()),
+                "pid": handle._pid,
             }
         }
     )

@@ -12,6 +12,20 @@ use super::{
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 
+/// One `session_event` payload with the run-anchor members removed from
+/// its `event` object (the bare `agent_start` every shared client
+/// reads; the member list lives with the worker's frame emission, see
+/// [`crate::worker::RUN_ANCHOR_MEMBERS`]).
+fn strip_run_anchor_members(payload: &Value) -> Value {
+    let mut bare = payload.clone();
+    if let Some(event) = bare.get_mut("event").and_then(Value::as_object_mut) {
+        for member in crate::worker::RUN_ANCHOR_MEMBERS {
+            event.remove(member);
+        }
+    }
+    bare
+}
+
 /// The immutable cleanup identity of one worker process lifetime.
 #[derive(Clone, Debug)]
 pub(super) struct OrphanGeneration {
@@ -839,6 +853,33 @@ impl Supervisor {
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
+                        // The run-anchor attribution (the worker tags an
+                        // `agent_start` with its delivery's identity — the
+                        // admission ids and the engine-continuation source)
+                        // never rides the shared broadcast: every client but
+                        // the A2A link reads the bare frame — byte-identical
+                        // to the TS wire — and the A2A link's own
+                        // connection alone receives the tagged copy (the one
+                        // consumer the attribution exists for; a Rust-only
+                        // daemon extension, no TS client sends the tagged
+                        // copy). The worker's own direct session-client
+                        // fan-out strips the same members (see
+                        // `worker::bare_agent_start_payload`), so the
+                        // attribution leaves this relay on no other path.
+                        let bare_agent_start = payload
+                            .get("event")
+                            .is_some_and(crate::worker::agent_start_carries_run_anchor)
+                            .then(|| strip_run_anchor_members(&payload));
+                        if let Some(bare) = bare_agent_start {
+                            if let Some(active_session_id) = &active_session_id {
+                                reader_supervisor.publish_session_event_attributed(
+                                    active_session_id,
+                                    &std::sync::Arc::new(bare),
+                                    &std::sync::Arc::new(payload),
+                                );
+                            }
+                            continue;
+                        }
                         // The abort supervision rides the forwarded events: `compaction_start`
                         // arms the token, a settled `compaction_end` clears it; only live
                         // frames drive it.
@@ -1120,5 +1161,46 @@ mod tests {
             Some(&Some(std::ffi::OsStr::new("1"))),
             "the internal identity still rides"
         );
+    }
+
+    /// The run-anchor attribution never rides the shared broadcast: a
+    /// tagged `agent_start` loses exactly its three run-anchor members
+    /// (the wire admission id, the client admission id, and the
+    /// engine-continuation flag) and keeps every other member — the
+    /// frame every non-A2A client reads stays byte-identical to the
+    /// TS wire, and the A2A link's own attributed copy carries the
+    /// tags (see the subscribers pin).
+    #[test]
+    fn the_shared_broadcast_strips_the_run_anchor_members() {
+        let tagged = json!({
+            "type": "session_event",
+            "activeSessionId": "s-1",
+            "event": {
+                "type": "agent_start",
+                "admissionId": "supervisor-admission:wire-1",
+                "clientAdmissionId": "task-1",
+                "engineContinuation": false,
+            },
+        });
+        let bare = strip_run_anchor_members(&tagged);
+        let event = bare.get("event").expect("the event survives");
+        assert_eq!(
+            event,
+            &json!({ "type": "agent_start" }),
+            "the shared agent_start is the bare TS frame: {bare:?}"
+        );
+        assert_eq!(
+            bare.get("activeSessionId"),
+            Some(&json!("s-1")),
+            "the payload's own members survive: {bare:?}"
+        );
+        // A frame that carries no anchor members passes through
+        // unchanged (never every agent_start rewritten).
+        let plain = json!({
+            "type": "session_event",
+            "activeSessionId": "s-1",
+            "event": { "type": "turn_start" },
+        });
+        assert_eq!(strip_run_anchor_members(&plain), plain);
     }
 }

@@ -180,11 +180,14 @@ async fn a_success_landing_in_a_turn_joins_it_or_is_held_after_it() {
         agent_message: None,
         queue_key: None,
         admission_id: None,
+        client_admission_id: None,
         images: Vec::new(),
         done: None,
         queue_visible: true,
         policy: TurnPolicy::Queued,
         forced_batch: false,
+        kernel_notice: false,
+        delivery_scoped: false,
     });
     assert_eq!(hold(&worker), None);
 }
