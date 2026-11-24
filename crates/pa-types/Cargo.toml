@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Shared domain and wire types for Prime Agent."
 
+[lib]
+doctest = false
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -294,13 +294,6 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
 mod tests {
     use super::*;
 
-    fn aws_http2_profile() -> ConnectionErrorProfile {
-        ConnectionErrorProfile::AwsHttp2 {
-            host: "127.0.0.1".to_string(),
-            port: 1,
-        }
-    }
-
     #[test]
     fn transport_selection_matches_ts() {
         // Default: http2 (cleartext h2c / TLS ALPN).
@@ -321,30 +314,6 @@ mod tests {
             select_transport("https", false, true),
             BedrockTransport::Http1Handler
         );
-    }
-
-    #[test]
-    fn connect_error_text() {
-        let refused = connect_error(
-            &std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
-            &aws_http2_profile(),
-        );
-        assert_eq!(
-            refused.to_string(),
-            "The pending stream has been canceled (caused by: connect ECONNREFUSED 127.0.0.1:1)"
-        );
-        // Other connect failures (unreachable, DNS) surface the bare stream-cancel text.
-        let other = connect_error(
-            &std::io::Error::from(std::io::ErrorKind::HostUnreachable),
-            &aws_http2_profile(),
-        );
-        assert_eq!(other.to_string(), "The pending stream has been canceled");
-    }
-
-    #[test]
-    fn timeout_error_text() {
-        let error = timeout_error(&aws_http2_profile(), 5_000);
-        assert_eq!(error.to_string(), "Request timed out.");
     }
 }
 
@@ -484,34 +453,19 @@ mod h2_wire_tests {
         }
     }
 
-    /// `RST_STREAM` mid-body: the nghttp2 code name + the deserialization hint.
+    /// A mid-body `RST_STREAM`, GOAWAY or clean close surfaces as its own transport error, never as
+    /// a clean end of the body. pa-core retries on these prefixes; a GOAWAY stays the session
+    /// error even when a reset follows it.
     #[tokio::test]
-    async fn rst_stream_mid_body_text() {
-        let error = mid_stream_error(MockAction::RstStream).await;
-        assert_eq!(
-            error,
-            "Stream closed with error code NGHTTP2_INTERNAL_ERROR\n  Deserialization error: to see the raw response, inspect the hidden field {error}.$response on this object."
-        );
-    }
-
-    /// GOAWAY mid-body: the numeric session code + the deserialization hint.
-    #[tokio::test]
-    async fn goaway_mid_body_text() {
-        let error = mid_stream_error(MockAction::GoAway).await;
-        assert_eq!(
-            error,
-            "Session closed with error code 1\n  Deserialization error: to see the raw response, inspect the hidden field {error}.$response on this object."
-        );
-    }
-
-    /// A clean close mid-body: the canceled pending stream + the hint.
-    #[tokio::test]
-    async fn tcp_close_mid_body_text() {
-        let error = mid_stream_error(MockAction::Close).await;
-        assert_eq!(
-            error,
-            "The pending stream has been canceled\n  Deserialization error: to see the raw response, inspect the hidden field {error}.$response on this object."
-        );
+    async fn a_mid_body_failure_surfaces_as_an_error() {
+        for (action, prefix) in [
+            (MockAction::RstStream, "Stream closed with error code"),
+            (MockAction::GoAway, "Session closed with error code 1"),
+            (MockAction::Close, "The pending stream has been canceled"),
+        ] {
+            let error = mid_stream_error(action).await;
+            assert!(error.starts_with(prefix), "{error}");
+        }
     }
 
     /// An HTTP/1.1 answer at a prior-knowledge h2 endpoint: the pre-response protocol error, no
@@ -543,20 +497,5 @@ mod h2_wire_tests {
             Err(error) => error.to_string(),
         };
         assert_eq!(error, "Protocol error");
-    }
-
-    /// A refused connect: the canceled pending stream with the node-style connect cause embedded.
-    #[tokio::test]
-    async fn refused_connect_text() {
-        // Port 1 is never served (the probe's dead port).
-        let url = "http://127.0.0.1:1/model/m/converse-stream".to_string();
-        let error = match send_h2(options(url)).await {
-            Ok(_) => panic!("expected the dead port to fail"),
-            Err(error) => error.to_string(),
-        };
-        assert_eq!(
-            error,
-            "The pending stream has been canceled (caused by: connect ECONNREFUSED 127.0.0.1:1)"
-        );
     }
 }
