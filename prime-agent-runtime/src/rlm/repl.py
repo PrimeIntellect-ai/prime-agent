@@ -108,7 +108,10 @@ _mcp_status_tasks: "set[asyncio.Task[None]]" = set()
 _interrupt_lock = threading.Lock()
 _inflight: set[str] = set()
 _pending_interrupts: dict[str, Any] = {"ids": set(), "any": False}
-_sigint_target: str | None = None
+# Requests whose interrupt the SIGINT handler delivers. A set, not one slot:
+# the host stops every running cell at once, and SIGINTs sent before the
+# handler runs coalesce into one handler call.
+_sigint_targets: set[str] = set()
 _finishing_rid: str | None = None
 _handoff_interrupted: set[str] = set()
 # Execute handlers run as tasks so a new cell can start while a backgrounded
@@ -467,40 +470,42 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
 
 def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
-    target = _sigint_target
-    # No lock (the main thread may hold it): the lookup by target id drops a
-    # SIGINT delayed past its request's finish, so it cannot hit a later cell.
-    task = _active.get(target) if target is not None else None
-    if task is None or task.done():
-        if task is not None:
-            # Handoff: the task is done but _run_guarded's finally has not run
-            # yet, so the main thread may be inside loop internals where raising
-            # would kill the serve loop. Record it; the finishing phase consumes it.
-            _handoff_interrupted.add(target)
-            return
-        # Post-run repr/drain is synchronous main-thread work: raise into it.
-        # The equality revalidation drops a SIGINT delayed past the done send.
-        if target is not None and target == _finishing_rid:
-            raise KeyboardInterrupt
-        return
-    _interrupted.add(target)
     # Handler runs in the main (loop) thread: current_task is whose step the signal interrupted.
     running = asyncio.current_task(_loop) if _loop is not None else None
-    if running is task:
-        # The active request's own step (sync bytecode or an EINTR-woken syscall): raise into it.
-        raise KeyboardInterrupt
-    # Loop idle in select() or another task mid-step: cancel the active task (same thread, safe).
-    task.cancel()
-    if (
-        running is not None
-        and running is not _serve_task
-        and running not in _cell_tasks
-        and running not in _active.values()
-    ):
-        # A background task blocked in sync code occupies the only thread and would keep the
-        # cancel from ever running: raise into it to unwind its step; it dies with the KI.
-        # Another cell's body is never such a task: the cancel runs when that cell yields.
-        running.add_done_callback(_consume_task_exception)
+    raise_now = False
+    # No lock (the main thread may hold it): the lookup by target id drops a
+    # SIGINT delayed past its request's finish, so it cannot hit a later cell.
+    for target in tuple(_sigint_targets):
+        task = _active.get(target)
+        if task is None or task.done():
+            if task is not None:
+                # Handoff: the task is done but _run_guarded's finally has not run
+                # yet, so the main thread may be inside loop internals where raising
+                # would kill the serve loop. Record it; the finishing phase consumes it.
+                _handoff_interrupted.add(target)
+            elif target == _finishing_rid:
+                # Post-run repr/drain is synchronous main-thread work: raise into it.
+                raise_now = True
+            continue
+        _interrupted.add(target)
+        if running is task:
+            # The active request's own step (sync bytecode or an EINTR-woken syscall): raise into it.
+            raise_now = True
+            continue
+        # Loop idle in select() or another task mid-step: cancel the active task (same thread, safe).
+        task.cancel()
+        if (
+            running is not None
+            and running is not _serve_task
+            and running not in _cell_tasks
+            and running not in _active.values()
+        ):
+            # A background task blocked in sync code occupies the only thread and would keep the
+            # cancel from ever running: raise into it to unwind its step; it dies with the KI.
+            # Another cell's body is never such a task: the cancel runs when that cell yields.
+            running.add_done_callback(_consume_task_exception)
+            raise_now = True
+    if raise_now:
         raise KeyboardInterrupt
 
 
@@ -513,7 +518,6 @@ def _request_interrupt(target: str | None) -> None:
     is still interrupted (never parked: parking would hit the NEXT request).
     Interrupts for finished or unknown requests are dropped.
     """
-    global _sigint_target
     with _interrupt_lock:
         rid = next(reversed(_active), None) if target is None else target
         task = _active.get(rid) if rid is not None else None
@@ -521,9 +525,9 @@ def _request_interrupt(target: str | None) -> None:
             # Active, or in the done-task handoff before _run_guarded's finally:
             # either way the rid still owns the interrupt (parking here would
             # leak it onto the next request); the handler decides delivery.
-            _sigint_target = rid
+            _sigint_targets.add(rid)
         elif _finishing_rid is not None and (target is None or target == _finishing_rid):
-            _sigint_target = _finishing_rid
+            _sigint_targets.add(_finishing_rid)
         elif target is not None:
             if target in _inflight:
                 _pending_interrupts["ids"].add(target)
@@ -571,17 +575,16 @@ def _consume_handoff_interrupt(rid: str) -> bool:
 
 def _finish_locked(rid: str) -> None:
     """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
-    global _finishing_rid, _sigint_target
+    global _finishing_rid
     if _finishing_rid == rid:
         _finishing_rid = None
     # An unconsumed handoff interrupt dies with its request (state requests
     # have no cancellable post-run work); it must never hit the next request.
     _handoff_interrupted.discard(rid)
     _interrupted.discard(rid)
-    if _sigint_target == rid:
-        # The target dies with its request: a later request reusing this id must
-        # not match a stale target when a delayed/external SIGINT arrives.
-        _sigint_target = None
+    # The target dies with its request: a later request reusing this id must
+    # not match a stale target when a delayed/external SIGINT arrives.
+    _sigint_targets.discard(rid)
     _inflight.discard(rid)
     _pending_interrupts["ids"].discard(rid)
     if not _inflight:

@@ -2252,7 +2252,7 @@ class FinishRequestTest(unittest.TestCase):
         self.repl_module._pending_interrupts["any"] = False
         self.repl_module._finishing_rid = None
         self.repl_module._handoff_interrupted.clear()
-        self.repl_module._sigint_target = None
+        self.repl_module._sigint_targets.clear()
         self.repl_module._active.clear()
         self.repl_module._interrupted.clear()
 
@@ -2276,6 +2276,32 @@ class FinishRequestTest(unittest.TestCase):
             return errors
 
         self.assertEqual(asyncio.run(main()), [])
+
+    @unittest.skipUnless(hasattr(signal, "pthread_kill"), "the SIGINT delivery path needs pthread_kill")
+    def test_two_interrupts_before_the_handler_runs_cancel_both_cells(self):
+        # The host stops every running cell at once. SIGINTs sent before the
+        # main thread runs the handler coalesce into one handler call, which
+        # must still cancel each targeted cell.
+        repl = self.repl_module
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+
+        async def main() -> list[object]:
+            loop = asyncio.get_running_loop()
+            repl._loop = loop
+            cells = {rid: loop.create_task(asyncio.sleep(30)) for rid in ("a", "b")}
+            repl._inflight.update(cells)
+            repl._active.update(cells)
+            # No signal is sent: the one handler call below stands in for both.
+            with mock.patch.object(signal, "pthread_kill", lambda *_: None):
+                repl._request_interrupt("a")
+                repl._request_interrupt("b")
+            loop.call_soon(repl._sigint_handler, signal.SIGINT, None)
+            return await asyncio.wait_for(asyncio.gather(*cells.values(), return_exceptions=True), 2)
+
+        outcomes = asyncio.run(main())
+        self.assertTrue(all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes), outcomes)
+        self.assertEqual(repl._interrupted, {"a", "b"})
 
     def test_parked_any_survives_while_another_request_is_inflight(self):
         repl = self.repl_module
@@ -2328,9 +2354,9 @@ class FinishRequestTest(unittest.TestCase):
         async def run_guarded_then_sigint(task, rid):
             outcome = await real_run_guarded(task, rid)
             with repl._interrupt_lock:
-                repl._sigint_target = rid
+                repl._sigint_targets.add(rid)
             # Synchronous SIGINT in the post-run window: the handler sees
-            # _sigint_target == _finishing_rid and raises right here.
+            # the target is _finishing_rid and raises right here.
             signal.raise_signal(signal.SIGINT)
             return outcome
 
@@ -2412,7 +2438,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(dict(ns), {"a": 1, "b": 2})
         done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
         self.assertEqual(done_next["status"], "ok")
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertFalse(repl._pending_interrupts["ids"])
 
@@ -2448,7 +2474,7 @@ class FinishRequestTest(unittest.TestCase):
 
         def restore_then_interrupt(*args, **kwargs):
             result = real_restore(*args, **kwargs)
-            repl._sigint_target = "restore"
+            repl._sigint_targets.add("restore")
             repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
             return result
 
@@ -2477,7 +2503,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(ns, {"a": 1, "b": 2})
         done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
         self.assertEqual(done_next["status"], "ok")
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertFalse(repl._pending_interrupts["ids"])
 
@@ -2534,7 +2560,7 @@ class FinishRequestTest(unittest.TestCase):
 
         def snapshot_then_interrupt(*args, **kwargs):
             result = real_snapshot(*args, **kwargs)
-            repl._sigint_target = "snap"
+            repl._sigint_targets.add("snap")
             repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
             return result
 
@@ -2563,7 +2589,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(done["saved"], ["small"])
         self.assertEqual(done["pruned"], ["big"])
         self.assertEqual(ns, {"small": 1})
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
 
     def test_untargeted_interrupt_in_done_task_handoff_is_not_parked(self):
         # The cell task is done but _run_guarded's finally has not run yet
@@ -2589,7 +2615,7 @@ class FinishRequestTest(unittest.TestCase):
         deadline = time.monotonic() + 5
         while not repl._handoff_interrupted and time.monotonic() < deadline:
             time.sleep(0.01)
-        self.assertEqual(repl._sigint_target, "handoff")
+        self.assertEqual(repl._sigint_targets, {"handoff"})
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertTrue(repl._consume_handoff_interrupt("handoff"))
         self.assertFalse(repl._handoff_interrupted)
