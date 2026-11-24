@@ -177,6 +177,12 @@ pub(crate) fn block_diagram(
     overlay: Option<&DiagramOverlay>,
 ) -> BlockDiagram {
     let n = states.len();
+    if n == 0 {
+        return BlockDiagram {
+            lines: Vec::new(),
+            node_rows: Vec::new(),
+        };
+    }
     let index_of = |id: &str| states.iter().position(|state| state.id == id);
     // Each state's live overlay row count (the nested children grow the
     // layer band below the box; the box itself never moves).
