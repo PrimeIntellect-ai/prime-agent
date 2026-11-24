@@ -5,9 +5,13 @@
 //! truth; [`registry`] is a private cache. A bot always runs this binary's
 //! exact version ([`version`]).
 
+pub mod credentials;
+pub mod exec_stream;
+pub mod link;
 pub mod manager;
 pub mod platform;
 pub mod registry;
+pub mod relay;
 pub mod version;
 
 #[cfg(test)]
@@ -98,7 +102,7 @@ pub fn manager_for(agent_dir: &Path) -> Result<Arc<BotManager>> {
             allow_insecure_localhost: false,
         },
     )?;
-    let platform = Arc::new(platform::PrimePlatform::new(client));
+    let platform = Arc::new(platform::PrimePlatform::new(client, agent_dir));
     let manager = Arc::new(BotManager::new(agent_dir, platform)?);
     Ok(Arc::clone(MANAGER.get_or_init(|| manager)))
 }

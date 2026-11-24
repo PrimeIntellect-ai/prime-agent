@@ -2,6 +2,7 @@
 //! Prime Sandboxes client; tests drive the manager through a fake.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,11 +10,14 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use pa_sandbox::{
     CommandSessionClient, CommandSessionErrorCode, CommandSessionEvent, CommandSessionOptions,
-    CommandSpec, InputChannel, OutputChannel, PlatformGatewayAuthSource, PrimeSandboxClient,
-    SandboxError, SandboxErrorCode, SandboxStatus, SendInputOptions, StartOptions, StartRequest,
-    StreamOptions, VmCreateRequest, MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
+    CommandSpec, HeaderRule, InputChannel, OutputChannel, PlatformGatewayAuthSource,
+    PrimeSandboxClient, SandboxError, SandboxErrorCode, SandboxStatus, SendInputOptions,
+    SendSignalOptions, StartOptions, StartRequest, StreamOptions, VmCreateRequest, VmSignal,
+    MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
+use super::credentials;
+use super::exec_stream::{spawn_exec_halves, ExecStreamHalves, SandboxAuthSource};
 use super::BotStatus;
 
 /// The parts of a sandbox the manager reads.
@@ -37,6 +41,17 @@ pub struct BotCreate {
     pub idempotency_key: String,
     /// Restore the disk from this checkpoint instead of booting the image.
     pub checkpoint_id: Option<String>,
+    /// Header rules that put the provider keys on the guest's API requests.
+    pub network_rules: BTreeMap<String, HeaderRule>,
+}
+
+/// What a guest needs to call its model provider without holding a key.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GuestCredentials {
+    /// The sandbox's header rules (set at create).
+    pub network_rules: BTreeMap<String, HeaderRule>,
+    /// The guest's `auth.json`, holding placeholders for the injected keys.
+    pub auth_json: Option<serde_json::Value>,
 }
 
 /// One finished guest command.
@@ -97,6 +112,18 @@ pub trait BotPlatform: Send + Sync {
         env: &'a BTreeMap<String, String>,
         stdin: Option<&'a [u8]>,
     ) -> BoxFuture<'a, PlatformResult<ExecOutput>>;
+    /// Start `command` in the guest with its stdio as a byte stream; dropping
+    /// the write half ends the process.
+    fn open_stream<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        command: &'a CommandSpec,
+    ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>>;
+    /// The platform secrets and guest auth for a bot that runs `provider`.
+    fn credentials<'a>(
+        &'a self,
+        provider: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<GuestCredentials>>;
 }
 
 /// Map a sandbox status onto a bot status.
@@ -116,6 +143,8 @@ const BOT_MEMORY_GB: f64 = 4.0;
 const BOT_DISK_GB: f64 = 20.0;
 const CHECKPOINT_WAIT: Duration = Duration::from_mins(10);
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
+/// How long a streamed guest process may take to start.
+const STREAM_START_WAIT: Duration = Duration::from_secs(60);
 /// A bootstrap or install command gets this long before sandboxd kills it.
 const EXEC_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// The daemon stops waiting on a silent gateway this long after sandboxd's kill.
@@ -126,13 +155,16 @@ const MAX_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
 /// [`BotPlatform`] over the Prime Sandboxes REST client and the VM command session.
 pub struct PrimePlatform {
     client: Arc<PrimeSandboxClient>,
+    /// Where the provider keys to inject are stored.
+    agent_dir: PathBuf,
 }
 
 impl PrimePlatform {
     #[must_use]
-    pub fn new(client: PrimeSandboxClient) -> Self {
+    pub fn new(client: PrimeSandboxClient, agent_dir: &Path) -> Self {
         Self {
             client: Arc::new(client),
+            agent_dir: agent_dir.to_path_buf(),
         }
     }
 
@@ -311,7 +343,8 @@ impl BotPlatform for PrimePlatform {
                 idle_timeout_minutes: None,
                 environment_vars: None,
                 secrets: None,
-                network_rules: None,
+                network_rules: (!request.network_rules.is_empty())
+                    .then(|| request.network_rules.clone()),
                 labels: request.labels.clone(),
                 idempotency_key: Some(request.idempotency_key.clone()),
                 checkpoint_id: request.checkpoint_id.clone(),
@@ -456,6 +489,84 @@ impl BotPlatform for PrimePlatform {
                         "the gateway sent no command result in time".into(),
                     ))
                 })
+        }
+        .boxed()
+    }
+
+    fn open_stream<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        command: &'a CommandSpec,
+    ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>> {
+        async move {
+            let source = SandboxAuthSource::new(Arc::clone(&self.client), sandbox_id.to_string());
+            let session_uuid = uuid::Uuid::new_v4().to_string();
+            let request = StartRequest {
+                command: command.clone(),
+                pty: None,
+                stdin: true,
+                session_uuid: session_uuid.clone(),
+            };
+            let started = tokio::time::timeout(
+                STREAM_START_WAIT,
+                // The relay lives as long as the link: no process deadline.
+                // A silent reattach loses stdout, so a stream fault ends the link.
+                spawn_exec_halves(
+                    &source,
+                    &request,
+                    StartOptions {
+                        stream: StreamOptions {
+                            max_reconnects: Some(0),
+                            ..StreamOptions::default()
+                        },
+                        connect_timeout_ms: Some(0),
+                    },
+                ),
+            )
+            .await;
+            let error = match started {
+                Ok(Ok(halves)) => return Ok(halves),
+                Ok(Err(error)) => format!("{error:#}"),
+                Err(_) => "the guest process sent no start event in time".to_string(),
+            };
+            // The process may have started without its start event reaching
+            // us; do not leave it running.
+            if let Ok(client) = source.command_client() {
+                let _ = client
+                    .send_signal(
+                        &session_uuid,
+                        VmSignal::Terminate,
+                        SendSignalOptions::default(),
+                    )
+                    .await;
+            }
+            Err(PlatformError::Transient(error))
+        }
+        .boxed()
+    }
+
+    fn credentials<'a>(
+        &'a self,
+        provider: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
+        async move {
+            let provisioned = credentials::provision(&self.client, &self.agent_dir, provider).await;
+            let auth_json = provisioned.guest_auth();
+            let network_rules = provisioned.rules_for(provider).map_err(|error| {
+                let message = format!("{error:#}");
+                // A platform blip while confirming the secret is retried.
+                match error.downcast_ref::<SandboxError>().map(map_error) {
+                    Some(PlatformError::Transient(_)) => PlatformError::Transient(message),
+                    Some(PlatformError::Conflict(_)) => PlatformError::Conflict(message),
+                    Some(PlatformError::NotFound(_) | PlatformError::Other(_)) | None => {
+                        PlatformError::Other(message)
+                    }
+                }
+            })?;
+            Ok(GuestCredentials {
+                network_rules,
+                auth_json,
+            })
         }
         .boxed()
     }
