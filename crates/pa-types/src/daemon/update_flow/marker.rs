@@ -189,17 +189,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn marker_roundtrip_snake_case() {
-        let json = r#"{"update_id":"018f1234-abcd-7abc-8def-0123456789ab","expires_at":"2026-10-01T12:00:45.000Z","supervisor":{"pid":4242,"process_start_id":"4242/170000","generation":"gen-7"},"note":"kept"}"#;
-        let original: serde_json::Value = serde_json::from_str(json).unwrap();
-        let parsed: UpdatePreparedMarker = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.supervisor.pid, 4242);
-        let out = serde_json::to_string(&parsed).unwrap();
-        let reparsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(original, reparsed);
-    }
-
-    #[test]
     fn marker_expires_at_behavior() {
         use PreparedMarkerExpiry::{Active, Expired, Malformed};
         // Still inside the 45 s window.

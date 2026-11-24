@@ -94,7 +94,6 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -196,7 +195,6 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -282,7 +280,6 @@ fn a_turn_whose_emit_panics_leaves_no_listener_accounting_later_runs() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );

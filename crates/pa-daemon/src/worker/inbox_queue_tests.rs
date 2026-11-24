@@ -1174,7 +1174,6 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -1892,7 +1891,6 @@ async fn the_disabled_interval_reminder_never_admits_but_keeps_polling() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -1952,7 +1950,6 @@ async fn the_disabled_inbox_never_admits_a_reminder() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -2008,7 +2005,6 @@ async fn a_closed_session_keeps_the_reminder_polling_for_the_next_session() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -2071,7 +2067,6 @@ async fn an_interval_flip_to_zero_during_the_wait_never_admits() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -2127,7 +2122,6 @@ async fn a_retired_session_leaves_no_inbox_for_the_rebuild() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
