@@ -122,10 +122,10 @@ pub(crate) fn inbox_notice_summary_line(row: &InboxNoticeRow, theme: &Theme) -> 
     ]
 }
 
-/// The inbox-notice rows: a leading blank (spacing-driven), the summary
-/// header, then the notice text body ALWAYS visible (no expansion gate —
-/// the waiting count and the `rlm.inbox.read()` call-to-action never
-/// collapse away), the same `╰─`-guttered body the agent-message rows use.
+/// One inbox notice's expanded rows: a leading blank (spacing-driven), the
+/// summary header, then the notice text body, the same `╰─`-guttered body
+/// the agent-message rows use. Collapsed, a run of notices paints the one
+/// `inbox_counter` line instead.
 pub(crate) fn render_inbox_notice(
     row: &InboxNoticeRow,
     theme: &Theme,
@@ -486,9 +486,7 @@ mod tests {
                 format!(" \u{2709} Agent inbox \u{b7} {expected}")
             );
         }
-        // The body's always-visible shape is pinned by the mod.rs gutter
-        // table and the headless frame test (render_inbox_notice takes no
-        // detail gate).
+        // The expanded body's shape is pinned by the mod.rs gutter table.
     }
 
     /// The un-boxed panel's label and body carry their shared spans with no box background.

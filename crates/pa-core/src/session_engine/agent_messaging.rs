@@ -13,6 +13,10 @@ pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
 pub const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL: &str = "Agent message received";
 pub const AGENT_MESSAGE_SOURCE: &str = "agent_message";
 pub const AGENT_MESSAGE_ID_PREFIX: &str = "agentmsg_";
+/// The id prefix of the `rlm.spawn` task row (`spawn:<child id>`): the
+/// kickoff rides an agent-message row like any later delivery, and this
+/// id is what tells them apart.
+pub const SPAWN_KICKOFF_ID_PREFIX: &str = "spawn:";
 pub const DEFAULT_AGENT_MESSAGE_MAX_CHARS: usize = 16_384;
 pub const DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION: usize = 20;
 /// The per-sender token bucket capacity: three deliveries burst before
@@ -80,6 +84,10 @@ pub struct AgentMessageSendInput {
     pub target: String,
     pub message: String,
     pub receiver_role: Option<AgentFamilyRelationship>,
+    /// The target lane's delivery mode: `Some("follow_up")` queues the
+    /// message behind the target's current work instead of steering it;
+    /// `None` is the default steer delivery.
+    pub delivery_mode: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -431,6 +439,7 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
                                 target: member.id.clone(),
                                 message: message.clone(),
                                 receiver_role: Some(member.relationship),
+                                delivery_mode: None,
                             })
                             .await;
                         receipts.push(match result {
@@ -518,6 +527,7 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
                         target: member.id.clone(),
                         message: message.clone(),
                         receiver_role: Some(role),
+                        delivery_mode: None,
                     })
                     .await?;
                 Ok(receipt_value(&receipt))
