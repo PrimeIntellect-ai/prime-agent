@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Agent loop for Prime Agent."
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true

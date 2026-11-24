@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Live model catalog: fetch, no-cold-start chain, transport pinning, Prime Inference."
 
+[lib]
+doctest = false
+
 [dependencies]
 pa-ai = { path = "../pa-ai" }
 pa-types = { path = "../pa-types" }
