@@ -3,8 +3,8 @@
 use super::{
     json, queue_lanes, queued_bash_completion_notices, queued_cell_completion_deliveries,
     response_failure, response_success, session_snapshot, AgentSessionEngine, DaemonResponse,
-    QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value, Worker,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    QueueCheckpoint, QueuePriority, QueuedItem, SessionCore, SessionFile, TurnPolicy, Value,
+    Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 /// How long the shutdown waits for the connections' fan-outs to flush.
@@ -670,17 +670,18 @@ impl Worker {
             let idle = self.idle_notify.notified();
             tokio::pin!(idle);
             idle.as_mut().enable();
-            {
-                let core = self.core.lock().unwrap();
-                if !core.busy
-                    && (core.steering.is_empty() && core.follow_up.is_empty()
-                        || self.input_pauses.paused())
-                {
-                    return;
-                }
+            if self.is_idle(&self.core.lock().unwrap()) {
+                return;
             }
             idle.await;
         }
+    }
+
+    /// The idle predicate: no turn running, and no queued input left to
+    /// run (or input paused).
+    fn is_idle(&self, core: &SessionCore) -> bool {
+        !core.busy
+            && (core.steering.is_empty() && core.follow_up.is_empty() || self.input_pauses.paused())
     }
 
     /// The idle wait, plus `waitForRlmQuiescence` (TS
@@ -744,8 +745,19 @@ impl Worker {
             tokio::pin!(idle);
             idle.as_mut().enable();
             self.wait_until_quiescent(payload).await;
-            if !holds_background || self.pending_background_completions() == 0 {
+            if !holds_background {
                 return;
+            }
+            // The detached count first: a cell queues its notice before it
+            // leaves the count. Then the queued rows and the idle state under
+            // one core lock: a notice the turn runner picks after the
+            // quiescent wait has left the queue but made the session busy.
+            let detached = self.pending_detached_completions();
+            {
+                let core = self.core.lock().unwrap();
+                if detached + queued_completion_deliveries(&core) == 0 && self.is_idle(&core) {
+                    return;
+                }
             }
             idle.await;
         }
@@ -774,7 +786,7 @@ impl Worker {
     /// The background lanes' outstanding work at a quiescence observation:
     /// live background work ([`AgentSessionEngine::background_work_count`]:
     /// detached cells and live `bash()` handles) plus
-    /// [`Self::queued_completion_deliveries`]. Zero when nothing will wake the
+    /// [`queued_completion_deliveries`]. Zero when nothing will wake the
     /// session. The ACP quiescence frames report it; the child-idle decision
     /// reads the narrower [`Self::pending_background_completions`], so a child
     /// that leaves a server running still settles.
@@ -787,12 +799,12 @@ impl Worker {
             .agent_engine
             .as_ref()
             .map_or(0, |engine| engine.background_work_count());
-        (live + self.queued_completion_deliveries()) as u64
+        (live + queued_completion_deliveries(&self.core.lock().unwrap())) as u64
     }
 
     /// The background completions still owed to this run: detached cells
     /// whose terminal notice is not yet admitted, plus
-    /// [`Self::queued_completion_deliveries`]. `get_state` reports it as
+    /// [`queued_completion_deliveries`]. `get_state` reports it as
     /// `pendingBackgroundCompletions`, and the child wait holds on it
     /// ([`Self::wait_until_child_idle`]). The one intentional difference
     /// from [`AgentSessionEngine::background_work_count`]: a live `bash()`
@@ -803,21 +815,17 @@ impl Worker {
     ///
     /// Panics when the session-core mutex is poisoned.
     pub(crate) fn pending_background_completions(&self) -> u64 {
-        let detached = self
-            .agent_engine
+        let detached = self.pending_detached_completions();
+        (detached + queued_completion_deliveries(&self.core.lock().unwrap())) as u64
+    }
+
+    /// Detached cells whose terminal notice is not yet admitted.
+    fn pending_detached_completions(&self) -> usize {
+        self.agent_engine
             .as_ref()
             .and_then(|engine| engine.live_handles())
             .and_then(|handles| handles.kernel_provisioner.upgrade())
-            .map_or(0, |provisioner| provisioner.pending_detached_completions());
-        (detached + self.queued_completion_deliveries()) as u64
-    }
-
-    /// The completion notices still queued for delivery: `[bash-done]` rows
-    /// and pending cell deliveries (a full `[cell-done]` row or the
-    /// coalesced inbox arrival that covers one).
-    fn queued_completion_deliveries(&self) -> usize {
-        let core = self.core.lock().unwrap();
-        queued_bash_completion_notices(&core) + queued_cell_completion_deliveries(&core)
+            .map_or(0, |provisioner| provisioner.pending_detached_completions())
     }
 
     /// `wait_for_headless_completion` (TS daemon command): settle the
@@ -861,4 +869,11 @@ pub(super) fn active_lifecycle(runtime_kind: &str, messageless: bool, busy: bool
     } else {
         "draft"
     }
+}
+
+/// The completion notices still queued for delivery: `[bash-done]` rows and
+/// pending cell deliveries (a full `[cell-done]` row or the coalesced inbox
+/// arrival that covers one).
+fn queued_completion_deliveries(core: &SessionCore) -> usize {
+    queued_bash_completion_notices(core) + queued_cell_completion_deliveries(core)
 }
