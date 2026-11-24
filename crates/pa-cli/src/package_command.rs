@@ -7,8 +7,8 @@ use crate::config::{get_agent_dir, APP_NAME, CONFIG_DIR_NAME};
 use crate::self_update::SelfUpdateOptions;
 
 use crate::public_command::{
-    DAEMON_UPDATE_RESTART_COORDINATOR_FLAG, DAEMON_UPDATE_RESTART_ORIGIN_FLAG,
-    DAEMON_UPDATE_RESTART_STATUS_FLAG,
+    DAEMON_UPDATE_RESTART_COORDINATOR_FLAG, DAEMON_UPDATE_RESTART_DAEMON_FLAG,
+    DAEMON_UPDATE_RESTART_ORIGIN_FLAG, DAEMON_UPDATE_RESTART_STATUS_FLAG,
 };
 
 /// Result of running a package command: printed output is handled here, and the
@@ -89,6 +89,7 @@ struct PackageCommandOptions {
     conflicting_options: Option<String>,
     source: Option<String>,
     restart_coordinator: bool,
+    restart_daemon: bool,
     restart_daemon_socket: Option<String>,
     restart_status_path: Option<String>,
     restart_origin_active_session_id: Option<String>,
@@ -210,9 +211,13 @@ fn parse_package_command(args: &[String]) -> Option<PackageCommandOptions> {
                     }
                 }
             }
-            DAEMON_UPDATE_RESTART_COORDINATOR_FLAG => {
+            DAEMON_UPDATE_RESTART_COORDINATOR_FLAG | DAEMON_UPDATE_RESTART_DAEMON_FLAG => {
                 if command == PackageCommand::Update {
-                    options.restart_coordinator = true;
+                    if arg == DAEMON_UPDATE_RESTART_COORDINATOR_FLAG {
+                        options.restart_coordinator = true;
+                    } else {
+                        options.restart_daemon = true;
+                    }
                 } else {
                     options
                         .invalid_option
@@ -430,6 +435,29 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
     }
     if let Some(conflict) = &options.conflicting_options {
         return fail(conflict, Some(&format!("Usage: {}", command.usage())));
+    }
+    if options.restart_daemon {
+        let Some(socket) = options.restart_daemon_socket else {
+            return fail("Invalid daemon update restart invocation.", None);
+        };
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return fail(
+                    &format!("Could not start the daemon restart runtime: {error}."),
+                    None,
+                );
+            }
+        };
+        return match runtime.block_on(crate::update_flow::daemon_restart::run(
+            std::path::Path::new(&socket),
+        )) {
+            Ok(()) => HANDLED_OK,
+            Err(error) => fail(&format!("{error:#}"), None),
+        };
     }
     if options.restart_coordinator {
         // The detached coordinator mode (spec §4): this process adopts the staged
