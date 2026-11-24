@@ -798,6 +798,7 @@ impl AgentSessionEngine {
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
         images: &[pa_agent::types::ImageContent],
+        compaction_abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<SessionCommandExecution> {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
@@ -805,6 +806,7 @@ impl AgentSessionEngine {
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
+            compaction_abort,
             api_key,
             autonomous: &mut autonomous,
         };
