@@ -34,6 +34,7 @@ from typing import Any
 
 from .factory import schedule_activity
 from .bash import _kill_live_handles, _rehydrate_persistent_shells
+from .discipline import CellDeclinedError, declined_reason
 
 PROTOCOL_VERSION = 3
 
@@ -109,12 +110,42 @@ _sigint_target: str | None = None
 _finishing_rid: str | None = None
 _handoff_interrupted = False
 
+# The in-cell span guard: the host's own cell limit (`ExecuteOptions::
+# cell_timeout_ms` — a per-call `timeout` or the `python_cell_timeout_ms`
+# setting — sent on the execute frame as `timeout_ms`), reached INTO the
+# cell. The Rust watchdog's clock starts as the request goes on the wire and
+# teaches only after the settle; the guard fires just inside the same limit,
+# so one giant cell — pure compute, no banned shape, invisible to the
+# discipline screen — settles with the teaching error instead of the
+# watchdog's post-hoc note. The interrupt rides the SIGINT path. A limit of
+# `0` or an absent field keeps the guard disarmed, exactly like the watchdog.
+_SPAN_GUARD_LEAD_SECONDS = 0.25
+# Request ids the span guard interrupted (a request may still be unwinding):
+# rid -> the host budget it fired under, so the error text names the limit.
+_span_guard_fired: dict[str, float] = {}
+
 
 def _send(event: dict[str, Any]) -> None:
-    """Write one protocol frame; the locked single write keeps frames atomic."""
+    """Write one protocol frame; the locked single write keeps frames atomic.
+
+    The frame is atomic against the interrupt path too: SIGINT is blocked on
+    the main thread for the write, so an abort or span-guard signal that
+    arrives meanwhile stays pending and lands after the last byte. Without
+    that mask, a KeyboardInterrupt raised inside the write loop leaves a
+    partial frame on the wire, and the next frame's bytes complete a corrupt
+    line that the host answers by replacing the kernel. The interrupt path
+    targets the main thread, so other threads need no mask; platforms without
+    `pthread_sigmask` cancel the task instead of raising into the write.
+    """
     data = (json.dumps(event, separators=(",", ":")) + "\n").encode()
+    mask_sigint = threading.current_thread() is threading.main_thread() and hasattr(
+        signal, "pthread_sigmask"
+    )
     with _write_lock:
         view = memoryview(data)
+        previous_mask = (
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}) if mask_sigint else None
+        )
         try:
             while view:
                 view = view[os.write(_protocol_fd, view) :]
@@ -123,6 +154,9 @@ def _send(event: dict[str, Any]) -> None:
                 os.write(_host_stderr_fd, f"rlm.repl: dropped protocol frame: {err}\n".encode())
             except OSError:
                 pass
+        finally:
+            if previous_mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _check_payload(event: str, data: dict[str, Any]) -> None:
@@ -152,6 +186,15 @@ def emit(data: dict[str, Any]) -> None:
 def is_active() -> bool:
     """True when this process serves the repl protocol (not merely imported)."""
     return _protocol_fd >= 0
+
+
+def request_in_flight() -> bool:
+    """True when a request (a cell or state op) is executing right now.
+
+    Lock-free like the SIGINT handler's own read: a torn read can only miss
+    one keepalive tick or send one that queues behind the running turn.
+    """
+    return _active["task"] is not None
 
 
 def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
@@ -604,6 +647,120 @@ def _interrupt_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     return {"event": "error", "id": cell_id, "ename": "KeyboardInterrupt", "evalue": "", "traceback": lines}
 
 
+def _span_guard_budget(timeout_ms: Any) -> float:
+    """The host's cell limit for one execute request, in seconds; 0.0 disarms.
+
+    The field is `ExecuteOptions::cell_timeout_ms` (a per-call `timeout`, else
+    the `python_cell_timeout_ms` setting), so a session that raised or
+    disabled its limit keeps that decision: `0` and an absent field both mean
+    no guard, exactly as they mean no watchdog.
+    """
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, (int, float)):
+        return 0.0
+    if timeout_ms <= 0:
+        return 0.0
+    return float(timeout_ms) / 1000.0
+
+
+def _span_guard_delay(budget: float) -> float:
+    """The guard's timer for one cell: a lead inside the host's own limit.
+
+    The watchdog's clock starts as the request goes on the wire, the guard's
+    after the frame is read, so a guard at the bare limit always loses the
+    race and its teaching never reaches the model. The lead covers the
+    frame's write-to-read transit; it shrinks with short limits so a small
+    per-call `timeout` still runs almost its whole span.
+    """
+    return max(0.001, budget - min(_SPAN_GUARD_LEAD_SECONDS, budget / 4))
+
+
+def _arm_span_guard(rid: str, budget: float) -> threading.Timer | None:
+    """Arm the in-cell budget timer for one user cell; `cancel()` disarms.
+
+    The timer rides the request-interrupt path (a per-rid target, dropped for
+    finished or unknown requests), so a guard that fires after the cell's
+    settle can never leak onto a later request. `_handle_execute`'s outer
+    finally discards the request's parked entry.
+
+    Armed only in sessions whose host wires completion notices: the guard's
+    teaching promises a `[bash-done]` resume that a handler-less host (the
+    print embeddings) cannot deliver, and there an unbounded await is the
+    documented contract, exactly as on main. The bootstrap flips the wiring
+    flag from the host-handler registry.
+    """
+    if budget <= 0:
+        return None
+    from .bash import _completion_notices_wired
+
+    if not _completion_notices_wired:
+        return None
+
+    def fire() -> None:
+        # Mark before interrupting: the flag is what decides between the
+        # teaching event and a bare KeyboardInterrupt in the except arms.
+        _span_guard_fired[rid] = budget
+        _request_interrupt(rid)
+
+    timer = threading.Timer(_span_guard_delay(budget), fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _span_guard_event(rid: str, exc: BaseException, budget: float) -> dict[str, Any]:
+    """The span guard's teaching error: where the cell was interrupted, plus
+    the parked-turn alternative (bash() auto-backgrounds; a [bash-done]
+    notice resumes) — the in-cell sibling of the Rust watchdog's post-hoc
+    note."""
+    stack = _cell_stack(traceback.extract_tb(exc.__traceback__))
+    lines = ["Traceback (most recent call last):\n"] if stack else []
+    if stack:
+        lines.extend(stack.format())
+    lines.append(
+        f"CellSpanGuard: python cell interrupted at its {budget:g}s cell limit; "
+        "prior REPL state persists.\n"
+        "[cell-span] Long work belongs in bash() — launch it there (it "
+        "auto-backgrounds) and end the turn; a [bash-done] notification "
+        "resumes you. Split long compute into smaller cells; do not hold "
+        "the turn inside one.\n"
+    )
+    return {
+        "event": "error",
+        "id": rid,
+        "ename": "CellSpanGuard",
+        "evalue": f"python cell interrupted at its {budget:g}s cell limit",
+        "traceback": _cap_traceback_lines([_cap_text(line) for line in lines]),
+    }
+
+
+def _cell_span_error(rid: str, exc: BaseException) -> dict[str, Any]:
+    """One request's interrupt event: the span teaching when the guard marked
+    this rid, else the plain cell error for the same exception."""
+    budget = _span_guard_fired.get(rid)
+    if budget is None:
+        return _error_event(rid, exc)
+    return _span_guard_event(rid, exc, budget)
+
+
+def _declined_event(cell_id: str, error: CellDeclinedError) -> dict[str, Any]:
+    """A declined cell's error event: the failed-cell header the host's result
+    rendering carries, with the decline's teaching message as the exception
+    line (the cell never ran, so there are no frames to show)."""
+    message = _cap_text(_safe_str(error))
+    return {
+        "event": "error",
+        "id": cell_id,
+        "ename": type(error).__name__,
+        "evalue": message,
+        "traceback": _cap_traceback_lines(
+            [
+                "Traceback (most recent call last):\n",
+                f"{type(error).__name__}: {message}\n",
+            ]
+        ),
+    }
+
+
 def _compile_cell(code: str, filename: str) -> tuple[list[types.CodeType], bool]:
     """Compile a cell; a trailing expression compiles separately in eval mode."""
     linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
@@ -643,10 +800,14 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
         value = await task
         return "ok", value, None
     except asyncio.CancelledError as exc:
+        if (budget := _span_guard_fired.get(rid)) is not None:
+            return "error", None, _span_guard_event(rid, exc, budget)
         if _active["interrupted"]:
             return "error", None, _interrupt_event(rid, exc)
         return "error", None, _error_event(rid, exc)
     except BaseException as exc:  # noqa: BLE001 - every cell failure becomes an error event
+        if (budget := _span_guard_fired.get(rid)) is not None:
+            return "error", None, _span_guard_event(rid, exc, budget)
         return "error", None, _error_event(rid, exc)
     finally:
         with _interrupt_lock:
@@ -684,36 +845,88 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
     try:
+        declined = declined_reason(req["code"])
+        if declined is not None:
+            # Refused before it runs: nothing executed, so the decline's
+            # teaching message is the whole result. Same drain/finish/send
+            # order as a completed cell.
+            try:
+                _drain_output()
+            finally:
+                with _interrupt_lock:
+                    # An interrupt parked while the screen ran belongs to
+                    # this cell, never to the next one.
+                    if cell_id in _inflight:
+                        _consume_pending_interrupt(cell_id)
+                    _finish_locked(cell_id)
+            _send(_declined_event(cell_id, declined))
+            _send({"event": "done", "id": cell_id, "status": "error"})
+            return
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))
         execution.owner = task
-        status, value, error = await _run_guarded(task, cell_id)
+        # The in-cell span guard: armed where the session's host wires
+        # completion notices, disarmed before the protocol sends. It stays
+        # armed through result rendering and the drain: a slow `__repr__` is
+        # still this cell's span, and its interrupt must reach the span
+        # teaching, not a bare KeyboardInterrupt. Protocol repair's internal
+        # executes pass through here too (the runtime bootstrap): the decline
+        # screen applies to them, benignly today — the bootstrap carries no
+        # banned shape — and the guard disarms until the flag flips.
+        span_guard = _arm_span_guard(cell_id, _span_guard_budget(req.get("timeout_ms")))
         result_text: str | None = None
+        closed = False
         try:
+            try:
+                status, value, error = await _run_guarded(task, cell_id)
+            except KeyboardInterrupt as exc:
+                # The task settled but the handler raised in this frame: report
+                # the request's own outcome instead of escaping without a done
+                # frame.
+                status, value, error = "error", None, _cell_span_error(cell_id, exc)
             if _consume_handoff_interrupt() and status == "ok":
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
-                status, error = "error", _error_event(cell_id, KeyboardInterrupt())
+                status, error = "error", _cell_span_error(cell_id, KeyboardInterrupt())
             if status == "ok" and has_trailing and value is not None:
                 try:
                     ns["_"] = value
                     result_text = repr(value)
                 except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
-                    status, error = "error", _error_event(cell_id, exc)
+                    status, error = "error", _cell_span_error(cell_id, exc)
             if result_text is not None:
                 result_text = _cap_text(result_text)
             _drain_output()
-        finally:
-            # Close the interrupt window before the protocol sends so a
-            # handler-raised KeyboardInterrupt can never tear a frame mid-_send.
+            # Disarm first, then close the interrupt window inside this same
+            # guarded region: a span interrupt that lands on the bookkeeping
+            # still becomes the teaching, and the retry below finishes a
+            # half-run close. Closing before the sends keeps a handler-raised
+            # KeyboardInterrupt out of a frame mid-_send.
+            if span_guard is not None:
+                span_guard.cancel()
             _finish_request(cell_id)
+            closed = True
+        except KeyboardInterrupt as exc:
+            # The guard fired during the render, the drain, or the close: the
+            # cell's value is not reported, and the teaching replaces the bare
+            # interrupt.
+            status, error, result_text = "error", _cell_span_error(cell_id, exc), None
+        finally:
+            if not closed:
+                # The close above was interrupted or never reached: finish it
+                # (idempotent) so this request owns no interrupt target.
+                if span_guard is not None:
+                    span_guard.cancel()
+                _finish_request(cell_id)
+
         if result_text is not None:
             _send({"event": "result", "id": cell_id, "text": result_text})
         if error is not None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
+        _span_guard_fired.pop(cell_id, None)
         execution.owner = None
         execution.finished.set()
         _current_cell_execution.reset(execution_token)
@@ -1803,6 +2016,14 @@ def main() -> None:
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    # The kernel owns its signal mask. A host that blocks SIGINT on the
+    # spawning thread (tokio-style signal handling) leaks that mask through
+    # fork+exec — an inherited-blocked SIGINT silences the whole interrupt
+    # machinery: user interrupts and the cell span guard raise a signal
+    # that never delivers, and a stuck cell wedges the session until the
+    # agent clock. Unblock before arming the handler.
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 

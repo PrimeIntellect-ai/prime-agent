@@ -29,14 +29,15 @@ pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
-    admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
-    consume_shown_inbox_items_locked, deliver_inbox_arrival_row_locked, enqueue_priority,
-    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    queued_bash_completion_notices, refresh_inbox_wake_rows_locked, restore_queue_snapshot,
-    restored_turn_policy, withdraw_bash_completion_notice, withdraw_drained_inbox_notice,
-    QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY,
-    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    admit_kernel_notice, admit_turn_held_notice, checkpoint_queue_recovery,
+    clear_withdrawn_progress_note, consume_shown_inbox_items_locked,
+    deliver_inbox_arrival_row_locked, enqueue_priority, gather_delivery_batch,
+    parse_custom_message, parse_prompt_images, queue_lanes, queued_bash_completion_notices,
+    refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy,
+    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -669,11 +670,11 @@ impl Worker {
                     refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
                 );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
-                // for `bash.completed` and `factory.progress`): the handlers
-                // validate, the sinks admit/withdraw through the queue lanes.
-                // With the agent inbox enabled (default), the notice's message
-                // lands in the session's durable inbox and ONE short steering
-                // notice wakes instead of the full row.
+                // for `bash.completed`, `bash.waiting` and `factory.progress`):
+                // the handlers validate, the sinks admit/withdraw through the
+                // queue lanes. With the agent inbox enabled (default), the
+                // notice's message lands in the session's durable inbox and ONE
+                // short steering notice wakes instead of the full row.
                 let notice_engine = std::sync::Arc::downgrade(concrete);
                 let notice_core = Arc::clone(&core);
                 let notice_notify = Arc::clone(&work_notify);
@@ -688,10 +689,10 @@ impl Worker {
                 let arrivals_for_consumed = std::sync::Arc::clone(&arrivals_for_sink);
                 let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
                     let Some(engine) = notice_engine.upgrade() else {
-                        return;
+                        return false;
                     };
                     if engine.session_is_closed() {
-                        return;
+                        return false;
                     }
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
@@ -713,7 +714,7 @@ impl Worker {
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {
-                                return;
+                                return true;
                             }
                             // The store moved on between the capture and
                             // the identity-checked push (a replacement
@@ -727,7 +728,7 @@ impl Worker {
                         &notice_notify,
                         notice,
                         closed,
-                    );
+                    )
                 });
                 crate::agent_inbox::spawn_inbox_reminder(
                     std::sync::Arc::downgrade(concrete),
