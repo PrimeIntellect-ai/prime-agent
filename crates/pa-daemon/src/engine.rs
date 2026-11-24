@@ -58,15 +58,15 @@ pub trait SessionEngine: Send + Sync {
 
     /// Whether the whole-worker idle passivation gates pass (the
     /// `idleEvictionMinutes` consumer re-checks them before asking the
-    /// supervisor for the graceful stop): the engine's settled gates, no
-    /// autonomous continuation owed behind a durable shell, and an empty
-    /// RLM child registry. The registry rule holds because a revival
-    /// rebuilds the registry from the spawn ledger as settled rows only —
-    /// live run state (answer previews, collect envelopes, in-flight
-    /// watchers) does not come back, so the stop would still discard state
-    /// the revival cannot restore. The default `false` keeps scripted
-    /// harness engines and kernel-less embeddings resident — the same
-    /// conservative arm as the release default.
+    /// supervisor for the graceful stop): the engine's settled gates
+    /// plus an empty RLM child registry. The registry rule holds
+    /// because a revival rebuilds the registry from the spawn ledger as
+    /// settled rows only — live run state (answer previews, collect
+    /// envelopes, in-flight watchers) does not come back, so the stop
+    /// would still discard state the revival cannot restore. The
+    /// default `false` keeps scripted harness engines and kernel-less
+    /// embeddings resident — the same conservative arm as the release
+    /// default.
     fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {

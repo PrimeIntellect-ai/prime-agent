@@ -1465,9 +1465,25 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         # Five degrades, past the size of the removed three-note budget:
         # a budget revert (or an upstream parity sync restoring it) must go
         # red here, not quietly silence degrades four and five.
-        with mock.patch.object(sys, "stderr", notes):
+        cell = asyncio.current_task()
+        with (
+            mock.patch.object(sys, "stderr", notes),
+            mock.patch.object(bash_module, "_live_cell_owner", lambda: cell),
+        ):
             snapshots = [await handle for _ in range(5)]
+
+            # A background task's degrade writes no note: the cell does not
+            # wait for it, so the note would land in a later cell's output.
+            async def background_poll() -> object:
+                return await handle
+
+            background = asyncio.create_task(background_poll())
+            for _ in range(100):
+                if background.done():
+                    break
+                await asyncio.sleep(0.05)
         handle.kill(grace=0.1)
+        self.assertIsInstance(background.result(), bash_module.BashSnapshot)
         for snapshot in snapshots:
             self.assertIsInstance(snapshot, bash_module.BashSnapshot)
         elapsed = [snapshot.duration for snapshot in snapshots]

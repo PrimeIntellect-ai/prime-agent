@@ -3,130 +3,6 @@
 //! retirements that reach them, and the residency hold their terminal
 //! outcome releases. Every case drives a fake POSIX kernel script.
 
-/// The write ceiling: a wake that fires while the frame is still
-/// unwritten (the steer cannot detach a frame the kernel never
-/// received) starts a short ceiling; on expiry the execution stops
-/// with the typed cause, the watcher retires the kernel, and the
-/// early-settle arm retires the blocked writer and its stdin. The
-/// revert (no ceiling arm) hangs the call past the test's timeout.
-#[tokio::test]
-async fn a_wake_caught_by_a_blocked_write_stops_the_cell_at_the_write_ceiling() {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let python = dir.path().join("ready-but-not-reading");
-    std::fs::write(
-        &python,
-        "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
-    )
-    .expect("write fake kernel");
-    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fake kernel");
-    let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
-        python: Some(python),
-        ..Default::default()
-    });
-    manager
-        .start(KernelStartOptions::default())
-        .await
-        .expect("ready handshake");
-    // A wake fires while the oversized frame is still unwritten: the
-    // steer handoff cannot yield, so the write ceiling owns the stop.
-    let wake = std::sync::Arc::new(crate::kernel::cell_wake::CellWake::new());
-    {
-        let wake = std::sync::Arc::clone(&wake);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            wake.request();
-        });
-    }
-    // Larger than the stdin pipe: the request writer blocks on the
-    // non-reading kernel, holding stdin's mutex.
-    let code = "x".repeat(1024 * 1024);
-    let result = tokio::time::timeout(
-        Duration::from_secs(10),
-        manager.execute(
-            &code,
-            ExecuteOptions {
-                wake: Some(wake),
-                ..Default::default()
-            },
-        ),
-    )
-    .await
-    .expect("the blocked write must settle at the write ceiling")
-    .expect("execute returns a result");
-    assert_eq!(result.status, ExecuteStatus::Aborted);
-    let error = result
-        .error
-        .expect("the typed cause names the blocked write's retirement");
-    assert_eq!(error.ename, "CellWriteCeilingRetired");
-    assert!(
-        manager.retired_for_ignored_interrupt(),
-        "the stopped write retires the kernel"
-    );
-    assert!(
-        manager.is_defunct(),
-        "the retired kernel is terminal: only a fresh manager serves again"
-    );
-    manager.kill();
-}
-
-/// A stale wake (its level predicate shows the input consumed) that
-/// lands during a slow write starts no write ceiling: the write finishes
-/// after the ceiling would have expired and the cell settles normally.
-#[tokio::test]
-async fn a_stale_wake_during_a_slow_write_starts_no_write_ceiling() {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let python = dir.path().join("slow-reader");
-    std::fs::write(
-        &python,
-        "#!/usr/bin/env python3\nimport json, sys, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(2)\nfor line in sys.stdin:\n    req = json.loads(line)\n    print(json.dumps({'event': 'done', 'id': req.get('id'), 'status': 'ok'}), flush=True)\n",
-    )
-    .expect("write fake kernel");
-    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fake kernel");
-    let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
-        python: Some(python),
-        ..Default::default()
-    });
-    manager
-        .start(KernelStartOptions::default())
-        .await
-        .expect("ready handshake");
-    let wake = std::sync::Arc::new(crate::kernel::cell_wake::CellWake::with_pending(
-        std::sync::Arc::new(|| false),
-    ));
-    {
-        let wake = std::sync::Arc::clone(&wake);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            wake.request();
-        });
-    }
-    // Larger than the stdin pipe: the write blocks until the kernel reads.
-    let code = "x".repeat(1024 * 1024);
-    let result = tokio::time::timeout(
-        Duration::from_secs(20),
-        manager.execute(
-            &code,
-            ExecuteOptions {
-                wake: Some(wake),
-                ..Default::default()
-            },
-        ),
-    )
-    .await
-    .expect("the slow write settles")
-    .expect("execute returns a result");
-    assert_eq!(result.status, ExecuteStatus::Ok);
-    manager.kill();
-}
-
 /// Wait until `ready` holds; fail with `what` past `within`.
 async fn wait_until(within: std::time::Duration, what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + within;
@@ -188,10 +64,17 @@ for line in sys.stdin:
 /// The debounced snapshot behind a detached cell stays owed and runs
 /// at the cell's settle, at any status: a successful cell A's capture
 /// must not stay dropped behind a detached cell B that ends in an
-/// error. The revert fails it — zero snapshot frames reach the kernel
-/// and the busy diagnostic logs — the probe evidence's shape.
+/// error. B's 200 ms budget detaches it before A's 800 ms debounce
+/// fires; B's 1.5 s budget lets the capture queue behind the attached B
+/// and meet it only after the detach.
 #[tokio::test]
 async fn an_owed_snapshot_runs_when_a_detached_cell_settles_in_error() {
+    for budget_ms in [200, 1_500] {
+        owed_snapshot_runs_after_an_error_settle(budget_ms).await;
+    }
+}
+
+async fn owed_snapshot_runs_after_an_error_settle(budget_ms: u64) {
     use super::*;
 
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -206,14 +89,13 @@ async fn an_owed_snapshot_runs_when_a_detached_cell_settles_in_error() {
         .await
         .expect("cell A");
     assert_eq!(a.status, ExecuteStatus::Ok);
-    // Cell B detaches at a 200 ms budget and settles in error at 7 s
-    // — before the retry's own debounce fires again.
+    // Cell B detaches at its budget and settles in error at 7 s.
     let (outcomes, callback) = background_cell_outcomes();
     let b = manager
         .execute(
             "slow-error",
             ExecuteOptions {
-                cell_timeout_ms: Some(200),
+                cell_timeout_ms: Some(budget_ms),
                 on_background_cell: Some(callback),
                 ..Default::default()
             },
@@ -232,7 +114,7 @@ async fn an_owed_snapshot_runs_when_a_detached_cell_settles_in_error() {
     let frames_path = dir.path().join("snapshot-frames");
     wait_until(
         Duration::from_secs(10),
-        "the owed snapshot must run at the detached cell's settle",
+        &format!("budget {budget_ms}: the owed snapshot must run at the detached cell's settle"),
         || {
             std::fs::read_to_string(&frames_path)
                 .unwrap_or_default()
@@ -656,12 +538,13 @@ while True:
     python
 }
 
-/// A user cancel retires a cell that ignores its interrupt (attached
-/// or detached alike): the aborted result names the kernel retirement
-/// and the possible state loss, the interrupt was really sent, and the
-/// manager is defunct (a fresh manager serves the next cell).
+/// A user cancel of an ATTACHED cell that ignores its interrupt
+/// force-aborts the call after the grace and keeps the kernel: the
+/// interrupt was really sent, the result is a plain abort, and the
+/// manager stays live (the next cell meets the busy-after-interrupt
+/// wait, as before backgrounding existed).
 #[tokio::test]
-async fn a_user_cancel_retires_an_attached_ignoring_cell() {
+async fn a_user_cancel_force_aborts_an_attached_ignoring_cell_and_keeps_the_kernel() {
     use super::*;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let python = runaway_cell_kernel(dir.path());
@@ -676,8 +559,7 @@ async fn a_user_cancel_retires_an_attached_ignoring_cell() {
     let started = Instant::now();
     let executing = manager.execute("hang", ExecuteOptions::default());
     tokio::pin!(executing);
-    // The user cancel fires while the attached cell runs (the Esc
-    // path): a cell that ignores the interrupt is retired.
+    // The user cancel fires while the attached cell runs (the Esc path).
     let cancel_manager = manager.clone();
     let cancel = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -689,26 +571,92 @@ async fn a_user_cancel_retires_an_attached_ignoring_cell() {
         .expect("the execute returns");
     assert!(cancel.await.unwrap_or(false), "a user execution was live");
     assert_eq!(result.status, ExecuteStatus::Aborted, "{result:?}");
-    let error = result.error.as_ref().expect("the retirement error");
-    assert_eq!(error.ename, "CellUserCancelRetired", "{result:?}");
-    assert!(error.evalue.contains("kernel was retired"), "{result:?}");
-    assert!(error.evalue.contains("unsnapshotted state"), "{result:?}");
-    // The interrupt really reached the kernel before the retirement.
+    assert!(result.error.is_none(), "a plain abort: {result:?}");
     assert!(
         std::fs::read_to_string(python.with_extension("interrupts"))
             .is_ok_and(|marks| !marks.is_empty()),
-        "the cancelled cell was interrupted before its kernel was retired"
+        "the cancelled cell was interrupted"
     );
-    assert!(manager.is_defunct(), "the ignoring cell's kernel retired");
     assert!(
-        manager.retired_for_ignored_interrupt(),
-        "the retirement is observable for the restart note"
+        !manager.is_defunct(),
+        "the attached cancel keeps the kernel"
     );
+    assert!(!manager.retired_for_ignored_interrupt());
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the stop is bounded: {:?}",
         started.elapsed()
     );
+    manager.kill();
+}
+
+/// `rlm.end_turn()` from a cell that already backgrounded answers an
+/// error: the cell's turn returned at the detach, so a success answer
+/// would claim a turn end that never happens.
+#[tokio::test]
+async fn end_turn_in_a_backgrounded_cell_answers_an_error() {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let python = dir.path().join("end-turn-kernel");
+    std::fs::write(
+        &python,
+        r#"#!/usr/bin/env python3
+import json, sys, time
+print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    req = json.loads(line)
+    if req.get("type") != "execute":
+        continue
+    rid = req.get("id")
+    time.sleep(0.6)
+    print(json.dumps({"event": "host_request", "id": "end-1", "data": {"type": "rlm.end_turn"}}), flush=True)
+    reply = json.loads(sys.stdin.readline())
+    print(json.dumps({"event": "stdout", "id": rid, "text": json.dumps(reply["data"])}), flush=True)
+    print(json.dumps({"event": "done", "id": rid, "status": "ok"}), flush=True)
+"#,
+    )
+    .expect("write fake kernel");
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake kernel");
+    let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+        python: Some(python),
+        ..Default::default()
+    });
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("ready handshake");
+    let (outcomes, callback) = background_cell_outcomes();
+    let result = manager
+        .execute(
+            "await rlm.end_turn()",
+            ExecuteOptions {
+                cell_timeout_ms: Some(200),
+                on_background_cell: Some(callback),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the bounded call detaches");
+    assert!(result.detached.is_some(), "{result:?}");
+    wait_until(
+        Duration::from_secs(5),
+        "the backgrounded cell never completed",
+        || !outcomes.lock().unwrap().is_empty(),
+    )
+    .await;
+    let outcome = outcomes.lock().unwrap().pop().expect("one outcome");
+    assert!(!outcome.result.ended_turn, "{outcome:?}");
+    assert!(
+        outcome.result.stdout.contains("\"status\": \"error\"")
+            && outcome.result.stdout.contains("backgrounded cell"),
+        "{outcome:?}"
+    );
+    manager.kill();
 }
 
 /// A manager-targeted user cancel reaches a DETACHED cell: the
@@ -1038,11 +986,10 @@ async fn a_cleared_wake_does_not_detach_a_later_cell() {
     manager.kill();
 }
 
-/// The ignored-interrupt retirement claims its execution atomically:
-/// a watcher whose cell settled and whose replacement started before
-/// the grace expired retires NOTHING — the replacement cell keeps its
-/// kernel (the claim refuses, so no teardown, kill, or reject reaches
-/// the replacement).
+/// A stop watcher whose attached cell settled and whose replacement
+/// started before the grace expired touches NOTHING: its force-abort
+/// re-checks the active execution, so the replacement cell keeps its
+/// kernel and completes on its own generation.
 #[tokio::test]
 async fn a_stale_retirement_never_touches_the_replacement_cell() {
     use super::*;
@@ -1323,12 +1270,12 @@ async fn the_detached_cell_holds_residency_until_admission() {
         assert!(Instant::now() < called, "the sink was never called");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        manager.has_background_work(),
+    assert_eq!(
+        manager.pending_detached_completions(),
+        1,
         "a cell whose outcome is unadmitted stays live background work"
     );
-    assert_eq!(manager.pending_detached_completions(), 1);
-    // Release the admission: the hold releases, the aggregate clears.
+    // Release the admission: the hold releases.
     {
         let (go, notified) = &*admission;
         *go.lock().expect("admission lock") = true;
@@ -1339,8 +1286,6 @@ async fn the_detached_cell_holds_residency_until_admission() {
         assert!(Instant::now() < cleared, "the hold never released");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(manager.background_bash_handle_count(), 0);
-    assert!(!manager.has_background_work());
     manager.kill();
 }
 

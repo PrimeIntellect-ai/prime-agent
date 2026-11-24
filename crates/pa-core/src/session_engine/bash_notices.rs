@@ -100,15 +100,6 @@ impl KernelNotice {
             preview_label: BACKGROUND_CELL_PREVIEW_LABEL,
         }
     }
-
-    /// Whether this notice's arrival ends a running cell's wait. A cell's
-    /// own completion never does: a cell still waiting when the notice lands
-    /// is a different cell (one that started after the backgrounded one, or
-    /// beside it), so the notice does not concern it and is read after it.
-    #[must_use]
-    pub fn wakes_cell_wait(&self) -> bool {
-        self.row.custom_type != messages::ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE
-    }
 }
 
 /// The queue-admission seam for one kernel notice (the daemon worker's
@@ -467,19 +458,6 @@ mod tests {
             notice.row.content,
             pa_types::ai::UserContent::Text(_)
         ));
-    }
-
-    /// A backgrounded cell's own completion never ends the next cell's
-    /// wait; the other notice classes do.
-    #[test]
-    fn only_foreign_notices_wake_a_running_cell() {
-        assert!(KernelNotice::bash_completion(7, "sleep 1", 0).wakes_cell_wait());
-        assert!(!KernelNotice::background_cell_completion(&outcome(
-            "cell-1",
-            crate::kernel::shared::DetachReason::Interrupted,
-            settled_result(crate::kernel::shared::ExecuteStatus::Ok, 1_200, ""),
-        ))
-        .wakes_cell_wait());
     }
 
     #[test]

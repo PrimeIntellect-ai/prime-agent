@@ -2,9 +2,8 @@
 //! and queue recovery.
 use super::inbox_router::{delivered_notice_text, notice_text, shown_items, wake_delay};
 use super::{
-    emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
-    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
-    AUTONOMOUS_QUEUE_KEY,
+    emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Result, SessionCore,
+    Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE, AUTONOMOUS_QUEUE_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,7 +430,7 @@ pub(crate) fn restore_queue_snapshot(
 pub(crate) fn admit_autonomous_follow_up(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     text: String,
 ) {
     {
@@ -467,7 +466,7 @@ pub(crate) fn admit_goal_follow_up(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     work: crate::engine::GoalTurnEndWork,
 ) {
     let (lane, follow_up) = match work {
@@ -534,7 +533,7 @@ pub(crate) fn admit_goal_follow_up(
 pub(crate) fn admit_kernel_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     notice: crate::engine::KernelNotice,
     session_is_closed: impl Fn() -> bool,
 ) {
@@ -609,7 +608,7 @@ pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     notice: pa_core::session_engine::inbox::InboxNotice,
@@ -943,7 +942,7 @@ pub(crate) fn consume_shown_inbox_items_locked(
 pub(crate) fn admit_inbox_reminder(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,

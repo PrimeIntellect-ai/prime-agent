@@ -123,9 +123,6 @@ pub(crate) struct ActiveExecution {
     /// cancel, and the hard deadline all reach THIS execution's stop path —
     /// and stopping it never cancels the provider run or a later cell.
     stop_signal: crate::kernel::cancellation::AbortSignal,
-    /// The typed cause of the out-of-band stop, recorded by the trigger that
-    /// fired `stop_signal` first.
-    stop_cause: Mutex<Option<crate::kernel::shared::ExecutionStopCause>>,
     /// The request runs user-namespace code (an execute — the bootstrap class
     /// included, internal or not): its settle can rebind or mutate names.
     namespace_code: bool,
@@ -141,18 +138,6 @@ pub(crate) struct ActiveExecution {
 }
 
 impl ActiveExecution {
-    /// Fire the execution's stop signal, recording `cause` when no trigger
-    /// fired first (the watcher's default is a user stop).
-    pub(crate) fn stop_with_cause(&self, cause: crate::kernel::shared::ExecutionStopCause) {
-        {
-            let mut recorded = lock(&self.stop_cause);
-            if recorded.is_none() {
-                *recorded = Some(cause);
-            }
-        }
-        self.stop_signal.abort();
-    }
-
     /// Mark the execution terminal and wake its watchers: they exit
     /// instead of awaiting a stop signal that will never fire.
     pub(crate) fn notify_terminated(&self) {
@@ -165,11 +150,6 @@ impl ActiveExecution {
             }
         });
     }
-
-    /// The typed cause of the out-of-band stop, when a trigger fired.
-    pub(crate) fn stop_cause(&self) -> Option<crate::kernel::shared::ExecutionStopCause> {
-        *lock(&self.stop_cause)
-    }
 }
 
 /// The kernel error of a user cancel whose interrupt was ignored: the cell
@@ -180,21 +160,6 @@ pub(crate) fn user_cancel_retirement_error() -> crate::kernel::shared::KernelErr
         ename: "CellUserCancelRetired".to_string(),
         evalue: "The cell did not stop on its cancel interrupt, so the kernel was retired; \
 unsnapshotted state may be lost."
-            .to_string(),
-        traceback: Vec::new(),
-    }
-}
-
-/// The kernel error of a blocked request write under the write ceiling: a
-/// wake or the wait budget fired while the frame was still unwritten (the
-/// steer handoff could not yield — the kernel never received the cell),
-/// so the kernel was retired — the outcome names the ceiling and the
-/// unsnapshotted state it may have lost.
-pub(crate) fn blocked_write_retirement_error() -> crate::kernel::shared::KernelError {
-    crate::kernel::shared::KernelError {
-        ename: "CellWriteCeilingRetired".to_string(),
-        evalue: "The cell's request write did not finish within the write ceiling, so the \
-kernel was retired; unsnapshotted state may be lost."
             .to_string(),
         traceback: Vec::new(),
     }
@@ -263,8 +228,7 @@ impl InternalExecuteResult {
 
     /// The forced-stop completion of a captured execution whose kernel was
     /// just retired: the partial output so far, and an abort whose error
-    /// names the stop cause (an ignored user cancel or the write ceiling)
-    /// and the retirement's possible state loss.
+    /// names the ignored cancel and the retirement's possible state loss.
     fn forced_stop(execution: &ActiveExecution) -> Self {
         let max_chars = execution.max_chars;
         let (stdout, stderr) = {
@@ -273,22 +237,6 @@ impl InternalExecuteResult {
                 buffers.stdout.snapshot(max_chars),
                 buffers.stderr.snapshot(max_chars),
             )
-        };
-        let cause = execution.stop_cause();
-        let (status, error) = match cause {
-            // An ignored user-cancel interrupt retired the kernel: the
-            // abort names the retirement and the state it may have lost,
-            // instead of reporting a plain abort.
-            Some(crate::kernel::shared::ExecutionStopCause::UserCancel) | None => {
-                (ExecuteStatus::Aborted, Some(user_cancel_retirement_error()))
-            }
-            // The write ceiling retired the kernel (a wake or the wait
-            // budget fired while the frame was still unwritten): the abort
-            // names the ceiling and the retirement, not a plain abort.
-            Some(crate::kernel::shared::ExecutionStopCause::WriteCeiling) => (
-                ExecuteStatus::Aborted,
-                Some(blocked_write_retirement_error()),
-            ),
         };
         Self {
             result: ExecuteResult {
@@ -303,8 +251,8 @@ impl InternalExecuteResult {
                 inbox_messages: None,
                 background_output: None,
                 ended_turn: false,
-                status,
-                error,
+                status: ExecuteStatus::Aborted,
+                error: Some(user_cancel_retirement_error()),
                 duration_ms: execution.started.elapsed().as_millis() as u64,
                 // No detach marker: an attached caller sees the forced stop as
                 // its own tool result, and a detached call's continuation
@@ -525,10 +473,10 @@ pub(crate) struct Inner {
     rebootstrap_memo: Mutex<Option<Arc<MemoSlot>>>,
     flush_memo: Mutex<Option<Arc<MemoSlot>>>,
     snapshot_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// A debounced capture that found a detached cell active stays owed:
-    /// the cell's settle (any status, kernel alive) retries it, so the
-    /// last settled namespace cannot stay unsnapshotted behind a
-    /// backgrounded cell.
+    /// A capture that failed stays owed (the usual cause is a detached
+    /// cell holding the kernel): the cell's settle (any status, kernel
+    /// alive) retries it, so the last settled namespace cannot stay
+    /// unsnapshotted behind a backgrounded cell.
     snapshot_owed: std::sync::atomic::AtomicBool,
     stderr_closed: Notify,
     stderr_closed_flag: AtomicBool,
@@ -568,8 +516,8 @@ impl Guarded {
 }
 
 impl Inner {
-    /// Fire the user-cancel stop of every running execution `filter`
-    /// selects; `false` when it selects none.
+    /// Fire the stop of every running execution `filter` selects; `false`
+    /// when it selects none.
     fn stop_active_executions(&self, filter: impl Fn(&ActiveExecution) -> bool) -> bool {
         let executions: Vec<_> = lock(&self.guarded)
             .active_executions
@@ -578,7 +526,7 @@ impl Inner {
             .cloned()
             .collect();
         for execution in &executions {
-            execution.stop_with_cause(crate::kernel::shared::ExecutionStopCause::UserCancel);
+            execution.stop_signal.abort();
         }
         !executions.is_empty()
     }
@@ -708,7 +656,7 @@ impl ReplKernelManager {
     /// quiescence drive through `SessionEngine::has_background_bash`.
     #[must_use]
     pub fn has_background_work(&self) -> bool {
-        self.background_bash_handle_count() > 0 || self.pending_detached_completions() > 0
+        self.background_bash_handle_count() > 0
     }
 
     /// The number of detached cells whose terminal outcome is not yet
@@ -722,8 +670,9 @@ impl ReplKernelManager {
     }
 
     /// Stop the kernel's current USER executions out-of-band (attached and
-    /// detached): an interrupt now, and a kernel retirement when the
-    /// interrupt is ignored. `false` when no user execution is active —
+    /// detached): an interrupt now; when the interrupt is ignored, an
+    /// attached cell is force-aborted and a detached one retires the
+    /// kernel. `false` when no user execution is active —
     /// internal ops (bootstrap, restore, snapshot) are never targeted.
     #[must_use]
     pub fn abort_user_execution(&self) -> bool {

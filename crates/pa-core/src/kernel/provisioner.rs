@@ -269,26 +269,14 @@ impl IpythonKernelProvisioner {
     }
 
     /// The session's live background kernel work: detached cells awaiting
-    /// their terminal admission plus live `bash()` handles. The passivation
-    /// gates read this aggregate; the bash-only count stays on the bash
-    /// handle APIs.
+    /// their terminal admission plus live `bash()` handles. The daemon's
+    /// background-work gates read this count.
     #[must_use]
     pub fn background_work_count(&self) -> usize {
         self.pending_detached_completions()
             + self
                 .manager()
                 .map_or(0, |manager| manager.background_bash_handle_count())
-    }
-
-    /// The session's live background `bash()` handles alone: the kernel
-    /// term of the daemon's shell count, which holds continuations next to
-    /// the aggregate and alone arms the goal skip wake. A detached cell's
-    /// terminal notice is the guaranteed retry, so only a shell arms the
-    /// marker turn.
-    #[must_use]
-    pub fn background_bash_handle_count(&self) -> usize {
-        self.manager()
-            .map_or(0, |manager| manager.background_bash_handle_count())
     }
 
     /// The Python skills pre-imported at kernel bootstrap.

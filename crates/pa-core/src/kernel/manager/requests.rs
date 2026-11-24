@@ -252,6 +252,15 @@ impl ReplKernelManager {
             self.wait_for_protocol_repair(opts.signal.as_ref()).await?;
             return Box::pin(self.enqueue_request(request, opts, execution_timeout_ms)).await;
         }
+        // A backgrounded cell is never interrupted, so an internal op behind
+        // it fails at once instead of waiting out the busy window. The
+        // dispose flush interrupts the cell first and keeps waiting.
+        if opts.internal
+            && self.inner.has_detached_active_execution()
+            && !lock(&self.inner.guarded).flushing_snapshot_for_dispose
+        {
+            return Err(anyhow!("the kernel is running a backgrounded cell"));
+        }
 
         // A user cell runs beside backgrounded cells; everything else (the
         // runtime bootstrap, state requests) waits out every running request.
@@ -371,7 +380,6 @@ impl ReplKernelManager {
             opts,
             detached: AtomicBool::new(false),
             stop_signal,
-            stop_cause: Mutex::new(None),
             settled_tx: tokio::sync::watch::channel(false).0,
         });
         lock(&self.inner.guarded)
@@ -456,12 +464,6 @@ impl ReplKernelManager {
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                // The parent token fired (a run abort): a user stop, unless
-                // a trigger already recorded its own typed cause.
-                if execution.stop_cause().is_none() {
-                    execution
-                        .stop_with_cause(crate::kernel::shared::ExecutionStopCause::UserCancel);
-                }
                 // Fence: only the still-active, unsettled execution gets the
                 // out-of-band interrupt — a settled execution's late watcher
                 // must never signal the next cell.
@@ -479,14 +481,19 @@ impl ReplKernelManager {
                     }
                     tokio::time::sleep_until(deadline).await;
                 }
-                // The kill-on-ignored-interrupt, restored in the detached
-                // context: an execution still physically active at grace
-                // expiry retires its kernel, and the forced-stop completion
-                // publishes only after the kill. The retirement claims its
-                // execution atomically, so a cell that settled while the
-                // grace ran out (and a replacement that started behind it)
-                // is never touched.
-                inner.retire_for_ignored_interrupt(&execution);
+                // An attached cell still running at grace expiry is
+                // force-aborted: its caller gets the abort and the kernel
+                // keeps its state. A detached cell has no caller to free the
+                // kernel, so it retires the kernel, and the forced-stop
+                // completion publishes only after the kill. The retirement
+                // claims its execution atomically, so a cell that settled
+                // while the grace ran out (and a replacement that started
+                // behind it) is never touched.
+                if execution.detached.load(Ordering::SeqCst) {
+                    inner.retire_for_ignored_interrupt(&execution);
+                } else {
+                    inner.force_abort(&execution);
+                }
             });
         }
         let mut frame = request.to_json();
@@ -518,105 +525,44 @@ impl ReplKernelManager {
 
         let mut settled_result: Option<anyhow::Result<InternalExecuteResult>> = None;
         let send_outcome: anyhow::Result<()> = {
-            // The write-phase ceiling: a wake or the wait budget that
-            // fires while the frame is still unwritten cannot detach the
-            // cell (the kernel never received it — the cannot-yield class
-            // of the steer handoff), so it starts a short ceiling instead.
-            // On expiry the execution stops with a typed cause, the stop
-            // watcher retires the kernel, and the settled arm below runs
-            // the existing early-settle retirement of the blocked writer
-            // and its stdin. The write carries its own wake subscription,
-            // so the wait's retained-wake contract is untouched.
-            let ceiling_ms = Duration::from_millis(crate::kernel::shared::KERNEL_WRITE_CEILING_MS);
-            let mut write_wake_rx = execution.opts.wake.as_ref().map(|wake| wake.subscribe());
-            // A wake level already pending at the write is a failed steer
-            // handoff too: the ceiling starts with the write.
-            let mut write_ceiling: Option<tokio::time::Instant> = wake_pending
-                .as_ref()
-                .filter(|pending| pending())
-                .map(|_| tokio::time::Instant::now() + ceiling_ms);
-            let mut budget_started_ceiling = false;
-            loop {
-                let write_budget = async {
-                    match budget_deadline {
-                        Some(deadline) if !budget_started_ceiling => {
-                            tokio::time::sleep_until(deadline).await;
+            tokio::select! {
+                biased;
+                settled = &mut result_rx => {
+                    // The cell settled before the write completed (fast runtime). Only an aborted
+                    // status may skip waiting for the write; a failed write on a successful cell
+                    // must surface.
+                    let settled: anyhow::Result<InternalExecuteResult> = match settled {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow!("Kernel has been shut down")),
+                    };
+                    let early_settle = matches!(&settled, Ok(result) if result.result.status == ExecuteStatus::Aborted);
+                    if early_settle {
+                        // A blocked request writer would otherwise retain stdin's
+                        // mutex after the caller returned, wedging shutdown too.
+                        send_task.abort();
+                        // A cancelled write leaves the request unsent or
+                        // torn: the runtime never sees it, its execution never
+                        // settles, and every later request fails as busy.
+                        // Retire stdin so the kernel is replaced.
+                        if matches!(send_task.await, Err(e) if e.is_cancelled()) {
+                            // Detached: a queued stdin writer must not park this request.
+                            tokio::spawn(async move {
+                                *stdin_retire.lock().await = None;
+                            });
                         }
-                        _ => std::future::pending().await,
-                    }
-                };
-                let write_ceiling_wait = async {
-                    match write_ceiling {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                };
-                tokio::select! {
-                    biased;
-                    settled = &mut result_rx => {
-                        // The cell settled before the write completed (fast runtime). Only an aborted
-                        // status may skip waiting for the write; a failed write on a successful cell
-                        // must surface.
-                        let settled: anyhow::Result<InternalExecuteResult> = match settled {
-                            Ok(result) => result,
-                            Err(_) => Err(anyhow!("Kernel has been shut down")),
-                        };
-                        let early_settle = matches!(&settled, Ok(result) if result.result.status == ExecuteStatus::Aborted);
-                        if early_settle {
-                            // A blocked request writer would otherwise retain stdin's
-                            // mutex after the caller returned, wedging shutdown too.
-                            send_task.abort();
-                            // A cancelled write leaves the request unsent or
-                            // torn: the runtime never sees it, its execution never
-                            // settles, and every later request fails as busy.
-                            // Retire stdin so the kernel is replaced.
-                            if matches!(send_task.await, Err(e) if e.is_cancelled()) {
-                                // Detached: a queued stdin writer must not park this request.
-                                tokio::spawn(async move {
-                                    *stdin_retire.lock().await = None;
-                                });
-                            }
-                            settled_result = Some(settled);
+                        settled_result = Some(settled);
+                    } else {
+                        // Surfacing a failed write outranks the settled cell.
+                        if let Err(error) = (&mut send_task).await.unwrap_or_else(|e| Err(anyhow!("{e}"))) {
+                            settled_result = Some(Err(error));
                         } else {
-                            // Surfacing a failed write outranks the settled cell.
-                            if let Err(error) = (&mut send_task).await.unwrap_or_else(|e| Err(anyhow!("{e}"))) {
-                                settled_result = Some(Err(error));
-                            } else {
-                                settled_result = Some(settled);
-                            }
-                        }
-                        break Ok(());
-                    }
-                    r = &mut send_task => {
-                        break r.unwrap_or_else(|e| Err(anyhow!("{e}")));
-                    }
-                    () = awakened(write_wake_rx.as_mut()) => {
-                        // A wake whose level shows the input consumed or
-                        // cleared would not detach the wait, so it starts
-                        // no ceiling either.
-                        if wake_pending.as_ref().is_none_or(|pending| pending()) {
-                            write_ceiling
-                                .get_or_insert_with(|| tokio::time::Instant::now() + ceiling_ms);
+                            settled_result = Some(settled);
                         }
                     }
-                    () = write_budget => {
-                        // The budget that fires mid-write starts the ceiling
-                        // once; the wait's own budget arm keeps its detach
-                        // reason when the write completes inside the ceiling.
-                        budget_started_ceiling = true;
-                        write_ceiling
-                            .get_or_insert_with(|| tokio::time::Instant::now() + ceiling_ms);
-                    }
-                    () = write_ceiling_wait => {
-                        // Fires once: the ceiling never re-arms, and the typed
-                        // stop is idempotent. The stop watcher's retirement
-                        // lands on the result channel, whose early-settle arm
-                        // retires the blocked writer and its stdin.
-                        write_ceiling = None;
-                        execution.stop_with_cause(
-                            crate::kernel::shared::ExecutionStopCause::WriteCeiling,
-                        );
-                    }
+                    Ok(())
+                }
+                r = &mut send_task => {
+                    r.unwrap_or_else(|e| Err(anyhow!("{e}")))
                 }
             }
         };
@@ -787,7 +733,7 @@ impl ReplKernelManager {
                             // namespace before it failed), but only with the
                             // kernel still alive.
                             let owed = inner.snapshot_owed.swap(false, Ordering::SeqCst);
-                            if (result.status == ExecuteStatus::Ok && result.detached.is_none())
+                            if result.status == ExecuteStatus::Ok
                                 || (owed && inner.is_running_state())
                             {
                                 inner.schedule_snapshot();

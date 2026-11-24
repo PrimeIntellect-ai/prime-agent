@@ -77,6 +77,13 @@ impl Inner {
             if buffers.settled {
                 return Err(anyhow!("rlm.end_turn arrived after its cell settled"));
             }
+            // A backgrounded cell's turn already returned: no turn is
+            // left to end.
+            if execution.detached.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(anyhow!(
+                    "rlm.end_turn ran in a backgrounded cell; its turn already returned"
+                ));
+            }
             buffers.ended_turn = true;
             return Ok(json!({ "endedTurn": true }));
         }

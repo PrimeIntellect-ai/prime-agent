@@ -24,28 +24,15 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// The whole-worker idle passivation gate: the settled gates, no
-    /// autonomous continuation owed behind a durable shell, and an empty RLM
-    /// child registry (rationale on the trait method). The kernel release does
-    /// NOT carry the last two rules: releasing a kernel keeps the worker (its
-    /// registry and its wakes) resident.
+    /// The whole-worker idle passivation gate: the settled gates plus an empty RLM
+    /// child registry (rationale on the trait method). The kernel release does NOT
+    /// carry the registry rule: releasing a kernel keeps the worker (and its registry)
+    /// resident.
     fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             if !self.settled_passivation_gates_pass().await {
-                return false;
-            }
-            // An autonomous continuation owed behind a durable shell waits for
-            // that shell's exit watch, which only this worker runs: the stop
-            // would drop the wake. The owed flag alone can outlive its hold,
-            // so it never keeps the worker resident by itself.
-            if self
-                .autonomous_awaits_rlm_work
-                .load(std::sync::atomic::Ordering::SeqCst)
-                && self.autonomous.lock().await.enabled
-                && self.durable_background_shell_count() > 0
-            {
                 return false;
             }
             match self.children.clone() {
@@ -104,20 +91,14 @@ impl SessionEngine for AgentSessionEngine {
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             // The quiescence arm: unsettled work defers the mint (owed, not
-            // consumed). Live background kernel work holds the deferral too
-            // (a detached cell's terminal notice is the guaranteed retry);
-            // only a live background bash() handle arms the fallback wake —
-            // its marker turn and its [bash-done] promise are
-            // shell-specific. The durable term keeps the goal-gate hold:
-            // a shell that outlived its kernel still defers the mint and
-            // arms behind its exit watch.
-            let live_background_work = self.has_live_background_kernel_work();
-            if self.has_unsettled_rlm_work().await
-                || live_background_work
-                || self.background_bash_handle_count() > 0
-            {
+            // consumed). Live background work also arms the fallback wake
+            // (once per deferral): its completion notice is the normal retry,
+            // and work that never completes gets one marker turn after one
+            // window.
+            let background_work = self.background_work_count() > 0;
+            if self.has_unsettled_rlm_work().await || background_work {
                 driver.mark_continuation_owed();
-                if self.has_live_background_bash_handles() {
+                if background_work {
                     drop(driver);
                     self.arm_background_skip_wake().await;
                 }

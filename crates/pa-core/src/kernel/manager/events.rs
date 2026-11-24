@@ -405,7 +405,6 @@ mod tests {
             result_tx: std::sync::Mutex::new(Some(result_tx)),
             detached: std::sync::atomic::AtomicBool::new(false),
             stop_signal: crate::kernel::cancellation::AbortSignal::default(),
-            stop_cause: std::sync::Mutex::new(None),
             settled_tx: tokio::sync::watch::channel(false).0,
         });
         lock(&manager.inner.guarded).active_executions = vec![Arc::clone(&execution)];

@@ -107,6 +107,12 @@ impl Inner {
             }
             Err(error) => {
                 self.append_diagnostic(&format!("state snapshot error: {error:#}"));
+                // A failed capture stays owed: the next backgrounded cell's
+                // settle (any status, kernel alive) retries it. No re-check
+                // of the detached cell here: it may settle between the
+                // failure and a re-check, which would drop the capture.
+                self.snapshot_owed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
         }
@@ -364,17 +370,6 @@ impl Inner {
         *timer = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(debounce)).await;
             if let Some(inner) = inner.upgrade() {
-                // A detached cell owns the runtime until it settles: the
-                // capture would only burn the busy window and fail. Keep
-                // the snapshot owed instead — the cell's settle (any
-                // status, kernel alive) retries it — so the settled
-                // namespace cannot stay unsnapshotted behind it.
-                if inner.has_detached_active_execution() {
-                    inner
-                        .snapshot_owed
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    return;
-                }
                 // The bootstrap schedules this flush; rewriting the just-restored payload while the
                 // namespace is unchanged is the one write that must not happen.
                 if inner.consume_restored_snapshot_skip().await {

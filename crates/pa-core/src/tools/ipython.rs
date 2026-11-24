@@ -409,7 +409,7 @@ fn timeout_arg_ms(params: &serde_json::Value) -> Option<u64> {
 }
 
 pub fn ipython_tool_description() -> &'static str {
-    "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Sleeping and waiting in a cell are fine: a new user message or inbox arrival ends the wait early and the cell keeps running in the background, its completion arriving as a notice. A new cell can run while a backgrounded cell waits at an await point, but not while it runs synchronous code; the user can cancel backgrounded work, and a cell that ignores the cancel's interrupt has its kernel retired. Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment."
+    "Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment."
 }
 
 #[tracing::instrument(
