@@ -2036,10 +2036,14 @@ def _shown(name: str) -> str:
 
 
 def _runs_dir() -> Path | None:
-    """The run registry directory, or ``None`` without a session artifact dir.
+    """The run registry directory, or ``None`` without a session artifact dir
+    or on a daemonless host (a ``--print`` run's children die with its
+    process, so its runs are never saved).
 
     Set-but-empty env values behave as unset (mirrors ``harness._env_dir``).
     """
+    if _daemonless_host():
+        return None
     value = (os.environ.get("RLM_SESSION_DIR") or "").strip()
     return Path(value).expanduser() / RUNS_DIR_NAME if value else None
 
@@ -2399,9 +2403,6 @@ class FactoryExecutor:
         # Run ids whose snapshots this executor loaded off disk: the
         # boot-once arming queue (each id is armed exactly once per boot).
         self._rehydrated: set[str] = set()
-        # The same ids, kept after arming: on a daemonless host their
-        # children died with the process that spawned them.
-        self._loaded: set[str] = set()
         # (run id, writer) pairs whose write already failed once: a dead
         # disk must not wedge the loop with a ledger row per event, and a
         # writer that recovers clears its own mark.
@@ -2846,7 +2847,6 @@ class FactoryExecutor:
                 continue
             self._runs[run.run_id] = run
             self._rehydrated.add(run.run_id)
-            self._loaded.add(run.run_id)
         # A marker whose snapshot is ABSENT names the run's FIRST write
         # (round-8 probe R8-03): the marker exists because the snapshot
         # does not, so no snapshot walk ever surfaces it — the run is
@@ -3344,7 +3344,7 @@ class FactoryExecutor:
         ``ValueError`` when the run is not paused, and on a daemonless
         (``--print``) host for any run this kernel did not start.
         """
-        if _daemonless_host() and (run_id not in self._runs or run_id in self._loaded):
+        if _daemonless_host() and run_id not in self._runs:
             raise ValueError(
                 f"factory run {run_id!r} did not start in this process: {PRINT_RUNS_NOT_DURABLE}"
             )

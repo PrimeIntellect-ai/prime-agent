@@ -14546,16 +14546,16 @@ class FactoryPrintDurabilityTest(_ExecutorTestCase):
         return run_id
 
     @async_test
-    async def test_resume_refuses_a_run_an_earlier_print_process_started(self) -> None:
+    async def test_a_print_run_is_never_saved_and_a_later_process_refuses_it(self) -> None:
         run_id = await self.paused_run()
+        self.assertFalse((Path(os.environ["RLM_SESSION_DIR"]) / factory_module.RUNS_DIR_NAME).exists())
         restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
         restarted.rehydrate_registry()
         factory_module._DEFAULT_EXECUTOR = restarted
-        for target in (run_id, "never-started"):
-            with self.assertRaises(ValueError) as raised:
-                await rlm_module.rlm.factory.resume(target)
-            self.assertIn("run machines under the daemon", str(raised.exception))
-        self.assertEqual(restarted._runs[run_id].state, "paused")
+        self.assertNotIn(run_id, restarted._runs)
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.resume(run_id)
+        self.assertIn("run machines under the daemon", str(raised.exception))
 
     @async_test
     async def test_resume_continues_a_run_this_print_process_started(self) -> None:
