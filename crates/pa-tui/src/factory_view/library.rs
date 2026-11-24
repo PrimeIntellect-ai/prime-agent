@@ -473,6 +473,15 @@ impl LibraryView {
     /// and a refresh that renames the selected row's displayed owner
     /// label each retire it. It never shares the page's fetch errors —
     /// those the report's retirements must preserve.
+    /// Whether `session_id` opened the page (its own rows are that
+    /// session's).
+    #[must_use]
+    pub fn opened_by(&self, session_id: &str) -> bool {
+        self.own_owner_ids
+            .first()
+            .is_some_and(|id| id == session_id)
+    }
+
     pub fn set_row_notice(&mut self, notice: Option<String>) {
         self.row_notice = notice.map(|text| crate::menu_panel::scrub_controls(&text));
     }
