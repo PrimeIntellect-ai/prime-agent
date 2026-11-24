@@ -28,33 +28,6 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// The files a reader inspects for each state, relative to the machine
-    /// dir: an agent state's shared context, prompt, and rubric; a python
-    /// state's module.
-    #[must_use]
-    pub fn state_files(&self) -> Vec<(String, Vec<String>)> {
-        self.states
-            .iter()
-            .map(|state| {
-                let files = match &state.work {
-                    Work::Agent(agent) => {
-                        let mut files = Vec::new();
-                        if self.context.is_some() {
-                            files.push(crate::load::CONTEXT_FILE.to_string());
-                        }
-                        files.push(agent.prompt_file.clone());
-                        if let Some(rubric) = &agent.rubric {
-                            files.push(rubric.file.clone());
-                        }
-                        files
-                    }
-                    Work::Python(call) => vec![call.file.clone()],
-                };
-                (state.id.clone(), files)
-            })
-            .collect()
-    }
-
     #[must_use]
     pub fn state(&self, id: &str) -> Option<&State> {
         self.states.iter().find(|state| state.id == id)

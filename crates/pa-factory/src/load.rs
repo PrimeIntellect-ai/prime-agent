@@ -13,6 +13,9 @@ use serde_json::Value;
 use toml::Spanned;
 
 use crate::duration::parse_duration_ms;
+use crate::limits::{
+    FOREACH_MAX, MAX_CHILDREN, MAX_ENTRIES, MAX_PARALLEL, MAX_RETRIES, MAX_STATES, MAX_TRANSITIONS,
+};
 use crate::machine::{
     Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall, Route,
     Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
@@ -22,10 +25,6 @@ use crate::types::{self, parse_slot, parse_type, record_names, Records, Slot, Ty
 pub const MACHINE_FILE: &str = "machine.toml";
 pub const CONTEXT_FILE: &str = "prompts/_context.md";
 
-const MAX_STATES: usize = 1024;
-const MAX_RETRIES: i64 = 10;
-const MAX_PARALLEL: i64 = 64;
-const FOREACH_MAX: i64 = 256;
 const LABEL_MAX_CHARS: usize = 64;
 const SEVERITIES: [&str; 4] = ["blocker", "major", "minor", "nit"];
 
@@ -297,7 +296,7 @@ fn build_machine(dir: &Path, raw: RawMachine, problems: &mut Vec<Diagnostic>) ->
 }
 
 pub(crate) fn is_machine_name(text: &str) -> bool {
-    is_state_id(text)
+    crate::library::machine_name_errors(text).is_empty()
 }
 
 pub(crate) fn is_state_id(text: &str) -> bool {
@@ -502,10 +501,10 @@ fn build_run(raw: RawRun, problems: &mut Vec<Diagnostic>) -> RunSettings {
             .and_then(|value| bounded(value, 1, MAX_PARALLEL, "run.max_parallel", problems)),
         max_children: raw
             .max_children
-            .and_then(|value| bounded(value, 1, 1_000_000, "run.max_children", problems)),
+            .and_then(|value| bounded(value, 1, MAX_CHILDREN, "run.max_children", problems)),
         max_transitions: raw
             .max_transitions
-            .and_then(|value| bounded(value, 1, 10_000, "run.max_transitions", problems)),
+            .and_then(|value| bounded(value, 1, MAX_TRANSITIONS, "run.max_transitions", problems)),
         failure_policy: raw
             .failure_policy
             .and_then(|text| policy(&text, "run.failure_policy", problems)),
@@ -580,14 +579,10 @@ fn read_text_file(
         return None;
     }
     let full = dir.join(path);
-    // A relative in-dir path can still LEAVE the dir through a symlink:
-    // `prompts/a.md -> /tmp/secret` passes the text check and hands the
-    // machine outside content (a probe at this fix's head read
-    // /tmp/probe-secret.txt into a child prompt). When the file exists,
-    // its canonicalized path must stay under the canonical machine dir —
-    // a symlink pointing outside is a load error, before any text is
-    // read. A missing file falls through to the read attempt below,
-    // which reports it with its own diagnostic.
+    // A relative in-dir path can still leave the dir through a symlink
+    // (`prompts/a.md -> /tmp/secret`), which would put outside content into
+    // a child prompt. An existing file must canonicalize under the machine
+    // dir; a missing one falls through to the read below, which reports it.
     if let (Ok(dir_canonical), Ok(full_canonical)) = (dir.canonicalize(), full.canonicalize()) {
         if !full_canonical.starts_with(&dir_canonical) {
             problems.push(Diagnostic::new(
@@ -774,9 +769,15 @@ fn build_state(
     let route = raw
         .route
         .and_then(|table| build_route(&at, table, problems));
-    let max_entries = raw
-        .max_entries
-        .and_then(|value| bounded(value, 1, 1_000_000, &format!("{at}.max_entries"), problems));
+    let max_entries = raw.max_entries.and_then(|value| {
+        bounded(
+            value,
+            1,
+            MAX_ENTRIES,
+            &format!("{at}.max_entries"),
+            problems,
+        )
+    });
     let retries = raw
         .retries
         .and_then(|value| bounded(value, 0, MAX_RETRIES, &format!("{at}.retries"), problems));

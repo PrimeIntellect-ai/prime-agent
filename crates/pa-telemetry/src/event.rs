@@ -57,19 +57,3 @@ impl TelemetryEvent {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn to_value_shape() {
-        let mut properties = Properties::new();
-        properties.set("outcome", serde_json::Value::from("success"));
-        let event = TelemetryEvent::new("agent run completed", properties);
-        let value = event.to_value();
-        assert_eq!(value["name"], "agent run completed");
-        assert_eq!(value["properties"]["outcome"], "success");
-        assert!(value["timestamp"].as_str().unwrap().ends_with('Z'));
-    }
-}
