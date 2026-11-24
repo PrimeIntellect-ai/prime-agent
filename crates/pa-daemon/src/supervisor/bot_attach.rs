@@ -10,8 +10,15 @@ impl Supervisor {
         bot_id: &str,
     ) -> DaemonResponse {
         let agent_dir = &self.options.agent_dir;
+        // The attach may resume a paused bot. When it ends, follow the bot: deliver the turns
+        // run during the attach, then pause it after the grace.
+        let this = Arc::clone(self);
+        let followed = bot_id.to_string();
+        let on_end = move || this.follow_bot(&followed);
         let attached = match crate::bots::manager_for(agent_dir) {
-            Ok(manager) => crate::bots::attach::attach_bot(&manager, agent_dir, bot_id).await,
+            Ok(manager) => {
+                crate::bots::attach::attach_bot(&manager, agent_dir, bot_id, on_end).await
+            }
             Err(error) => Err(error),
         };
         match attached {
