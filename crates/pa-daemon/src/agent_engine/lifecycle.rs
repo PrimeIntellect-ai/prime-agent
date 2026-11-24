@@ -140,6 +140,7 @@ impl AgentSessionEngine {
             inbox: std::sync::Mutex::new(None),
             inbox_read_hook: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
+            background_skip_wake_armed: std::sync::atomic::AtomicBool::new(false),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             queue_modes,
             registered_jobs_probe: std::sync::Mutex::new(None),

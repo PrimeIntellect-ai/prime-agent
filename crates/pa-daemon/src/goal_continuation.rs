@@ -135,14 +135,6 @@ impl AgentSessionEngine {
             }
         }
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
-            // Self-heal: a fire that completed without running (withdrawn
-            // or cleared mid-teardown) strands the owed deferral with no
-            // wake; the next settle consult behind a still-live shell
-            // re-arms it so the bounded-stall guarantee survives (an
-            // armed wake stays put).
-            if self.has_live_background_bash_handles() {
-                self.arm_background_skip_wake().await;
-            }
             return;
         }
         // Queued input or the post-abort suspension owns the boundary.
@@ -306,9 +298,10 @@ impl AgentSessionEngine {
             }
             // The quiescence gate: the continuation waits (not consumed)
             // until the descendants settle or the bash handles finish. A
-            // live background bash handle also arms the fallback wake: the
-            // shell's [bash-done] notice is the normal retry, but a shell
-            // that never completes must not stall the goal past one window.
+            // live background bash handle also arms the fallback wake (once
+            // per deferral): the shell's [bash-done] notice is the normal
+            // retry, and a shell that never completes gets one marker turn
+            // after one window.
             let live_background_bash = self.has_live_background_bash_handles();
             if self.has_unsettled_rlm_work().await || live_background_bash {
                 driver.mark_continuation_owed();

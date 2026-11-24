@@ -777,9 +777,10 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
 
 /// T-0012: a live background `bash()` handle defers the goal continuation
 /// (owed, not consumed) and arms the fallback wake - a durable one-shot
-/// cron one skip-window out - so a shell that never completes cannot stall
-/// the goal. The shell's settle path (the `[bash-done]` sibling) delivers
-/// the owed continuation and retires the armed wake.
+/// cron one skip-window out - once per deferral: a shell that never
+/// completes gets exactly one marker turn. The shell's settle path (the
+/// `[bash-done]` sibling) delivers the owed continuation and retires the
+/// armed wake.
 #[test]
 fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
     let _faux = FAUX_TEST_LOCK
@@ -826,7 +827,6 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
                         {"text": "goal turn reply"},
                         {"text": "user turn reply"},
                         {"text": "marker turn reply"},
-                        {"text": "queued turn reply"},
                     ]
                 })
                 .to_string(),
@@ -976,10 +976,9 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
             )
             .expect("the scheduler records the fire");
     };
-    // THE RE-ARM: the scheduler claims the due wake and its marker turn
-    // runs; that turn's end re-consults the boundary and arms the next
-    // window, and the fired one-shot completes after its turn - exactly
-    // one Active, a new id.
+    // ONE FALLBACK TURN PER DEFERRAL: the scheduler claims the due wake and
+    // its marker turn runs behind the still-live shell; that turn's end
+    // re-defers but arms nothing, so no later window fires another marker.
     let claimed = store
         .claim_due(fire_at_ms, crate::util::now_ms())
         .expect("the scheduler claims the due wake");
@@ -993,100 +992,23 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         &mut marker_events,
     );
     complete_dispatch(first_fire);
-    let rearmed = active_wakes();
-    let [rewake] = rearmed.as_slice() else {
-        panic!("the marker turn must re-arm exactly one wake: {rearmed:?}");
-    };
     assert!(
-        rewake.id != first_wake_id,
-        "the re-arm must replace the fired wake, not stack beside it"
+        active_wakes().is_empty(),
+        "the marker turn must not re-arm the fallback wake: {:?}",
+        active_wakes()
     );
-    // A CLAIMED WAKE QUEUED BEHIND ANOTHER TURN: the scheduler claims
-    // before the per-session dispatch lane, so another turn can end while
-    // the claimed wake still waits to run its marker. That turn's arming
-    // must leave the claimed wake to fire on time (retiring it would push
-    // the bound a full window out) and arm the next window beside it.
-    let rewake_fire_at_ms = pa_core::cron::parse_iso_millis(
-        rewake
-            .next_run_at
-            .as_deref()
-            .expect("the re-armed wake carries a fire time"),
-    )
-    .expect("the fire time parses");
-    let rewake_id = rewake.id.clone();
-    let claimed = store
-        .claim_due(rewake_fire_at_ms, crate::util::now_ms())
-        .expect("the scheduler claims the re-armed wake");
-    let [queued_fire] = claimed.as_slice() else {
-        panic!("the scheduler claims exactly the re-armed wake: {claimed:?}");
-    };
-    let mut queued_ahead_events: Vec<EngineEvent> = Vec::new();
-    admit(
-        &engine,
-        "a turn queued ahead of the claimed wake".to_string(),
-        &mut queued_ahead_events,
-    );
+    let later = store
+        .claim_due(fire_at_ms + 10 * window, crate::util::now_ms())
+        .expect("the scheduler scans later windows");
     assert!(
-        store.get_claimed_job(&rewake_id).is_some(),
-        "a turn ending ahead of the claimed wake must not retire it"
+        later.is_empty(),
+        "a never-ending shell gets exactly one fallback turn: {later:?}"
     );
-    assert!(
-        engine.background_skip_wake_armed(),
-        "the next window arms beside the claimed wake"
-    );
-    complete_dispatch(queued_fire);
-    let after_fire = active_wakes();
-    let [next_wake] = after_fire.as_slice() else {
-        panic!("the claimed wake's fire must leave exactly one wake: {after_fire:?}");
-    };
-    assert_ne!(next_wake.id, rewake_id);
-    // A CLAIMED BACKOFF WAKE: the background-skip arming keeps only its own
-    // kind. A claimed backoff marker would run the goal through the live
-    // shell, so the arming retires it.
-    let backoff_id = engine
-        .runtime
-        .block_on(engine.schedule_goal_wake(
-            crate::agent_engine::GoalWakeKind::Backoff,
-            crate::util::now_ms() + 1_000,
-        ))
-        .expect("the backoff wake arms");
-    let claimed = store
-        .claim_due(crate::util::now_ms() + 5_000, crate::util::now_ms())
-        .expect("the scheduler claims the backoff wake");
-    let [backoff_fire] = claimed.as_slice() else {
-        panic!("the scheduler claims exactly the backoff wake: {claimed:?}");
-    };
-    engine.runtime.block_on(engine.schedule_goal_wake(
-        crate::agent_engine::GoalWakeKind::BackgroundSkip,
-        crate::util::now_ms() + window,
-    ));
-    assert!(
-        store.get_claimed_job(&backoff_id).is_none(),
-        "the background-skip arming must retire a claimed backoff wake"
-    );
-    complete_dispatch(backoff_fire);
-    // SELF-HEAL: a fire that completed without running (withdrawn or
-    // cleared) strands the owed deferral with no wake; the next settle
-    // consult behind the still-live shell re-arms it.
-    for job in store.list() {
-        if job.label.as_deref()
-            == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
-            && job.status == pa_core::cron::JobStatus::Active
-        {
-            store.cancel(&job.id, crate::util::now_ms()).unwrap();
-        }
-    }
-    assert!(
-        !engine.background_skip_wake_armed(),
-        "the test must first strand the wake"
-    );
+    // A settle consult behind the still-live shell arms nothing either.
     engine
         .runtime
         .block_on(async { engine.goal_children_settled().await });
-    assert!(
-        engine.background_skip_wake_armed(),
-        "the settle consult must re-arm the stranded wake"
-    );
+    assert!(active_wakes().is_empty());
     // The shell settles: the same consult delivers the owed continuation
     // and the successful mint retires the armed wake.
     engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
@@ -1116,7 +1038,7 @@ fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
         .runtime
         .block_on(async { engine.arm_background_skip_wake().await });
     assert!(
-        !engine.background_skip_wake_armed(),
+        active_wakes().is_empty(),
         "an arming behind a consumed deferral must arm nothing"
     );
 }

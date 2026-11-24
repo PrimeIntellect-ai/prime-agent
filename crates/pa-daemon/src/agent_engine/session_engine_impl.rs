@@ -92,9 +92,9 @@ impl SessionEngine for AgentSessionEngine {
             let mut driver = handles.driver.lock().await;
             // The quiescence arm: unsettled work defers the mint (owed, not
             // consumed). A live background bash handle also arms the
-            // fallback wake: the shell's [bash-done] notice is the normal
-            // retry, but a shell that never completes must not stall the goal
-            // past one window.
+            // fallback wake (once per deferral): the shell's [bash-done]
+            // notice is the normal retry, and a shell that never completes
+            // gets one marker turn after one window.
             let live_background_bash = self.has_live_background_bash_handles();
             if self.has_unsettled_rlm_work().await || live_background_bash {
                 driver.mark_continuation_owed();

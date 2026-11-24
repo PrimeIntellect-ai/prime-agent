@@ -17,16 +17,6 @@ pub(crate) enum GoalWakeKind {
     BackgroundSkip,
 }
 
-/// What retiring the session's goal wakes does with one a dispatch has
-/// already claimed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaimedGoalWake {
-    Retire,
-    /// Keep a claimed background-skip wake; a claimed backoff wake still
-    /// retires, since its marker would run the goal through a live shell.
-    KeepBackgroundSkip,
-}
-
 impl AgentSessionEngine {
     /// Write the durable `rlm_max_depth_state` entry: straight into the
     /// built session's persistence handle, or parked for the build.
@@ -84,12 +74,13 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Arm the background-skip fallback wake one window out, unless one is
-    /// still waiting to fire: the deferred mint sites and the settle
-    /// consult's self-heal share the arming. A turn inside the window (a
-    /// user prompt, a steering notice, a post-compaction consult) never
-    /// pushes the bound out; the firing wake's own marker turn arms the
-    /// next window. The check and the store write run under the goal
+    /// Arm the background-skip fallback wake one window out, once per
+    /// deferral: the deferred mint sites share the arming, and a later
+    /// boundary of the same deferral (a user prompt, a steering notice, the
+    /// fired wake's own marker turn) arms nothing. A shell that is still
+    /// running after the one marker turn holds the goal until it ends; the
+    /// next deferral (after a mint, or after a goal transition retired the
+    /// wake) arms again. The check and the store write run under the goal
     /// driver lock, which the mint and the goal's transitions hold: a
     /// deferral a mint already consumed, or a goal that left the active
     /// state, arms no stale wake.
@@ -101,15 +92,20 @@ impl AgentSessionEngine {
             let driver = live.goal.driver.lock().await;
             if !driver.owes_continuation()
                 || !driver.owns_continuation_wakeup()
-                || self.background_skip_wake_armed()
+                || self
+                    .background_skip_wake_armed
+                    .load(std::sync::atomic::Ordering::SeqCst)
             {
                 return;
             }
-            self.create_goal_wake_job(
+            let job = self.create_goal_wake_job(
                 GoalWakeKind::BackgroundSkip,
                 crate::util::now_ms()
                     + pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WINDOW_MS,
-            )
+            );
+            self.background_skip_wake_armed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            job
         };
         if let Some(job) = job {
             self.wake_goal_scheduler(job).await;
@@ -142,14 +138,8 @@ impl AgentSessionEngine {
     ) -> Option<pa_core::cron::AgentCronJob> {
         // Exactly one wake per window: the prior job retires before the
         // replacement arms — repeated boundaries must never stack marker
-        // turns. A background-skip arming keeps a claimed background-skip wake: the
-        // scheduler claims before the per-session dispatch lane, so the
-        // claim may still wait behind another turn, and retiring it would
-        // push the bound a full window out.
-        self.retire_goal_wakes(match kind {
-            GoalWakeKind::Backoff => ClaimedGoalWake::Retire,
-            GoalWakeKind::BackgroundSkip => ClaimedGoalWake::KeepBackgroundSkip,
-        });
+        // turns.
+        self.cancel_goal_wake();
         let wiring = self.cron_wiring()?;
         let binding = self.kernel_cron_binding()?;
         let schedule_text = format!(
@@ -200,39 +190,14 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Whether the session holds a background-skip wake still waiting to
-    /// fire: Active in the cron store and not claimed by a dispatch. A
-    /// claimed wake is firing or queued to fire (it completes only after
-    /// its marker turn), so an arming arms the next window beside it and
-    /// leaves it in place; a fire that completed without running leaves
-    /// none, so the settle consult's self-heal re-arms behind a hung shell.
-    pub(crate) fn background_skip_wake_armed(&self) -> bool {
-        let Some(wiring) = self.cron_wiring() else {
-            return false;
-        };
-        let Some(binding) = self.kernel_cron_binding() else {
-            return false;
-        };
-        wiring.store.list().into_iter().any(|job| {
-            job.status == pa_core::cron::JobStatus::Active
-                && job.label.as_deref()
-                    == Some(
-                        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
-                    )
-                && job.session_id == binding.session_id
-                && wiring.store.get_claimed_job(&job.id).is_none()
-        })
-    }
-
     /// Cancel the pending goal wake: the successful mint and the goal's
     /// terminal transitions retire the stale wake (either kind — the
     /// no-progress backoff or the background-skip fallback). A fired job
-    /// stays untouched.
+    /// stays untouched. Retiring the wake ends the deferral's one
+    /// background-skip arming, so the next deferral arms again.
     pub(crate) fn cancel_goal_wake(&self) {
-        self.retire_goal_wakes(ClaimedGoalWake::Retire);
-    }
-
-    fn retire_goal_wakes(&self, claimed: ClaimedGoalWake) {
+        self.background_skip_wake_armed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let Some(wiring) = self.cron_wiring() else {
             return;
         };
@@ -254,15 +219,6 @@ impl AgentSessionEngine {
                     )
                 )
                 || job.session_id != binding.session_id
-            {
-                continue;
-            }
-            if claimed == ClaimedGoalWake::KeepBackgroundSkip
-                && job.label.as_deref()
-                    == Some(
-                        pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL,
-                    )
-                && wiring.store.get_claimed_job(&job.id).is_some()
             {
                 continue;
             }

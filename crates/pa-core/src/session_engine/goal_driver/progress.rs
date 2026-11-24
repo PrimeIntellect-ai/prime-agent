@@ -31,16 +31,14 @@ pub const GOAL_BACKOFF_WAKE_MARKER_TEXT: &str = "<goal_backoff_wake>\nThe goal c
 /// The fallback wake's cron label: when the quiescence gate defers a goal
 /// continuation behind a live background `bash()` handle, the daemon arms a
 /// one-shot cron one [`GOAL_BACKGROUND_SKIP_WINDOW_MS`] out, so a shell that
-/// never completes cannot stall the goal forever.
+/// never completes cannot stall the goal without the model hearing of it.
 pub const GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL: &str = "goal-background-skip-wake";
 
-/// The fallback wake's window: the armed wake fires one marker turn per
-/// window while the shell stays live (each firing turn re-arms). Five
-/// minutes is generous to legitimate long builds yet bounds the stall; the
-/// shell's own `[bash-done]` notice is still the normal, immediate wake.
-/// Each firing marker turn is a real provider turn charging the goal, and
-/// while the quiescence gate holds the no-progress streak does not advance,
-/// so the loop is bounded only by the goal's token budget or the operator.
+/// The fallback wake's window: the wake fires one marker turn this long
+/// after a deferral starts, once per deferral (the marker turn's own
+/// boundary does not re-arm it). Five minutes is generous to legitimate
+/// long builds; the shell's own `[bash-done]` notice is still the normal,
+/// immediate wake.
 pub const GOAL_BACKGROUND_SKIP_WINDOW_MS: u64 = 5 * 60 * 1000;
 
 /// The fallback wake's marker prompt: honest about why it fired, and that
