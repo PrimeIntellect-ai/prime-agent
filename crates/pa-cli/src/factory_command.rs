@@ -336,6 +336,13 @@ fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
         return Err(format!("machine file not found: {}", source.display()));
     }
     let machine = pa_factory::read_machine_md(source)?;
+    let folder = user_dir.join(&machine.name);
+    if folder.join(pa_factory::MACHINE_FILE).is_file() {
+        return Err(format!(
+            "{} is a machine directory, which the library uses before a MACHINE.md; rename the machine or move the directory first",
+            folder.display()
+        ));
+    }
     let checked = resolve_kernel_python().and_then(|python| {
         dispatch_via_kernel(&python, &json!({"op": "validate", "spec": machine.spec}))
     })?;
@@ -345,9 +352,7 @@ fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
     }
     let bytes = std::fs::read(source)
         .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-    let destination = user_dir
-        .join(&machine.name)
-        .join(pa_factory::MACHINE_MD_FILE);
+    let destination = folder.join(pa_factory::MACHINE_MD_FILE);
     let created = !destination.exists();
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)
@@ -586,6 +591,24 @@ mod tests {
             listing_row(&machine, 5),
             "sweep  repo  A machine that sweeps."
         );
+    }
+
+    #[test]
+    fn an_import_never_hides_behind_a_machine_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("MACHINE.md");
+        std::fs::write(
+            &source,
+            "---\nname: sweep\ndescription: Sweep.\n---\n```machine-spec\n{\"states\": []}\n```\n",
+        )
+        .unwrap();
+        let user = dir.path().join("machines");
+        std::fs::create_dir_all(user.join("sweep")).unwrap();
+        std::fs::write(user.join("sweep/machine.toml"), "format = 1\n").unwrap();
+        assert!(import_machine(&source, &user)
+            .unwrap_err()
+            .contains("is a machine directory"));
+        assert!(!user.join("sweep/MACHINE.md").exists());
     }
 
     #[test]
