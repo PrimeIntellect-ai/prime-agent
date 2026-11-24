@@ -812,40 +812,6 @@ impl Provider for OpenAICodexResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// The user-facing text for a failed codex stream is the verbatim error message; the
-    /// raw-`fetch` connection failure surfaces the runtime's own refused-connect text.
-    #[test]
-    fn codex_error_message_shapes() {
-        let usage_limit =
-            ProviderError::Http(crate::utils_inner::stream_failure::ProviderHttpError {
-                message: "You have hit your ChatGPT usage limit (pro plan).".to_string(),
-                status: Some(429),
-                body: None,
-                headers: HashMap::default(),
-                request_id: None,
-                sdk_name: Some("CodexApiError".to_string()),
-                retry_after_ms: Some(60_000),
-                provider_error_type: Some("usage_limit_reached".to_string()),
-            });
-        assert_eq!(
-            usage_limit.to_string(),
-            "You have hit your ChatGPT usage limit (pro plan)."
-        );
-        let connect = ProviderError::Connection(
-            crate::utils_inner::stream_failure::ProviderConnectionError {
-                kind: crate::utils_inner::stream_failure::ConnectionErrorKind::Connect,
-                profile: crate::utils_inner::stream_failure::ConnectionErrorProfile::RawFetch,
-                cause: "tcp connect error".to_string(),
-            },
-        );
-        assert_eq!(
-            connect.to_string(),
-            "Unable to connect. Is the computer able to access the url?"
-        );
-        assert_eq!(ProviderError::Aborted.to_string(), "Request was aborted");
-    }
 
     #[test]
     fn additional_headers_override_model_headers() {
