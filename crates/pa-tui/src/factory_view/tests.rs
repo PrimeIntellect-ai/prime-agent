@@ -316,7 +316,7 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
     assert!(fired_arrow, "the fired edge's arrow paints success");
     // The spawned child nests under its state's box.
     assert!(
-        joined.contains("└─ run-ab-researcher"),
+        joined.contains("└─ #0 · e0 run-ab"),
         "the settled child nests under the collect box: {joined}"
     );
 }
@@ -332,7 +332,7 @@ fn each_instance_of_a_state_nests_with_its_own_label() {
     ]);
     let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
     let joined = frame_text(&mut view).join("\n");
-    for label in ["run-ab-researcher #0 · e0", "run-ab-researcher #1 · e0"] {
+    for label in ["└─ #0 · e0 run-ab", "└─ #1 · e0 run-ab"] {
         assert!(joined.contains(label), "missing {label:?}: {joined}");
     }
 }
