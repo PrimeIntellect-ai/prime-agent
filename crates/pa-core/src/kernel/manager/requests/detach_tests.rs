@@ -742,21 +742,40 @@ async fn the_scoped_cancel_skips_an_attached_cell() {
         .start(KernelStartOptions::default())
         .await
         .expect("ready handshake");
-    let attached = manager
-        .execute(
-            "cell",
-            ExecuteOptions {
-                on_background_cell: Some(background_cell_outcomes().1),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("the attached call waits for its cell");
-    assert!(attached.detached.is_none());
+    let call = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            manager
+                .execute(
+                    "cell",
+                    ExecuteOptions {
+                        on_background_cell: Some(background_cell_outcomes().1),
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
+    };
+    // The cancel lands while the attached cell runs (the fake cell sleeps
+    // a second), so a cancel that reached attached cells would signal it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lock(&manager.inner.guarded).active_executions.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the cell's execution never became active"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert!(
         !manager.abort_detached_execution(),
         "no detached execution is running"
     );
+    let attached = call
+        .await
+        .expect("the call task joins")
+        .expect("the attached call waits for its cell");
+    assert!(attached.detached.is_none());
+    assert_eq!(attached.status, ExecuteStatus::Ok);
     assert!(
         !python.with_extension("interrupts").exists(),
         "the scoped cancel never signalled the attached cell"
@@ -1323,6 +1342,7 @@ async fn a_settled_execution_releases_its_stop_watcher() {
     };
     // Capture the running execution: its watcher holds a terminal-watch
     // receiver while the cell runs.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let execution = loop {
         let active = lock(&manager.inner.guarded)
             .active_executions
@@ -1331,9 +1351,12 @@ async fn a_settled_execution_releases_its_stop_watcher() {
         if let Some(active) = active {
             break active;
         }
+        assert!(
+            Instant::now() < deadline,
+            "the cell's execution never became active"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if execution.settled_tx.receiver_count() > 0 {
             break;
