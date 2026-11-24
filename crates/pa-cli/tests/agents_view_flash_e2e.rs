@@ -16,6 +16,9 @@
 //! live roster alone; the catalog keeps every dead row resumable.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -110,14 +113,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 /// One saved-session fixture: a version-3 session header (the parent

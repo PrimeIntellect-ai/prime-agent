@@ -23,6 +23,9 @@
 )]
 #![cfg(unix)]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -122,17 +125,11 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, script: &Path) -> Superviso
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Supervisor {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 struct Client {

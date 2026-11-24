@@ -15,6 +15,9 @@
 //! stop it — nor any other live daemon on the machine.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -94,14 +97,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, tmp_dir: &Path) -> Daemon {
         "15000",
     );
     let child = command.spawn().expect("spawn daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon { child };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Daemon { child }
 }
 
 /// Run the CLI with its state root pinned inside `root`: agent dir and TMPDIR
@@ -1038,15 +1035,7 @@ fn a_daemon_launched_with_an_inherited_worker_env_comes_up_as_a_supervisor() {
     // The invocation must come up as B's supervisor. On a routing
     // regression the process starts as a worker instead and this socket
     // never appears.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        socket.exists(),
-        "the daemon must come up as a supervisor on {} (an inherited worker env must not reroute it into worker mode)",
-        socket.display()
-    );
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(10));
 
     // The hello names this child as the supervisor.
     let stream = UnixStream::connect(&socket).expect("connect the supervisor");

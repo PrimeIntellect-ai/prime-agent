@@ -22,6 +22,9 @@
 // Every probe reads /proc (fd tables, process state, limits): Linux only.
 #![cfg(target_os = "linux")]
 
+#[path = "support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
@@ -102,17 +105,11 @@ fn spawn_daemon(mut launcher: Command, socket: &Path, agent_dir: &Path) -> Daemo
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Daemon {
-                child,
-                socket: socket.to_path_buf(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    daemon_socket::wait_until_listening(socket, Duration::from_secs(10));
+    Daemon {
+        child,
+        socket: socket.to_path_buf(),
     }
-    panic!("supervisor socket never appeared");
 }
 
 struct Client {

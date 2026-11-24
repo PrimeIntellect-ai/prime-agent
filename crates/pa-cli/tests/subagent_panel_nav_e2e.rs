@@ -16,12 +16,15 @@
 //! child, and the agents-back key returns.
 #![cfg(unix)]
 
+#[path = "../../pa-daemon/tests/support/daemon_socket.rs"]
+mod daemon_socket;
+
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::SessionSelection;
@@ -109,14 +112,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if socket.exists() {
-            return Supervisor { child, socket };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("supervisor socket never appeared");
+    daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
+    Supervisor { child, socket }
 }
 
 /// One saved-session fixture: a header with the subagent linkage
