@@ -5627,8 +5627,10 @@ class FactoryExecutor:
         return None
 
     async def _announce_task_work_hold(self, run: FactoryRun, state: _StateRun, instance: _NodeInstance) -> None:
-        """Tell the parent once that a settled child's background work holds
-        the run; the hold itself ends when that work does."""
+        """Tell the parent that a settled child's background work started
+        holding the run (once per hold of each child); the hold itself ends
+        when that work does."""
+        run.milestones.discard(TASK_WORK_HELD)  # every child's hold is its own notice
         await self._milestone(
             run,
             TASK_WORK_HELD,
@@ -6426,7 +6428,14 @@ class FactoryExecutor:
                 await self._apply_settlement(run, state, entry, instance, result)
                 if result.factory_task_busy is True and state.lifecycle != "resident":
                     task_work_waiting = True
-                    await self._announce_task_work_hold(run, state, instance)
+                    if (
+                        run.state == "running"
+                        and instance.status != "running"
+                        and instance.child_id is not None
+                    ):
+                        # The settle left a settled owner (not a retry,
+                        # respawn, or stop).
+                        await self._announce_task_work_hold(run, state, instance)
                 if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
                     await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
@@ -6443,7 +6452,6 @@ class FactoryExecutor:
                 was_busy = instance.factory_task_activity == "busy"
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
                 if not result.factory_task_busy:
-                    run.milestones.discard(TASK_WORK_HELD)  # the next hold notifies again
                     continue
                 if not was_busy:
                     await self._announce_task_work_hold(run, state, instance)

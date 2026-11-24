@@ -7968,6 +7968,29 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(len(self.host.spawn_calls("build")), 1)
 
     @async_test
+    async def test_each_settled_childs_background_work_hold_is_announced(self) -> None:
+        self.store_machine(
+            {
+                "states": [state("a", entry=True), state("b", entry=True), state("c")],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="holds",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "a", "factory_task_busy": True}
+        self.host.outcomes["b"] = {"status": "done", "answer": "b", "factory_task_busy": True}
+        owner_poll = self.host.gate("rlm.collect", 3)
+        started = await self.start("holds")
+        await self.host.gate_entered("rlm.collect", 3).wait()
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 2, held)
+
+        self.host.outcomes["a"]["factory_task_busy"] = False
+        self.host.outcomes["b"]["factory_task_busy"] = False
+        owner_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
     async def test_deleting_the_held_child_starts_the_next_state(self) -> None:
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = True
