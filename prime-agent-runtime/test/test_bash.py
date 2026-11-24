@@ -1591,7 +1591,9 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
                 return await handle
 
             background = asyncio.create_task(background_poll())
-            while not background.done():
+            for _ in range(100):
+                if background.done():
+                    break
                 await asyncio.sleep(0.05)
         handle.kill(grace=0.1)
         self.assertIsInstance(background.result(), bash_module.BashSnapshot)
