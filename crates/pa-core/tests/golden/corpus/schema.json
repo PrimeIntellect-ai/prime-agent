@@ -21,7 +21,7 @@
           },
           "timeout": {
             "type": "integer",
-            "description": "Seconds before this cell is interrupted (default 60 unless the user configured otherwise, max 180)."
+            "description": "Seconds this call waits before auto-backgrounding a still-running cell (default 60 unless the user configured otherwise, max 180). The cell keeps running and its completion notice arrives in the inbox, or as a full session row when it carries rich output."
           }
         }
       }

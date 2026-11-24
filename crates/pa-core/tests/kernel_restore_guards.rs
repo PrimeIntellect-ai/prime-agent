@@ -73,6 +73,7 @@ fn test_options(
         bootstrap_code: Some(build_rlm_bootstrap_code(&[], false)),
         stderr_log_path: None,
         on_background_work_settled: None,
+        pending_detached_completions: None,
     })
 }
 

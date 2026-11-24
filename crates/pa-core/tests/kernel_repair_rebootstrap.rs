@@ -27,6 +27,7 @@ fn fake_kernel(dir: &Path, env: HashMap<String, String>) -> ReplKernelManager {
         bootstrap_code: Some("BOOT".to_string()),
         stderr_log_path: None,
         on_background_work_settled: None,
+        pending_detached_completions: None,
     })
 }
 

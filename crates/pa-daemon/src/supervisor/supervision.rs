@@ -1037,6 +1037,23 @@ impl Supervisor {
         resident
             .peer_transport_capable
             .store(peer_transport_capable, Ordering::SeqCst);
+        // The scoped-abort gate rides the same advertisement: the worker
+        // reads `abort` with a `background_cell` scope, so a
+        // mixed-version daemon never routes the scoped request to a
+        // worker that would treat it as the full abort.
+        let background_cell_abort_capable = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("capabilities"))
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "background_cell_abort")
+            });
+        resident
+            .background_cell_abort_capable
+            .store(background_cell_abort_capable, Ordering::SeqCst);
         pumps.installed = true;
         Ok(())
     }

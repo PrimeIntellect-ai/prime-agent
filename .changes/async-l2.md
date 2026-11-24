@@ -1,1 +1,1 @@
-- A cell that passes its span budget and a bash() call with an invented keyword argument both get a teaching decline.
+- A bash() call with an invented keyword argument gets a teaching decline, and an interrupt can no longer tear a protocol frame.

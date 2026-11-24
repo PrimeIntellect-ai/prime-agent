@@ -132,6 +132,14 @@ pub trait SessionEngine: Send + Sync {
     /// a real agent loop no-op.
     fn abort_in_flight_turn(&self) {}
 
+    /// Stop only the session's detached (backgrounded) kernel cell — the
+    /// scoped idle cancel's target: no queue is touched, no turn is
+    /// aborted, and `false` answers when no detached execution runs.
+    /// Engines without a kernel no-op.
+    fn abort_background_cell(&self) -> bool {
+        false
+    }
+
     /// Switch the queue delivery modes live: apply the persisted mode to
     /// the engine's agent-level queues too.
     fn set_queue_modes(&self, steering: Option<&str>, follow_up: Option<&str>) {

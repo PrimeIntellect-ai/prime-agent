@@ -64,6 +64,9 @@ pub(crate) struct DaemonLink {
     closed: Arc<std::sync::atomic::AtomicBool>,
     frames: Mutex<mpsc::UnboundedReceiver<LinkFrame>>,
     protocol_version: u64,
+    /// The daemon hello's advertised server capabilities: the gate for
+    /// capability-scoped worker commands.
+    server_capabilities: Vec<String>,
     next_request_id: std::sync::atomic::AtomicU64,
 }
 
@@ -152,12 +155,24 @@ impl DaemonLink {
                 version: DAEMON_PROTOCOL_VERSION,
             });
         let version = protocol.version.min(DAEMON_PROTOCOL_VERSION);
+        let server_capabilities = hello
+            .get("serverCapabilities")
+            .and_then(Value::as_array)
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
         Ok(DaemonLink {
             writer: line_tx,
             pending,
             closed,
             frames: Mutex::new(frame_rx),
             protocol_version: version,
+            server_capabilities,
             next_request_id: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -166,6 +181,14 @@ impl DaemonLink {
     /// under the session-scoped response timeout.
     pub(crate) async fn request(&self, command: DaemonCommand) -> anyhow::Result<DaemonResponse> {
         self.exchange(command, Some(REQUEST_TIMEOUT)).await
+    }
+
+    /// Whether the linked daemon advertised `capability` in its hello: the
+    /// gate for capability-scoped worker commands.
+    pub(crate) fn supports_server_capability(&self, capability: &str) -> bool {
+        self.server_capabilities
+            .iter()
+            .any(|entry| entry == capability)
     }
 
     pub(crate) async fn request_ok(&self, command: DaemonCommand) -> anyhow::Result<()> {
@@ -549,6 +572,10 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                                 wait_for_session_close(&state).await;
                                 cancel_order(&json!({ "sessionId": session_id }), &state).await
                             }
+                            CancelOrder::IdleBackgroundCell { daemon_session_id } => {
+                                run_background_cell_abort(daemon_session_id, &link).await;
+                                return;
+                            }
                         };
                     }
                 });
@@ -661,7 +688,14 @@ enum FrameOrder {
 enum CancelOrder {
     None,
     Armed(CancelStop),
-    WaitForClose { session_id: String },
+    WaitForClose {
+        session_id: String,
+    },
+    /// A local prompt and a stop failure are both absent: the session reads
+    /// idle, but a parked backgrounded cell can still hold the kernel.
+    IdleBackgroundCell {
+        daemon_session_id: String,
+    },
 }
 
 struct CancelStop {
@@ -816,7 +850,14 @@ fn arm_cancel_locked(session_id: &str, guard: &mut DaemonAcpState) -> CancelOrde
             turn.cancelled = true;
             Some(turn.admission_id.clone())
         }
-        None if hosted.stop_failure.is_none() => return CancelOrder::None,
+        // The otherwise-idle cancel still reaches a parked backgrounded
+        // cell: the scoped abort stops it without the queue mutation a bare
+        // abort would perform.
+        None if hosted.stop_failure.is_none() => {
+            return CancelOrder::IdleBackgroundCell {
+                daemon_session_id: hosted.daemon_active_session_id.clone(),
+            }
+        }
         None => None,
     };
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
@@ -828,6 +869,27 @@ fn arm_cancel_locked(session_id: &str, guard: &mut DaemonAcpState) -> CancelOrde
         admission_id,
         done: done_tx,
     })
+}
+
+/// The otherwise-idle cancel's scoped abort: it reaches a parked
+/// backgrounded cell without mutating the queues. A peer without the
+/// capability keeps the old no-op. The supervisor's own hello is a
+/// first-line filter only: its routing boundary refuses the scoped abort
+/// for a serving worker that did not advertise the capability in its own
+/// `worker_auth` (a mixed-version daemon may have adopted an older worker
+/// that reads every abort as the full queue-suspending abort), and the
+/// scoped request never falls back to a plain abort.
+async fn run_background_cell_abort(daemon_session_id: String, link: &Arc<DaemonLink>) {
+    if link.supports_server_capability("background_cell_abort") {
+        let _ = link
+            .request_ok(DaemonCommand::Abort {
+                id: None,
+                active_session_id: daemon_session_id,
+                scope: Some("background_cell".to_string()),
+                rest: Map::default(),
+            })
+            .await;
+    }
 }
 
 async fn wait_for_session_close(state: &Arc<Mutex<DaemonAcpState>>) {
@@ -2372,6 +2434,7 @@ mod tests {
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frames: Mutex::new(frames),
             protocol_version: DAEMON_PROTOCOL_VERSION,
+            server_capabilities: Vec::new(),
             next_request_id: std::sync::atomic::AtomicU64::new(0),
         });
         let worker = tokio::spawn(async move {
@@ -2519,6 +2582,7 @@ mod tests {
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frames: Mutex::new(frames),
             protocol_version: DAEMON_PROTOCOL_VERSION,
+            server_capabilities: Vec::new(),
             next_request_id: std::sync::atomic::AtomicU64::new(0),
         });
         let worker = tokio::spawn(async move {
@@ -2617,11 +2681,19 @@ mod tests {
         assert!(running.session.as_ref().unwrap().cancel_task.is_some());
 
         let mut idle = state(Some(hosted_session()));
-        assert!(matches!(
-            arm_cancel_locked("acp-1", &mut idle),
-            CancelOrder::None
-        ));
+        // The otherwise-idle cancel orders the scoped background-cell stop:
+        // the parked cell is the only work an idle cancel can own, and the
+        // queue-mutating arm stays closed.
+        match arm_cancel_locked("acp-1", &mut idle) {
+            CancelOrder::IdleBackgroundCell { daemon_session_id } => {
+                assert_eq!(daemon_session_id, "daemon-1");
+            }
+            CancelOrder::None | CancelOrder::Armed(_) | CancelOrder::WaitForClose { .. } => {
+                panic!("an idle cancel orders the scoped stop")
+            }
+        }
         assert!(idle.session.as_ref().unwrap().turn.is_none());
+        assert!(!idle.session.as_ref().unwrap().cancelling);
 
         let mut failed = state(Some(hosted_session()));
         failed.session.as_mut().unwrap().stop_failure = Some("boom".to_string());
@@ -2646,6 +2718,95 @@ mod tests {
             arm_cancel_locked("acp-1", &mut stopping),
             CancelOrder::None
         ));
+    }
+
+    /// An otherwise-idle cancel orders the scoped background-cell abort,
+    /// and with the daemon's capability the abort is the only command:
+    /// no queue mutation, no armed stop.
+    #[tokio::test]
+    async fn an_idle_cancel_sends_the_scoped_abort_with_the_capability() {
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let order = cancel_order(&json!({ "sessionId": "acp-1" }), &state).await;
+        let CancelOrder::IdleBackgroundCell { daemon_session_id } = order else {
+            panic!("an idle cancel orders the scoped stop");
+        };
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::clone(&pending),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            server_capabilities: vec!["background_cell_abort".to_string()],
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let abort = tokio::spawn({
+            let link = Arc::clone(&link);
+            async move { run_background_cell_abort(daemon_session_id, &link).await }
+        });
+        let sent = commands.recv().await.expect("the scoped abort goes out");
+        let envelope: DaemonCommandEnvelope = serde_json::from_str(&sent).unwrap();
+        let DaemonCommand::Abort {
+            active_session_id,
+            scope,
+            ..
+        } = envelope.command
+        else {
+            panic!("the idle cancel sends an abort: {sent}")
+        };
+        assert_eq!(active_session_id, "daemon-1");
+        assert_eq!(
+            scope.as_deref(),
+            Some("background_cell"),
+            "the idle cancel is the scoped one"
+        );
+        let reply = pending.lock().unwrap().remove(&envelope.id).unwrap();
+        reply
+            .send(DaemonResponse {
+                id: Some(envelope.id),
+                command: "abort".to_string(),
+                success: true,
+                data: None,
+                error: None,
+                error_info: None,
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), abort)
+            .await
+            .expect("the scoped abort settles")
+            .unwrap();
+        assert!(
+            commands.try_recv().is_err(),
+            "the scoped abort is the only command"
+        );
+        assert!(
+            !state.lock().await.session.as_ref().unwrap().cancelling,
+            "no stop was armed"
+        );
+    }
+
+    /// A peer without the capability keeps the old idle no-op: the cancel
+    /// sends nothing (a bare abort would mutate the queues).
+    #[tokio::test]
+    async fn an_idle_cancel_without_the_capability_sends_nothing() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            server_capabilities: Vec::new(),
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        run_background_cell_abort("daemon-1".to_string(), &link).await;
+        assert!(
+            commands.try_recv().is_err(),
+            "a peer without the capability receives no request"
+        );
     }
 
     #[tokio::test]

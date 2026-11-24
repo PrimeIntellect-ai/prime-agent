@@ -137,6 +137,7 @@ impl AgentSessionEngine {
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             kernel_notice_sink: std::sync::Mutex::new(None),
+            cell_wake: std::sync::Arc::new(pa_core::kernel::cell_wake::CellWake::new()),
             bash_consumed_sink: std::sync::Mutex::new(None),
             inbox: std::sync::Mutex::new(None),
             inbox_read_hook: std::sync::Mutex::new(None),
@@ -203,6 +204,18 @@ impl AgentSessionEngine {
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Install the worker's queue-backed cell wake (the pending predicate
+    /// reads the live steering lane, so an arrival that predates a cell's
+    /// subscription still ends its wait). Runs once at construction, before
+    /// the engine is shared and before the first session build hands the
+    /// wake to a kernel provisioner.
+    pub fn set_worker_cell_wake(
+        &mut self,
+        wake: std::sync::Arc<pa_core::kernel::cell_wake::CellWake>,
+    ) {
+        self.cell_wake = wake;
     }
 
     /// Replace the autonomous continuation policy. Call before the first admitted turn.
@@ -1165,6 +1178,23 @@ impl AgentSessionEngine {
             .expect("late agent message sink lock")
             .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
+            cell_wake: Some(std::sync::Arc::clone(&self.cell_wake)),
+            on_background_cell: {
+                let weak = self
+                    .self_weak
+                    .lock()
+                    .expect("engine self weak lock")
+                    .clone();
+                weak.map(|weak| {
+                    std::sync::Arc::new(
+                        move |outcome: pa_core::kernel::shared::BackgroundCellOutcome| {
+                            if let Some(engine) = weak.upgrade() {
+                                engine.admit_background_cell_outcome(&outcome);
+                            }
+                        },
+                    ) as pa_core::kernel::shared::BackgroundCellCallback
+                })
+            },
             on_late_sent_agent_message,
             semantic_edges,
             telemetry,
