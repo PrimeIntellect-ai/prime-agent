@@ -458,11 +458,6 @@ impl Worker {
             // without a script run the real agent engine.
             let mut agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>> =
                 None;
-            // The worker's orphan journal (supervisor-stamped env): the
-            // continuation gates' durable background-shell term reads it.
-            let orphan_journal_path =
-                std::env::var_os(pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV)
-                    .map(std::path::PathBuf::from);
             let engine: std::sync::Arc<dyn SessionEngine> = match &script {
                 // A `{"engine": "faux", ...}` script drives the real agent
                 // engine over the scripted faux provider (verification only).
@@ -483,7 +478,6 @@ impl Worker {
                         telemetry_disabled: config.telemetry_disabled,
                         cron_store: Some(kernel_cron_wiring(&scheduled)),
                         queued_steering_probe: queued_steering_probe.clone(),
-                        orphan_journal_path,
                     }) {
                         Ok(mut engine) => {
                             // The queue-backed wake installs before the
@@ -518,7 +512,6 @@ impl Worker {
                         telemetry_disabled: config.telemetry_disabled,
                         cron_store: Some(kernel_cron_wiring(&scheduled)),
                         queued_steering_probe: queued_steering_probe.clone(),
-                        orphan_journal_path,
                     }) {
                         Ok(mut engine) => {
                             engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));

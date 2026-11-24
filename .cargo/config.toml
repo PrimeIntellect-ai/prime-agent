@@ -3,3 +3,9 @@
 # already set, so a test that needs it can still set its own value.
 [env]
 DO_NOT_TRACK = "1"
+# No cargo test or cargo run bootstraps the account's own kernel venv
+# (~/.prime/agent/kernel-venv): it serves the user's live sessions, and a
+# locally built binary's runtime differs from the installed one. Set
+# PRIME_AGENT_KERNEL_VENV to a scratch dir instead, or set this to 0 to use the
+# account venv deliberately.
+PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV = "1"
