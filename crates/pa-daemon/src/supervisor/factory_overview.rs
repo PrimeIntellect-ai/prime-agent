@@ -65,6 +65,15 @@ struct ResidentOwner {
     resident: Arc<ResidentWorker>,
 }
 
+impl ResidentOwner {
+    /// The live cache's key: the worker and the session it hosts. A worker id
+    /// is fresh per launched worker, and a worker that switches sessions
+    /// starts a new key, so cached rows never cross workers or sessions.
+    fn live_key(&self) -> String {
+        format!("{}/{}", self.resident.worker_id, self.active_session_id)
+    }
+}
+
 /// One catalog owner: its identity, its display name, and its
 /// conversation log (the artifact-dir derivation's input; memory-only
 /// owners carry none, so they hold no durable records).
@@ -74,7 +83,8 @@ struct CatalogOwner {
     log: Option<PathBuf>,
 }
 
-/// The overview's live-half cache, keyed by worker id: the last rows each
+/// The overview's live-half cache, keyed by worker and hosted session
+/// ([`ResidentOwner::live_key`]): the last rows each
 /// resident worker's kernel answered through the non-arming `peek` read,
 /// each stamped with its read time, plus each worker's last real read
 /// failure. A worker id is fresh per launched worker, so a read from a
@@ -211,11 +221,11 @@ impl Supervisor {
         };
         // Each owner's live worker: the first resident the scan resolved to
         // that owner.
-        let mut live_worker: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut live_worker: BTreeMap<&str, String> = BTreeMap::new();
         for (owner, id) in resident_owners.iter().zip(&live_owner_ids) {
             live_worker
                 .entry(id.as_str())
-                .or_insert(owner.resident.worker_id.as_str());
+                .or_insert_with(|| owner.live_key());
         }
         let (mut live_rows, live_read_at, live_warnings) = {
             let cache = self.factory_live.lock().unwrap();
@@ -235,7 +245,7 @@ impl Supervisor {
             // freshness bound carry the saved marker: the page never paints
             // a ticking live claim off a snapshot with no confirmed read
             // behind it.
-            let worker = live_worker.get(owner.id.as_str()).copied();
+            let worker = live_worker.get(owner.id.as_str()).map(String::as_str);
             let stale = !live_rows_are_fresh(worker.and_then(|worker| live_read_at.get(worker)));
             let mut live: Vec<Value> = worker
                 .and_then(|worker| live_rows.remove(worker))
@@ -297,23 +307,20 @@ impl Supervisor {
         let cache = &mut *guard;
         // A worker that left the resident list took its kernel with it:
         // its rows go (the session's durable records still answer).
-        cache.resident = owners
-            .iter()
-            .map(|owner| owner.resident.worker_id.clone())
-            .collect();
+        cache.resident = owners.iter().map(ResidentOwner::live_key).collect();
         let resident = &cache.resident;
         cache.rows.retain(|worker, _| resident.contains(worker));
         cache.read_at.retain(|worker, _| resident.contains(worker));
         cache.warnings.retain(|worker, _| resident.contains(worker));
         for owner in owners {
-            if !cache.in_flight.insert(owner.resident.worker_id.clone()) {
+            if !cache.in_flight.insert(owner.live_key()) {
                 continue; // this worker's read is still pending: never stack a second
             }
             let supervisor = Arc::clone(self);
             let owner = owner.clone();
             tokio::spawn(async move {
                 let outcome = supervisor.read_factory_live(&owner).await;
-                supervisor.fold_factory_live(&owner.resident.worker_id, &owner.id, outcome);
+                supervisor.fold_factory_live(&owner.live_key(), &owner.id, outcome);
             });
         }
     }
@@ -1294,14 +1301,14 @@ mod tests {
         );
         {
             let mut cache = supervisor.factory_live.lock().unwrap();
-            for worker in ["w-gone", "w-stays"] {
+            for worker in ["w-gone/owner", "w-stays/owner", "w-stays/old-session"] {
                 cache
                     .rows
                     .insert(worker.to_string(), vec![json!({ "runId": worker })]);
                 cache.read_at.insert(worker.to_string(), Instant::now());
                 cache.resident.insert(worker.to_string());
             }
-            cache.in_flight.insert("w-gone".to_string());
+            cache.in_flight.insert("w-gone/owner".to_string());
         }
         let stays = memory_only_resident("w-stays", "owner");
         supervisor.spawn_factory_live_refresh(&[ResidentOwner {
@@ -1314,11 +1321,15 @@ mod tests {
         {
             let cache = supervisor.factory_live.lock().unwrap();
             assert!(
-                !cache.rows.contains_key("w-gone"),
+                !cache.rows.contains_key("w-gone/owner"),
                 "the gone worker's rows drop"
             );
-            assert!(!cache.read_at.contains_key("w-gone"));
-            assert_eq!(cache.rows["w-stays"][0]["runId"], "w-stays");
+            assert!(!cache.read_at.contains_key("w-gone/owner"));
+            assert!(
+                !cache.rows.contains_key("w-stays/old-session"),
+                "a worker that switched sessions drops the old session's rows"
+            );
+            assert_eq!(cache.rows["w-stays/owner"][0]["runId"], "w-stays/owner");
         }
         for late in [
             Ok(DaemonResponse {
@@ -1331,19 +1342,19 @@ mod tests {
             }),
             Err(anyhow::anyhow!("Kernel is not running")),
         ] {
-            supervisor.fold_factory_live("w-gone", "owner", Some(late));
+            supervisor.fold_factory_live("w-gone/owner", "owner", Some(late));
         }
         let cache = supervisor.factory_live.lock().unwrap();
         assert!(
-            !cache.rows.contains_key("w-gone"),
+            !cache.rows.contains_key("w-gone/owner"),
             "the late fold adds no rows"
         );
-        assert!(!cache.read_at.contains_key("w-gone"));
+        assert!(!cache.read_at.contains_key("w-gone/owner"));
         assert!(
             cache.warnings.is_empty(),
             "the late failure is never published"
         );
-        assert!(!cache.in_flight.contains("w-gone"));
+        assert!(!cache.in_flight.contains("w-gone/owner"));
     }
 
     /// An owner re-admitted under a different worker starts a new
@@ -1416,12 +1427,14 @@ mod tests {
         {
             let mut cache = supervisor.factory_live.lock().unwrap();
             cache.rows.insert(
-                "w-mem".to_string(),
+                "w-mem/mem-owner".to_string(),
                 live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
                     .expect("the snapshot reply folds"),
             );
-            cache.read_at.insert("w-mem".to_string(), Instant::now());
-            cache.resident.insert("w-mem".to_string());
+            cache
+                .read_at
+                .insert("w-mem/mem-owner".to_string(), Instant::now());
+            cache.resident.insert("w-mem/mem-owner".to_string());
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
         assert!(response.success, "the overview answered: {response:?}");
@@ -1489,17 +1502,17 @@ mod tests {
             // The cached rows are the fold's projection output — the
             // production cache shape, never the raw lane wire.
             cache.rows.insert(
-                "w-stale".to_string(),
+                "w-stale/stale-owner".to_string(),
                 live_rows_from_snapshot(Some(&json!({ "runs": [live_snapshot_row()] })))
                     .expect("the snapshot reply folds"),
             );
             cache.read_at.insert(
-                "w-stale".to_string(),
+                "w-stale/stale-owner".to_string(),
                 Instant::now()
                     .checked_sub(FACTORY_LIVE_FRESH_WINDOW + Duration::from_millis(500))
                     .expect("a read stamp past the fresh window"),
             );
-            cache.resident.insert("w-stale".to_string());
+            cache.resident.insert("w-stale/stale-owner".to_string());
         }
         let response = supervisor.factory_overview("c1", "factory_activity").await;
         assert!(response.success, "the overview answered: {response:?}");
