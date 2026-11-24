@@ -17,7 +17,7 @@ pub use anthropic::{
     login_anthropic, refresh_anthropic_token, AnthropicCredentials,
     LOGIN_CANCELLED as ANTHROPIC_LOGIN_CANCELLED,
 };
-pub use callback::{query_param, CodexCallbackServer};
+pub use callback::CodexCallbackServer;
 pub use github_copilot::{
     get_github_copilot_base_url, login_github_copilot, refresh_github_copilot_token,
     CopilotCredentials, LOGIN_CANCELLED as COPILOT_LOGIN_CANCELLED,
@@ -109,5 +109,31 @@ impl CodexHttp for ReqwestCodexHttp {
             let body = response.text().await.map_err(|error| error.to_string())?;
             Ok(CodexHttpResponse { status, body })
         })
+    }
+}
+
+/// One decoded query parameter (`+` as space, percent-decoded).
+#[must_use]
+pub fn query_param(query: &str, name: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_param;
+
+    #[test]
+    fn query_and_percent_decoding() {
+        let decoded = |query| query_param(query, "code");
+        assert_eq!(decoded("code=a%20b"), Some("a b".to_string()));
+        assert_eq!(decoded("code=a+b&state=2"), Some("a b".to_string()));
+        assert_eq!(decoded("code=bad%2"), Some("bad%2".to_string()));
+        // A `%` followed by a multi-byte character stays literal.
+        assert_eq!(decoded("code=%9\u{e9}"), Some("%9\u{e9}".to_string()));
+        // A bare key keeps an empty value, like TS `URLSearchParams`.
+        assert_eq!(decoded("code&state=2"), Some(String::new()));
+        assert_eq!(decoded("state=2"), None);
     }
 }
