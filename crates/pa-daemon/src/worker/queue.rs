@@ -908,6 +908,8 @@ pub(crate) fn deliver_inbox_arrival_row_locked(
         item,
         &inbox.with_persistence_error_clause(text),
         batch.len(),
+        batch_wakes_a_cell(&batch),
+        batch_covers_cell_done(&batch),
     );
     item.preview = Some(preview);
     core_guard.inbox_shown_unaccepted = shown;
