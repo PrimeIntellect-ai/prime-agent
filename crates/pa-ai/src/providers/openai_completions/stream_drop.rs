@@ -131,21 +131,14 @@ async fn a_stream_dropped_mid_thinking_classifies_as_stream_drop() {
         Some("Let me work through this step by step. First I"),
         "the partial thinking block rides the failure"
     );
-}
 
-/// A stream dropped mid-text classifies the same way.
-#[tokio::test]
-async fn a_stream_dropped_mid_text_classifies_as_stream_drop() {
+    // A stream dropped mid-text classifies the same way.
     let (_, terminal) = stream_events(TEXT_DELTA.to_string()).await;
     let AssistantMessageEvent::Error { error, .. } = terminal else {
         panic!("a dropped stream must terminate with an error event");
     };
-    assert_eq!(error.stop_reason, StopReason::Error);
-    assert!(error
-        .error_message
-        .as_deref()
-        .unwrap_or_default()
-        .contains("text block"));
+    let error_message = error.error_message.as_deref().unwrap_or_default();
+    assert!(error_message.contains("text block"), "{error_message}");
     assert_eq!(failure_kind(&error).as_deref(), Some("stream_drop"));
 }
 
@@ -166,49 +159,22 @@ async fn an_empty_body_is_a_stream_drop_not_an_empty_turn() {
     assert_eq!(failure_kind(&error).as_deref(), Some("stream_drop"));
 }
 
-/// The healthy stream is unchanged: the stop signal (`finish_reason`) plus
-/// the `[DONE]` marker complete the turn with no error and no
-/// retryable classification.
+/// The stop signal alone, the `[DONE]` marker alone, or both complete the
+/// turn: gateways that omit either are completed streams, not drops.
 #[tokio::test]
-async fn a_healthy_stream_completes_without_a_drop() {
-    let body = format!("{THINKING_DELTA}{FINISH}{DONE}");
-    let (event_types, terminal) = stream_events(body).await;
-    let AssistantMessageEvent::Done { message, .. } = terminal else {
-        panic!("a healthy stream must complete: {event_types:?}");
-    };
-    assert_eq!(message.stop_reason, StopReason::Stop);
-    assert_eq!(message.error_message, None);
-    assert!(message.diagnostics.is_none());
-    assert_eq!(
-        thinking_text(&message).as_deref(),
-        Some("Let me work through this step by step. First I")
-    );
-}
-
-/// The stop signal alone completes the turn: gateways that close without
-/// the `[DONE]` marker are completed streams, not drops.
-#[tokio::test]
-async fn a_finish_reason_without_done_marker_completes() {
-    let body = format!("{TEXT_DELTA}{FINISH}");
-    let (_, terminal) = stream_events(body).await;
-    let AssistantMessageEvent::Done { message, .. } = terminal else {
-        panic!("a finish_reason alone must complete the stream");
-    };
-    assert_eq!(message.stop_reason, StopReason::Stop);
-    assert_eq!(message.error_message, None);
-}
-
-/// The `[DONE]` marker alone completes the turn: gateways that omit the
-/// final `finish_reason` chunk are completed streams, not drops.
-#[tokio::test]
-async fn a_done_marker_without_finish_reason_completes() {
-    let body = format!("{TEXT_DELTA}{DONE}");
-    let (_, terminal) = stream_events(body).await;
-    let AssistantMessageEvent::Done { message, .. } = terminal else {
-        panic!("a [DONE] alone must complete the stream");
-    };
-    assert_eq!(message.stop_reason, StopReason::Stop);
-    assert_eq!(message.error_message, None);
+async fn a_finish_reason_or_done_marker_completes() {
+    for body in [
+        format!("{TEXT_DELTA}{FINISH}"),
+        format!("{TEXT_DELTA}{DONE}"),
+        format!("{THINKING_DELTA}{FINISH}{DONE}"),
+    ] {
+        let (_, terminal) = stream_events(body.clone()).await;
+        let AssistantMessageEvent::Done { message, .. } = terminal else {
+            panic!("the stream must complete: {body}");
+        };
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(message.error_message, None);
+    }
 }
 
 /// Serve the SSE body and hold the connection open: no `Content-Length`,

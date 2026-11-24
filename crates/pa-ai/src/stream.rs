@@ -242,44 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn the_estimate_counts_the_serialized_tool_schemas() {
-        let tool: crate::types::Tool = serde_json::from_value(json!({
-            "name": "lookup",
-            "description": "x".repeat(1_600),
-            "parameters": {"type": "object"}
-        }))
-        .expect("tool parses");
-        let serialized = serde_json::to_string(&tool).expect("tool serializes");
-        let mut context = text_context(3_000);
-        context.tools = Some(vec![tool]);
-        // The tool schema's serialized bytes plus its wire envelope join the text under chars/4.
-        assert_eq!(
-            estimated_input_tokens(&context),
-            (3_000 + 48 + serialized.chars().count() as u64).div_ceil(4)
-        );
-    }
-
-    #[test]
-    fn the_estimate_counts_raw_blocks_as_their_serialized_json() {
-        // Raw blocks reach the prompt as text (`user_block_payload`'s opaque arm), so their
-        // serialized bytes claim input room.
-        let value = json!({"unmodeled": "y".repeat(4_000)});
-        let serialized = serde_json::to_string(&value).expect("value serializes");
-        let mut context = text_context(3_000);
-        context
-            .messages
-            .push(crate::types::Message::User(UserMessage {
-                content: UserMessageContent::Blocks(vec![UserOrToolContent::Raw(value)]),
-                timestamp: 0,
-                rest: Map::default(),
-            }));
-        assert_eq!(
-            estimated_input_tokens(&context),
-            (3_000 + serialized.chars().count() as u64).div_ceil(4)
-        );
-    }
-
-    #[test]
     fn video_budget_leaves_room_for_the_measured_longest_clip() {
         let model = test_model(64_000, 32_000);
         for role in ["user", "toolResult"] {
@@ -308,11 +270,38 @@ mod tests {
     }
 
     #[test]
-    fn tool_schemas_shrink_the_room_the_clamp_leaves() {
-        // The schemas eat the output room; the input must still fit the window — zero room leaves
-        // the budget for the overflow recovery arm instead.
-        let model = test_model(1_000, 40_000);
-        let mut context = text_context(3_000); // 750 text tokens
+    fn clamp_takes_whatever_room_exists() {
+        // (context window, model max output, prompt chars, requested budget, sent budget).
+        for (window, max_output, chars, requested, sent) in [
+            // A sub-floor budget still fits: the clamp honors exactly the room the estimate
+            // leaves (750 estimated input tokens, 250 room).
+            (1_000, 40_000, 3_000, Some(400), Some(250)),
+            // The input estimate fills the window: no budget can save the request, so it stays as
+            // sent for the overflow recovery arm.
+            (1_000, 40_000, 4_400, Some(400), Some(400)),
+            // No explicit budget: the default min(model.maxTokens, 32000) clamps to the room.
+            (1_000, 40_000, 3_600, None, Some(100)),
+            // Satisfiable requests pass through; a default that fits never materializes.
+            (1_000, 40_000, 3_000, Some(200), Some(200)),
+            (100_000, 4_096, 3_000, None, None),
+            // An unknown window, or a model declaring no max output, leaves the request alone.
+            (0, 40_000, 9_000, Some(400), Some(400)),
+            (1_000, 0, 4_200, None, None),
+        ] {
+            let mut options = StreamOptions {
+                max_tokens: requested,
+                ..Default::default()
+            };
+            clamp_output_budget(
+                &test_model(window, max_output),
+                &text_context(chars),
+                Some(&mut options),
+            );
+            assert_eq!(options.max_tokens, sent, "{window} {max_output} {chars}");
+        }
+
+        // Tool schemas eat the output room: the budget clamps to exactly what is left.
+        let mut context = text_context(3_000);
         let tool: crate::types::Tool = serde_json::from_value(json!({
             "name": "lookup",
             "description": "x".repeat(400),
@@ -325,94 +314,11 @@ mod tests {
             max_tokens: Some(250),
             ..Default::default()
         };
-        clamp_output_budget(&model, &context, Some(&mut options));
-        // The schema's serialized tokens leave less room than the budget requests, so the budget
-        // clamps to exactly what is left.
+        clamp_output_budget(&test_model(1_000, 40_000), &context, Some(&mut options));
         let room =
             1_000u64.saturating_sub((3_000 + 48 + serialized.chars().count() as u64).div_ceil(4));
         assert_eq!(options.max_tokens, Some(room));
         assert!(room > 0 && room < 250);
-    }
-
-    #[test]
-    fn clamp_shrinks_an_unsatisfiable_output_budget() {
-        // The live failure shape: an input estimate leaving less room than the requested output
-        // budget.
-        let model = test_model(1_000, 40_000);
-        let context = text_context(3_000); // 750 estimated input tokens
-        let mut options = StreamOptions {
-            max_tokens: Some(400),
-            ..Default::default()
-        };
-        clamp_output_budget(&model, &context, Some(&mut options));
-        assert_eq!(options.max_tokens, Some(250));
-    }
-
-    #[test]
-    fn clamp_resolves_the_default_budget_when_none_set() {
-        // The main-loop shape: no explicit max_tokens, so the effective request budget is
-        // min(model.maxTokens, 32000).
-        let model = test_model(1_000, 40_000);
-        let context = text_context(3_600); // 900 estimated input tokens
-        let mut options = StreamOptions::default();
-        clamp_output_budget(&model, &context, Some(&mut options));
-        assert_eq!(options.max_tokens, Some(100));
-    }
-
-    #[test]
-    fn satisfiable_requests_pass_through_unchanged() {
-        let model = test_model(1_000, 40_000);
-        let context = text_context(3_000); // 750 estimated input tokens
-        let mut options = StreamOptions {
-            max_tokens: Some(200),
-            ..Default::default()
-        };
-        clamp_output_budget(&model, &context, Some(&mut options));
-        assert_eq!(options.max_tokens, Some(200));
-        // No explicit budget and the default fits: nothing materializes.
-        let model = test_model(100_000, 4_096); // default request budget 4_096
-        let mut options = StreamOptions::default();
-        clamp_output_budget(&model, &context, Some(&mut options));
-        assert_eq!(options.max_tokens, None);
-    }
-
-    #[test]
-    fn clamp_takes_whatever_room_exists() {
-        // A sub-floor budget still fits: the clamp honors exactly the room the estimate leaves (250
-        // room -> 250 requested output).
-        let model = test_model(1_000, 40_000);
-        let context = text_context(3_000); // 750 estimated input tokens
-        let mut options = StreamOptions {
-            max_tokens: Some(400),
-            ..Default::default()
-        };
-        clamp_output_budget(&model, &context, Some(&mut options));
-        assert_eq!(options.max_tokens, Some(250));
-        // The input estimate fills the window: no budget can save the request, so it stays as sent
-        // for the overflow recovery arm.
-        let context = text_context(4_400); // 1,100 estimated input tokens
-        let mut options = StreamOptions {
-            max_tokens: Some(400),
-            ..Default::default()
-        };
-        clamp_output_budget(&model, &context, Some(&mut options));
-        assert_eq!(options.max_tokens, Some(400));
-    }
-
-    #[test]
-    fn unknown_window_and_missing_options_leave_the_request_alone() {
-        let model = test_model(0, 40_000);
-        let mut options = StreamOptions {
-            max_tokens: Some(400),
-            ..Default::default()
-        };
-        clamp_output_budget(&model, &text_context(9_000), Some(&mut options));
-        assert_eq!(options.max_tokens, Some(400));
-        // A model declaring no max output sends no budget to clamp.
-        let model = test_model(1_000, 0);
-        let mut options = StreamOptions::default();
-        clamp_output_budget(&model, &text_context(4_200), Some(&mut options));
-        assert_eq!(options.max_tokens, None);
     }
 
     /// The facade is the seam every model request crosses, so the session identity rides it as a

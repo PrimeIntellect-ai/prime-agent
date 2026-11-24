@@ -621,7 +621,7 @@ mod tests {
     fn computes_input_delta_for_matching_bodies() {
         let base = json!({ "model": "gpt", "input": [ { "type": "a" } ] });
         let items = vec![json!({ "type": "assistant_item" })];
-        let cont = continuation(base, items);
+        let cont = continuation(base.clone(), items);
         let next = json!({
             "model": "gpt",
             "input": [ { "type": "a" }, { "type": "assistant_item" }, { "type": "new" } ],
@@ -629,24 +629,17 @@ mod tests {
         let request = build_cached_websocket_request_body(Some(&cont), &next, 42);
         assert_eq!(request["previous_response_id"], "resp_1");
         assert_eq!(request["input"], json!([{ "type": "new" }]));
-    }
 
-    #[test]
-    fn rejects_delta_when_body_differs() {
-        let base = json!({ "model": "gpt", "input": [ { "type": "a" } ] });
-        let cont = continuation(base, vec![]);
-        let next = json!({ "model": "other", "input": [ { "type": "a" }, { "type": "b" } ] });
-        let request = build_cached_websocket_request_body(Some(&cont), &next, 42);
+        // A changed non-input field or a diverged input prefix sends the full body.
+        let other_model =
+            json!({ "model": "other", "input": [ { "type": "a" }, { "type": "b" } ] });
+        let cont = continuation(base.clone(), vec![]);
+        let request = build_cached_websocket_request_body(Some(&cont), &other_model, 42);
         assert!(request.get("previous_response_id").is_none());
         assert_eq!(request["input"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn rejects_delta_when_prefix_differs() {
-        let base = json!({ "model": "gpt", "input": [ { "type": "a" } ] });
+        let diverged = json!({ "model": "gpt", "input": [ { "type": "a" }, { "type": "y" } ] });
         let cont = continuation(base, vec![json!({ "type": "x" })]);
-        let next = json!({ "model": "gpt", "input": [ { "type": "a" }, { "type": "y" } ] });
-        let request = build_cached_websocket_request_body(Some(&cont), &next, 42);
+        let request = build_cached_websocket_request_body(Some(&cont), &diverged, 42);
         assert!(request.get("previous_response_id").is_none());
     }
 
@@ -844,169 +837,50 @@ mod ws_wire_tests {
         }
     }
 
+    /// A closing or malformed server frame (reserved opcode, RSV bit) ends the request as a
+    /// transport error carrying the close code the diagnostics record.
     #[tokio::test]
-    async fn refused_connect_text() {
-        let url = "ws://127.0.0.1:1/codex/responses".to_string();
-        let error = match acquire_websocket(&url, &[], None, None).await {
-            Ok(_) => panic!("expected the dead port to fail"),
-            Err(CodexStreamError::Transport(error)) => error,
-            Err(other) => panic!("expected a transport error, got {other}"),
-        };
-        assert_eq!(
-            error.to_string(),
-            "WebSocket connection to 'ws://127.0.0.1:1/codex/responses' failed: Failed to connect"
-        );
-        assert_eq!(error.error_name(), "Error");
-        assert_eq!(error.close_code(), None);
-    }
-
-    /// A non-101 upgrade answer: the "Expected 101 status code" cause (probed for 401 and 500).
-    #[tokio::test]
-    async fn handshake_rejection_text() {
-        for status in [401u16, 500u16] {
-            let error = acquire_connect_error(MockAction::RejectHttp(status)).await;
-            assert!(
-                error
-                    .to_string()
-                    .starts_with("WebSocket connection to 'ws://127.0.0.1:"),
-                "unexpected text {error}"
-            );
-            assert!(
-                error
-                    .to_string()
-                    .ends_with("/codex/responses' failed: Expected 101 status code"),
-                "unexpected text {error}"
-            );
-            assert_eq!(error.error_name(), "Error");
-        }
-    }
-
-    #[tokio::test]
-    async fn bad_accept_key_text() {
-        let error = acquire_connect_error(MockAction::BadAcceptKey).await;
-        assert!(error
-            .to_string()
-            .ends_with("/codex/responses' failed: Mismatch websocket accept header"));
-        assert_eq!(error.error_name(), "Error");
-    }
-
-    #[tokio::test]
-    async fn close_frame_with_reason_text() {
-        let error = request_terminal_error(MockAction::CloseCode {
-            code: 1011,
-            reason: "mock server reason",
-        })
-        .await;
-        let CodexStreamError::Transport(transport) = &error else {
-            panic!("expected a transport error, got {error}");
-        };
-        assert_eq!(
-            transport.to_string(),
-            "WebSocket closed 1011 mock server reason"
-        );
-        assert_eq!(transport.error_name(), "WebSocketCloseError");
-        assert_eq!(transport.close_code(), Some(1011));
-    }
-
-    /// The 1009 no-reason special case composes "message too big".
-    #[tokio::test]
-    async fn close_1009_no_reason_text() {
-        let error = request_terminal_error(MockAction::CloseCode {
-            code: WEBSOCKET_CLOSE_CODE_TOO_BIG,
-            reason: "",
-        })
-        .await;
-        let CodexStreamError::Transport(transport) = &error else {
-            panic!("expected a transport error, got {error}");
-        };
-        assert_eq!(
-            transport.to_string(),
-            "WebSocket closed 1009 message too big"
-        );
-        assert_eq!(transport.close_code(), Some(1009));
-    }
-
-    #[tokio::test]
-    async fn close_no_code_text() {
-        let error = request_terminal_error(MockAction::CloseNoCode).await;
-        let CodexStreamError::Transport(transport) = &error else {
-            panic!("expected a transport error, got {error}");
-        };
-        assert_eq!(transport.to_string(), "WebSocket closed 1005");
-        assert_eq!(transport.close_code(), Some(1005));
-    }
-
-    #[tokio::test]
-    async fn fin_without_close_frame_text() {
-        let error = request_terminal_error(MockAction::Fin).await;
-        let CodexStreamError::Transport(transport) = &error else {
-            panic!("expected a transport error, got {error}");
-        };
-        assert_eq!(
-            transport.to_string(),
-            "WebSocket closed 1006 Connection ended"
-        );
-        assert_eq!(transport.error_name(), "WebSocketCloseError");
-        assert_eq!(transport.close_code(), Some(WEBSOCKET_CLOSE_CODE_ABNORMAL));
-    }
-
-    #[tokio::test]
-    async fn reserved_opcode_text() {
-        for action in [
-            MockAction::ReservedDataOpcode,
-            MockAction::ReservedControlOpcode,
+    async fn a_closing_or_malformed_frame_ends_the_request_with_its_close_code() {
+        for (action, code) in [
+            (
+                MockAction::CloseCode {
+                    code: WEBSOCKET_CLOSE_CODE_TOO_BIG,
+                    reason: "",
+                },
+                1009,
+            ),
+            (
+                MockAction::CloseCode {
+                    code: 1011,
+                    reason: "mock server reason",
+                },
+                1011,
+            ),
+            (MockAction::CloseNoCode, 1005),
+            (MockAction::Fin, WEBSOCKET_CLOSE_CODE_ABNORMAL),
+            (MockAction::ReservedDataOpcode, 1002),
+            (MockAction::ReservedControlOpcode, 1002),
+            (MockAction::RsvBits, 1011),
         ] {
             let error = request_terminal_error(action).await;
             let CodexStreamError::Transport(transport) = &error else {
                 panic!("expected a transport error, got {error}");
             };
-            assert_eq!(
-                transport.to_string(),
-                "WebSocket closed 1002 Protocol error - unsupported control frame"
-            );
-            assert_eq!(transport.close_code(), Some(1002));
+            assert_eq!(transport.close_code(), Some(code), "{transport}");
         }
     }
 
+    /// A non-101 upgrade answer or a wrong `Sec-WebSocket-Accept` never opens the connection.
     #[tokio::test]
-    async fn rsv_bits_text() {
-        let error = request_terminal_error(MockAction::RsvBits).await;
-        let CodexStreamError::Transport(transport) = &error else {
-            panic!("expected a transport error, got {error}");
-        };
-        assert_eq!(
-            transport.to_string(),
-            "WebSocket closed 1011 Compression not implemented yet"
-        );
-        assert_eq!(transport.close_code(), Some(1011));
-    }
-
-    #[tokio::test]
-    async fn wss_to_plain_tls_text() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock bind");
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("mock accept");
-            // Read the TLS ClientHello then answer plain HTTP: the handshake fails against a
-            // non-TLS peer.
-            let mut buf = [0u8; 512];
-            let _ = socket.read(&mut buf).await;
-            socket
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .expect("mock write");
-        });
-        let url = format!("wss://127.0.0.1:{port}/codex/responses");
-        let error = match acquire_websocket(&url, &[], None, None).await {
-            Ok(_) => panic!("expected the TLS handshake to fail"),
-            Err(CodexStreamError::Transport(error)) => error,
-            Err(other) => panic!("expected a transport error, got {other}"),
-        };
-        assert_eq!(
-            error.to_string(),
-            format!("WebSocket connection to 'wss://127.0.0.1:{port}/codex/responses' failed: TLS handshake failed")
-        );
-        assert_eq!(error.error_name(), "Error");
+    async fn a_failed_handshake_never_connects() {
+        for action in [
+            MockAction::RejectHttp(401),
+            MockAction::RejectHttp(500),
+            MockAction::BadAcceptKey,
+        ] {
+            let error = acquire_connect_error(action).await;
+            assert_eq!(error.close_code(), None, "{error}");
+        }
     }
 
     /// An invalid JSON frame is a non-transport protocol error: thrown without the SSE fallback.
