@@ -278,6 +278,18 @@ mod tests {
     }
 
     #[test]
+    fn session_commands_execute_in_session() {
+        let registry = SlashCommandRegistry::builtin();
+        for name in SESSION_SLASH_COMMAND_NAMES {
+            assert!(is_session_slash_command_name(name));
+            assert_eq!(
+                registry.get(name).unwrap().execution,
+                SlashCommandExecution::Session
+            );
+        }
+    }
+
+    #[test]
     fn suggestion_matches_close_names_only() {
         let registry = SlashCommandRegistry::builtin();
         let candidates = registry.suggestion_candidates();
