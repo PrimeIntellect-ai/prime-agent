@@ -537,10 +537,10 @@ impl NodeView {
                 .iter()
                 .position(|row| row.entry == Some(entry) && row.index == Some(index))
         });
+        self.error = None;
         if selection_changed {
             self.scroll_to_selected(self.last_viewport.get().map_or(0, |size| size.1));
         }
-        self.error = None;
     }
 
     /// Move the walk to another instance: it drops the fetch the previous
@@ -549,10 +549,10 @@ impl NodeView {
     /// good reply.
     fn move_selection(&mut self, selected: Option<usize>, viewport_rows: usize) {
         self.selected = selected;
-        self.scroll_to_selected(viewport_rows);
         self.request_epoch = None;
         self.requested_selector = None;
         self.error = None;
+        self.scroll_to_selected(viewport_rows);
     }
 
     fn scroll_to_selected(&mut self, viewport_rows: usize) {
@@ -1080,6 +1080,19 @@ mod tests {
         restored.merge_reply(&reply);
         let rows = restored.render(&theme, 80, &kb, 12);
         assert!(rows.iter().flatten().any(|span| span.content.contains('▸')));
+    }
+
+    #[test]
+    fn a_move_scrolls_for_the_window_without_the_error_it_clears() {
+        let mut node = NodeView::parse_reply("run", "worker", &reply_with_instances(30)).unwrap();
+        let kb = KeybindingsManager::new();
+        for _ in 0..19 {
+            assert!(node.handle_key("down", &kb, 12));
+        }
+        node.set_error("stale fetch");
+        assert!(node.handle_key("down", &kb, 12));
+        assert!(node.error.is_none());
+        assert_eq!(node.scroll, 20 - (visible_rows(12, false) - 1));
     }
 
     #[test]
