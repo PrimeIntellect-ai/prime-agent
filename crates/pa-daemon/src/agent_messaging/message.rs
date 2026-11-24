@@ -204,28 +204,23 @@ impl AgentMessageController for LinkAgentMessageController {
         &self,
         input: AgentMessageSendInput,
     ) -> anyhow::Result<AgentMessageReceipt> {
-        if input.target == self.active_session_id {
-            anyhow::bail!("Agent messaging cannot target the sending session");
-        }
-        // A delivery to one of this session's own children starts a follow-up turn there:
-        // re-arm that child's usage observation BEFORE the delivery (a fast child can
-        // settle before the await returns; a late-armed observation never bills).
-        if let Some(children) = &self.children {
-            children.observe_child_usage(&input.target).await;
-        }
-        let receipt = match self.deliver_direct(&input).await {
-            DirectDelivery::Delivered(receipt) => receipt,
-            DirectDelivery::Unavailable => self.deliver_via_supervisor(input.clone()).await?,
-            DirectDelivery::Failed(error) => return Err(anyhow::anyhow!(error)),
-        };
-        Ok(receipt)
+        self.send_agent_message_cancellable(input, &never_cancelled)
+            .await
     }
+}
+
+/// The send probe for the trait's uncancellable route.
+fn never_cancelled() -> bool {
+    false
 }
 
 /// The outcome of the direct-delivery attempt.
 enum DirectDelivery {
     /// The target answered with a receipt.
     Delivered(AgentMessageReceipt),
+    /// The turn was cancelled before a delivery leg started; nothing was
+    /// sent.
+    Cancelled,
     /// No direct link could be established; the supervisor route may take
     /// over.
     Unavailable,
@@ -235,9 +230,58 @@ enum DirectDelivery {
 }
 
 impl LinkAgentMessageController {
+    /// The cancellation-aware send: the same routes as the trait's
+    /// `send_agent_message`, with the turn's cancel probe checked before
+    /// every delivery leg. A cancel that lands during the ticket lookup
+    /// stops the peer send; one that lands after a refused ticket stops
+    /// the supervisor fallback, so a cancelled turn never posts a stale
+    /// message through either route.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the turn is cancelled before a delivery leg
+    /// starts, when the target is the sending session, or when the send
+    /// itself fails.
+    pub async fn send_agent_message_cancellable<F: Fn() -> bool + ?Sized>(
+        &self,
+        input: AgentMessageSendInput,
+        cancelled: &F,
+    ) -> anyhow::Result<AgentMessageReceipt> {
+        if cancelled() {
+            anyhow::bail!("the agent message send was cancelled");
+        }
+        if input.target == self.active_session_id {
+            anyhow::bail!("Agent messaging cannot target the sending session");
+        }
+        // A delivery to one of this session's own children starts a follow-up turn there:
+        // re-arm that child's usage observation BEFORE the delivery (a fast child can
+        // settle before the await returns; a late-armed observation never bills).
+        if let Some(children) = &self.children {
+            children.observe_child_usage(&input.target).await;
+        }
+        let receipt = match self.deliver_direct(&input, cancelled).await {
+            DirectDelivery::Delivered(receipt) => receipt,
+            DirectDelivery::Cancelled => {
+                anyhow::bail!("the agent message send was cancelled");
+            }
+            DirectDelivery::Unavailable => {
+                if cancelled() {
+                    anyhow::bail!("the agent message send was cancelled");
+                }
+                self.deliver_via_supervisor(input.clone()).await?
+            }
+            DirectDelivery::Failed(error) => return Err(anyhow::anyhow!(error)),
+        };
+        Ok(receipt)
+    }
+
     /// Try the direct worker-to-worker path: `Unavailable` only when the
     /// delivery command never reached the target; once sent, the outcome is final.
-    async fn deliver_direct(&self, input: &AgentMessageSendInput) -> DirectDelivery {
+    async fn deliver_direct<F: Fn() -> bool + ?Sized>(
+        &self,
+        input: &AgentMessageSendInput,
+        cancelled: &F,
+    ) -> DirectDelivery {
         let ticket = match self
             .link
             .request_success(
@@ -260,11 +304,16 @@ impl LinkAgentMessageController {
             // unavailable) is the fallback trigger, not an error.
             Err(_) => return DirectDelivery::Unavailable,
         };
+        // The ticket request can wait out its whole timeout. A cancel that
+        // lands during it stops the send before the peer leg.
+        if cancelled() {
+            return DirectDelivery::Cancelled;
+        }
         match crate::peer_client::deliver_message_over_peer_transport(
             &ticket,
             &input.message,
             &self.sender_block(),
-            None,
+            input.delivery_mode,
         )
         .await
         {
@@ -309,6 +358,7 @@ impl LinkAgentMessageController {
                     "message": input.message,
                     "fromActiveSessionId": self.active_session_id,
                     "agentOrigin": true,
+                    "deliveryMode": input.delivery_mode,
                 }),
                 std::time::Duration::from_secs(30),
             )

@@ -2594,7 +2594,8 @@ class FactoryExecutor:
 
         Stages follow the spec: ``arrived`` (a child answer settled and was
         captured), ``recorded`` (everything else), ``shown`` (a milestone
-        notice was injected into the parent conversation), and ``delivered``
+        notice was handed to the parent, as a direct row or an inbox
+        message), and ``delivered``
         (the parent read the ledger via ``status()``).
         """
         event: dict[str, Any] = {"seq": len(run.events) + 1, "kind": kind, "stage": stage}
@@ -5849,7 +5850,8 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   failure; `name=` labels the run in status and the TUI.
 - Pause and failure notices (escalate, budget, max_transitions,
   max_children, failed, finished) arrive as quiet notices in the
-  conversation once per kind per run (an escalate pause notifies again
+  conversation, or as `factory-progress` inbox messages in sessions with
+  the agent inbox, once per kind per run (an escalate pause notifies again
   after each resume), the pause notices with the resume call spelled
   out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);

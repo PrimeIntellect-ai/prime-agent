@@ -249,6 +249,7 @@ async def spawn(
     model: str | None = None,
     thinking: str | None = None,
     cwd: str | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -258,8 +259,10 @@ async def spawn(
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     ``cwd`` starts the child in that directory (relative to the session cwd); defaults
     to the session cwd.
+    ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
+    child (the model comes from the ``decisionModel`` setting).
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
 
 async def _spawn(
@@ -270,6 +273,7 @@ async def _spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     factory: dict[str, str] | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
@@ -284,6 +288,8 @@ async def _spawn(
         kwargs["cwd"] = cwd
     if factory is not None:
         kwargs["factory"] = factory
+    if kind is not None:
+        kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -562,6 +568,10 @@ async def progress_note(message: str) -> RLMProgressNoteResult:
     return RLMProgressNoteResult(accepted=accepted, retry_after_ms=retry_after_ms)
 
 
+# Display MIME the host collects into the cell card: one per message a read returned.
+_INBOX_MESSAGE_MIME = "application/vnd.prime-agent.inbox-message+json"
+
+
 def _inbox_message_from_payload(payload: Any) -> RLMInboxMessage:
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.inbox.read returned an invalid message entry")
@@ -602,7 +612,8 @@ async def inbox_read(
     """Read and drain the session inbox: the waiting machine-generated
     notices (bash completions, factory milestones, agent messages,
     child lifecycle terminals, heartbeat fires) return in arrival order
-    with their arrival time, and the inbox empties.
+    with their arrival time, and the inbox empties. Read messages are gone,
+    so assign the result: ``msgs = await rlm.inbox.read()``.
 
     Every argument narrows the read (ANDed); no argument drains
     everything. ``sender`` matches exactly (a command, a run id, an
@@ -638,7 +649,10 @@ async def inbox_read(
     messages = payload.get("messages")
     if not isinstance(messages, list):
         raise RuntimeError("rlm.inbox.read returned an invalid messages list")
-    return [_inbox_message_from_payload(entry) for entry in messages]
+    read = [_inbox_message_from_payload(entry) for entry in messages]
+    for entry in messages:
+        emit({_INBOX_MESSAGE_MIME: entry})
+    return read
 
 
 async def inbox_count() -> RLMInboxCount:
@@ -762,9 +776,10 @@ _harness_state = _HarnessProxy()
 
 class _RLMInboxNamespace:
     """The session inbox of machine-generated notices:
-    ``await rlm.inbox.read()`` drains and returns the waiting messages
-    (optionally narrowed by sender, inbox_class, and arrival window);
-    ``await rlm.inbox.count()`` counts them without draining.
+    ``msgs = await rlm.inbox.read()`` drains and returns the waiting messages
+    (optionally narrowed by sender, inbox_class, and arrival window); read
+    messages are gone, so assign the result; ``await rlm.inbox.count()``
+    counts them without draining.
     """
 
     async def read(
@@ -954,8 +969,9 @@ class _RLMNamespace:
         model: str | None = None,
         thinking: str | None = None,
         cwd: str | None = None,
+        kind: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
     async def create_session(
         self,

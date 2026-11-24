@@ -1,0 +1,1 @@
+- Inbox arrivals now wake an idle agent once per batch: a successful bash completion waits out a 30 s hold, and a delivered row marks the items it shows as read.
