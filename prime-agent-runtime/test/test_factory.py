@@ -7954,6 +7954,9 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(len(self.host.deleted_targets()), 0)
         self.assertEqual(len(self.host.calls_of("agent_message.send")), 1)
         self.assertIn("factory_task_activity_unverified", [event["kind"] for event in status["events"]])
+        notices = self.host.calls_of("factory.progress")
+        self.assertEqual([notice["kind"] for notice in notices], ["paused"])
+        self.assertIn("UNVERIFIED", notices[0]["detail"])
 
         stopped = await rlm_module.rlm.factory.stop(started["run_id"])
         self.assertEqual(stopped["state"], "stopped")

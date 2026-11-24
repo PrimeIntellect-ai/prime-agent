@@ -4265,12 +4265,17 @@ class FactoryExecutor:
         run.watchers = []
         self._persist_run(run)
 
-    def _mark_paused(self, run: FactoryRun) -> None:
-        """Record the pause moment: the budget excludes paused time
-        (elapsed = now - started_at - paused_ms), so every pause arms
-        its start; the resume folds it into ``paused_ms``."""
+    async def _pause(
+        self, run: FactoryRun, reason: str, kind: str, detail: str, *, node: str | None = None
+    ) -> None:
+        """Pause the run and tell the parent. The budget excludes paused time
+        (elapsed = now - started_at - paused_ms), so every pause records its
+        start; the resume folds it into ``paused_ms``."""
+        run.state = "paused"
         if run.pause_started_at is None:
             run.pause_started_at = self._now_fn()
+        run.pause_reason = reason
+        await self._milestone(run, kind, detail, node=node)
 
     def _fold_paused(self, run: FactoryRun) -> None:
         """Fold the completed pause into the budget's paused total."""
@@ -4418,16 +4423,9 @@ class FactoryExecutor:
             run.max_transitions_reported = True
             entry.consumed = False
             run.pending_evaluations.insert(0, (state.state_id, entry.index, position))
-            run.state = "paused"
-            # The budget's pause tracking (F-08 / round-3 probe R3A): the
-            # refactor moved this pause out of _evaluate_settles, and the
-            # move silently dropped the mark — a 2h operator wait then
-            # counted as ACTIVE time and the first resume re-paused on the
-            # run budget.
-            self._mark_paused(run)
-            run.pause_reason = "max_transitions exceeded"
-            await self._milestone(
+            await self._pause(
                 run,
+                "max_transitions exceeded",
                 "max_transitions_exceeded",
                 f"max_transitions {run.max_transitions} exceeded; no new entries; "
                 f"resume with await rlm.factory.resume('{run.run_id}')",
@@ -4632,12 +4630,10 @@ class FactoryExecutor:
         the run resumes. Resuming after the milestone is an explicit operator
         decision, so no further budget pauses fire (budget_reported)."""
         elapsed_ms = self._run_budget_active_ms(run)
-        run.state = "paused"
-        self._mark_paused(run)
-        run.pause_reason = "run budget exceeded"
         run.budget_reported = True
-        await self._milestone(
+        await self._pause(
             run,
+            "run budget exceeded",
             "budget_exceeded",
             f"run budget_ms {run.run_budget_ms} exceeded after {int(elapsed_ms)}ms; no new spawns; "
             f"resume with await rlm.factory.resume('{run.run_id}')",
@@ -4658,12 +4654,10 @@ class FactoryExecutor:
         Children already in flight keep running. Resuming after the
         milestone is an explicit operator decision, so no further
         child-budget pauses fire (max_children_reported)."""
-        run.state = "paused"
-        self._mark_paused(run)
-        run.pause_reason = "max_children exceeded"
         run.max_children_reported = True
-        await self._milestone(
+        await self._pause(
             run,
+            "max_children exceeded",
             "max_children_exceeded",
             f"run max_children {run.max_children} exceeded after {run.spawn_count} children; "
             f"no new spawns; resume with await rlm.factory.resume('{run.run_id}')",
@@ -5637,15 +5631,13 @@ class FactoryExecutor:
         )
         return None
 
-    def _pause_for_unverified_task_activity(
+    async def _pause_for_unverified_task_activity(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance
     ) -> None:
         if run.state != "running":
             return
         instance.factory_task_activity = "unverified"
-        run.state = "paused"
-        self._mark_paused(run)
-        run.pause_reason = (
+        reason = (
             f"factory task activity UNVERIFIED for {state.state_id}; "
             f"child ownership remains with {instance.child_id or 'this instance'}"
         )
@@ -5656,9 +5648,15 @@ class FactoryExecutor:
             entry=entry.index,
             instance=instance.index,
             child=instance.child_id,
-            detail=run.pause_reason,
+            detail=reason,
         )
-        self._touch(run)
+        await self._pause(
+            run,
+            reason,
+            "paused",
+            f"{reason}; resume with await rlm.factory.resume('{run.run_id}')",
+            node=state.state_id,
+        )
 
     async def _poll_repair(
         self,
@@ -5689,7 +5687,7 @@ class FactoryExecutor:
                 await self._settle_emitted(run, state, entry)
             return
         if task_busy is None:
-            self._pause_for_unverified_task_activity(run, state, entry, instance)
+            await self._pause_for_unverified_task_activity(run, state, entry, instance)
             return
         if not task_busy and self._now_fn() >= instance.awaiting_outputs_until:
             instance.awaiting_outputs_until = None
@@ -5965,11 +5963,9 @@ class FactoryExecutor:
             if run.state != "running":
                 return  # stop() landed during the cancellations; it wins
             if self._has_unresolved_actor(run):
-                run.state = "paused"
-                self._mark_paused(run)
-                run.pause_reason = "child retirement failed; the actor remains owned by this run"
-                await self._milestone(
+                await self._pause(
                     run,
+                    "child retirement failed; the actor remains owned by this run",
                     "paused",
                     "failure cascade could not confirm child retirement; resume after the child is safe to replace",
                     node=state.state_id,
@@ -5992,11 +5988,9 @@ class FactoryExecutor:
         elif policy == "continue":
             pass  # the entry stays error; dependents see the error settle at binding
         else:  # escalate (default)
-            run.state = "paused"
-            self._mark_paused(run)
-            run.pause_reason = reason
-            await self._milestone(
+            await self._pause(
                 run,
+                reason,
                 "paused",
                 f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}') "
                 "to re-admit the failed entry as a fresh attempt",
@@ -6412,7 +6406,7 @@ class FactoryExecutor:
                 )
                 if state.spec.get("emit") is not None and missing:
                     if result.factory_task_busy is None and state.lifecycle != "resident":
-                        self._pause_for_unverified_task_activity(run, state, entry, instance)
+                        await self._pause_for_unverified_task_activity(run, state, entry, instance)
                         return
                     if result.factory_task_busy is True:
                         task_work_waiting = True
@@ -6421,7 +6415,7 @@ class FactoryExecutor:
                 if result.factory_task_busy is True and state.lifecycle != "resident":
                     task_work_waiting = True
                 if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
-                    self._pause_for_unverified_task_activity(run, state, entry, instance)
+                    await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
             for state, entry, instance in owner_polls:
                 if run.loop_generation != generation:
@@ -6429,7 +6423,7 @@ class FactoryExecutor:
                 result = results_by_child.get(instance.child_id or "")
                 if result is None or not result.settled or result.factory_task_busy is None:
                     instance.factory_task_activity = "unverified"
-                    self._pause_for_unverified_task_activity(run, state, entry, instance)
+                    await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
                 task_work_waiting = task_work_waiting or result.factory_task_busy
