@@ -13,6 +13,9 @@ use serde_json::Value;
 use toml::Spanned;
 
 use crate::duration::parse_duration_ms;
+use crate::limits::{
+    FOREACH_MAX, MAX_CHILDREN, MAX_ENTRIES, MAX_PARALLEL, MAX_RETRIES, MAX_STATES, MAX_TRANSITIONS,
+};
 use crate::machine::{
     Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall, Route,
     Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,
@@ -22,10 +25,6 @@ use crate::types::{self, parse_slot, parse_type, record_names, Records, Slot, Ty
 pub const MACHINE_FILE: &str = "machine.toml";
 pub const CONTEXT_FILE: &str = "prompts/_context.md";
 
-const MAX_STATES: usize = 1024;
-const MAX_RETRIES: i64 = 10;
-const MAX_PARALLEL: i64 = 64;
-const FOREACH_MAX: i64 = 256;
 const LABEL_MAX_CHARS: usize = 64;
 const SEVERITIES: [&str; 4] = ["blocker", "major", "minor", "nit"];
 
@@ -297,7 +296,7 @@ fn build_machine(dir: &Path, raw: RawMachine, problems: &mut Vec<Diagnostic>) ->
 }
 
 pub(crate) fn is_machine_name(text: &str) -> bool {
-    is_state_id(text)
+    crate::library::machine_name_errors(text).is_empty()
 }
 
 pub(crate) fn is_state_id(text: &str) -> bool {
@@ -477,10 +476,10 @@ fn build_run(raw: RawRun, problems: &mut Vec<Diagnostic>) -> RunSettings {
             .and_then(|value| bounded(value, 1, MAX_PARALLEL, "run.max_parallel", problems)),
         max_children: raw
             .max_children
-            .and_then(|value| bounded(value, 1, 1_000_000, "run.max_children", problems)),
+            .and_then(|value| bounded(value, 1, MAX_CHILDREN, "run.max_children", problems)),
         max_transitions: raw
             .max_transitions
-            .and_then(|value| bounded(value, 1, 10_000, "run.max_transitions", problems)),
+            .and_then(|value| bounded(value, 1, MAX_TRANSITIONS, "run.max_transitions", problems)),
         failure_policy: raw
             .failure_policy
             .and_then(|text| policy(&text, "run.failure_policy", problems)),
@@ -745,7 +744,7 @@ fn build_state(
         .and_then(|table| build_route(&at, table, problems));
     let max_entries = raw
         .max_entries
-        .and_then(|value| bounded(value, 1, 1_000_000, &format!("{at}.max_entries"), problems));
+        .and_then(|value| bounded(value, 1, MAX_ENTRIES, &format!("{at}.max_entries"), problems));
     let retries = raw
         .retries
         .and_then(|value| bounded(value, 0, MAX_RETRIES, &format!("{at}.retries"), problems));
