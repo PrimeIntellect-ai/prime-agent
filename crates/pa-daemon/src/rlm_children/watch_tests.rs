@@ -562,6 +562,60 @@ async fn collect_reports_factory_task_work_separately_from_turn_settlement() {
     assert_eq!(follow_up[0].factory_task_busy, Some(true));
 }
 
+/// A refresh whose direct read was idle but whose settle re-check sees the
+/// child busy again records the factory task as busy, never the stale idle.
+#[tokio::test]
+async fn an_idle_read_that_the_recheck_sees_busy_records_factory_task_busy() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_state = Arc::new(FakeChildSubagents::default());
+    // A parked idle wait keeps the settle watcher out of the scripted reads.
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        10_000,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_state),
+    )
+    .await;
+    sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+                contract: None,
+            }),
+        })
+        .await
+        .expect("spawn must succeed against the fake supervisor");
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !record.lock().await.run.prompt_admitted() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the spawned task prompt must be admitted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    child_state.scripted_states.lock().unwrap().extend([
+        json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } }),
+        json!({ "isStreaming": true, "sessionActions": { "queuedCount": 0 } }),
+    ]);
+
+    assert!(
+        sessions.inner.refresh_record(&record).await,
+        "the re-check saw it busy"
+    );
+    assert_eq!(record.lock().await.factory_task_busy, Some(true));
+}
+
 /// The task-activity write is part of the direct read: while one refresh
 /// holds the record for it, the next refresh cannot start its worker round
 /// trip. The unreachable arm proves a failed read also records its
