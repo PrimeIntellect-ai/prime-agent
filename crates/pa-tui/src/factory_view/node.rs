@@ -555,7 +555,7 @@ impl NodeView {
             let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
             let width = self.last_width.get().unwrap_or_default();
             let total = self.files_document(&theme, width).len();
-            let visible = visible_rows(viewport_rows, total);
+            let visible = self.window_rows(viewport_rows).min(total.max(1));
             let step = if page_up || page_down { visible } else { 1 };
             let delta = if up || page_up {
                 -(step as isize)
@@ -604,7 +604,7 @@ impl NodeView {
                 .saturating_sub(4)
                 .max(20);
             let total = self.document_lines(Some(&theme), width).len();
-            let visible = visible_rows(viewport_rows, total);
+            let visible = self.window_rows(viewport_rows).min(total.max(1));
             self.scroll = if page_up {
                 self.scroll.saturating_sub(visible)
             } else {
@@ -855,15 +855,9 @@ impl NodeView {
         } else {
             (self.document_lines(Some(theme), inner_width), self.scroll)
         };
-        let error = if self.files_open {
-            self.files_error.as_ref()
-        } else {
-            self.error.as_ref()
-        };
+        let error = self.shown_error();
         let error_rows = usize::from(error.is_some());
-        let visible = viewport_rows
-            .saturating_sub(rows.len() + 4 + error_rows)
-            .max(1);
+        let visible = self.window_rows(viewport_rows);
         let scroll = scroll.min(document.len().saturating_sub(visible));
         rows.extend(document.into_iter().skip(scroll).take(visible));
         while rows.len() < viewport_rows.saturating_sub(2 + error_rows) {
@@ -883,6 +877,24 @@ impl NodeView {
         rows.into_iter()
             .map(|row| truncate_line(&row, width, ""))
             .collect()
+    }
+
+    /// The open document's error, shown on its own row above the hint.
+    fn shown_error(&self) -> Option<&String> {
+        if self.files_open {
+            self.files_error.as_ref()
+        } else {
+            self.error.as_ref()
+        }
+    }
+
+    /// The document window's rows, for the render and the key loop alike: the
+    /// viewport less the header and its blank, the error row while one shows,
+    /// and the blank and hint pinned at the bottom (with their two spacers).
+    fn window_rows(&self, viewport_rows: usize) -> usize {
+        viewport_rows
+            .saturating_sub(6 + usize::from(self.shown_error().is_some()))
+            .max(1)
     }
 
     /// The bottom hint line.
@@ -922,9 +934,4 @@ fn plain_line(rows: &mut Vec<Line>, theme: Option<&Theme>, text: &str, color: Th
     } else {
         rows.push(vec![Span::raw(text.to_string())]);
     }
-}
-
-/// The windowed row count for one document total.
-fn visible_rows(viewport_rows: usize, total: usize) -> usize {
-    viewport_rows.saturating_sub(6).max(4).min(total.max(1))
 }
