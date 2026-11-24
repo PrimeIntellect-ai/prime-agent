@@ -1,0 +1,1 @@
+- Gemini models over OpenAI-compatible providers no longer merge their reasoning text and encrypted reasoning into one record, so the replayed conversation matches what the model produced and is not re-counted as a new branch on every call.

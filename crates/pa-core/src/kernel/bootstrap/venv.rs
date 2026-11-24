@@ -284,7 +284,8 @@ fn displaces_install(existing: &BootstrapPythonSkill, skill: &BootstrapPythonSki
 }
 
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
-/// changed are installed. Per-skill failures warn and continue.
+/// changed are installed. Per-skill failures warn and continue. A failed uninstall of a shadowing
+/// distribution warns and leaves the skills it shadows unrecorded, so the next session retries it.
 pub(crate) async fn sync_python_skills(
     uv: &UvCommand<'_>,
     venv: &Path,
@@ -328,6 +329,8 @@ pub(crate) async fn sync_python_skills(
         // are NOT replaced by the install, so uninstall them first or their
         // editable install shadows the skill this session selected.
         let mut shadowing: Vec<String> = Vec::new();
+        // (key of the skill being installed, record of the distribution shadowing it)
+        let mut shadowed: Vec<(String, BootstrapPythonSkill)> = Vec::new();
         for skill in &missing {
             let skill_project = normalize_project_name(&read_python_skill_project_name(skill));
             installed.retain(|_, existing| {
@@ -335,14 +338,16 @@ pub(crate) async fn sync_python_skills(
                     return true;
                 }
                 let existing_project = read_python_skill_project_name(existing);
-                if normalize_project_name(&existing_project) != skill_project
-                    && !shadowing.contains(&existing_project)
-                {
-                    shadowing.push(existing_project);
+                if normalize_project_name(&existing_project) != skill_project {
+                    shadowed.push((bootstrap_skill_key(skill), existing.clone()));
+                    if !shadowing.contains(&existing_project) {
+                        shadowing.push(existing_project);
+                    }
                 }
                 false
             });
         }
+        let mut uninstall_failed = false;
         if !shadowing.is_empty() {
             let mut uninstall_args = vec![
                 "pip".to_string(),
@@ -353,8 +358,9 @@ pub(crate) async fn sync_python_skills(
             uninstall_args.extend(shadowing.iter().cloned());
             if let Err(error) = run_async(uv.executable, &uninstall_args, uv.project).await {
                 options.report(&format!(
-                    "Warning: failed to uninstall the Python skill distributions this sync replaces ({shadowing:?}): {error}"
+                    "Warning: failed to uninstall the Python skill distributions this sync replaces ({shadowing:?}); the next session retries: {error}"
                 ));
+                uninstall_failed = true;
             }
         }
         // One uv invocation installs the whole batch of missing skills: a fresh bootstrap otherwise
@@ -406,6 +412,16 @@ pub(crate) async fn sync_python_skills(
                         skill.import_name
                     )),
                 }
+            }
+        }
+        // A distribution that survived the uninstall keeps shadowing its
+        // skill on sys.path. Record the surviving distribution instead of the
+        // shadowed skill, so the next session's kernel_ready does not
+        // short-circuit and its sync re-derives and retries the uninstall.
+        if uninstall_failed {
+            for (skill_key, existing) in shadowed {
+                installed.remove(&skill_key);
+                installed.insert(bootstrap_skill_key(&existing), existing);
             }
         }
     }
