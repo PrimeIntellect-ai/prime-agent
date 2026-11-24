@@ -214,40 +214,7 @@ impl Worker {
         &self,
         successor: &std::path::Path,
     ) -> anyhow::Result<()> {
-        {
-            let mut core = self.core.lock().unwrap();
-            // Mark the session closed before the children close: the marker keeps
-            // settle retries from minting continuations into the retiring session.
-            // From the same critical section on, mail for this worker lands in
-            // the successor's inbox, and the mail still waiting moves there
-            // (the successor's open announces it): the outgoing session never
-            // reopens through this worker.
-            if let Some(agent_engine) = &self.agent_engine {
-                agent_engine.mark_session_closed();
-                let outgoing = agent_engine.inbox();
-                let outgoing_session = agent_engine
-                    .session_file
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_deref()
-                    .and_then(std::path::Path::file_stem)
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let successor_inbox = agent_engine
-                    .open_inbox_at(Some(successor).filter(|path| !path.as_os_str().is_empty()));
-                if let Some(outgoing) =
-                    outgoing.filter(|outgoing| !std::sync::Arc::ptr_eq(outgoing, &successor_inbox))
-                {
-                    crate::agent_inbox::move_waiting_messages(
-                        &outgoing,
-                        &successor_inbox,
-                        &outgoing_session,
-                    );
-                }
-            }
-            core.steering.clear();
-            core.follow_up.clear();
-        }
+        self.retire_for_replacement(successor);
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_replacement_settled().await;
@@ -256,6 +223,51 @@ impl Worker {
         // replacement fails with the old runtime already retired.
         self.close_rlm_children(crate::rlm_children::ChildCloseReason::Replaced)
             .await
+    }
+
+    /// The replacement's first step, one critical section: the session
+    /// closes, its waiting mail moves to the successor's inbox, the running
+    /// turn stops accepting rows, and the queued actions cancel.
+    pub(super) fn retire_for_replacement(&self, successor: &std::path::Path) {
+        let mut core = self.core.lock().unwrap();
+        // Mark the session closed before the children close: the marker keeps
+        // settle retries from minting continuations into the retiring session.
+        // From the same critical section on, mail for this worker lands in
+        // the successor's inbox, and the mail still waiting moves there
+        // (the successor's open announces it): the outgoing session never
+        // reopens through this worker.
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.mark_session_closed();
+            let outgoing = agent_engine.inbox();
+            let outgoing_session = agent_engine
+                .session_file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref()
+                .and_then(std::path::Path::file_stem)
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let successor_inbox = agent_engine
+                .open_inbox_at(Some(successor).filter(|path| !path.as_os_str().is_empty()));
+            if let Some(outgoing) =
+                outgoing.filter(|outgoing| !std::sync::Arc::ptr_eq(outgoing, &successor_inbox))
+            {
+                crate::agent_inbox::move_waiting_messages(
+                    &outgoing,
+                    &successor_inbox,
+                    &outgoing_session,
+                );
+            }
+        }
+        // The abort lands with the move: a row the running turn accepted
+        // after it would consume the moved mail from the outgoing inbox while
+        // the successor announces the copies.
+        if core.busy || core.compacting {
+            core.abort_requested = true;
+            core.turn_cancelled = true;
+        }
+        core.steering.clear();
+        core.follow_up.clear();
     }
 
     /// Close this session's supervisor-backed RLM children: every runtime

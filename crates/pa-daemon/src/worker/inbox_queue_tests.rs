@@ -731,6 +731,29 @@ async fn mail_waiting_at_a_replacement_moves_to_the_new_session() {
     assert_eq!(rows[0].covers, waiting_ids(&inbox));
 }
 
+/// A turn running at a replacement accepts no row once the mail moved:
+/// the arrival row it picked shows mail the new session now announces, so
+/// accepting that row would deliver the mail twice.
+#[tokio::test]
+async fn a_turn_running_at_a_replacement_accepts_no_row_after_the_mail_moves() {
+    let fx = fixture();
+    fx.route(notice(INBOX_CLASS_AGENT_MESSAGE, "shown"), Lane::Steering);
+    {
+        // The runner picked the arrival row: its turn shows the message.
+        let mut core = fx.worker.core.lock().unwrap();
+        let mut row = core.steering.pop_front().expect("the arrival row");
+        deliver_inbox_arrival_row_locked(&mut core, &mut row, &fx.inbox);
+        core.busy = true;
+    }
+    let successor = fx.dir.join("sessions").join("successor.jsonl");
+    fx.worker.retire_for_replacement(&successor);
+    assert_eq!(fx.inbox.count().0, 0, "the mail moved");
+    assert!(
+        fx.worker.core.lock().unwrap().abort_requested,
+        "the running turn's row gate is shut"
+    );
+}
+
 /// One cell-completion arrival (a `[cell-done]` message the
 /// backgrounded cell's terminal notice pushed).
 fn cell_done(cell_id: &str) -> InboxNotice {
