@@ -554,14 +554,10 @@ fn read_text_file(
         return None;
     }
     let full = dir.join(path);
-    // A relative in-dir path can still LEAVE the dir through a symlink:
-    // `prompts/a.md -> /tmp/secret` passes the text check and hands the
-    // machine outside content (a probe at this fix's head read
-    // /tmp/probe-secret.txt into a child prompt). When the file exists,
-    // its canonicalized path must stay under the canonical machine dir —
-    // a symlink pointing outside is a load error, before any text is
-    // read. A missing file falls through to the read attempt below,
-    // which reports it with its own diagnostic.
+    // A relative in-dir path can still leave the dir through a symlink
+    // (`prompts/a.md -> /tmp/secret`), which would put outside content into
+    // a child prompt. An existing file must canonicalize under the machine
+    // dir; a missing one falls through to the read below, which reports it.
     if let (Ok(dir_canonical), Ok(full_canonical)) = (dir.canonicalize(), full.canonicalize()) {
         if !full_canonical.starts_with(&dir_canonical) {
             problems.push(Diagnostic::new(
