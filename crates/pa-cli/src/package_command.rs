@@ -455,7 +455,9 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         return match runtime.block_on(crate::update_flow::daemon_restart::run(
             std::path::Path::new(&socket),
         )) {
-            Ok(()) => HANDLED_OK,
+            Ok(code) => PackageCommandOutcome {
+                exit_code: Some(code),
+            },
             Err(error) => fail(&format!("{error:#}"), None),
         };
     }

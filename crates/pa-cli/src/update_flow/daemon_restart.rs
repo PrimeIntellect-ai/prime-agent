@@ -15,12 +15,16 @@ use pa_types::daemon::update_flow::{
 use super::phases::{check_marker_fresh, commit_update, prepare_to_prepared, restore_report};
 use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello};
 
-/// Restart the daemon on `socket_path` from this binary and print the restore counts.
+/// The exit code for a restart whose successor came up but did not restore every session.
+pub const RESTORE_FAILURES_EXIT_CODE: i32 = 3;
+
+/// Restart the daemon on `socket_path` from this binary and print the restore counts. Returns
+/// the exit code: 0, or [`RESTORE_FAILURES_EXIT_CODE`] when sessions failed to restore.
 ///
 /// # Errors
 /// Returns an error when the daemon cannot be reached, refuses the prepare or the commit,
 /// does not exit, or the successor does not greet within its budget.
-pub async fn run(socket_path: &Path) -> Result<()> {
+pub async fn run(socket_path: &Path) -> Result<i32> {
     let budget = UpdateTimeoutBudget::from_env();
     let update_id = UpdateId::from(uuid::Uuid::now_v7().to_string());
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket_path)
@@ -57,11 +61,21 @@ pub async fn run(socket_path: &Path) -> Result<()> {
     wait_for_hello(&socket_path, budget.boot_ms)
         .await
         .context("the new supervisor did not greet within its boot budget")?;
-    let (counts, _failures) = restore_report(&socket_path, &budget).await;
+    let (counts, failures) = restore_report(&socket_path, &budget).await;
     let _ = std::fs::remove_dir_all(&prepared_dir);
     println!(
         "restored {} of {} session(s) ({} failed)",
         counts.restored, counts.total, counts.failed
     );
-    Ok(())
+    for failure in &failures {
+        eprintln!(
+            "could not restore {}: {}",
+            failure.session_file, failure.message
+        );
+    }
+    Ok(if counts.failed > 0 {
+        RESTORE_FAILURES_EXIT_CODE
+    } else {
+        0
+    })
 }

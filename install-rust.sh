@@ -1743,6 +1743,9 @@ STOP_DRAIN_UNKNOWN_S = 30.0
 STOP_DRAIN_CAP_S = 120.0
 FORCE_TERM_WAIT_S = 5.0
 FORCE_KILL_WAIT_S = 3.0
+# The restart mode's exit code for a successor that did not restore every
+# session (pa-cli update_flow::daemon_restart::RESTORE_FAILURES_EXIT_CODE).
+RESTORE_FAILURES_EXIT_CODE = 3
 
 def read_line(sock, deadline, buf):
     # One persistent buffer per connection: a daemon that answers
@@ -1980,17 +1983,32 @@ if owner == "rust" and restart_launcher:
             [restart_launcher, "update", "--internal-update-restart-daemon", "--daemon-socket", path],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             universal_newlines=True, env=restart_env)
-        restarted = restart.returncode == 0
+        restart_returncode = restart.returncode
         restart_error = (restart.stderr or "").strip().splitlines()[-1:] or ["exit %d" % restart.returncode]
     except OSError as error:
-        restarted = False
+        restart_returncode = None
         restart_error = [str(error)]
+    restarted = restart_returncode == 0
     if restarted:
         print("rust:restarted:%s" % count_label)
         sys.exit(0)
+    if restart_returncode == RESTORE_FAILURES_EXIT_CODE:
+        print("rust:restarted-failures:%s" % count_label)
+        sys.exit(0)
     progress("the update restart failed (%s)" % restart_error[0])
-    if not listening_flag():
-        print("rust:stopped-restart:%s" % count_label)
+    # Only the daemon that never left gets the stop ladder: a successor that
+    # took the socket (whatever its greeting) is never commanded to stop.
+    try:
+        after = connect()
+        after_hello = wait_hello(after)
+        after.close()
+    except OSError:
+        after_hello = None
+        if not listening_flag():
+            print("rust:stopped-restart:%s" % count_label)
+            sys.exit(0)
+    if after_hello is None or after_hello.get("supervisorPid") != hello.get("supervisorPid"):
+        print("rust:restarted-failures:%s" % count_label)
         sys.exit(0)
 
 bound_s = STOP_CONFIRM_TIMEOUT_S + drain_confirm_timeout_s()
@@ -2188,6 +2206,14 @@ stop_daemon_candidate() {
         step_ok "Restarted the ${daemon_title}" "${sessions_label} resumed"
       fi
       ts_stop_summary="${ts_stop_summary}rust daemon: restarted on ${socket_path} for this update (${sessions_label}; the new daemon resumed them)
+"
+      ;;
+    rust:restarted-failures:*)
+      ts_stop_found_any="yes"
+      step_fail "Restarted the ${daemon_title}" "not every session resumed"
+      note "! The new daemon did not resume every session; the transcripts stay"
+      note "  saved. Reopen them from Agents View."
+      ts_stop_summary="${ts_stop_summary}rust daemon: WARNING restarted on ${socket_path} for this update, but not every session resumed (${sessions_label}; the transcripts stay saved)
 "
       ;;
     ts:stopped:*|ts:stopped-forced:*|ts:stopped-killed:*|rust:stopped:*|rust:stopped-forced:*|rust:stopped-killed:*|rust:stopped-restart:*)
