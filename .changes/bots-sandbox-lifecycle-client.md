@@ -1,0 +1,1 @@
+feat: new `pa-sandbox` crate with the Prime Sandboxes lifecycle client for bots — idempotent VM create (with `timeout_minutes = -1` for no lifetime cap), fetch, list by label across all pages, pause and resume, delete (404 is success), wait-until-running, and filesystem checkpoints; errors never carry the API key and the transport refuses redirects

@@ -1690,6 +1690,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pa-sandbox"
+version = "0.10.5"
+dependencies = [
+ "pa-ai",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "pa-telemetry"
 version = "0.10.5"
 dependencies = [
