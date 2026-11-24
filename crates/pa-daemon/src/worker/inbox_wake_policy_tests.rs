@@ -207,7 +207,7 @@ async fn a_delivery_consumes_what_it_shows_and_leaves_counted_items_waiting() {
             .lines()
             .last()
             .unwrap()
-            .contains("\"kind\":\"withdrawn\""),
+            .contains("\"kind\":\"removed\""),
         "{journal}"
     );
 
