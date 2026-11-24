@@ -7651,6 +7651,30 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(status["state"], "done")
 
     @async_test
+    async def test_a_repaired_child_that_keeps_background_work_is_announced(self) -> None:
+        self.host.emitted["design"] = {"design": "the design"}
+        self.host.outcomes["design"] = {"status": "done", "factory_task_busy": False}
+
+        def repair(payload: dict[str, Any]) -> None:
+            (self.host.session_root / "child-1" / FACTORY_OUTPUTS_FILE).write_text(
+                json.dumps({"design": "the design", "risk": "high"}), encoding="utf-8"
+            )
+            self.host.outcomes["design"]["factory_task_busy"] = True  # a job outlives the repair
+
+        self.host.on_message = repair
+        later_poll = self.host.gate("rlm.collect", 4)
+        started = await self.start()
+        await self.host.gate_entered("rlm.collect", 4).wait()
+
+        held = [notice for notice in self.host.notices if notice["kind"] == factory_module.TASK_WORK_HELD]
+        self.assertEqual(len(held), 1, self.host.notices)
+        self.assertEqual(self.host.spawn_calls("build"), [])
+        self.host.outcomes["design"]["factory_task_busy"] = False
+        later_poll.set()
+        status = await self.settle(started)
+        self.assertEqual(status["state"], "done")
+
+    @async_test
     async def test_deleting_the_held_child_starts_the_next_state(self) -> None:
         self.host.emitted["design"] = {"design": "the design", "risk": "low"}
         self.host.outcomes["design"]["factory_task_busy"] = True

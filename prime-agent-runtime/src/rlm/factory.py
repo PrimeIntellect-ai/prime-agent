@@ -1775,6 +1775,7 @@ class _NodeInstance:
     # while the instance is running again, the repair turn decides it
     ownership_change_in_progress: bool = False  # an admission or deletion owns the actor slot
     factory_task_activity: str | None = None  # busy, idle, or unverified for factory children
+    hold_announced: bool = False  # the parent was told this settled owner's background work holds the run
     process: "_PythonProcess | None" = None  # a python state's running call
     deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
@@ -4780,6 +4781,7 @@ class FactoryExecutor:
         instance.session_dir = str(handle.session_dir)
         instance.child_name = handle.name
         instance.factory_task_activity = None
+        instance.hold_announced = False
         instance.repair_sent = False
         instance.spawned_at = self._now_fn()
         instance.status = "running"
@@ -6175,32 +6177,28 @@ class FactoryExecutor:
                 await self._apply_settlement(run, state, entry, instance, result)
                 if result.factory_task_busy is True and state.lifecycle != "resident":
                     task_work_waiting = True
-                    if (
-                        run.state == "running"
-                        and instance.status != "running"
-                        and instance.child_id is not None
-                    ):
-                        # The child still owns the checkout (a settled or
-                        # retrying entry); a respawn or a stop released it.
-                        await self._announce_task_work_hold(run, state, instance)
                 if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
                     await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
             for state, entry, instance in owner_polls:
-                # A stop or pause that landed during the collect owns the
-                # instances now: a stale poll must not re-mark them busy.
-                if not self._loop_alive(run, generation):
+                if run.loop_generation != generation:
                     return
+                if run.state != "running":
+                    # A stop or pause that landed during the collect owns the
+                    # owners now: a stale poll must not re-mark them busy.
+                    # The python exits below still apply.
+                    break
                 result = results_by_child.get(instance.child_id or "")
                 if result is None or not result.settled or result.factory_task_busy is None:
                     instance.factory_task_activity = "unverified"
                     await self._pause_for_unverified_task_activity(run, state, entry, instance)
                     return
-                was_busy = instance.factory_task_activity == "busy"
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
                 if not result.factory_task_busy:
+                    instance.hold_announced = False
                     continue
-                if not was_busy:
+                if not instance.hold_announced:
+                    instance.hold_announced = True
                     await self._announce_task_work_hold(run, state, instance)
                 task_work_waiting = True
             child_still_running = any(
