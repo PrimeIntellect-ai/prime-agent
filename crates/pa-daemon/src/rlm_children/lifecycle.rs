@@ -511,7 +511,12 @@ impl SupervisorChildSessionsInner {
         // a crash) does not undo the idle read.
         if recheck_idle {
             tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
+            let _direct = direct_observation.lock().await;
             if matches!(self.child_busy(&active_session_id).await, Ok(true)) {
+                // The busy re-check supersedes the idle read's task flag.
+                if factory {
+                    record.lock().await.factory_task_busy = Some(true);
+                }
                 return true;
             }
         }
