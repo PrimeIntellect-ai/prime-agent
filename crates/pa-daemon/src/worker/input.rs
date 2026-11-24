@@ -12,14 +12,6 @@ use serde_json::Value;
 use crate::protocol::{response_failure, DaemonResponse};
 
 impl Worker {
-    /// Fire the session's cell wake (a user message or inbox arrival ends a
-    /// running cell's wait early; the work keeps running in the background).
-    pub(crate) fn fire_cell_wake(&self) {
-        if let Some(engine) = &self.agent_engine {
-            engine.fire_cell_wake();
-        }
-    }
-
     pub(crate) async fn handle_prompt(&self, payload: &Value, wait: bool) -> DaemonResponse {
         if let Err(response) = self.require_created("prompt") {
             return response;
@@ -95,7 +87,7 @@ impl Worker {
         }
         let (done_tx, done_rx) = oneshot::channel();
         let done = if wait { Some(done_tx) } else { None };
-        let (snapshot, queued_behind_work, lane) = {
+        let (snapshot, queued_behind_work) = {
             let mut core = self.core.lock().unwrap();
             // TS commits before accepting the prompt into its action queue.
             // Hold the queue lock across this transition and enqueue so a
@@ -156,14 +148,8 @@ impl Worker {
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
             let snapshot = Self::snapshot_locked(&core);
-            (snapshot, queued_behind_work, lane)
+            (snapshot, queued_behind_work)
         };
-        // A steering arrival ends a running cell's wait early: the cell keeps
-        // running in the background (nothing is signalled) and its completion
-        // lands in the inbox. An arrival with no live wait is inert.
-        if lane == Lane::Steering {
-            self.fire_cell_wake();
-        }
         // The admission checkpoint: the admitted prompt is undelivered
         // live work until its turn settles.
         self.checkpoint_queue(QueueCheckpoint::Admitted {
@@ -283,12 +269,6 @@ impl Worker {
         }
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
-        // A steering arrival ends a running cell's wait early: the cell keeps
-        // running in the background (nothing is signalled) and its completion
-        // lands in the inbox. An arrival with no live wait is inert.
-        if lane == Lane::Steering {
-            self.fire_cell_wake();
-        }
         // The queue-write checkpoint: an undelivered lane is live work. The
         // operation names are TS's journal strings, so the journals stay
         // comparable record-for-record.
@@ -346,10 +326,6 @@ impl Worker {
                 // recomputes under the emission lock so a concurrent read
                 // hook's newer copy is never overwritten).
                 let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
-                // A steering arrival ends a running cell's wait early.
-                if lane == Lane::Steering {
-                    engine.fire_cell_wake();
-                }
                 true
             }
             Err(_) => false,
@@ -527,11 +503,6 @@ impl Worker {
             let _ = crate::worker::emit_action_update_fresh(&self.core, &self.events);
             // The notice is admitted live work — a restart must revive
             // the worker to deliver it (no client reopens the session).
-            // A steering delivery ends a running cell's wait early, like a
-            // steer prompt; a follow-up delivery waits for the turn.
-            if lane == Lane::Steering {
-                self.fire_cell_wake();
-            }
             let receipt = agent_message_receipt(&id, &target, message, lane, queued, &sender);
             return response_success(None, "worker_deliver_message", Some(receipt));
         }
@@ -607,11 +578,6 @@ impl Worker {
             let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
-        // A steering delivery ends a running cell's wait early, like a steer
-        // prompt; a follow-up delivery waits for the turn.
-        if lane == Lane::Steering {
-            self.fire_cell_wake();
-        }
         // The queued agent message is admitted live work — a restart must revive
         // the worker to deliver it (no client reopens the session).
         self.checkpoint_queue(QueueCheckpoint::Admitted {

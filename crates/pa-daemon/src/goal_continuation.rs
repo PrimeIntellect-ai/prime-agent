@@ -134,10 +134,7 @@ impl AgentSessionEngine {
                 return;
             }
         }
-        if self.has_unsettled_rlm_work().await
-            || self.has_live_background_kernel_work()
-            || self.background_bash_handle_count() > 0
-        {
+        if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
             // Self-heal: a fire that completed without running (withdrawn
             // or cleared mid-teardown) strands the owed deferral with no
             // wake; the next settle consult behind still-live kernel work
@@ -317,14 +314,19 @@ impl AgentSessionEngine {
         self.background_bash_handle_count() > 0
     }
 
-    /// Whether live background kernel work holds the boundary: a
-    /// backgrounded cell (whose completion notice is the wake-up) or a
-    /// live `bash()` handle. The passivation gates read this aggregate
-    /// alone; the continuation gates read it next to
-    /// [`Self::background_bash_handle_count`], whose durable term holds a
-    /// shell that outlived its kernel.
+    /// Whether live background kernel work runs: a backgrounded cell
+    /// (whose completion notice is the wake-up) or a live `bash()` handle.
+    /// The passivation gates read this term alone.
     pub(crate) fn has_live_background_kernel_work(&self) -> bool {
         self.background_kernel_work_count() > 0
+    }
+
+    /// Whether live background work holds a continuation boundary: kernel
+    /// work ([`Self::has_live_background_kernel_work`]) or a durable shell
+    /// that outlived its kernel ([`Self::durable_background_shell_count`]).
+    /// The goal and autonomous continuation gates read this one predicate.
+    pub(crate) fn has_live_background_work(&self) -> bool {
+        self.has_live_background_kernel_work() || self.durable_background_shell_count() > 0
     }
 
     /// The built session's kernel manager, when a session is built and its
@@ -424,11 +426,7 @@ impl AgentSessionEngine {
             // shell-specific. The durable term keeps the goal-gate hold:
             // a shell that outlived its kernel still defers the mint and
             // arms behind its exit watch.
-            let live_background_work = self.has_live_background_kernel_work();
-            if self.has_unsettled_rlm_work().await
-                || live_background_work
-                || self.background_bash_handle_count() > 0
-            {
+            if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
                 driver.mark_continuation_owed();
                 if self.has_live_background_bash_handles() {
                     drop(driver);
