@@ -1,1 +1,1 @@
-- Python runtime: a completed background bash job's notice carries its output tail, and the kernel owns its SIGINT mask at startup.
+- Python runtime: the kernel owns its SIGINT mask at startup.

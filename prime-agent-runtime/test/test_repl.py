@@ -122,14 +122,6 @@ def reply_ok(repl: ReplProcess, request: dict) -> None:
     repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
 
 
-def wait_for_host_request_of_type(repl: ReplProcess, kind: str) -> dict:
-    """Read protocol events until the next host_request whose data.type is `kind`."""
-    while True:
-        event = repl.read_event()
-        if event.get("event") == "host_request" and event.get("data", {}).get("type") == kind:
-            return event
-
-
 class ReplTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repl = ReplProcess()
