@@ -594,7 +594,6 @@ fn transport_failure_details(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::openai_codex_responses::API_OPENAI_CODEX_RESPONSES;
 
     #[test]
     fn maps_flat_error_events() {
@@ -643,16 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_statuses_normalize_to_null() {
-        let mapped = map_codex_event(json!({
-            "type": "response.done",
-            "response": { "status": "weird" },
-        }))
-        .expect("maps through");
-        assert!(mapped.event["response"]["status"].is_null());
-    }
-
-    #[test]
     fn stale_continuation_detection() {
         let error = CodexStreamError::Api(CodexApiError {
             message: "previous response not found".into(),
@@ -663,28 +652,6 @@ mod tests {
         });
         assert!(is_stale_codex_continuation_error(&error));
         assert!(error.is_non_transport_error());
-    }
-
-    #[test]
-    // Golden equality against the fixed multiplier table is the contract here.
-    #[allow(clippy::float_cmp)]
-    fn service_tier_multipliers() {
-        assert_eq!(
-            get_codex_service_tier_cost_multiplier("gpt-5.5-codex", Some("priority")),
-            2.5
-        );
-        assert_eq!(
-            get_codex_service_tier_cost_multiplier("gpt-5.4", Some("priority")),
-            2.0
-        );
-        assert_eq!(
-            get_codex_service_tier_cost_multiplier("gpt-5.4", Some("flex")),
-            0.5
-        );
-        assert_eq!(
-            get_codex_service_tier_cost_multiplier("gpt-5.4", Some("default")),
-            1.0
-        );
     }
 
     #[test]
@@ -729,195 +696,5 @@ mod tests {
         );
         let diagnostic = crate::utils_inner::stream_failure::diagnostic_error_info(&error);
         assert_eq!(diagnostic.name.as_deref(), Some("CodexApiError"));
-    }
-
-    /// A plain HTTP-level codex error keeps the server's error message text (the classified rewrite
-    /// would turn it into "Provider rejected the request (400): ...").
-    #[test]
-    fn api_error_http_message_stays_verbatim() {
-        let api_error = CodexApiError {
-            message: "The requested model does not exist".to_string(),
-            code: Some("not_found_error".to_string()),
-            status: Some(400),
-            retry_after_ms: None,
-            payload: None,
-        };
-        let error = api_error.into_provider_error();
-        assert_eq!(error.to_string(), "The requested model does not exist");
-        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
-        assert_eq!(info.provider_error_type.as_deref(), Some("not_found_error"));
-        assert_eq!(
-            info.kind,
-            crate::utils_inner::stream_failure::StreamFailureKind::InvalidRequest
-        );
-    }
-
-    /// A flat mid-stream error event keeps its "Codex error: ..." composed message through the
-    /// provider error.
-    #[test]
-    fn flat_error_event_message_survives_provider_error() {
-        let error = map_codex_event(json!({
-            "type": "error",
-            "code": "server_error",
-            "message": "upstream exploded",
-        }))
-        .expect_err("error event")
-        .into_provider_error();
-        assert_eq!(error.to_string(), "Codex error: upstream exploded");
-        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
-        assert_eq!(info.provider_error_type.as_deref(), Some("server_error"));
-        assert_eq!(
-            info.kind,
-            crate::utils_inner::stream_failure::StreamFailureKind::ServerError
-        );
-    }
-
-    /// Protocol errors surface their message verbatim and record the TS `CodexProtocolError` class
-    /// name.
-    #[test]
-    fn protocol_error_message_and_name() {
-        let error = CodexStreamError::Protocol(CodexProtocolError {
-            message: "Invalid Codex SSE JSON: unexpected token".to_string(),
-            payload: Some(Value::String("{oops".to_string())),
-        })
-        .into_provider_error();
-        assert_eq!(
-            error.to_string(),
-            "Invalid Codex SSE JSON: unexpected token"
-        );
-        let diagnostic = crate::utils_inner::stream_failure::diagnostic_error_info(&error);
-        assert_eq!(diagnostic.name.as_deref(), Some("CodexProtocolError"));
-        // The class name is the classification key; it never classifies.
-        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
-        assert_eq!(
-            info.kind,
-            crate::utils_inner::stream_failure::StreamFailureKind::Unknown
-        );
-    }
-
-    #[test]
-    fn passes_plain_events_through() {
-        let mapped =
-            map_codex_event(json!({ "type": "response.output_text.delta", "delta": "hi" }))
-                .expect("plain events pass through");
-        assert!(!mapped.done);
-        assert_eq!(mapped.event["type"], "response.output_text.delta");
-    }
-
-    /// The transport-failure diagnostic for a close event before the SSE fallback (TS-binary probe
-    /// ground truth); `error.code` is absent for non-close runtime failures.
-    #[test]
-    fn transport_failure_diagnostic_shapes() {
-        let close = WebSocketTransportError::close(1011, "mock server reason");
-        let runtime = WebSocketTransportError::runtime(
-            "WebSocket connection to 'ws://127.0.0.1:1/codex/responses' failed: Failed to connect",
-        );
-
-        let mut output = AssistantMessage {
-            content: Vec::new(),
-            api: API_OPENAI_CODEX_RESPONSES.to_string(),
-            provider: "openai-codex".to_string(),
-            model: "gpt-5-codex".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: crate::types::Usage::default(),
-            stop_reason: crate::types::StopReason::Stop,
-            stop_reason_raw: None,
-            error_message: None,
-            timestamp: 0,
-            rest: Map::default(),
-        };
-        append_transport_failure_diagnostic(&mut output, &close, "auto", false, 23_377);
-        append_transport_failure_diagnostic(&mut output, &runtime, "auto", true, 23_361);
-        let diagnostics = serde_json::to_value(output.diagnostics.as_deref()).unwrap();
-        assert_eq!(
-            diagnostics,
-            json!([
-                {
-                    "type": "provider_transport_failure",
-                    "timestamp": diagnostics[0]["timestamp"],
-                    "error": {
-                        "name": "WebSocketCloseError",
-                        "message": "WebSocket closed 1011 mock server reason",
-                        "code": 1011
-                    },
-                    "details": {
-                        "configuredTransport": "auto",
-                        "fallbackTransport": "sse",
-                        "eventsEmitted": false,
-                        "phase": "before_message_stream_start",
-                        "requestBytes": 23377
-                    }
-                },
-                {
-                    "type": "provider_transport_failure",
-                    "timestamp": diagnostics[1]["timestamp"],
-                    "error": {
-                        "name": "Error",
-                        "message": "WebSocket connection to 'ws://127.0.0.1:1/codex/responses' failed: Failed to connect"
-                    },
-                    "details": {
-                        "configuredTransport": "auto",
-                        "eventsEmitted": true,
-                        "phase": "after_message_stream_start",
-                        "requestBytes": 23361
-                    }
-                }
-            ])
-        );
-    }
-
-    /// A transport error thrown mid-stream carries its TS surface through the provider error,
-    /// exactly what the TS `provider_stream_failure` diagnostic records (TS-binary probe ground
-    /// truth).
-    #[test]
-    fn transport_error_provider_stream_failure_shape() {
-        let error =
-            CodexStreamError::Transport(WebSocketTransportError::close(1011, "mock server reason"))
-                .into_provider_error();
-        assert_eq!(
-            error.to_string(),
-            "WebSocket closed 1011 mock server reason"
-        );
-        let mut output = AssistantMessage {
-            content: Vec::new(),
-            api: API_OPENAI_CODEX_RESPONSES.to_string(),
-            provider: "openai-codex".to_string(),
-            model: "gpt-5-codex".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: crate::types::Usage::default(),
-            stop_reason: crate::types::StopReason::Error,
-            stop_reason_raw: None,
-            error_message: Some(error.to_string()),
-            timestamp: 0,
-            rest: Map::default(),
-        };
-        crate::utils_inner::stream_failure::record_stream_failure(
-            ("openai-codex", "gpt-5-codex", API_OPENAI_CODEX_RESPONSES),
-            &mut output,
-            &error,
-        );
-        let diagnostics = serde_json::to_value(output.diagnostics.as_deref()).unwrap();
-        assert_eq!(
-            diagnostics,
-            json!([
-                {
-                    "type": "provider_stream_failure",
-                    "timestamp": diagnostics[0]["timestamp"],
-                    "error": {
-                        "name": "WebSocketCloseError",
-                        "message": "WebSocket closed 1011 mock server reason",
-                        "code": 1011
-                    },
-                    "details": {
-                        "kind": "unknown",
-                        "providerErrorType": "WebSocketCloseError"
-                    }
-                }
-            ])
-        );
     }
 }

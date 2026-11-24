@@ -189,37 +189,28 @@ mod tests {
     }
 
     #[test]
-    fn a_catalog_model_is_capped_at_the_default_output_ceiling() {
-        // TS resolveMaxTokens: a catalog value above the ceiling clamps to
-        // 32000 — most catalog models advertise far more than a turn needs.
-        let catalog = model("openai-completions", "gpt-x", 131_072);
-        assert_eq!(default_request_max_tokens(&catalog), Some(32_000));
-        assert_eq!(
-            build_base_options(&catalog, None, None).max_tokens,
-            Some(32_000)
-        );
-    }
-
-    #[test]
-    fn an_explicitly_configured_max_tokens_passes_through_unchanged() {
-        // The #755 fix: a configured value bypasses the ceiling — the
-        // reporter's models.json entry asking for 131072 arrives whole.
-        let explicit = explicit_model("openai-completions", "glm-5.2", 131_072);
-        assert_eq!(default_request_max_tokens(&explicit), Some(131_072));
-        assert_eq!(
-            build_base_options(&explicit, None, None).max_tokens,
-            Some(131_072)
-        );
-    }
-
-    #[test]
-    fn an_explicit_model_below_the_ceiling_keeps_its_value() {
-        // min semantics: an explicit 8000 stays 8000.
-        let small = explicit_model("openai-completions", "glm-5.2", 8_000);
-        assert_eq!(
-            build_base_options(&small, None, None).max_tokens,
-            Some(8_000)
-        );
+    fn the_request_budget_caps_catalog_values_and_keeps_explicit_ones() {
+        // TS resolveMaxTokens: a catalog value above the ceiling clamps to 32000 — most catalog
+        // models advertise far more than a turn needs. The #755 fix: a configured value bypasses
+        // the ceiling — the reporter's models.json entry asking for 131072 arrives whole — and an
+        // explicit 8000 stays 8000.
+        for (entry, expected) in [
+            (model("openai-completions", "gpt-x", 131_072), 32_000),
+            (
+                explicit_model("openai-completions", "glm-5.2", 131_072),
+                131_072,
+            ),
+            (
+                explicit_model("openai-completions", "glm-5.2", 8_000),
+                8_000,
+            ),
+        ] {
+            assert_eq!(default_request_max_tokens(&entry), Some(expected));
+            assert_eq!(
+                build_base_options(&entry, None, None).max_tokens,
+                Some(expected)
+            );
+        }
     }
 
     #[test]
@@ -296,32 +287,22 @@ mod tests {
             effective_request_max_tokens(&anthropic, ModelThinkingLevel::High),
             32_000 + 16_384
         );
-    }
-
-    #[test]
-    fn the_fold_caps_at_the_model_max_output() {
-        // The model's own ceiling binds before the base + thinking sum.
-        let small = model("anthropic", "claude-sonnet-4-5", 36_000);
-        assert_eq!(
-            effective_request_max_tokens(&small, ModelThinkingLevel::High),
-            36_000
-        );
-    }
-
-    #[test]
-    fn adaptive_and_non_budget_providers_keep_the_base_budget() {
-        // Adaptive-thinking Anthropic models use effort, not budgets.
-        let adaptive = model("anthropic", "claude-opus-4-6", 65_536);
-        assert_eq!(
-            effective_request_max_tokens(&adaptive, ModelThinkingLevel::High),
-            32_000
-        );
-        // OpenAI-style reasoning consumes the budget from within, never on top of it.
-        let openai = model("openai-completions", "gpt-x", 65_536);
-        assert_eq!(
-            effective_request_max_tokens(&openai, ModelThinkingLevel::High),
-            32_000
-        );
+        // Adaptive-thinking Anthropic models use effort, not budgets; OpenAI-style reasoning
+        // consumes the budget from within; the model's own ceiling binds before the sum; a model
+        // without a declared max output has no budget to fold.
+        for (entry, expected) in [
+            (model("anthropic", "claude-opus-4-6", 65_536), 32_000),
+            (model("openai-completions", "gpt-x", 65_536), 32_000),
+            (model("anthropic", "claude-sonnet-4-5", 36_000), 36_000),
+            (model("anthropic", "claude-sonnet-4-5", 0), 0),
+        ] {
+            assert_eq!(
+                effective_request_max_tokens(&entry, ModelThinkingLevel::High),
+                expected,
+                "{}",
+                entry.id
+            );
+        }
     }
 
     #[test]
@@ -341,15 +322,6 @@ mod tests {
         assert_eq!(
             build_base_options(&openai, Some(&options), None).max_tokens,
             Some(64_000)
-        );
-    }
-
-    #[test]
-    fn a_model_without_a_declared_max_output_has_no_budget_to_fold() {
-        let bare = model("anthropic", "claude-sonnet-4-5", 0);
-        assert_eq!(
-            effective_request_max_tokens(&bare, ModelThinkingLevel::High),
-            0
         );
     }
 }

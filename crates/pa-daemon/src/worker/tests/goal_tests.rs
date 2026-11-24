@@ -237,8 +237,8 @@ async fn goal_turn_end_loop_runs_to_completion() {
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "the goal loop never settled: {idle:?}");
     let events = session_events_since(&mut subscription);
-    // A gate run without the kernel environment (the kernel venv, or
-    // uv on PATH to build it) fails the
+    // A gate run without the kernel environment (the kernel venv with the
+    // bundled skills installed, or uv on PATH to build it) fails the
     // completing ipython cell: the goal stays active and the loop
     // keeps minting (TS parity: goal continuations are unbounded while
     // the goal is active) until the faux script runs dry. Fail with
@@ -247,12 +247,14 @@ async fn goal_turn_end_loop_runs_to_completion() {
     let kernel_failure = events.iter().find(|event| {
         event.get("type").and_then(Value::as_str) == Some("message_end")
             && event["message"]["role"] == "toolResult"
-            && event["message"]["isError"] == json!(true)
+            && (event["message"]["isError"] == json!(true)
+                || event["message"]["details"]["status"] == "error")
     });
     if let Some(failure) = kernel_failure {
         panic!(
             "the completing ipython cell failed — this test needs the kernel \
-                 environment (the bootstrapped kernel venv, or uv on PATH to build it): {failure:?}"
+                 environment (the bootstrapped kernel venv, or uv on PATH to build it; \
+                 a PRIME_AGENT_KERNEL_PYTHON override skips the skill install): {failure:?}"
         );
     }
     let goal_rows: Vec<&Value> = events
