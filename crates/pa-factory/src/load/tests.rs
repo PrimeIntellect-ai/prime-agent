@@ -620,6 +620,15 @@ fn unknown_subagent_keys_are_refused_not_dropped() {
 }
 
 #[test]
+fn params_are_refused_not_dropped() {
+    let spec = json!({"params": {"task": "ship it"}, "states": [{"id": "a", "entry": true, "subagent": {"prompt": "Do {task}."}}]});
+    assert_eq!(
+        convert_spec(&spec, &meta("a")).unwrap_err(),
+        ["params have no converted form yet: declare each under [params] in machine.toml and write {{name}} where a prompt uses it"]
+    );
+}
+
+#[test]
 fn guards_are_refused_with_the_guard_spelled_out() {
     let errors = convert_spec(&bundled_seed("pr-manager"), &meta("pr-manager")).unwrap_err();
     assert_eq!(
