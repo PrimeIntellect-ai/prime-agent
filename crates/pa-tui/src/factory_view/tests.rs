@@ -710,6 +710,16 @@ fn a_fired_join_lights_whatever_its_source_order() {
     );
 }
 
+/// A run selected before the cached batch lists it shows a loading line,
+/// never a blank page.
+#[test]
+fn a_selected_run_missing_from_the_batch_shows_loading() {
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 40);
+    view.select(FactoryRow::header("run-not-listed"));
+    let joined = frame_text(&mut view).join("\n");
+    assert!(joined.contains("Loading run run-not-listed…"), "{joined}");
+}
+
 /// The empty state and the key hint.
 #[test]
 fn the_empty_state_names_the_surface() {
