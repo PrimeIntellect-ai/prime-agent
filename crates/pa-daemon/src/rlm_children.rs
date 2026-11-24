@@ -842,7 +842,15 @@ impl SupervisorChildSessions {
             answer_preview: record.answer_preview.clone(),
             answer_text: record.answer_text.clone(),
             error: record.run.error().map(str::to_string),
-            duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
+            // A settled child's own run time: a parent that collects it late
+            // (a paused factory run) does not count the wait.
+            duration_ms: Some(
+                record
+                    .run
+                    .ended_at_ms()
+                    .unwrap_or_else(now_ms)
+                    .saturating_sub(record.started_at_ms),
+            ),
             tool_use_count: record.tool_use_count,
             replied_since_task: Some(record.replied_since_task),
         }

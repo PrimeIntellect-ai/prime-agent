@@ -3,11 +3,15 @@
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+use crate::util::now_ms;
+
 #[derive(Debug)]
 pub(super) struct RunState {
     phase: RunPhase,
     prompt: PromptPhase,
     changed: Arc<Notify>,
+    /// When the run left `Running`: a settled child's duration stops here.
+    ended_at_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -64,6 +68,7 @@ impl RunState {
             phase: RunPhase::Running,
             prompt: PromptPhase::Held,
             changed: Arc::new(Notify::new()),
+            ended_at_ms: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl RunState {
             phase: RunPhase::Running,
             prompt: PromptPhase::Admitted,
             changed: Arc::new(Notify::new()),
+            ended_at_ms: None,
         }
     }
 
@@ -82,6 +88,7 @@ impl RunState {
             phase: RunPhase::Settled(verdict),
             prompt: PromptPhase::Admitted,
             changed: Arc::new(Notify::new()),
+            ended_at_ms: None,
         }
     }
 
@@ -89,6 +96,7 @@ impl RunState {
     /// that does not apply in the current phase changes nothing.
     pub(super) fn apply(&mut self, event: RunEvent) -> bool {
         let admitted = self.prompt_admitted();
+        let was_running = self.is_running();
         let (next, changed) = match (std::mem::replace(&mut self.phase, RunPhase::Running), event) {
             (phase, RunEvent::ReleasePrompt) => {
                 let held = matches!(self.prompt, PromptPhase::Held);
@@ -138,10 +146,20 @@ impl RunState {
             | (phase @ RunPhase::Settled(_), RunEvent::Funnel) => (phase, false),
         };
         self.phase = next;
+        match (was_running, self.is_running()) {
+            (true, false) => self.ended_at_ms = Some(now_ms()),
+            (false, true) => self.ended_at_ms = None,
+            _ => {}
+        }
         if changed {
             self.changed.notify_waiters();
         }
         changed
+    }
+
+    /// When the run left `Running`, if it did (a reseeded row has no time).
+    pub(super) fn ended_at_ms(&self) -> Option<u64> {
+        self.ended_at_ms
     }
 
     pub(super) fn notifier(&self) -> Arc<Notify> {
@@ -196,6 +214,21 @@ fn deleted_by_parent() -> RunVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_end_time_is_set_when_the_run_stops_running_and_cleared_on_a_refused_cancel() {
+        let mut run = RunState::admitted();
+        assert_eq!(run.ended_at_ms(), None);
+        run.apply(RunEvent::Cancel { reason: None });
+        assert!(run.ended_at_ms().is_some());
+        run.apply(RunEvent::CancelRefused);
+        assert_eq!(run.ended_at_ms(), None);
+        run.apply(RunEvent::IdleRead { final_turn_error: None });
+        let ended = run.ended_at_ms();
+        assert!(ended.is_some());
+        run.apply(RunEvent::Funnel);
+        assert_eq!(run.ended_at_ms(), ended, "the funnel keeps the settle time");
+    }
 
     #[test]
     fn prompt_release_is_idempotent_and_admission_ends_it() {

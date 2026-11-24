@@ -165,6 +165,8 @@ struct InlineChildState {
     answer_text: Option<String>,
     error: Option<String>,
     started_at_ms: u64,
+    /// When the run settled: a settled child's duration stops here.
+    settled_at_ms: Option<u64>,
     /// An agent message to the parent arrived since the task was
     /// admitted; the no-reply terminal notice is withheld once set.
     replied_since_task: bool,
@@ -451,6 +453,7 @@ async fn drive_child(child: Arc<InlineChild>) {
         }
         let mut state = child.state.lock().await;
         state.settled = false;
+        state.settled_at_ms = None;
         state.status = "running";
         state.started_at_ms = crate::util_time::now_ms();
         state.error = None;
@@ -503,6 +506,7 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
             return;
         }
         state.settled = true;
+        state.settled_at_ms = Some(crate::util_time::now_ms());
         state.answer_text = answer.map(|text| cap_text(&text, ANSWER_TEXT_MAX_CHARS));
         let notice = if let Some(error) = run_error.or(terminal_error) {
             state.status = "error";
@@ -840,6 +844,7 @@ impl RlmSubagentHost for InlineHost {
                     answer_text: None,
                     error: None,
                     started_at_ms: crate::util_time::now_ms(),
+                    settled_at_ms: None,
                     replied_since_task: false,
                 }),
             });
@@ -916,6 +921,7 @@ impl RlmSubagentHost for InlineHost {
                 let mut state = child.state.lock().await;
                 state.settled = true;
                 if was_running {
+                    state.settled_at_ms = Some(crate::util_time::now_ms());
                     state.status = "cancelled";
                     state.error = Some("Deleted by parent orchestrator".to_string());
                 }
@@ -979,7 +985,11 @@ impl RlmSubagentHost for InlineHost {
                         answer_text: state.answer_text.clone(),
                         error: state.error.clone(),
                         duration_ms: Some(
-                            crate::util_time::now_ms().saturating_sub(state.started_at_ms),
+                            state
+                                .settled_at_ms
+                                .filter(|_| !unsettled)
+                                .unwrap_or_else(crate::util_time::now_ms)
+                                .saturating_sub(state.started_at_ms),
                         ),
                         tool_use_count: None,
                         replied_since_task: Some(state.replied_since_task),
