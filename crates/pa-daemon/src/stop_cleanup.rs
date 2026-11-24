@@ -555,6 +555,7 @@ mod tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         ledger
@@ -565,6 +566,7 @@ mod tests {
                 depth: 1,
                 name: "moved".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
 
@@ -634,6 +636,7 @@ mod tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         // The tombstone lands before the kill (the revival window); the
@@ -722,6 +725,7 @@ mod tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         ledger
@@ -798,6 +802,7 @@ mod tests {
                 depth: 1,
                 name: "lane".to_string(),
                 factory: None,
+                decision_child: false,
             })
             .unwrap();
         // Still live: no capture (kill-failure retryability — the child
@@ -831,6 +836,7 @@ mod tests {
                     depth: 1,
                     name: "lane".to_string(),
                     factory: None,
+                    decision_child: false,
                 })
                 .unwrap();
             ledger

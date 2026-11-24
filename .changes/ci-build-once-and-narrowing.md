@@ -1,0 +1,1 @@
+- The installer's kernel pre-warm (`prime-agent --prime-agent-bootstrap`) now also installs the bundled Python skills, so the first session does not have to.
