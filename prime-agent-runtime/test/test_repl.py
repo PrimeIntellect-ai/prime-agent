@@ -2554,6 +2554,11 @@ class RestoreApplyShieldTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, SRC)
         self.addCleanup(sys.path.remove, SRC)
+        # These tests raise SIGINT in this process and expect Python's own
+        # KeyboardInterrupt handler. A runner started as a background job
+        # inherits SIGINT as ignored, and Python then installs no handler.
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
 
     class SigintOnNthSet(dict):
         """Fires one synchronous SIGINT right after its Nth assignment."""
