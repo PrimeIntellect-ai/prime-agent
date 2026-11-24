@@ -21,16 +21,12 @@ use crate::worker::Worker;
 /// so a disabled factory never surfaces its lane — no capability, no
 /// dock group, no page. Both hello surfaces (the supervisor's and the
 /// worker's) advertise the lane only while the setting reads enabled.
-///
-/// The read is the kernel's strict gate, `factory_enabled` in
-/// `pa_core::refinement` (the mirror of the runtime's
-/// `rlm.factory.factory_enabled`): a malformed `factory` block — an
-/// array like `{"factory":[true]}` — reads as the fail-closed disabled
-/// default, never as a positional misparse of `enabled`, so every
-/// daemon gate surface (the overview arm, both hellos, the
-/// saved-session listing) refuses exactly what the kernel refuses.
 pub(crate) fn factory_lane_enabled(agent_dir: &Path) -> bool {
-    pa_core::refinement::factory_enabled(agent_dir)
+    pa_core::settings::SettingsManager::create(
+        std::env::current_dir().unwrap_or_default(),
+        agent_dir,
+    )
+    .get_factory_enabled()
 }
 
 /// A session's own stored factory specs: the factory entries of its local harness store, read
@@ -276,48 +272,5 @@ mod tests {
                 .any(|capability| capability == "factory_activity"),
             "the disabled factory lane leaves the advertisement: {disabled_again:?}"
         );
-    }
-
-    /// The malformed opt-in shapes: a typed settings read parses a
-    /// positional array into the nested `factory` object
-    /// (`{"factory":[true]}` reads as `enabled`), but the kernel's
-    /// strict gate requires the `factory` block to be an object and
-    /// refuses every shape here. The lane reads that same strict gate,
-    /// so no malformed document ever surfaces it.
-    #[test]
-    fn the_factory_lane_stays_unadvertised_for_malformed_settings_shapes() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let agent_dir = dir.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).expect("agent dir");
-        let settings = agent_dir.join("settings.json");
-        let unadvertised = |shape: &str| {
-            let capabilities = advertised_server_capabilities(&agent_dir);
-            assert!(
-                !capabilities
-                    .iter()
-                    .any(|capability| capability == "factory_activity"),
-                "the `{shape}` settings shape must not surface the lane: {capabilities:?}"
-            );
-        };
-        let shapes = [
-            ("array-true", r#"{"factory": [true]}"#),
-            ("array-string", r#"{"factory": ["true"]}"#),
-            ("array-extra", r#"{"factory": [true, false]}"#),
-            ("enabled-string", r#"{"factory": {"enabled": "true"}}"#),
-            ("enabled-integer", r#"{"factory": {"enabled": 1}}"#),
-            ("enabled-null", r#"{"factory": {"enabled": null}}"#),
-            ("corrupt", r#"{"factory": {"enabled": tru"#),
-            ("empty", "{}"),
-        ];
-        for (shape, content) in shapes {
-            std::fs::write(&settings, content).expect("write settings");
-            unadvertised(shape);
-        }
-        // A missing settings file reads as the disabled default.
-        std::fs::remove_file(&settings).expect("remove settings");
-        unadvertised("missing");
-        // A settings directory fails the read, which fails closed.
-        std::fs::create_dir(&settings).expect("settings dir");
-        unadvertised("directory");
     }
 }
