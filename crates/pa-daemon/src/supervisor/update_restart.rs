@@ -390,33 +390,37 @@ impl Supervisor {
                         self.finish_update_abort(&abort);
                     }
                     for (resident, (_, verdict)) in residents.iter().zip(&verdicts) {
-                        match verdict {
-                            WorkerStopVerdict::Stopped => {
-                                // The old monitor may only now observe its
-                                // child's exit. Retire that watch before
-                                // reopening supervision: the bump lands
-                                // before the stop flag is cleared, so a
-                                // watch woken at the exit reads either the
-                                // intentional stop or the new generation.
-                                resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
-                                resident.transition(WorkerTransition::ResumeStopped);
-                                match self.relaunch_supervised(resident).await {
-                                    Ok(()) => {
-                                        resident.consecutive_failures.store(0, Ordering::SeqCst);
-                                    }
-                                    Err(error) => {
-                                        self.log_line(&format!(
-                                            "worker {} abandon relaunch failed: {error:#}",
-                                            resident.worker_id
-                                        ));
-                                    }
-                                }
+                        // The old monitor may only now observe its child's exit. Retire that
+                        // watch before reopening supervision: the bump lands before the stop
+                        // flag is cleared, so a watch woken at the exit reads either the
+                        // intentional stop or the new generation. A refused stop can still
+                        // land late (or already did, read as the stop's own exit), so this
+                        // loop owns every worker's next exit: a gone process relaunches, a
+                        // live one gets a fresh watch that relaunches it on a crash.
+                        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
+                        resident.transition(WorkerTransition::ResumeStopped);
+                        let (pid, start_id) = {
+                            let descriptor = resident.descriptor.lock().await;
+                            (descriptor.pid, descriptor.process_start_id.clone())
+                        };
+                        let gone = *verdict == WorkerStopVerdict::Stopped
+                            || super::worker_lifecycle::worker_process_gone(pid, start_id).await;
+                        if !gone {
+                            // Pid 0 records no process to watch.
+                            if pid != 0 {
+                                self.spawn_monitor(Arc::clone(resident), None, pid, None);
                             }
-                            WorkerStopVerdict::Refused => {
-                                // Restore normal supervision: the stop request may still land late,
-                                // in which case the monitor treats the exit as a crash and
-                                // relaunches with backoff (the session file is the truth).
-                                resident.transition(WorkerTransition::ResumeStopped);
+                            continue;
+                        }
+                        match self.relaunch_supervised(resident).await {
+                            Ok(()) => {
+                                resident.consecutive_failures.store(0, Ordering::SeqCst);
+                            }
+                            Err(error) => {
+                                self.log_line(&format!(
+                                    "worker {} abandon relaunch failed: {error:#}",
+                                    resident.worker_id
+                                ));
                             }
                         }
                     }
