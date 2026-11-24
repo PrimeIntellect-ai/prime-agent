@@ -52,6 +52,16 @@ pub fn convert_spec(spec: &Value, meta: &MachineMeta) -> Result<Vec<DirFile>, Ve
         spec.clone()
     };
     let mut problems = Vec::new();
+    if spec
+        .get("params")
+        .and_then(Value::as_object)
+        .is_some_and(|params| !params.is_empty())
+    {
+        problems.push(
+            "params have no converted form yet: declare each under [params] in machine.toml and write {{name}} where a prompt uses it"
+                .to_string(),
+        );
+    }
     let mut files = Vec::new();
     let run = machine
         .get("run")
