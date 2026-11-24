@@ -6714,8 +6714,8 @@ def boot_arm_persisted_runs() -> bool:
     test process) stays on the lazy first-call path.
     """
     global _BOOT_ARM_TASK
-    if _BOOT_ARM_TASK is not None or _DEFAULT_EXECUTOR is not None:
-        return False  # already armed, or a test executor owns the namespace
+    if _BOOT_ARM_TASK is not None:
+        return False  # already armed
     if not factory_enabled():
         return False  # the opt-in gate stays authoritative, even at boot
     if not _runs_dir_snapshots():

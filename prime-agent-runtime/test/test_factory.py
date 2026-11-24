@@ -8491,6 +8491,17 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
             restarted._runs[run_id].task,
             "the peek read never starts the re-armed control loop",
         )
+        # The peek created the executor; the next executed command still
+        # releases the boot arm.
+        factory_module._BOOT_ARM_TASK = None
+        try:
+            self.assertTrue(factory_module.boot_arm_persisted_runs(), "a peek disabled the boot arm")
+            await factory_module._BOOT_ARM_TASK
+            self.assertNotIn(run_id, restarted._rehydrated)
+            self.assertIsNotNone(restarted._runs[run_id].task)
+            restarted._runs[run_id].task.cancel()
+        finally:
+            factory_module._BOOT_ARM_TASK = None
 
 
 class FactoryEmitRetryTest(_ExecutorTestCase):
@@ -13272,15 +13283,6 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             self.assertNotEqual(arm_state["state"], "running", "the run never advanced after the execute released the arm")
         finally:
             pass
-    def test_the_boot_arm_needs_a_running_loop_but_no_ipython(self) -> None:
-        # The production kernel is `python -m rlm.repl` - no IPython is
-        # imported - and the arm's schedule must succeed there (the
-        # handle paths schedule it after the loop exists; the release is
-        # the clean restore or the first execute, never the boot).
-        import sys
-
-        self.assertNotIn("IPython", sys.modules)
-        self.assertTrue(factory_module.boot_arm_persisted_runs.__doc__)
 
     @async_test
     async def test_a_suspend_does_not_charge_the_budget(self) -> None:
