@@ -1,7 +1,8 @@
 //! Every session the daemon knows, from one set of rules: the saved
 //! catalog of a sessions directory, the file-backed residents, the
 //! roster-known top-level sessions outside the default directory (a
-//! passivated owner opened from a custom `sessionDir`), and the passive
+//! passivated owner opened from a custom `sessionDir`; default listing
+//! only), and the passive
 //! RLM children of all of them. `list` with `all` and the factory overview
 //! both read it.
 
@@ -61,7 +62,9 @@ impl Supervisor {
             .map(|resident| canonical_session_path(&resident.session_file))
             .collect();
         let mut roster_files = Vec::new();
-        {
+        // Roster-known sessions of other folders join only the default
+        // listing: a command that names a folder lists that folder.
+        if catalog_dir == default_dir {
             let roster = self.roster.lock().unwrap();
             let mut seen = HashSet::new();
             for entry in roster.entries() {
