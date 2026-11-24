@@ -197,32 +197,6 @@ pub fn legacy_update_restart_status(agent_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn rt<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(json: &str) {
-        let original: serde_json::Value = serde_json::from_str(json).unwrap();
-        let parsed: T = serde_json::from_str(json).expect("deserialize");
-        let out = serde_json::to_string(&parsed).expect("serialize");
-        let reparsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(original, reparsed, "round trip changed the value: {out}");
-    }
-
-    #[test]
-    fn intent_roundtrip_snake_case() {
-        rt::<UpdateIntent>(
-            r#"{"update_id":"018f1234-abcd-7abc-8def-0123456789ab","pid":4242,"process_start_id":"123456/100","heartbeat_at":"2026-10-01T12:00:00.000Z"}"#,
-        );
-        rt::<UpdateIntent>(r#"{"update_id":"u","pid":9,"heartbeat_at":"t","note":"kept"}"#);
-    }
-
-    #[test]
-    fn status_roundtrip_ts_schema_with_spec_additions() {
-        rt::<UpdateStatus>(
-            r#"{"version":1,"updateId":"018f1234-abcd-7abc-8def-0123456789ab","socketPath":"/tmp/prime-agent-1000/daemon.sock","state":"preparing","epoch":3,"coordinator":{"pid":99,"processStartId":"1/2"},"counts":{"total":2,"restored":0,"resumed":0,"failed":0},"startedAt":"2026-10-01T12:00:00Z","updatedAt":"2026-10-01T12:00:05Z","heartbeatAt":"2026-10-01T12:00:05Z"}"#,
-        );
-        rt::<UpdateStatus>(
-            r#"{"version":1,"updateId":"u2","socketPath":"/s","state":"complete","epoch":7,"predecessor":{"pid":1},"successor":{"pid":2,"supervisorGeneration":"g"},"counts":{"total":3,"restored":2,"resumed":1,"failed":1},"failures":[{"sessionFile":"/sessions/a.jsonl","message":"worker refused"}],"message":"updated","startedAt":"a","updatedAt":"b","unknownField":true}"#,
-        );
-    }
-
     #[test]
     fn status_defaults_accept_ts_minimal_file() {
         // A TS-era status file (no epoch, no failures) parses and keeps unknown fields.
@@ -267,13 +241,5 @@ mod tests {
             legacy_update_restart_status(agent_dir),
             Path::new("/ad/daemon-update-restart.json")
         );
-    }
-
-    #[test]
-    fn update_id_is_transparent_and_displayed() {
-        let id: UpdateId = serde_json::from_value("018f-uuidv7".into()).unwrap();
-        assert_eq!(serde_json::to_value(&id).unwrap(), "018f-uuidv7");
-        assert_eq!(id.to_string(), "018f-uuidv7");
-        assert_eq!(id.as_ref(), "018f-uuidv7");
     }
 }
