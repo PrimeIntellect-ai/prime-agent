@@ -7,6 +7,7 @@ mod accept_loop;
 mod adoption;
 mod clients;
 mod factory_overview;
+mod known_sessions;
 mod launch_budget;
 mod notes;
 mod options;
