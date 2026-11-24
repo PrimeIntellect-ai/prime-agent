@@ -7963,9 +7963,11 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.host.emitted["design"] = {"design": "the design"}
         self.host.factory_task_busy_until_collect["design"] = 2
         repair_sent_after_collect = []
+        sleeps_before_repair = []
 
         def repair(payload: dict[str, Any]) -> None:
             repair_sent_after_collect.append(self.host.collects)
+            sleeps_before_repair.append(list(self.sleeps.sleeps))
             child_dir = self.host.session_root / "child-1"
             (child_dir / FACTORY_OUTPUTS_FILE).write_text(
                 json.dumps({"design": "the design", "risk": "high"}), encoding="utf-8"
@@ -7977,6 +7979,9 @@ class FactoryEmitTest(_ExecutorTestCase):
         self.assertEqual(status["state"], "done", status)
         self.assertGreaterEqual(repair_sent_after_collect[0], 3)
         self.assertEqual(len(self.host.spawn_calls("design")), 1)
+        # The settled child's collect returned at once, so the wait for its
+        # background work is a poll interval, never a tight loop.
+        self.assertEqual(sleeps_before_repair[0], [factory_module.REPAIR_POLL_SECONDS] * 2)
 
     @async_test
     async def test_unknown_task_activity_pauses_unverified_without_replacing_child(self) -> None:
@@ -8110,6 +8115,20 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
                 os.environ["RLM_SESSION_DIR"] = previous
 
         self.addCleanup(restore)
+
+    @async_test
+    async def test_resume_saves_the_running_state_before_it_returns(self) -> None:
+        self.host.outcomes["a"] = {"status": "error", "error": "boom"}
+        self.store_machine({"states": [state("a", entry=True)]}, spec_id="resume")
+        result = await self.start("resume")
+        run_id = result["run_id"]
+        await self.wait_until(lambda: self.executor._runs[run_id].state == "paused")
+        snapshot = factory_module._runs_dir() / f"{run_id}.json"
+        self.assertEqual(json.loads(snapshot.read_text())["state"], "paused")
+        self.host.outcomes["a"] = {"status": "running"}
+        await rlm_module.rlm.factory.resume(run_id)
+        self.assertEqual(json.loads(snapshot.read_text())["state"], "running")
+        self.executor._runs[run_id].task.cancel()
 
     @async_test
     async def test_a_restart_after_one_join_source_settled_still_fires_the_join(self) -> None:

@@ -2445,8 +2445,8 @@ class FactoryExecutor:
             return  # no session artifact dir, or a daemonless host: memory only
         if self._persist_marks.get(run.run_id) == run.revision:
             return  # nothing changed since the last write
-        self._persist_marks[run.run_id] = run.revision
         if run.state in TERMINAL_RUN_STATES and not self._has_unresolved_actor(run):
+            self._persist_marks[run.run_id] = run.revision
             self._retire_run_files(run, directory)
             return
         staging = directory / f".{run.run_id}.json.tmp"
@@ -2456,6 +2456,7 @@ class FactoryExecutor:
             with open(staging, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
             os.replace(staging, directory / f"{run.run_id}.json")
+            self._persist_marks[run.run_id] = run.revision
             self._persist_failed.discard((run.run_id, "snapshot"))
             # A recovered write clears any stale persist-failed marker.
             try:
@@ -3381,6 +3382,7 @@ class FactoryExecutor:
             await self._finalize(run)
         elif run.state == "running":
             self._start_loop(run)
+        self._persist_run(run)
         return {
             "run_id": run.run_id,
             "state": run.state,
@@ -6422,9 +6424,14 @@ class FactoryExecutor:
                     return
                 instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
                 task_work_waiting = task_work_waiting or result.factory_task_busy
-            if task_work_waiting and not children and not python_calls and not repairing:
-                # Only settled owners were collected, so the collect returned
-                # at once; a running child's collect already waited.
+            child_still_running = any(
+                not result.settled
+                for _, _, instance in children
+                if (result := results_by_child.get(instance.child_id or "")) is not None
+            )
+            if task_work_waiting and not child_still_running and not python_calls and not repairing:
+                # Every collected child read settled, so the collect returned
+                # without waiting; a still-running child's collect already waited.
                 await self._sleep_fn(REPAIR_POLL_SECONDS)
             for state, entry, instance in repairing:
                 if run.loop_generation != generation:
