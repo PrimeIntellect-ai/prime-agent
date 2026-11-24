@@ -90,7 +90,9 @@ impl Contract {
                 .ok_or_else(|| malformed("an output has no name"))?;
             // A file port's name becomes a directory under the session.
             if !is_identifier(name) {
-                return Err(malformed(&format!("output name {name:?} is not an identifier")));
+                return Err(malformed(&format!(
+                    "output name {name:?} is not an identifier"
+                )));
             }
             let ty = output
                 .get("type")
