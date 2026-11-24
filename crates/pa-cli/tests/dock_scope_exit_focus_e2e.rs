@@ -113,9 +113,6 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         "15000",
     );
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    // Readiness is the socket appearing (observable), not the wait: the
-    // sleep is only the poll interval between checks, and the deadline
-    // bounds failure — a missing socket panics, it never passes.
     daemon_socket::wait_until_listening(&socket, Duration::from_secs(15));
     Supervisor { child, socket }
 }

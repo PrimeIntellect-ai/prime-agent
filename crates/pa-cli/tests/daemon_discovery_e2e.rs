@@ -1033,8 +1033,8 @@ fn a_daemon_launched_with_an_inherited_worker_env_comes_up_as_a_supervisor() {
     let _daemon = Daemon { child };
 
     // The invocation must come up as B's supervisor. On a routing
-    // regression the process starts as a worker instead and this socket
-    // never appears.
+    // regression the process starts as a worker instead and nothing ever
+    // listens on this socket.
     daemon_socket::wait_until_listening(&socket, Duration::from_secs(10));
 
     // The hello names this child as the supervisor.
