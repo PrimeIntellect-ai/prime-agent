@@ -411,7 +411,10 @@ mod tests {
             .flatten()
             .filter(|entry| entry.file_name().to_string_lossy().contains(".partial-"))
             .collect();
-        assert!(partials.is_empty(), "recovery removes the incomplete tree: {partials:?}");
+        assert!(
+            partials.is_empty(),
+            "recovery removes the incomplete tree: {partials:?}"
+        );
     }
 
     #[tokio::test]
