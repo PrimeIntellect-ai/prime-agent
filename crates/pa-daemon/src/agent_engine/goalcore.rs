@@ -90,8 +90,12 @@ impl AgentSessionEngine {
         };
         let job = {
             let driver = live.goal.driver.lock().await;
+            // The handle probe repeats under the lock: a shell that settled
+            // after the caller's probe already retried the continuation
+            // (and may have armed its backoff wake), so it arms nothing.
             if !driver.owes_continuation()
                 || !driver.owns_continuation_wakeup()
+                || !self.has_live_background_bash_handles()
                 || self
                     .background_skip_wake_armed
                     .load(std::sync::atomic::Ordering::SeqCst)
@@ -103,8 +107,12 @@ impl AgentSessionEngine {
                 crate::util::now_ms()
                     + pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WINDOW_MS,
             );
-            self.background_skip_wake_armed
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Only a written job counts as armed: a failed write leaves the
+            // next boundary of this deferral free to arm again.
+            if job.is_some() {
+                self.background_skip_wake_armed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             job
         };
         if let Some(job) = job {
