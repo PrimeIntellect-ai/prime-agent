@@ -393,6 +393,41 @@ fn wait_for_idle_waits_for_rlm_quiescence() {
         return;
     };
     let mut lane = spawn_held_child_lane(&kernel_python);
+    let rows = rlm_children_rows(&mut lane.client, "g0", &lane.parent_id);
+    let child_row = rows
+        .iter()
+        .find(|row| row["id"] == json!(lane.child_id))
+        .expect("the spawned child's roster row");
+    assert_eq!(
+        child_row["status"], "running",
+        "the child must still be busy"
+    );
+
+    lane.client.send_command(
+        "w0",
+        &json!({
+            "type": "wait_for_idle",
+            "activeSessionId": lane.parent_id,
+            "waitForRlmQuiescence": true,
+            "timeoutMs": 100,
+        }),
+    );
+    let bounded = lane.client.read_response("w0");
+    assert_eq!(bounded["success"], true, "bounded wait failed: {bounded}");
+    assert_eq!(
+        bounded["data"]["timedOut"], true,
+        "busy descendant must time out: {bounded}"
+    );
+    let rows = rlm_children_rows(&mut lane.client, "g0", &lane.parent_id);
+    let child_row = rows
+        .iter()
+        .find(|row| row["id"] == json!(lane.child_id))
+        .expect("the spawned child's roster row");
+    assert_eq!(
+        child_row["status"], "running",
+        "the timeout must not stop the child"
+    );
+
     lane.client.send_command(
         "w1",
         &json!({

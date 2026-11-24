@@ -1217,7 +1217,7 @@ PYTHON_STDERR_TAIL_CAP = 2000
 """How much of a failed python call's stderr its error text carries."""
 
 PYTHON_RUNNER = r"""
-import asyncio, importlib, inspect, json, os, sys
+import asyncio, importlib, importlib.util, inspect, json, os, sys
 sys.path.insert(0, os.getcwd())
 if len(sys.argv) > 3:
     sys.path.insert(0, sys.argv[3])
@@ -1225,7 +1225,16 @@ inputs = json.load(sys.stdin.buffer)
 result_stream = os.fdopen(os.dup(1), "w")
 os.dup2(2, 1)
 sys.stdout = sys.stderr
-result = getattr(importlib.import_module(sys.argv[1]), sys.argv[2])(inputs)
+if len(sys.argv) > 3:
+    spec = importlib.util.spec_from_file_location(
+        sys.argv[1], os.path.join(sys.argv[3], sys.argv[1] + ".py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(sys.argv[1], module)
+    spec.loader.exec_module(module)
+else:
+    module = importlib.import_module(sys.argv[1])
+result = getattr(module, sys.argv[2])(inputs)
 if inspect.iscoroutine(result):
     result = asyncio.run(result)
 json.dump(result, result_stream)
@@ -1234,8 +1243,10 @@ result_stream.close()
 """The ``python -I -c`` program that runs one python state call: inputs
 arrive as JSON on stdin, everything the call prints (its own subprocesses
 included) goes to stderr, and the returned dict is the only thing written
-to stdout. A target's optional ``path`` (a machine directory's ``nodes/``)
-is searched before the working directory."""
+to stdout. A target with a ``path`` (a machine directory's ``nodes/``)
+loads ``<path>/<import>.py`` by file, so a node named like a module the
+runner already imported (``select.py``, ``types.py``) still runs; the
+``path`` is also searched first, so a node can import its sibling files."""
 
 _FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 TERMINAL_ENTRY_STATUSES = ("done", "error", "cancelled")
@@ -2658,7 +2669,8 @@ class FactoryExecutor:
 
         Stages follow the spec: ``arrived`` (a child answer settled and was
         captured), ``recorded`` (everything else), ``shown`` (a milestone
-        notice was injected into the parent conversation), and ``delivered``
+        notice was handed to the parent, as a direct row or an inbox
+        message), and ``delivered``
         (the parent read the ledger via ``status()``).
         """
         event: dict[str, Any] = {"seq": len(run.events) + 1, "kind": kind, "stage": stage}
@@ -3484,22 +3496,16 @@ class FactoryExecutor:
                     failed_instance.provisional = True
                     failed_instance.capture_failed = True
                 generation = run.loop_generation
-                for index, failed_instance in enumerate(failed):
+                for failed_instance in failed:
                     await self._apply_instance_failure(
                         run, state, entry, failed_instance, capture_failure, retry=True
                     )
                     if run.loop_generation != generation:
                         return  # resume() re-admitted the entry; this list is stale
-                    if entry.status == "error":
-                        # This instance spent its retries and failed the
-                        # entry; the other omitted instances settle as
-                        # errors under the same failure.
-                        for other in failed[index + 1:]:
-                            await self._apply_instance_failure(
-                                run, state, entry, other, capture_failure, retry=True
-                            )
-                        return
-                    if entry.status != "running":
+                    # Once one instance spent its retries and failed the
+                    # entry, the other omitted instances still settle as
+                    # errors under the same failure.
+                    if entry.status not in ("running", "error"):
                         return
                 return
             entry.status = "done"
@@ -6011,7 +6017,8 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   failure; `name=` labels the run in status and the TUI.
 - Pause and failure notices (escalate, budget, max_transitions,
   max_children, failed, finished) arrive as quiet notices in the
-  conversation once per kind per run (an escalate pause notifies again
+  conversation, or as `factory-progress` inbox messages in sessions with
+  the agent inbox, once per kind per run (an escalate pause notifies again
   after each resume), the pause notices with the resume call spelled
   out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);

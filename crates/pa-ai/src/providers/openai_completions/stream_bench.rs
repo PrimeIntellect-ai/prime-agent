@@ -88,8 +88,8 @@ fn stream_event_snapshots() {
     }
 }
 
-#[test]
-fn reasoning_details_merge_by_index() {
+/// Feed each `reasoning_details` array as one delta and return the stream-end state.
+fn stream_reasoning_details(deltas: &[Value]) -> StreamingState {
     let model: Model = serde_json::from_value(json!({
         "id": "parity", "name": "parity", "api": "openai-completions",
         "provider": "parity", "baseUrl": "http://localhost", "reasoning": true,
@@ -102,15 +102,9 @@ fn reasoning_details_merge_by_index() {
         crate::event_stream::initial_assistant_message("openai-completions", "parity", "parity");
     let mut state = StreamingState::new(output);
     let (writer, _reader) = create_assistant_message_event_stream();
-    for details in [
-        json!([{"type":"reasoning.text","text":"a","format":"unknown","index":0}]),
-        json!([{"type":"reasoning.summary","summary":"s","text":"x","index":1}, {"text":"b","signature":null,"index":0}]),
-        json!([{"text":7,"index":1}, {"text":"c","index":0}]),
-        json!([{"summary":" t","text":"y","index":1}]),
-        json!([{"type":"reasoning.encrypted","data":"e"}]),
-    ] {
+    for delta in deltas {
         handle_chunk(
-            &json!({"choices":[{"delta":{"reasoning_details": details}}]}),
+            &json!({"choices":[{"delta": delta}]}),
             &model,
             None,
             &mut state,
@@ -118,15 +112,85 @@ fn reasoning_details_merge_by_index() {
         );
     }
     encode_reasoning_details_signature(&mut state);
+    state
+}
+
+fn reasoning_signature(state: &StreamingState) -> Option<String> {
     let Some(AssistantContent::Thinking(block)) = state.output.content.last() else {
         panic!("expected the redacted thinking block");
     };
+    block.thinking_signature.clone()
+}
+
+#[test]
+fn reasoning_details_merge_by_index() {
+    let state = stream_reasoning_details(&[
+        json!({"reasoning_details": [{"type":"reasoning.text","text":"a","format":"unknown","index":0}]}),
+        json!({"reasoning_details": [{"type":"reasoning.summary","summary":"s","text":"x","index":1}, {"text":"b","signature":null,"index":0}]}),
+        json!({"reasoning_details": [{"text":7,"index":1}, {"text":"c","index":0}]}),
+        json!({"reasoning_details": [{"summary":" t","text":"y","index":1}]}),
+        json!({"reasoning_details": [{"type":"reasoning.encrypted","data":"e"}]}),
+    ]);
     assert_eq!(
-        block.thinking_signature,
+        reasoning_signature(&state),
         Some(encode_reasoning_details(&[
             json!({"type":"reasoning.text","text":"abc","format":"unknown","index":0,"signature":null}),
             json!({"type":"reasoning.summary","summary":"s t","text":"y","index":1}),
             json!({"type":"reasoning.encrypted","data":"e"}),
+        ]))
+    );
+}
+
+/// Gemini streams its reasoning text and its encrypted reasoning both at index 0. Merging them
+/// into one record changes the replayed assistant message, so every next call branches.
+#[test]
+fn text_and_encrypted_details_at_the_same_index_stay_separate_records() {
+    let encrypted = json!({"type":"reasoning.encrypted","data":"enc","id":"call-1","format":"google-gemini-v1","index":0});
+    let state = stream_reasoning_details(&[
+        json!({"tool_calls": [{"index":0,"id":"call-1","function":{"name":"lookup","arguments":"{}"}}]}),
+        json!({"reasoning_details": [{"type":"reasoning.text","text":"think","format":"google-gemini-v1","index":0}]}),
+        json!({"reasoning_details": [encrypted]}),
+    ]);
+    assert_eq!(
+        reasoning_signature(&state),
+        Some(encode_reasoning_details(&[
+            json!({"type":"reasoning.text","text":"think","format":"google-gemini-v1","index":0}),
+            encrypted.clone(),
+        ]))
+    );
+    let AssistantContent::ToolCall(tool_call) = &state.output.content[0] else {
+        panic!("expected the tool call block");
+    };
+    assert_eq!(tool_call.thought_signature, Some(encrypted.to_string()));
+}
+
+#[test]
+fn text_fragments_with_the_same_type_and_index_concatenate() {
+    let state = stream_reasoning_details(&[
+        json!({"reasoning_details": [{"type":"reasoning.text","text":"thin","index":0}]}),
+        json!({"reasoning_details": [{"type":"reasoning.text","text":"king","index":0}]}),
+    ]);
+    assert_eq!(
+        reasoning_signature(&state),
+        Some(encode_reasoning_details(&[
+            json!({"type":"reasoning.text","text":"thinking","index":0}),
+        ]))
+    );
+}
+
+/// GPT and `DeepSeek` send one detail per index; their records are unchanged by the type key.
+#[test]
+fn one_detail_per_index_keeps_one_record_per_index() {
+    let state = stream_reasoning_details(&[
+        json!({"reasoning_details": [{"type":"reasoning.summary","summary":"plan","index":0}]}),
+        json!({"reasoning_details": [{"summary":" more","index":0}]}),
+        json!({"reasoning_details": [{"type":"reasoning.encrypted","data":"enc","index":1}]}),
+    ]);
+    assert_eq!(
+        reasoning_signature(&state),
+        Some(encode_reasoning_details(&[
+            json!({"type":"reasoning.summary","summary":"plan more","index":0}),
+            json!({"type":"reasoning.encrypted","data":"enc","index":1}),
         ]))
     );
 }

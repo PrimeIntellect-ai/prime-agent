@@ -7,9 +7,8 @@ touched crates and their reverse dependencies (scripts/ci_test_shard.py
 mapping is fail-safe by construction: a selection that cannot be made is
 the FULL selection — a wrong guess can only cost runner minutes, never
 coverage. Guaranteed-metadata paths (GUARANTEED_METADATA_PREFIXES) are
-skipped for selection instead of failing it: no test unit reads them, and
-without the skip every shipped PR's own changelog fragment would defeat
-the narrowing.
+skipped for selection instead of failing it: no test unit reads changelog
+fragments or documentation, so those changes do not defeat crate narrowing.
 
 The input is the pull-requests files API (`GET /repos/{o}/{r}/pulls/{n}/files`,
 paginated by gh), one TSV row per file: `<filename>` TAB `<previous_filename>`
@@ -48,21 +47,17 @@ FILES_API_CEILING = 3000
 # this list minimal and justify every entry: unlike a fail-safe, a wrong
 # entry here SKIPS coverage for a real change.
 #
-#   .changes/ - the release changelog fragments. fold_changelog.py reads
-#               them at release cut time and ci.yml's changelog-fragment
-#               job only checks that one exists; no crate, cargo test
-#               unit, or shipped binary reads the directory. The skip
-#               matters in practice: the fragment check demands a
-#               fragment from every PR touching a shipped path (the
-#               no-changelog label is the opt-out), so without the skip
-#               the narrowing could never narrow a shipped PR.
+#   .changes/ - release changelog fragments are read at release cut time;
+#               no crate, cargo test unit, or shipped binary reads them.
+#   docs/ - documentation files are not inputs to test units.
+# These paths are skipped so a real crate change can still narrow its test
+# selection when the PR also updates its changelog or documentation.
 #
 # Near misses stay fail-safe, not metadata: top-level *.md (pa-cli's
-# packaged-layout e2e copies README.md into its staged layout, so
-# deleting or renaming it flips that unit red), docs/, skills/, vendor/,
-# install scripts, the runtime sidecar, workspace Cargo files, scripts/,
-# and the workflows.
-GUARANTEED_METADATA_PREFIXES: tuple[str, ...] = (".changes/",)
+# packaged-layout e2e copies README.md into its staged layout), skills/,
+# vendor/, install scripts, the runtime sidecar, workspace Cargo files,
+# scripts/, and the workflows.
+GUARANTEED_METADATA_PREFIXES: tuple[str, ...] = (".changes/", "docs/")
 
 
 def is_guaranteed_metadata(path: str) -> bool:
@@ -112,8 +107,9 @@ def select_crates(rows: list[tuple[str, str]]) -> list[str] | None:
     (GUARANTEED_METADATA_PREFIXES) are skipped — no test unit reads them —
     and they never narrow on their own: a metadata-only list gets the full
     selection. Everything else — the workflows, CI tooling, vendor/, the
-    runtime sidecar, workspace-level Cargo files, install scripts, docs —
-    affects more than any crate subset, and a rename counts both sides. An
+    runtime sidecar, workspace-level Cargo files, install scripts, and
+    top-level README files — can affect tests beyond a crate subset. A rename
+    counts both sides. An
     undecidable list (empty rows, the API ceiling or an unknown crate)
     fails safe to the full selection.
     """

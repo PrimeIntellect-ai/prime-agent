@@ -1,6 +1,10 @@
 //! Layered system-prompt assembly: static layer files first (cacheable),
 //! every session-specific value last. See the parent module docs.
 
+use pa_types::ai::ModelInput;
+
+use crate::resources::{ContextFile, LoadedResources};
+use crate::settings::SettingsManager;
 use crate::skills::{format_skills_for_prompt, Skill};
 
 use super::layers;
@@ -60,35 +64,42 @@ pub struct SystemPromptBreakdown {
     pub cached_prefix_len: usize,
 }
 
-/// Inputs for one session's prompt. Static inputs (`custom_prompt`,
-/// `model_prompt_extras`) select the cached prefix; everything else feeds
-/// the dynamic tail.
-#[derive(Debug, Default)]
+/// How a factory state's child hands its outputs back; selects the child
+/// prompt's factory line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryChild {
+    /// The factory reads the child's final message.
+    FinalMessage,
+    /// The state declares an `emit` contract: the child calls
+    /// `rlm.factory.emit`, and its final message is not read.
+    Emit,
+}
+
+/// Inputs for one session's prompt. Only `resources.system_prompt` and
+/// `model_prompt_extras` select the cached prefix; everything else,
+/// settings included, feeds the dynamic tail. A conditional tail piece
+/// reads its condition from these inputs where its text lives.
 pub struct BuildSystemPromptOptions<'a> {
-    /// Replaces the layered static prefix with user text. The dynamic tail
-    /// still applies.
-    pub custom_prompt: Option<String>,
-    pub model_prompt_extras: Option<&'a str>,
-    /// Whether the resolved model accepts image input, when known.
-    pub vision_capable: Option<bool>,
+    pub settings: &'a SettingsManager,
+    /// The replacement prompt, the appended prompt, and the AGENTS.md
+    /// context files.
+    pub resources: &'a LoadedResources,
+    /// The model-visible skills.
+    pub skills: &'a [Skill],
     /// Active tools. Tool schemas carry tool descriptions outside the prompt.
-    pub selected_tools: Option<Vec<&'a str>>,
-    pub append_system_prompt: Option<String>,
+    pub selected_tools: Vec<&'a str>,
+    pub model_prompt_extras: Option<&'a str>,
+    /// The session model's input modalities.
+    pub model_input: &'a [ModelInput],
     pub cwd: String,
     /// Conversation log path.
     pub messages_path: Option<String>,
-    /// Pre-loaded context files (path, content).
-    pub context_files: Vec<(String, String)>,
-    pub skills: Vec<Skill>,
-    /// Whether to include the subagent surface in this session.
-    pub allow_recursion: Option<bool>,
-    /// Fixed recursive-agent depth for this session.
-    pub rlm_depth: Option<u32>,
-    /// Human-readable parent name or id for child communication doctrine.
-    pub rlm_parent_agent: Option<&'a str>,
-    /// Whether this child runs one factory state: the factory reads its
-    /// final message, so the child does not reply to the parent.
-    pub factory_child: bool,
+    /// Enabled user-configured generic MCP servers.
+    pub generic_mcp_servers: Vec<String>,
+    pub rlm_depth: u32,
+    /// Set when this child runs one factory state: it hands its outputs to
+    /// the factory, so it does not reply to the parent.
+    pub factory_child: Option<FactoryChild>,
     /// Whether the session runs without a daemon (no scheduler, no
     /// heartbeat firing). The wake-up facts the daemonless line states
     /// must match the embedding's wiring.
@@ -97,8 +108,6 @@ pub struct BuildSystemPromptOptions<'a> {
     /// daemonless print host or a daemon worker); a daemonless session
     /// without one cannot spawn at all.
     pub can_spawn: bool,
-    /// Enabled user-configured generic MCP servers.
-    pub generic_mcp_servers: Vec<String>,
 }
 
 /// Build the system prompt (assembled text only).
@@ -113,7 +122,7 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
     let mut segments: Vec<PromptSegment> = Vec::new();
 
     // The static prefix: the user's replacement prompt, or the layered files.
-    match options.custom_prompt.as_deref() {
+    match options.resources.system_prompt.as_deref() {
         Some(custom) if !custom.is_empty() => {
             segments.push(PromptSegment::static_segment(
                 "custom",
@@ -155,10 +164,7 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
     // The dynamic tail, in fixed order: packages -> project context ->
     // skills inventory -> MCP servers -> environment -> session role ->
     // additional guidance -> appended prompt.
-    let tools: Vec<&str> = options
-        .selected_tools
-        .clone()
-        .unwrap_or_else(|| vec![pa_types::ai::PYTHON_TOOL_NAME]);
+    let tools = &options.selected_tools;
     let has_ipython = tools.contains(&pa_types::ai::PYTHON_TOOL_NAME);
     let has_file_access = has_ipython || tools.contains(&"bash");
 
@@ -168,7 +174,7 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
         packages_section(),
     ));
 
-    let context = context_files_section(&options.context_files);
+    let context = context_files_section(&options.resources.agents_files);
     if !context.is_empty() {
         segments.push(PromptSegment::dynamic_segment(
             "project-context",
@@ -183,7 +189,7 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
         .filter(|skill| !skill.disable_model_invocation)
         .collect();
     if has_file_access && !visible_skills.is_empty() {
-        let inventory = format_skills_for_prompt(&options.skills).trim().to_string();
+        let inventory = format_skills_for_prompt(options.skills).trim().to_string();
         segments.push(PromptSegment::dynamic_segment(
             "skills-inventory",
             "skill discovery",
@@ -217,14 +223,13 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
         ));
     }
 
-    if let Some(extra) = options.append_system_prompt.as_deref() {
-        if !extra.is_empty() {
-            segments.push(PromptSegment::dynamic_segment(
-                "appended-prompt",
-                "--append-system-prompt",
-                extra.to_string(),
-            ));
-        }
+    let appended = options.resources.append_system_prompt.join("\n\n");
+    if !appended.is_empty() {
+        segments.push(PromptSegment::dynamic_segment(
+            "appended-prompt",
+            "--append-system-prompt",
+            appended,
+        ));
     }
 
     let assembled = segments
@@ -252,7 +257,7 @@ fn packages_section() -> String {
     lines.join("\n")
 }
 
-fn context_files_section(context_files: &[(String, String)]) -> String {
+fn context_files_section(context_files: &[ContextFile]) -> String {
     if context_files.is_empty() {
         return String::new();
     }
@@ -262,8 +267,8 @@ fn context_files_section(context_files: &[(String, String)]) -> String {
         "Project-specific instructions and guidelines:".to_string(),
         String::new(),
     ];
-    for (file_path, content) in context_files {
-        lines.push(format!("## {file_path}\n\n{content}"));
+    for file in context_files {
+        lines.push(format!("## {}\n\n{}", file.path.display(), file.content));
     }
     lines.join("\n")
 }
@@ -280,21 +285,17 @@ fn environment_section(options: &BuildSystemPromptOptions) -> String {
         format!("Working directory: {cwd}"),
         format!("Conversation log: {messages_path}"),
     ];
-    match options.vision_capable {
-        Some(true) => lines.push(
-            "Image input: this model can see images; `attach_image` loads them into context."
-                .to_string(),
-        ),
-        Some(false) => lines.push(
-            "Image input: this model cannot see images; `attach_image` errors for it.".to_string(),
-        ),
-        None => {}
-    }
+    lines.push(if options.model_input.contains(&ModelInput::Image) {
+        "Image input: this model can see images; `attach_image` loads them into context."
+            .to_string()
+    } else {
+        "Image input: this model cannot see images; `attach_image` errors for it.".to_string()
+    });
     lines.join("\n")
 }
 
 fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -> String {
-    let depth = options.rlm_depth.unwrap_or(0);
+    let depth = options.rlm_depth;
     let mut lines = vec![format!(
         "Recursive agent depth: {depth}{}",
         if depth == 0 { " (root)" } else { " (not root)" }
@@ -309,10 +310,21 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         });
     }
     if has_ipython {
-        lines.push(
-            "`await bash(cmd)` waits at most 1 second. If the command is still running, it returns a snapshot: `r.running` is True, `r.exit_code` is None, `r.output` is the output so far, and `r.handle` is the live handle. A completed result has `r.running` False and an integer `r.exit_code`. The command keeps running after a snapshot; end the turn and collect the final result on the `[bash-done]` notification."
-                .to_string(),
-        );
+        let agent_inbox = !options.daemonless && options.settings.get_agent_inbox_enabled();
+        if agent_inbox {
+            lines.push(
+                "This session has an agent inbox: bash completions, agent messages, child exits, heartbeats, and factory milestones wait in it, and a short `[inbox …]` notice announces new ones. When the notice says messages are waiting, read them with `msgs = await rlm.inbox.read()`. Your own `bash-done` messages need no reply; when nothing else needs action, end the turn silently."
+                    .to_string(),
+            );
+        }
+        lines.push(format!(
+            "`await bash(cmd)` waits at most 1 second. If the command is still running, it returns a snapshot: `r.running` is True, `r.exit_code` is None, `r.output` is the output so far, and `r.handle` is the live handle. A completed result has `r.running` False and an integer `r.exit_code`. The command keeps running after a snapshot; end the turn and collect the final result {}.",
+            if agent_inbox {
+                "when its `[inbox …]` notice arrives"
+            } else {
+                "on the `[bash-done]` notification"
+            }
+        ));
         lines.push(
             "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
                 .to_string(),
@@ -323,17 +335,24 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
                 .to_string(),
         );
     }
-    if options.allow_recursion == Some(false) {
-        lines.push("Subagent spawning is disabled in this session.".to_string());
-    }
     if depth > 0 {
-        lines.push(format!(
-            "You are a child agent spawned by {}. Task prompts are labeled `[task from parent]`.",
-            options.rlm_parent_agent.unwrap_or("your parent agent")
-        ));
-        if options.factory_child {
+        lines.push(
+            "You are a child agent spawned by your parent agent. Task prompts are labeled `[task from parent]`."
+                .to_string(),
+        );
+        if options.factory_child == Some(FactoryChild::FinalMessage) {
             lines.push(
                 "Your final message is this state's output, which the factory reads; do not message the parent.".to_string(),
+            );
+        } else if options.factory_child == Some(FactoryChild::Emit) {
+            lines.push(
+                "Hand this state's outputs back with `await rlm.factory.emit(...)` before you finish; your final message is not read as output. Do not message the parent.".to_string(),
+            );
+            lines.push(
+                "- `factory.emit(**outputs: Any) -> dict[str, Any]`: one call, one keyword per output port (`await rlm.factory.emit(verdict={...})`); every value is checked against the state's declared type before anything is kept, and a wrong value raises `FactoryEmitError` naming the field — fix it and call again".to_string(),
+            );
+            lines.push(
+                "- `factory.inputs() -> dict[str, Any]`: this state's bound inputs (and the machine's params) as values".to_string(),
             );
         } else if has_ipython {
             lines.push(
@@ -428,22 +447,55 @@ mod tests {
         }
     }
 
-    fn base_options() -> BuildSystemPromptOptions<'static> {
-        BuildSystemPromptOptions {
-            cwd: "/w".to_string(),
-            messages_path: Some("/log.jsonl".to_string()),
-            skills: vec![
-                skill("web-search", Some("websearch")),
-                skill("refine", Some("refine")),
-                skill("agent-message", Some("agent_message")),
-            ],
-            ..Default::default()
+    /// Owns what the options borrow.
+    struct Fixture {
+        settings: SettingsManager,
+        resources: LoadedResources,
+        skills: Vec<Skill>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                settings: SettingsManager::in_memory(&crate::settings::Settings::default()),
+                resources: LoadedResources::default(),
+                skills: vec![
+                    skill("web-search", Some("websearch")),
+                    skill("refine", Some("refine")),
+                    skill("agent-message", Some("agent_message")),
+                ],
+            }
+        }
+
+        fn options(&self) -> BuildSystemPromptOptions<'_> {
+            BuildSystemPromptOptions {
+                settings: &self.settings,
+                resources: &self.resources,
+                skills: &self.skills,
+                selected_tools: vec![pa_types::ai::PYTHON_TOOL_NAME],
+                model_prompt_extras: None,
+                model_input: &[],
+                cwd: "/w".to_string(),
+                messages_path: Some("/log.jsonl".to_string()),
+                generic_mcp_servers: Vec::new(),
+                rlm_depth: 0,
+                factory_child: None,
+                daemonless: false,
+                can_spawn: false,
+            }
+        }
+    }
+
+    fn agents_file(content: &str) -> ContextFile {
+        ContextFile {
+            path: PathBuf::from("AGENTS.md"),
+            content: content.to_string(),
         }
     }
 
     #[test]
     fn default_prompt_is_layered_with_static_prefix_first() {
-        let breakdown = system_prompt_breakdown(&base_options());
+        let breakdown = system_prompt_breakdown(&Fixture::new().options());
         let prompt = &breakdown.assembled;
         assert!(prompt.starts_with("# prime-agent harness"));
         assert_eq!(breakdown.segments[0].kind, SegmentKind::Static);
@@ -477,14 +529,15 @@ mod tests {
 
     #[test]
     fn dynamic_tail_isolates_the_cached_prefix() {
-        let mut other = base_options();
+        let base = Fixture::new();
+        let mut with_context = Fixture::new();
+        with_context.resources.agents_files = vec![agents_file("Rule one.")];
+        let mut other = with_context.options();
         other.cwd = "/somewhere/else".to_string();
         other.messages_path = None;
-        other.rlm_depth = Some(2);
-        other.rlm_parent_agent = Some("the lead");
+        other.rlm_depth = 2;
         other.generic_mcp_servers = vec!["slack".to_string()];
-        other.context_files = vec![("AGENTS.md".to_string(), "Rule one.".to_string())];
-        let left = system_prompt_breakdown(&base_options());
+        let left = system_prompt_breakdown(&base.options());
         let right = system_prompt_breakdown(&other);
         assert_eq!(
             left.assembled[..left.cached_prefix_len],
@@ -494,30 +547,37 @@ mod tests {
         assert!(right.assembled[right.cached_prefix_len..]
             .contains("Enabled generic MCP servers: `slack`"));
         assert!(right.assembled[right.cached_prefix_len..]
-            .contains("You are a child agent spawned by the lead."));
+            .contains("You are a child agent spawned by your parent agent."));
     }
 
     #[test]
     fn factory_child_gets_the_factory_line_instead_of_the_reply_line() {
         const REPLY: &str = "reply explicitly with `await agent_message.send(";
-        const FACTORY: &str = "Your final message is this state's output";
-        let mut child = base_options();
-        child.rlm_depth = Some(1);
+        const FINAL_MESSAGE: &str = "Your final message is this state's output";
+        const EMIT: &str = "`await rlm.factory.emit(...)` before you finish";
+        let fixture = Fixture::new();
+        let mut child = fixture.options();
+        child.rlm_depth = 1;
         let normal = build_system_prompt(&child);
         assert!(normal.contains(REPLY));
-        assert!(!normal.contains(FACTORY));
-        child.factory_child = true;
+        assert!(!normal.contains(FINAL_MESSAGE) && !normal.contains(EMIT));
+        child.factory_child = Some(FactoryChild::FinalMessage);
         let factory = build_system_prompt(&child);
-        assert!(factory.contains(FACTORY));
-        assert!(!factory.contains(REPLY));
+        assert!(factory.contains(FINAL_MESSAGE));
+        assert!(!factory.contains(REPLY) && !factory.contains(EMIT));
+        child.factory_child = Some(FactoryChild::Emit);
+        let emit = build_system_prompt(&child);
+        assert!(emit.contains(EMIT));
+        assert!(!emit.contains(REPLY) && !emit.contains(FINAL_MESSAGE));
     }
 
     #[test]
     fn custom_prompt_replaces_layers_keeps_tail() {
-        let mut options = base_options();
-        options.custom_prompt = Some("Be terse.".to_string());
+        let mut fixture = Fixture::new();
+        fixture.resources.system_prompt = Some("Be terse.".to_string());
+        fixture.resources.agents_files = vec![agents_file("Rule one.")];
+        let mut options = fixture.options();
         options.model_prompt_extras = Some("Tier-2 guidance.");
-        options.context_files = vec![("AGENTS.md".to_string(), "Rule one.".to_string())];
         let breakdown = system_prompt_breakdown(&options);
         let prompt = &breakdown.assembled;
         assert!(prompt.starts_with("Be terse."));
@@ -531,7 +591,8 @@ mod tests {
 
     #[test]
     fn mcp_servers_are_a_tail_segment() {
-        let mut options = base_options();
+        let fixture = Fixture::new();
+        let mut options = fixture.options();
         options.generic_mcp_servers = vec!["t".to_string(), "t".to_string()];
         let breakdown = system_prompt_breakdown(&options);
         let names: Vec<&str> = breakdown
@@ -550,19 +611,21 @@ mod tests {
     fn daemonless_line_drops_the_stale_no_wake_claim() {
         // The line's one durable contract: it no longer tells daemonless
         // agents that background completions never wake them.
-        let mut spawning = base_options();
+        let fixture = Fixture::new();
+        let mut spawning = fixture.options();
         spawning.daemonless = true;
         spawning.can_spawn = true;
         assert!(!build_system_prompt(&spawning).contains("completions do not wake you"));
 
-        let mut bare = base_options();
+        let mut bare = fixture.options();
         bare.daemonless = true;
         assert!(!build_system_prompt(&bare).contains("completions do not wake you"));
     }
 
     #[test]
     fn model_prompt_extras_form_the_last_static_segment() {
-        let mut options = base_options();
+        let fixture = Fixture::new();
+        let mut options = fixture.options();
         options.model_prompt_extras = Some("Tier-2 guidance.");
         let breakdown = system_prompt_breakdown(&options);
         let names: Vec<&str> = breakdown

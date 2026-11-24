@@ -356,7 +356,7 @@ pub struct InteractiveOptions {
     /// Telemetry opt-out: `Some(true)` only when the invocation disabled telemetry; carried on
     /// create/attach so the daemon worker installs no telemetry subscriber.
     pub telemetry_disabled: Option<bool>,
-    /// `/mcp login` / `/mcp logout`: the client-side auth flows the composition root provides;
+    /// MCP connect flows opened from the `/mcp` view, provided by the composition root;
     /// `None` reports the commands as unavailable.
     pub client_auth: Option<crate::client_auth::ClientAuthCommandsHandle>,
     /// `/traces`: the settings + credential state the composition root owns (the trace upload
