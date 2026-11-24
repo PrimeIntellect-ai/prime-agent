@@ -42,7 +42,6 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -117,7 +116,6 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -243,7 +241,6 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -346,10 +343,9 @@ fn post_compaction_goal_continuation_mint() {
     AgentSessionEngine::release_goal_continuation_handle(minted.pending_handle.as_ref());
     // TS #2465: live background kernel work holds the post-compaction
     // mint the same way: the mint defers (owed, not consumed) until it
-    // settles. The gates read the aggregate work probe (the bash-only
-    // count stays with the bash handle APIs).
+    // settles.
     let live_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 1);
-    engine.set_test_background_work_probe(live_probe);
+    engine.set_test_probes(Some(live_probe), None);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_none(),
         "a live handle minted the post-compaction continuation"
@@ -364,7 +360,7 @@ fn post_compaction_goal_continuation_mint() {
         );
     }
     let settled_probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync> = std::sync::Arc::new(|| 0);
-    engine.set_test_background_work_probe(settled_probe);
+    engine.set_test_probes(Some(settled_probe), None);
     assert!(
         engine.mint_post_compaction_goal_continuation().is_some(),
         "the settled handle releases the post-compaction mint"
@@ -478,7 +474,6 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -713,7 +708,6 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -781,16 +775,14 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
-/// T-0012: the goal deferral and the fallback wake read different probes.
-/// The aggregate work probe holds the deferral (owed, not consumed) but
-/// never arms the marker turn — a detached cell's terminal notice is the
-/// guaranteed retry, so its marker turn would only charge the goal. Only
-/// a live background `bash()` handle arms the fallback wake - a durable
-/// one-shot cron one skip-window out - so a shell that never completes
-/// cannot stall the goal. The shell's settle path (the `[bash-done]`
-/// sibling) delivers the owed continuation and retires the armed wake.
+/// T-0012: a live background `bash()` handle defers the goal continuation
+/// (owed, not consumed) and arms the fallback wake - a durable one-shot
+/// cron one skip-window out - once per deferral: a shell that never
+/// completes gets exactly one marker turn. The shell's settle path (the
+/// `[bash-done]` sibling) delivers the owed continuation and retires the
+/// armed wake.
 #[test]
-fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
+fn background_shell_owes_the_continuation_and_arms_the_fallback_wake() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -835,7 +827,6 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
                         {"text": "goal turn reply"},
                         {"text": "user turn reply"},
                         {"text": "marker turn reply"},
-                        {"text": "queued turn reply"},
                     ]
                 })
                 .to_string(),
@@ -848,7 +839,6 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
             telemetry_disabled: None,
             cron_store: Some(cron_store),
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -860,13 +850,9 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
     // provisioner probe); the live-handle probe is meaningful from here on.
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "warm".to_string(), &mut events);
-    // THE SPLIT: the aggregate work probe alone (a detached cell, no
-    // shell) holds the deferral but never arms the wake.
-    engine.set_test_background_work_probe(std::sync::Arc::new(|| 1));
-    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
-    // The goal start behind live work with no shell: its natural end
-    // holds the continuation (owed, not consumed) and arms NO wake —
-    // the detached cell's terminal notice is the guaranteed retry.
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
+    // The goal start behind a live handle: its natural end holds the
+    // continuation (owed, not consumed) and arms the fallback wake.
     admit(
         &engine,
         "/goal ship behind the shell".to_string(),
@@ -874,21 +860,15 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
     );
     {
         let work = goal_work.lock().unwrap();
-        assert!(work.is_empty(), "work minted behind live work: {work:?}");
+        assert!(
+            work.is_empty(),
+            "work minted behind a live handle: {work:?}"
+        );
     }
     assert_eq!(engine.goal_state_value()["status"], "active");
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
-    assert!(
-        !engine.background_skip_wake_armed(),
-        "a shell-less detached cell must not arm the fallback wake"
-    );
-    // Only the bash handle arms: the settle consult's self-heal behind a
-    // live shell arms exactly one Active background-skip job for this
-    // session with the honest marker prompt and a fire time.
-    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
-    engine
-        .runtime
-        .block_on(async { engine.goal_children_settled().await });
+    // THE FALLBACK WAKE: exactly one Active background-skip job, armed for
+    // this session with the honest marker prompt and a fire time.
     let wakes: Vec<pa_core::cron::AgentCronJob> = store
         .list()
         .into_iter()
@@ -996,10 +976,9 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
             )
             .expect("the scheduler records the fire");
     };
-    // THE RE-ARM: the scheduler claims the due wake and its marker turn
-    // runs; that turn's end re-consults the boundary and arms the next
-    // window, and the fired one-shot completes after its turn - exactly
-    // one Active, a new id.
+    // ONE FALLBACK TURN PER DEFERRAL: the scheduler claims the due wake and
+    // its marker turn runs behind the still-live shell; that turn's end
+    // re-defers but arms nothing, so no later window fires another marker.
     let claimed = store
         .claim_due(fire_at_ms, crate::util::now_ms())
         .expect("the scheduler claims the due wake");
@@ -1013,134 +992,25 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
         &mut marker_events,
     );
     complete_dispatch(first_fire);
-    let rearmed = active_wakes();
-    let [rewake] = rearmed.as_slice() else {
-        panic!("the marker turn must re-arm exactly one wake: {rearmed:?}");
-    };
     assert!(
-        rewake.id != first_wake_id,
-        "the re-arm must replace the fired wake, not stack beside it"
+        active_wakes().is_empty(),
+        "the marker turn must not re-arm the fallback wake: {:?}",
+        active_wakes()
     );
-    // A CLAIMED WAKE QUEUED BEHIND ANOTHER TURN: the scheduler claims
-    // before the per-session dispatch lane, so another turn can end while
-    // the claimed wake still waits to run its marker. That turn's arming
-    // must leave the claimed wake to fire on time (retiring it would push
-    // the bound a full window out) and arm the next window beside it.
-    let rewake_fire_at_ms = pa_core::cron::parse_iso_millis(
-        rewake
-            .next_run_at
-            .as_deref()
-            .expect("the re-armed wake carries a fire time"),
-    )
-    .expect("the fire time parses");
-    let rewake_id = rewake.id.clone();
-    let claimed = store
-        .claim_due(rewake_fire_at_ms, crate::util::now_ms())
-        .expect("the scheduler claims the re-armed wake");
-    let [queued_fire] = claimed.as_slice() else {
-        panic!("the scheduler claims exactly the re-armed wake: {claimed:?}");
-    };
-    let mut queued_ahead_events: Vec<EngineEvent> = Vec::new();
-    admit(
-        &engine,
-        "a turn queued ahead of the claimed wake".to_string(),
-        &mut queued_ahead_events,
-    );
+    let later = store
+        .claim_due(fire_at_ms + 10 * window, crate::util::now_ms())
+        .expect("the scheduler scans later windows");
     assert!(
-        store.get_claimed_job(&rewake_id).is_some(),
-        "a turn ending ahead of the claimed wake must not retire it"
+        later.is_empty(),
+        "a never-ending shell gets exactly one fallback turn: {later:?}"
     );
-    assert!(
-        engine.background_skip_wake_armed(),
-        "the next window arms beside the claimed wake"
-    );
-    complete_dispatch(queued_fire);
-    let after_fire = active_wakes();
-    let [next_wake] = after_fire.as_slice() else {
-        panic!("the claimed wake's fire must leave exactly one wake: {after_fire:?}");
-    };
-    assert_ne!(next_wake.id, rewake_id);
-    // A CLAIMED BACKOFF WAKE: the background-skip arming keeps only its own
-    // kind. A claimed backoff marker would run the goal through the live
-    // shell, so the arming retires it.
-    let backoff_id = engine
-        .runtime
-        .block_on(engine.schedule_goal_wake(
-            crate::agent_engine::GoalWakeKind::Backoff,
-            crate::util::now_ms() + 1_000,
-        ))
-        .expect("the backoff wake arms");
-    let claimed = store
-        .claim_due(crate::util::now_ms() + 5_000, crate::util::now_ms())
-        .expect("the scheduler claims the backoff wake");
-    let [backoff_fire] = claimed.as_slice() else {
-        panic!("the scheduler claims exactly the backoff wake: {claimed:?}");
-    };
-    engine.runtime.block_on(engine.schedule_goal_wake(
-        crate::agent_engine::GoalWakeKind::BackgroundSkip,
-        crate::util::now_ms() + window,
-    ));
-    assert!(
-        store.get_claimed_job(&backoff_id).is_none(),
-        "the background-skip arming must retire a claimed backoff wake"
-    );
-    complete_dispatch(backoff_fire);
-    // SELF-HEAL: a fire that completed without running (withdrawn or
-    // cleared) strands the owed deferral with no wake; the next settle
-    // consult behind the still-live shell re-arms it.
-    for job in store.list() {
-        if job.label.as_deref()
-            == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
-            && job.status == pa_core::cron::JobStatus::Active
-        {
-            store.cancel(&job.id, crate::util::now_ms()).unwrap();
-        }
-    }
-    assert!(
-        !engine.background_skip_wake_armed(),
-        "the test must first strand the wake"
-    );
+    // A settle consult behind the still-live shell arms nothing either.
     engine
         .runtime
         .block_on(async { engine.goal_children_settled().await });
-    assert!(
-        engine.background_skip_wake_armed(),
-        "the settle consult must re-arm the stranded wake"
-    );
-    // A shell-less strand does NOT re-arm: the aggregate work probe alone
-    // never arms the marker turn.
-    for job in store.list() {
-        if job.label.as_deref()
-            == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
-            && job.status == pa_core::cron::JobStatus::Active
-        {
-            store.cancel(&job.id, crate::util::now_ms()).unwrap();
-        }
-    }
-    assert!(
-        !engine.background_skip_wake_armed(),
-        "the test must strand the wake again"
-    );
-    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
-    engine
-        .runtime
-        .block_on(async { engine.goal_children_settled().await });
-    assert!(
-        !engine.background_skip_wake_armed(),
-        "the shell-less settle consult must not arm the fallback wake"
-    );
-    // The shell's return re-arms it again.
-    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
-    engine
-        .runtime
-        .block_on(async { engine.goal_children_settled().await });
-    assert!(
-        engine.background_skip_wake_armed(),
-        "the live shell's settle consult must re-arm the wake"
-    );
-    // The background work settles: the same consult delivers the owed
-    // continuation and the successful mint retires the armed wake.
-    engine.set_test_background_work_probe(std::sync::Arc::new(|| 0));
+    assert!(active_wakes().is_empty());
+    // The shell settles: the same consult delivers the owed continuation
+    // and the successful mint retires the armed wake.
     engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
     engine
         .runtime
@@ -1168,143 +1038,9 @@ fn a_detached_cell_defers_the_goal_but_only_a_shell_arms_the_fallback_wake() {
         .runtime
         .block_on(async { engine.arm_background_skip_wake().await });
     assert!(
-        !engine.background_skip_wake_armed(),
+        active_wakes().is_empty(),
         "an arming behind a consumed deferral must arm nothing"
     );
-}
-
-/// A shell whose kernel died without graceful cleanup is live,
-/// durable in the worker's orphan journal, and invisible to the
-/// replacement kernel's empty registry. The gate's durable term must hold
-/// the goal continuation across the restart, and drop only when the shell
-/// actually dies. Without the durable term this test's turn end mints
-/// straight through the live shell (the bypass); without the daemon-owned
-/// exit watch the owed continuation never lands.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn durable_shell_holds_the_goal_continuation_across_a_kernel_restart() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = tempfile::TempDir::new().unwrap();
-    let session_file = dir.path().join("session.jsonl");
-    std::fs::write(
-        &session_file,
-        format!(
-            "{}
-",
-            serde_json::json!({
-                "type": "session",
-                "version": 3,
-                "id": "durable-shell-session",
-                "timestamp": "2026-01-01T00:00:00.000Z",
-                "cwd": dir.path().display().to_string(),
-            })
-        ),
-    )
-    .unwrap();
-    let store =
-        std::sync::Arc::new(pa_core::cron::store::AgentCronJobStore::for_session_artifacts());
-    store.register_session_artifact("durable-shell-session", &dir.path().join("artifacts"));
-    let cron_store = pa_core::session_engine::runtime_wiring::KernelCronWiring {
-        store: std::sync::Arc::clone(&store),
-        binding: None,
-        mutation_hook: None,
-    };
-    // The worker's orphan journal and a REAL live shell record in the
-    // runtime's shape: the shell outlived its (dead, fake) kernel, the
-    // owner is this worker (the test process).
-    let journal = dir.path().join("durable.orphans.jsonl");
-    let mut live_shell = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .unwrap();
-    let live_pid = i64::from(live_shell.id());
-    let identity = pa_core::kernel::orphan_journal::get_process_start_id(live_shell.id() as i32)
-        .expect("live shell identity");
-    std::fs::write(
-        &journal,
-        format!(
-            "{}
-",
-            serde_json::json!({
-                "version": 1, "pid": live_pid, "ownerPid": i64::from(std::process::id()),
-                "kernelPid": 999_999, "active": true,
-                "processStartId": identity,
-                "recordedAt": "2026-11-06T00:00:00Z",
-            })
-        ),
-    )
-    .unwrap();
-    let engine = std::sync::Arc::new(
-        AgentSessionEngine::new(AgentEngineConfig {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: dir.path().join("agent"),
-            provider: None,
-            model: None,
-            api_key: None,
-            thinking: None,
-            session_dir: None,
-            session_file: Some(session_file),
-            faux_script: Some(
-                serde_json::json!({ "responses": [{"text": "goal turn reply"}] }).to_string(),
-            ),
-            supervisor_link: Some(crate::agent_engine::SupervisorLinkConfig {
-                socket_path: dir.path().join("supervisor.sock"),
-                active_session_id: "active-durable".to_string(),
-                worker_token: "token".to_string(),
-            }),
-            telemetry_disabled: None,
-            cron_store: Some(cron_store),
-            queued_steering_probe: None,
-            orphan_journal_path: Some(journal),
-        })
-        .unwrap(),
-    );
-    engine.register_arc();
-    let goal_work = goal_admission_collector(&engine);
-    // The post-restart state: the kernel-manager registry reads zero (no
-    // probe set; the session build installs the empty provisioner read),
-    // the durable journal holds the live shell.
-    assert_eq!(engine.background_bash_handle_count(), 1);
-    let mut events: Vec<EngineEvent> = Vec::new();
-    admit(
-        &engine,
-        "/goal ship behind the orphaned shell".to_string(),
-        &mut events,
-    );
-    {
-        let work = goal_work.lock().unwrap();
-        assert!(
-            work.is_empty(),
-            "the durable shell must hold the continuation: {work:?}"
-        );
-    }
-    assert_eq!(engine.goal_state_value()["status"], "active");
-    assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
-    assert!(
-        store.list().into_iter().any(|job| {
-            job.label.as_deref()
-                == Some(pa_core::session_engine::goal_driver::GOAL_BACKGROUND_SKIP_WAKE_CRON_LABEL)
-                && job.status == pa_core::cron::JobStatus::Active
-        }),
-        "the held boundary arms the fallback wake behind the durable shell"
-    );
-    // The shell dies: its exit watch alone delivers the owed continuation
-    // (no settle consult runs here).
-    let _ = live_shell.kill();
-    let _ = live_shell.wait();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while goal_work.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(engine.background_bash_handle_count(), 0);
-    let work = goal_work.lock().unwrap();
-    let [crate::engine::GoalTurnEndWork::Continuation(delivered)] = work.as_slice() else {
-        panic!("the settled shell never delivered the continuation: {work:?}");
-    };
-    assert!(delivered.request.message.contains("[goal: continuation]"));
-    assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
 /// The engine session's entries as their persisted wire shapes (the
@@ -1497,7 +1233,6 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -1641,7 +1376,6 @@ fn assert_turn_end_publishes_a_held_goal_change(message: &str, aborted: bool) {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -1725,7 +1459,6 @@ fn active_goal_survives_an_abort_that_lands_before_the_provider_stream() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);

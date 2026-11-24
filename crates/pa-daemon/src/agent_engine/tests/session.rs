@@ -34,7 +34,6 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap();
         let engine = std::sync::Arc::new(engine);
@@ -112,7 +111,6 @@ fn the_built_session_carries_the_durable_header_id_across_rebuilds() {
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let model = engine.resolve_model().expect("faux model");
@@ -443,7 +441,6 @@ fn run_skill_prompt_body(
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -615,7 +612,6 @@ fn an_unbuilt_engine_branch_summary_carries_the_request_session_id() {
         telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let model = engine.resolve_model().expect("faux model");

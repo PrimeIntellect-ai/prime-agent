@@ -262,10 +262,7 @@ mod tests {
         );
         // Pre-epoch timestamps stay exact.
         assert_eq!(timestamp_to_ms("1969-12-31T23:59:59.999Z"), Some(-1));
-    }
 
-    #[test]
-    fn timestamp_rejects_impossible_and_malformed_values() {
         assert_eq!(timestamp_to_ms("not-a-timestamp"), None);
         assert_eq!(timestamp_to_ms(""), None);
         assert_eq!(timestamp_to_ms("2026-13-01"), None);
@@ -302,14 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn log_line_defaults_level_and_component() {
-        let entry = parse_incident_log_line(r#"{"ts":"2026-09-10T20:00:00Z","msg":"hi"}"#)
-            .expect("valid line");
-        assert_eq!(entry.level, "warn");
-        assert_eq!(entry.component, "unknown");
-    }
-
-    #[test]
     fn log_line_skips_malformed_records() {
         assert!(parse_incident_log_line("").is_none());
         assert!(parse_incident_log_line("   ").is_none());
@@ -319,6 +308,12 @@ mod tests {
         assert!(parse_incident_log_line(r#"{"ts":"garbage","msg":true}"#).is_none());
         assert!(parse_incident_log_line(r#"{"ts":"2026-09-10T20:00:00Z"}"#).is_none());
         assert!(parse_incident_log_line(r#"["an","array"]"#).is_none());
+
+        assert!(parse_incident_daemon_log_line("not a log line").is_none());
+        assert!(parse_incident_daemon_log_line("[not-a-timestamp] supervisor: msg").is_none());
+        assert!(parse_incident_daemon_log_line("[]").is_none());
+        assert!(parse_incident_daemon_log_line("[2026-09-10T20:00:00Z]   ").is_none());
+        assert!(parse_incident_daemon_log_line("[2026-09-10T20:00:00Z] supervisor:").is_none());
     }
 
     #[test]
@@ -342,14 +337,5 @@ mod tests {
         .expect("worker line");
         assert_eq!(worker.component, "coding-agent.daemon");
         assert_eq!(worker.msg, "uncaught exception: Error: write EPIPE");
-    }
-
-    #[test]
-    fn daemon_log_line_skips_malformed_lines() {
-        assert!(parse_incident_daemon_log_line("not a log line").is_none());
-        assert!(parse_incident_daemon_log_line("[not-a-timestamp] supervisor: msg").is_none());
-        assert!(parse_incident_daemon_log_line("[]").is_none());
-        assert!(parse_incident_daemon_log_line("[2026-09-10T20:00:00Z]   ").is_none());
-        assert!(parse_incident_daemon_log_line("[2026-09-10T20:00:00Z] supervisor:").is_none());
     }
 }

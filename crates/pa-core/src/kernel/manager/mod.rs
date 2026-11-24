@@ -460,10 +460,10 @@ pub(crate) struct Inner {
     rebootstrap_memo: Mutex<Option<Arc<MemoSlot>>>,
     flush_memo: Mutex<Option<Arc<MemoSlot>>>,
     snapshot_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// A capture that met a detached cell stays owed:
-    /// the cell's settle (any status, kernel alive) retries it, so the
-    /// last settled namespace cannot stay unsnapshotted behind a
-    /// backgrounded cell.
+    /// A capture that failed stays owed (the usual cause is a detached
+    /// cell holding the kernel): the cell's settle (any status, kernel
+    /// alive) retries it, so the last settled namespace cannot stay
+    /// unsnapshotted behind a backgrounded cell.
     snapshot_owed: std::sync::atomic::AtomicBool,
     stderr_closed: Notify,
     stderr_closed_flag: AtomicBool,

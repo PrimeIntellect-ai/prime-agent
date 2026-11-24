@@ -74,7 +74,6 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -151,7 +150,6 @@ fn agent_engine_streams_updates_and_final_message() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -219,7 +217,6 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        orphan_journal_path: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);

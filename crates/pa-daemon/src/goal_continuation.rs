@@ -134,19 +134,7 @@ impl AgentSessionEngine {
                 return;
             }
         }
-        if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
-            // Self-heal: a fire that completed without running (withdrawn
-            // or cleared mid-teardown) strands the owed deferral with no
-            // wake; the next settle consult behind still-live kernel work
-            // re-arms it so the bounded-stall guarantee survives (an armed
-            // wake stays put). Only a live bash handle arms it: a detached
-            // cell's terminal notice is the guaranteed retry, so its marker
-            // turn would only charge the goal. The arming reads the shell
-            // liveness with the durable term, so an outlived-the-kernel
-            // shell re-arms behind its exit watch too.
-            if self.has_live_background_bash_handles() {
-                self.arm_background_skip_wake().await;
-            }
+        if self.has_unsettled_rlm_work().await || self.background_work_count() > 0 {
             return;
         }
         // Queued input or the post-abort suspension owns the boundary.
@@ -235,98 +223,17 @@ impl AgentSessionEngine {
         children.any_running().await
     }
 
-    /// The kernel-manager registry's live background `bash()` handle
-    /// count: the kernel term of [`Self::background_bash_handle_count`].
-    /// The probe reads the manager without the session mutex (the consult
-    /// can run inside a compaction turn, which holds it). An unbuilt
-    /// session answers `0`.
-    pub(crate) fn kernel_background_bash_handle_count(&self) -> usize {
-        self.live_handles()
-            .map_or(0, |live| (live.background_bash_probe)())
-    }
-
-    /// The number of live background `bash()` handles: the continuation
-    /// gates' live-work term. The kernel-manager registry plus the durable
-    /// term ([`Self::durable_background_shell_count`]).
-    pub(crate) fn background_bash_handle_count(&self) -> usize {
-        self.kernel_background_bash_handle_count() + self.durable_background_shell_count()
-    }
-
-    /// The durable term: the worker's orphan journal's still-live shell
-    /// records, which survive a kernel lost without graceful cleanup (the
-    /// replacement kernel's registry is empty while the shells run, and
-    /// their `[bash-done]` notice died with the kernel). The read arms the
-    /// daemon-owned wake: each counted shell gets one exit watch
-    /// ([`watch_durable_shell_exit`]), so every hold this term causes has
-    /// a retry. A shell whose watch fired or could not register no longer
-    /// counts. An unwired journal answers `0`; an engine without a
-    /// registered arc arms nothing (the settle callback's rule).
-    pub(crate) fn durable_background_shell_count(&self) -> usize {
-        let Some(journal) = self.durable_background_shell_journal.as_ref() else {
-            return 0;
-        };
-        let shells = journal.live_shells();
-        let engine = self
-            .self_weak
-            .lock()
-            .expect("engine self weak lock")
-            .clone();
-        let mut watches = self
-            .durable_shell_exit_watches
-            .lock()
-            .expect("durable shell exit watches lock");
-        watches.retain(|(pid, start_id), _| {
-            shells
-                .iter()
-                .any(|shell| shell.pid == *pid && shell.process_start_id == *start_id)
-        });
-        let mut held = 0;
-        for shell in shells {
-            let key = (shell.pid, shell.process_start_id);
-            if let Some(holds) = watches.get(&key) {
-                held += usize::from(*holds);
-                continue;
-            }
-            if let Some(engine) = engine.clone() {
-                self.runtime
-                    .spawn(watch_durable_shell_exit(engine, key.clone()));
-                watches.insert(key, true);
-            }
-            held += 1;
-        }
-        held
-    }
-
-    /// The count of live background KERNEL work: detached cells awaiting
-    /// their terminal admission plus live `bash()` handles. The probe
-    /// reads the session provisioner without the session mutex (the
-    /// consult can run inside a compaction turn, which holds it). An
-    /// unbuilt session answers `0`.
-    pub(crate) fn background_kernel_work_count(&self) -> usize {
+    /// The count of live background work: detached cells awaiting their
+    /// terminal admission plus live `bash()` handles in the kernel
+    /// registry. The one answer to "is background work running": the goal
+    /// and autonomous continuation gates, the fallback wake's arming, the
+    /// passivation gates, the supervisor-lost gate, and ACP's
+    /// `outstandingBackgroundJobs` read it. The probe reads the session
+    /// provisioner without the session mutex (the consult can run inside a
+    /// compaction turn, which holds it). An unbuilt session answers `0`.
+    pub(crate) fn background_work_count(&self) -> usize {
         self.live_handles()
             .map_or(0, |live| (live.background_work_probe)())
-    }
-
-    /// Whether a live background `bash()` handle holds the boundary: its
-    /// completion notice (a kernel handle) or its exit watch (a durable
-    /// shell) is the wake-up a held continuation waits for.
-    pub(crate) fn has_live_background_bash_handles(&self) -> bool {
-        self.background_bash_handle_count() > 0
-    }
-
-    /// Whether live background kernel work runs: a backgrounded cell
-    /// (whose completion notice is the wake-up) or a live `bash()` handle.
-    /// The passivation gates read this term alone.
-    pub(crate) fn has_live_background_kernel_work(&self) -> bool {
-        self.background_kernel_work_count() > 0
-    }
-
-    /// Whether live background work holds a continuation boundary: kernel
-    /// work ([`Self::has_live_background_kernel_work`]) or a durable shell
-    /// that outlived its kernel ([`Self::durable_background_shell_count`]).
-    /// The goal and autonomous continuation gates read this one predicate.
-    pub(crate) fn has_live_background_work(&self) -> bool {
-        self.has_live_background_kernel_work() || self.durable_background_shell_count() > 0
     }
 
     /// The built session's kernel manager, when a session is built and its
@@ -351,22 +258,14 @@ impl AgentSessionEngine {
     }
 
     /// The settled passivation gates (the kernel release and the whole-worker idle
-    /// passivation share them): no unsettled RLM work, no live background kernel
-    /// work — a `bash()` handle in the kernel-manager registry (a snapshot cannot
-    /// resurrect a live process) or a detached cell awaiting its terminal
-    /// admission — no active-or-paused scheduled job (crons AND armed
-    /// heartbeats). Deliberate divergence: no relaunch-on-fire, so the port
-    /// BLOCKS while any job is armed. An unwired jobs probe passes. The
-    /// kernel-side work alone decides passivation: releasing the kernel
-    /// neither kills nor resurrects an orphaned shell, so the durable term
-    /// must not pin a resident kernel. A durable-held continuation keeps the
-    /// worker (and the shell's exit watch) resident through other gates: a
-    /// goal's armed background-skip wake is an Active cron (the
-    /// registered-jobs gate below), and an owed autonomous continuation
-    /// blocks the worker passivation. An orphan shell that holds nothing
-    /// pins neither the kernel nor the worker.
+    /// passivation share them): no unsettled RLM work, no live background work — a
+    /// `bash()` handle in the kernel-manager registry (a snapshot cannot resurrect a
+    /// live process) or a detached cell awaiting its terminal admission — no
+    /// active-or-paused scheduled job (crons AND armed heartbeats). Deliberate
+    /// divergence: no relaunch-on-fire, so the port BLOCKS while any job is armed.
+    /// An unwired jobs probe passes.
     pub(crate) async fn settled_passivation_gates_pass(&self) -> bool {
-        if self.has_unsettled_rlm_work().await || self.has_live_background_kernel_work() {
+        if self.has_unsettled_rlm_work().await || self.background_work_count() > 0 {
             return false;
         }
         let probe = self
@@ -418,17 +317,14 @@ impl AgentSessionEngine {
                 return GoalBoundary::End;
             }
             // The quiescence gate: the continuation waits (not consumed)
-            // until the descendants settle or the background kernel work
-            // finishes. The deferral holds on the aggregate work probe (a
-            // detached cell's terminal notice is the guaranteed retry);
-            // only a live background bash() handle arms the fallback wake —
-            // its marker turn and its [bash-done] promise are
-            // shell-specific. The durable term keeps the goal-gate hold:
-            // a shell that outlived its kernel still defers the mint and
-            // arms behind its exit watch.
-            if self.has_unsettled_rlm_work().await || self.has_live_background_work() {
+            // until the descendants settle or the background work finishes.
+            // Live background work also arms the fallback wake (once per
+            // deferral): its completion notice is the normal retry, and work
+            // that never completes gets one marker turn after one window.
+            let background_work = self.background_work_count() > 0;
+            if self.has_unsettled_rlm_work().await || background_work {
                 driver.mark_continuation_owed();
-                if self.has_live_background_bash_handles() {
+                if background_work {
                     drop(driver);
                     self.arm_background_skip_wake().await;
                 }
@@ -559,38 +455,6 @@ impl AgentSessionEngine {
     }
 }
 
-/// One durable shell's exit watch, parked on the operating system's exit
-/// notification (Linux pidfd, macOS kqueue) with no timer: the exit releases
-/// the shell (a zombie still probes live until it is reaped) and retries both
-/// owed continuations, like the kernel registry's settle callback. A watch
-/// that cannot register releases the shell at once: a hold with no wake
-/// would stall the loop until outside input.
-async fn watch_durable_shell_exit(
-    engine: std::sync::Weak<AgentSessionEngine>,
-    key: (i32, Option<String>),
-) {
-    let exited = pa_core::platform::process::wait_for_exit(key.0 as u32).await;
-    let Some(engine) = engine.upgrade() else {
-        return;
-    };
-    if let Err(error) = exited {
-        eprintln!(
-            "pa-daemon: background shell {}: exit watch unavailable ({error}); its journal record stops holding the continuations",
-            key.0
-        );
-    }
-    if let Some(holds) = engine
-        .durable_shell_exit_watches
-        .lock()
-        .expect("durable shell exit watches lock")
-        .get_mut(&key)
-    {
-        *holds = false;
-    }
-    engine.retry_owed_goal_continuation();
-    engine.retry_owed_autonomous_continuation();
-}
-
 /// The minted goal-context row as one admitted turn request: the
 /// continuation text drives the model turn, the durable row rides as
 /// the injected custom message.
@@ -615,14 +479,14 @@ mod tests {
     };
     use crate::engine::EngineEvent;
 
-    /// Inject the engine's aggregate background-work probe (a `1` probe
+    /// Inject the engine's background-work probe (a `1` probe
     /// = a detached cell awaiting its completion, or a live background
     /// `bash()` handle): the count the continuation gates read.
     fn set_background_work_probe(
         engine: &Arc<AgentSessionEngine>,
         probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
     ) {
-        engine.set_test_background_work_probe(probe);
+        engine.set_test_probes(Some(probe), None);
     }
 
     #[test]

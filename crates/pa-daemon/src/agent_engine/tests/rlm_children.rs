@@ -312,7 +312,6 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            orphan_journal_path: None,
         })
         .unwrap(),
     );
@@ -331,11 +330,9 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
     assert!(engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
-    // Live background kernel work blocks the passivation, and the release
-    // consumes the same gate: the probe never fires while it runs. The
-    // gates read the aggregate work probe (the bash-only count stays with
-    // the bash handle APIs).
-    engine.set_test_background_work_probe(std::sync::Arc::new(|| 1));
+    // Live background work blocks the passivation, and the release
+    // consumes the same gate: the probe never fires while it runs.
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 1)), None);
     assert!(!engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
@@ -343,7 +340,7 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .runtime
         .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
-    engine.set_test_background_work_probe(std::sync::Arc::new(|| 0));
+    engine.set_test_probes(Some(std::sync::Arc::new(|| 0)), None);
     *engine
         .registered_jobs_probe
         .lock()
@@ -382,46 +379,4 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .runtime
         .block_on(engine.release_settled_child_kernel());
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
-}
-
-/// The shared residency gates see DETACHED-only background work: with the
-/// bash-only probe empty, the aggregate (a backgrounded cell awaiting its
-/// terminal admission) keeps both the whole-worker passivation and the
-/// child kernel release blocked — a parked child keeps the detach promise.
-#[test]
-fn the_residency_gates_refuse_detached_only_work() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (engine, _dir) = faux_engine_with_settings(&serde_json::json!({ "responses": [] }), 1);
-    engine
-        .ensure_core_session(&engine.resolve_model().expect("faux model"))
-        .expect("session build");
-    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let probe_fired = std::sync::Arc::clone(&fired);
-    engine.set_test_probes(
-        None,
-        Some(std::sync::Arc::new(move || {
-            probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(std::future::ready(()))
-        })),
-    );
-    // The aggregate sees the detached cell (a pending detached completion).
-    engine.set_test_background_work_probe(std::sync::Arc::new(|| 1));
-    assert!(
-        !engine
-            .runtime
-            .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)),
-        "detached-only work keeps the whole-worker passivation blocked"
-    );
-    engine
-        .runtime
-        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
-            &*engine,
-        ));
-    assert_eq!(
-        fired.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "detached-only work keeps the kernel release blocked"
-    );
 }
