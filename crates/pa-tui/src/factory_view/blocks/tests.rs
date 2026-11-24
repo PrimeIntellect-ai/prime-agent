@@ -187,12 +187,8 @@ fn back_edge_guards_clear_forward_wires_on_their_departure_row() {
         None,
     );
     let text = plain(&diagram);
-    let departure = text
-        .lines()
-        .find(|row| row.contains(&format!(" {label} ")))
-        .unwrap_or_else(|| panic!("the full back-edge guard must survive its row:\n{text}"));
     assert!(
-        departure.contains(&format!(" {label} ")),
+        text.lines().any(|row| row.contains(&format!(" {label} "))),
         "a crossing replaced a guard character:\n{text}"
     );
 }
