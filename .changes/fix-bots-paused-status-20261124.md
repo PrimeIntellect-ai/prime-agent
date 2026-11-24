@@ -1,0 +1,1 @@
+- `rlm.list_subagents()` now shows a paused bot as `paused` instead of `completed`.
