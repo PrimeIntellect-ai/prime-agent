@@ -1226,17 +1226,9 @@ their files retired at the terminal persist already, so this is memory
 bookkeeping only; an evicted run answers ``unknown factory run`` exactly
 like a run of a previous boot (F-12's second half)."""
 
-PERSIST_MIN_INTERVAL = 1.0
-"""Seconds (on the executor's clock) between two registry snapshots of one
-run in the same run state: the ledger events between snapshots replay
-idempotently after a restart (a settle re-collects a child that stayed
-settled under the supervisor), so the bounded staleness trades a small
-replay for a write volume a thousand-state machine can afford. A run state
-change forces the next snapshot immediately."""
-
 ADMISSIONS_JOURNAL_SUFFIX = ".admissions.jsonl"
-"""A run's mutation journal: one ordered line per durable mutation the
-throttle window could otherwise lose — an entry's prepared instance batch
+"""A run's mutation journal: one ordered line per durable mutation made
+between two snapshots — an entry's prepared instance batch
 (``kind: "batch"``, one line when ``_prepare_entry`` binds a prompt per
 instance) and one admitted child (``kind: "admission"``, appended the
 moment the spawn handle lands). The rehydrate replays the lines the
@@ -1245,9 +1237,10 @@ durable at O(small) per line; a persist failure degrades durability
 loudly (a ``persist_failed`` ledger row), never the run itself."""
 
 TERMINAL_RUN_STATES = ("done", "failed", "stopped")
-"""The run states past which the durable registry retires a run's files:
-the registry keeps the run in memory for this boot, and a restart forgets
-it — the durable archive holds only runs a restart must continue."""
+"""The run states past which the durable registry retires a run's files once
+it owns no live child: the registry keeps the run in memory for this boot,
+and a restart forgets it — the durable archive holds only runs a restart
+must continue or stop."""
 
 RUN_LOST_PYTHON_CALL = (
     "the kernel restart lost this state's running python call "
@@ -2359,9 +2352,8 @@ class FactoryExecutor:
     ``rlm.spawn``, settlement via ``rlm.collect``, cancellation via
     ``rlm.delete_subagent``); this executor owns the run state in kernel
     memory, snapshotted to the session artifact dir
-    (``$RLM_SESSION_DIR/factory-runs/<run id>.json``, atomic writes,
-    forced on run state changes and settle evaluations, otherwise
-    throttled to once per ``PERSIST_MIN_INTERVAL`` in the same state) with
+    (``$RLM_SESSION_DIR/factory-runs/<run id>.json``, atomic writes at
+    the control loop's consistent points) with
     a mutation journal for the batches and admissions between snapshots,
     so a kernel restart loses only the control-loop tasks: the registry
     rehydrates on the next factory use and the runs continue. Every host
@@ -2407,11 +2399,8 @@ class FactoryExecutor:
         # disk must not wedge the loop with a ledger row per event, and a
         # writer that recovers clears its own mark.
         self._persist_failed: set[tuple[str, str]] = set()
-        # The throttle marks: run id -> (the run state the last snapshot
-        # persisted, when it persisted). A state change forces the next
-        # snapshot (the operator-visible truth never trails); the same
-        # state re-snapshots at most once per PERSIST_MIN_INTERVAL.
-        self._persist_marks: dict[str, tuple[str, float]] = {}
+        # Run id -> the run revision the last write persisted.
+        self._persist_marks: dict[str, int] = {}
         # Run ids the unscoped graph's per-run guard already reported this
         # boot (round-9 probe R9-03): the TUI polls every 2 seconds, and
         # a line per poll filled the kernel's background buffer with one
@@ -2420,39 +2409,35 @@ class FactoryExecutor:
 
     # -- registry persistence -----------------------------------------------
 
-    def _persist_run(self, run: FactoryRun, *, force: bool = False) -> None:
-        """Snapshot one run to the session artifact dir (atomic write),
-        throttled per run state; terminal runs retire their files instead.
+    def _persist_run(self, run: FactoryRun) -> None:
+        """Snapshot one run to the session artifact dir (atomic write) when it
+        changed since the last write; a finished run retires its files instead.
 
-        A run state change (running, stopping, paused) forces the snapshot —
-        the operator-visible truth never trails — and the same state
-        re-snapshots at most once per PERSIST_MIN_INTERVAL: the mutations
-        between snapshots replay from the journal (prepared batches,
+        Callers persist only at consistent points: the control loop's
+        iteration boundary (before it waits on its children), a fired
+        transition, the loop's exit, and the run/stop/arm entry points. A
+        snapshot therefore never holds a half-applied settle; the mutations
+        made inside one iteration replay from the journal (prepared batches,
         admissions) or re-derive (a settle re-collects a child that stayed
-        settled under the supervisor). A terminal state (done, failed,
-        stopped) retires the snapshot and the journal: the registry keeps
-        the run in memory for this boot, and a restart forgets it — the
-        same shape the in-memory registry always had, so the durable
-        archive holds only live runs. Best-effort, exactly once per run and
-        writer when it fails: the run keeps running (the registry's memory
-        copy is the truth the loop reads); the durability loss is a ledger
-        row, never a wedge.
+        settled under the supervisor). A terminal run (done, failed,
+        stopped) that owns no live actor retires the snapshot and the
+        journal: the registry keeps the run in memory for this boot, and a
+        restart forgets it, so the durable archive holds only runs that can
+        still act. A terminal run with a live resident or in-flight child
+        keeps its snapshot, so ``stop`` still finds it after a restart.
+        Best-effort, exactly once per run and writer when it fails: the run
+        keeps running (the registry's memory copy is the truth the loop
+        reads); the durability loss is a ledger row, never a wedge.
         """
         directory = _runs_dir()
         if directory is None:
-            return  # no session artifact dir: kernel-memory-only registry
-        now = self._now_fn()
-        if run.state in TERMINAL_RUN_STATES:
+            return  # no session artifact dir, or a daemonless host: memory only
+        if self._persist_marks.get(run.run_id) == run.revision:
+            return  # nothing changed since the last write
+        self._persist_marks[run.run_id] = run.revision
+        if run.state in TERMINAL_RUN_STATES and not self._has_unresolved_actor(run):
             self._retire_run_files(run, directory)
             return
-        mark = self._persist_marks.get(run.run_id)
-        if (
-            not force
-            and mark is not None
-            and mark[0] == run.state
-            and now - mark[1] < PERSIST_MIN_INTERVAL
-        ):
-            return  # the same state snapshotted recently; the journal holds the deltas
         staging = directory / f".{run.run_id}.json.tmp"
         try:
             payload = _run_json(run, {"wall": time.time(), "mono": self._now_fn()})
@@ -2460,7 +2445,6 @@ class FactoryExecutor:
             with open(staging, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
             os.replace(staging, directory / f"{run.run_id}.json")
-            self._persist_marks[run.run_id] = (run.state, now)
             self._persist_failed.discard((run.run_id, "snapshot"))
             # A recovered write clears any stale persist-failed marker.
             try:
@@ -2576,8 +2560,6 @@ class FactoryExecutor:
                 os.unlink(path)
             except OSError:
                 pass  # already gone, or never written: nothing to retire
-
-        self._persist_marks.pop(run.run_id, None)
 
     def _retired_record(self, run_id: str) -> dict[str, Any] | None:
         """The tombstone ledger's record for a run id, or None.
@@ -3117,6 +3099,7 @@ class FactoryExecutor:
                 await self._resolve_admission_intents(run)
                 if run.state == "stopping":
                     await self._complete_stop(run, "stopped; rehydrated after a kernel restart")
+                    self._persist_run(run)
                     continue
                 for state_id in list(run.order):
                     state = run.states[state_id]
@@ -3131,6 +3114,7 @@ class FactoryExecutor:
                                 )
                 if run.state == "running":
                     self._start_loop(run)
+                self._persist_run(run)
             except Exception as error:  # noqa: BLE001 - the last shared loop
                 import sys
 
@@ -3238,6 +3222,7 @@ class FactoryExecutor:
             # A budget pause during the initial admission leaves the run
             # paused with no loop: resuming is the operator's decision.
             self._start_loop(run)
+        self._persist_run(run)
         return {
             "run_id": run.run_id,
             "spec_id": run.spec_id,
@@ -3328,7 +3313,9 @@ class FactoryExecutor:
         if run.state != "stopping":
             run.state = "stopping"
             self._touch(run)
+            self._persist_run(run)
         stopped = await self._complete_stop(run, "stopped")
+        self._persist_run(run)
         return {"run_id": run.run_id, "state": run.state, "cancelled": stopped}
 
     async def resume(self, run_id: str) -> dict[str, Any]:
@@ -4253,17 +4240,13 @@ class FactoryExecutor:
             del self._runs[run_id]
 
     def _touch(self, run: FactoryRun) -> None:
-        """Bump the run's watch revision, wake every registered watcher, and
-        snapshot the registry: every observable mutation — the events that
-        funnel here and the direct transitions (a stop's ``stopping`` mark,
-        a resume's ``running`` one) — is the last state a kernel restart
-        may recover, so the durable copy never trails the truth."""
+        """Bump the run's watch revision and wake every registered watcher.
+        The revision also tells ``_persist_run`` the run changed."""
         run.revision += 1
         for waiter in run.watchers:
             if not waiter.done():
                 waiter.set_result(run.revision)
         run.watchers = []
-        self._persist_run(run)
 
     async def _pause(
         self, run: FactoryRun, reason: str, kind: str, detail: str, *, node: str | None = None
@@ -4546,10 +4529,10 @@ class FactoryExecutor:
             fired = fired or outcome == "fired"
         if fired:
             # A fired transition consumed a settle and entered a target:
-            # both must be durable before the throttle window can lose them,
-            # or a restart replays the settle and re-fires — a max_entries
-            # guard would self-heal, a multi-entry target would double-work.
-            self._persist_run(run, force=True)
+            # both must be durable before the iteration's next await, or a
+            # restart replays the settle and re-fires — a max_entries guard
+            # would self-heal, a multi-entry target would double-work.
+            self._persist_run(run)
 
     # -- readiness, binding, admission --------------------------------------
 
@@ -6295,6 +6278,7 @@ class FactoryExecutor:
 
         try:
             await self._loop_body(run, generation)
+            self._persist_run(run)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -6321,6 +6305,7 @@ class FactoryExecutor:
                     await self._milestone(run, "failed", f"executor error: {exc}")
                 except Exception:
                     pass
+                self._persist_run(run)
 
     async def _loop_body(self, run: FactoryRun, generation: int) -> None:
         import asyncio
@@ -6333,6 +6318,9 @@ class FactoryExecutor:
         # so this task exits at its next check instead of continuing as a
         # second concurrent control loop.
         while self._loop_alive(run, generation):
+            # The iteration boundary is a consistent point: every settle the
+            # last iteration applied is complete before the loop waits again.
+            self._persist_run(run)
             in_flight = [
                 (run.states[state_id], entry, instance)
                 for state_id in run.order

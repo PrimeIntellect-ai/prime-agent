@@ -8085,6 +8085,69 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
         self.addCleanup(restore)
 
     @async_test
+    async def test_a_restart_after_one_join_source_settled_still_fires_the_join(self) -> None:
+        # The snapshot never holds a half-applied settle: a restart while
+        # the join waits on its other source continues the run.
+        self.store_machine(
+            {
+                "run": {"max_parallel": 4},
+                "states": [state("a", entry=True), state("b", entry=True), state("c")],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+            spec_id="join",
+        )
+        self.host.outcomes["a"] = {"status": "done", "answer": "a"}
+        self.host.outcomes["b"] = {"status": "running"}
+        first = self.host.gate("rlm.collect", 1)
+        second = self.host.gate("rlm.collect", 2)
+        result = await self.start("join")
+        run_id = result["run_id"]
+        await self.host.gate_entered("rlm.collect", 1).wait()
+        self.clock.advance(5.0)  # the loop sat in its collect for a while
+        first.set()
+        await self.host.gate_entered("rlm.collect", 2).wait()
+        run = self.executor._runs[run_id]
+        self.assertEqual(run.states["a"].entries[0].status, "done")
+        run.task.cancel()
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        self.host.outcomes["b"] = {"status": "done", "answer": "b"}
+        second.set()
+        await rlm_module.rlm.factory.status(run_id)
+        await restarted._runs[run_id].task
+        status = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.spawn_calls("c")), 1)
+
+    @async_test
+    async def test_a_done_run_with_a_running_resident_stays_stoppable_after_a_restart(self) -> None:
+        self.host.outcomes["watcher"] = {"status": "running"}
+        self.store_factory(
+            {
+                "nodes": [
+                    {"id": "t", "subagent": "worker"},
+                    {"id": "watcher", "subagent": "worker", "lifecycle": "resident"},
+                ],
+            },
+            spec_id="resident",
+        )
+        result = await self.start("resident")
+        run_id = result["run_id"]
+        await self.executor._runs[run_id].task
+        self.assertEqual(self.executor._runs[run_id].state, "done")
+
+        restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        restarted.rehydrate_registry()
+        factory_module._DEFAULT_EXECUTOR = restarted
+        stopped = await rlm_module.rlm.factory.stop(run_id)
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(stopped["cancelled"], ["watcher"])
+        self.assertEqual(self.host.deleted_targets(), ["child-2"])
+        self.assertFalse((factory_module._runs_dir() / f"{run_id}.json").exists(), "the stopped run retires its files")
+
+    @async_test
     async def test_a_snapshotted_run_rehydrates_and_the_childs_emit_still_routes(self) -> None:
         # Advance the clock per admission: the spawn's ledger touch lands
         # past the persist throttle, so the snapshot itself carries the
@@ -8435,7 +8498,7 @@ class FactoryKernelRestartTest(_ExecutorTestCase):
         self.addCleanup(process._kill)
         # The call is mid-flight and durable as running: the snapshot is
         # the state the restart recovers.
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         run.task.cancel()
         restarted = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
         restarted.rehydrate_registry()
@@ -11801,7 +11864,8 @@ class FactoryClockRebaseTest(_ExecutorTestCase):
         # host reboots (the new clock starts at 50).
         old_mono = self.executor._runs[result["run_id"]].revision  # noqa: F841 — read for clarity
         run.admission_backoff_until = 1_600.0
-        self.executor._persist_run(run, force=True)
+        run.revision += 1
+        self.executor._persist_run(run)
         # The reboot: a NEW executor with a fresh clock at 50 (the fake
         # clock's base is 1000; the wall walked ~0 since the snapshot, so
         # the deadline's real remaining is ~600s).
@@ -11992,7 +12056,7 @@ class FactoryBootRearmTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the child never admitted"
             await asyncio.sleep(0)
         old.task.cancel()
-        self.executor._persist_run(old, force=True)
+        self.executor._persist_run(old)
         # The new kernel: a FRESH executor (the module import shape) with
         # no factory call made — the boot arm alone re-arms the run.
         previous = factory_module._DEFAULT_EXECUTOR
@@ -12066,7 +12130,7 @@ class FactoryBootRearmTest(_ExecutorTestCase):
         # The kill-restart control's outcome on the graceful path: the
         # persisted run re-arms at the next kernel boot.
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         previous = factory_module._DEFAULT_EXECUTOR
         factory_module._DEFAULT_EXECUTOR = None
         factory_module._BOOT_ARM_TASK = None
@@ -12169,7 +12233,7 @@ class FactoryAdmissionIntentTest(_ExecutorTestCase):
         # retry already carries attempt 2, still holding the failed
         # attempt's child id.
         self.assertEqual(instance.attempt, 2)
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         retry_gate.set()
         deadline = time.monotonic() + 30
         while True:
@@ -12234,7 +12298,7 @@ class FactoryAdmissionIntentTest(_ExecutorTestCase):
         # orphan intent rides a fresh journal — the death-before-reply
         # shape: the snapshot predates the intent, the admission never
         # landed.
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         journal.write_text("\n".join(_json.dumps(row) for row in kept))
         # The fresh kernel: the resolver deletes the orphan before the
         # re-admission can collide with its name.
@@ -12585,7 +12649,7 @@ class FactoryJoinDeferredRestartTest(_ExecutorTestCase):
         # defer preceded the max_transitions pause in the same pass).
         self.assertEqual(first_state, "paused")
         self.assertTrue(run.deferred_join_rechecks, "the pause must have stashed the join holds")
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         snapshot = self.artifacts / "factory-runs" / f"{run_id}.json"
         self.assertTrue(snapshot.exists())
         # THE STASH RIDE: the snapshot carries the holds.
@@ -12791,7 +12855,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -12830,7 +12894,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -12875,7 +12939,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the child never admitted"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         marker = _runs_dir() / f"{run_id}.persist-failed"
         marker.write_text("the disk was full\n", encoding="utf-8")
         stderr = StringIO()
@@ -12909,7 +12973,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -12966,7 +13030,8 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
         blocker = runs_dir / f".{run_id}.json.tmp"
         blocker.mkdir()
         try:
-            self.executor._persist_run(run, force=True)
+            run.revision += 1
+            self.executor._persist_run(run)
             kinds = [e["kind"] for e in run.events]
             self.assertIn("persist_failed", kinds, "the failure left no ledger row")
             marker = runs_dir / f"{run_id}.persist-failed"
@@ -12974,7 +13039,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             # A recovered write clears the stale marker.
             shutil.rmtree(blocker)
             self.executor._persist_failed.discard((run_id, "snapshot"))
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             self.assertFalse((runs_dir / f"{run_id}.persist-failed").exists(), "the marker outlived its failure")
             self.assertTrue((runs_dir / f"{run_id}.json").exists(), "the recovered write did not land")
         finally:
@@ -13007,7 +13072,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         names = sorted(p.name for p in _runs_dir().glob("*.json"))
@@ -13069,7 +13134,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         # Corrupt the FIRST run's journal: a parsed line whose counters
@@ -13349,7 +13414,7 @@ class FactoryRound1PinsTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the run never paused"
             await asyncio.sleep(0)
         # The paused run persisted its snapshot (with the clock pair).
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         from rlm.factory import _runs_dir
 
         snapshot_path = _runs_dir() / f"{run_id}.json"
@@ -13448,7 +13513,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
                 assert time.monotonic() < deadline, "the child never admitted"
                 await asyncio.sleep(0)
             run.task.cancel()
-            self.executor._persist_run(run, force=True)
+            self.executor._persist_run(run)
             runs.append(result["run_id"])
         self.host.outcomes = {}
         return runs[0], runs[1], runs[2]
@@ -13485,7 +13550,8 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
         blocker.mkdir()
         for suffix in (".json", ".admissions.jsonl"):
             (self._runs_dir() / f"{run_id}{suffix}").unlink(missing_ok=True)
-        self.executor._persist_run(run, force=True)
+        run.revision += 1
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         # The gate now opens on the marker alone.
         self.assertTrue(_runs_dir_snapshots(), "the boot gate stayed closed on a lone marker")
@@ -13599,7 +13665,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the chain never ran"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         snapshot = self._runs_dir() / f"{chained}.json"
         raw = snapshot.read_bytes()
@@ -13931,7 +13997,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the child never admitted"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         # Seed the journal with a batch row whose content carries a lone
         # surrogate (one flipped bit in an emoji escape).
         journal = _runs_dir() / f"{run_id}{ADMISSIONS_JOURNAL_SUFFIX}"
@@ -14102,7 +14168,7 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
             assert time.monotonic() < deadline, "the chain never ran"
             await asyncio.sleep(0)
         run.task.cancel()
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         snapshot = self._runs_dir() / f"{chained}.json"
         raw = snapshot.read_bytes()
@@ -14191,7 +14257,8 @@ class FactoryRegistryCorruptionTest(_ExecutorTestCase):
         for suffix in (".json", ".admissions.jsonl"):
             path = self._runs_dir() / f"{run_id}{suffix}"
             path.unlink(missing_ok=True)
-        self.executor._persist_run(run, force=True)
+        run.revision += 1
+        self.executor._persist_run(run)
         self.host.outcomes = {}
         captured = StringIO()
         rebooted = self._fresh()
@@ -14582,7 +14649,7 @@ class FactoryPrintDurabilityTest(_ExecutorTestCase):
         run = self.executor._runs[run_id]
         await self.wait_until(lambda: run.state != "running")
         self.assertEqual(run.state, "paused")
-        self.executor._persist_run(run, force=True)
+        self.executor._persist_run(run)
         return run_id
 
     @async_test
