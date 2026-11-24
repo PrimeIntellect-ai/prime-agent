@@ -24,28 +24,15 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// The whole-worker idle passivation gate: the settled gates, no
-    /// autonomous continuation owed behind a durable shell, and an empty RLM
-    /// child registry (rationale on the trait method). The kernel release does
-    /// NOT carry the last two rules: releasing a kernel keeps the worker (its
-    /// registry and its wakes) resident.
+    /// The whole-worker idle passivation gate: the settled gates plus an empty RLM
+    /// child registry (rationale on the trait method). The kernel release does NOT
+    /// carry the registry rule: releasing a kernel keeps the worker (and its registry)
+    /// resident.
     fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             if !self.settled_passivation_gates_pass().await {
-                return false;
-            }
-            // An autonomous continuation owed behind a durable shell waits for
-            // that shell's exit watch, which only this worker runs: the stop
-            // would drop the wake. The owed flag alone can outlive its hold,
-            // so it never keeps the worker resident by itself.
-            if self
-                .autonomous_awaits_rlm_work
-                .load(std::sync::atomic::Ordering::SeqCst)
-                && self.autonomous.lock().await.enabled
-                && self.durable_background_shell_count() > 0
-            {
                 return false;
             }
             match self.children.clone() {
@@ -105,10 +92,9 @@ impl SessionEngine for AgentSessionEngine {
             let mut driver = handles.driver.lock().await;
             // The quiescence arm: unsettled work defers the mint (owed, not
             // consumed). A live background bash handle also arms the
-            // fallback wake: the shell's end is the normal retry (its
-            // [bash-done] notice, or the exit watch of a shell that outlived
-            // its kernel), but a shell that never completes must not stall
-            // the goal past one window.
+            // fallback wake: the shell's [bash-done] notice is the normal
+            // retry, but a shell that never completes must not stall the goal
+            // past one window.
             let live_background_bash = self.has_live_background_bash_handles();
             if self.has_unsettled_rlm_work().await || live_background_bash {
                 driver.mark_continuation_owed();
