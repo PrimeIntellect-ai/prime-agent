@@ -25,8 +25,9 @@ mod uv;
 mod version;
 
 use layout::home_dir;
-pub(crate) use layout::{expand_home, resolve_writable_kernel_venv_dir};
+pub(crate) use layout::{expand_home, home_kernel_venv_dir, resolve_writable_kernel_venv_dir};
 pub use layout::{kernel_venv_dir, kernel_venv_python};
+use layout::{remove_retired_venvs, retire_venv, retired_venvs};
 pub use probe::invalidate_runtime_probe_cache;
 #[cfg(test)]
 use probe::{installed_rlm_dir, lock_probe_memo, runtime_probe_key};
@@ -116,6 +117,98 @@ async fn run_async(command: &str, args: &[String], project: Option<&Path>) -> an
     .map_err(|e| anyhow!("bootstrap task join failed: {e}"))?
 }
 
+/// A sibling staging path for a rebuild: the new venv is built here and only
+/// then renamed into place, so the live path keeps serving the previous venv
+/// for the whole build.
+pub(crate) fn venv_candidate_path(venv: &Path) -> PathBuf {
+    let name = venv.file_name().unwrap_or_default().to_string_lossy();
+    venv.with_file_name(format!(
+        "{name}.candidate-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
+/// Whether a venv has the interpreter and configuration written by `uv venv`.
+fn venv_structure_complete(venv: &Path) -> bool {
+    kernel_venv_python(venv).exists() && venv.join("pyvenv.cfg").is_file()
+}
+
+/// Restore the newest complete retired copy when the live venv is missing or
+/// incomplete, for example after a process was killed during the two-rename
+/// swap. The caller holds the bootstrap lock, so no live rebuild owns a copy.
+pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
+    if venv_structure_complete(venv) {
+        return Ok(());
+    }
+    let Some((_, retired)) = retired_venvs(venv)
+        .into_iter()
+        .find(|(_, path)| venv_structure_complete(path))
+    else {
+        return Ok(());
+    };
+    let mut partial = None;
+    if venv.exists() {
+        let name = venv.file_name().unwrap_or_default().to_string_lossy();
+        let aside = venv.with_file_name(format!(
+            "{name}.partial-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        crate::platform::rename_onto(venv, &aside)
+            .with_context(|| format!("moving incomplete {} aside", venv.display()))?;
+        partial = Some(aside);
+    }
+    crate::platform::rename_onto(&retired, venv)
+        .with_context(|| format!("restoring {} from {}", venv.display(), retired.display()))?;
+    // The staging sweep keeps entries named after a live pid, this process's
+    // included, so the incomplete tree is removed here.
+    if let Some(partial) = partial {
+        let _ = std::fs::remove_dir_all(partial);
+    }
+    Ok(())
+}
+
+/// Move a fully built `candidate` onto the live `venv` path.
+///
+/// The old venv is renamed to `<venv>.stale-<unix-ms>` first. The live path
+/// is absent only between the two renames; a killed process can leave it so,
+/// and the next lock holder restores the retired copy. An incomplete candidate
+/// is rejected before the live venv is touched, and a failed candidate move
+/// restores the old venv at once. Once the new venv is in place, every retired
+/// copy is removed.
+pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Result<()> {
+    if !venv_structure_complete(candidate) {
+        anyhow::bail!("candidate venv {} is incomplete", candidate.display());
+    }
+    if !venv.exists() {
+        crate::platform::rename_onto(candidate, venv)
+            .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()))?;
+        remove_retired_venvs(venv);
+        return Ok(());
+    }
+    let retired = retire_venv(venv)?;
+    if let Err(error) = crate::platform::rename_onto(candidate, venv) {
+        // Put the working venv back before reporting the failure. A failed
+        // restore must not hide behind the first error: the caller has to know
+        // that the live path is gone and the old venv sits at the retired path.
+        if let Err(restore) = crate::platform::rename_onto(&retired, venv) {
+            return Err(anyhow::anyhow!(
+                "moving {} into {} failed ({error:#}), and restoring {} from {} failed too \
+                 ({restore:#})",
+                candidate.display(),
+                venv.display(),
+                venv.display(),
+                retired.display()
+            ));
+        }
+        return Err(error)
+            .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
+    }
+    remove_retired_venvs(venv);
+    Ok(())
+}
+
 pub(crate) async fn bootstrap_venv(
     venv: &Path,
     source_dir: &Path,
@@ -167,6 +260,7 @@ pub(crate) async fn bootstrap_venv(
             // Avoid querying Python executables found on the caller's PATH.
             "--managed-python".to_string(),
             "--seed".to_string(),
+            "--relocatable".to_string(),
         ],
         uv_command.project,
     )

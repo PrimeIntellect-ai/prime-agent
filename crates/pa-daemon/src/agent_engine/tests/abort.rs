@@ -500,7 +500,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
                         {"type": "text", "text": "Running the wedge cell."},
                         {"type": "toolCall", "name": "python_repl", "id": "toolu_wedge01",
                          "arguments": {"code":
-                            "import time\nopen('wedge-started', 'w').write('1')\ntime.sleep(300)\nopen('wedge-finished', 'w').write('1')\nprint('cell completed')"}}
+                            "open('wedge-started', 'w').write('1')\nwhile True:\n    pass"}}
                     ]},
                     {"content": [{"type": "text", "text": "The cell completed."}]}
                 ]

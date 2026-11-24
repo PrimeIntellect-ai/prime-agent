@@ -382,6 +382,12 @@ jobs:
           if-no-files-found: error
       - name: Run this shard's test subset
         if: ${{ !cancelled() && (success() || steps.lifecycle_checks.outcome == 'failure') }}
+        env:
+          # The runner's account venv is a throwaway: the bootstrap step above
+          # built it for these suites, which share it (skills sync into it
+          # lazily). Opt out of the account-venv refusal that .cargo/config.toml
+          # turns on for every cargo-launched process.
+          PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV: "0"
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
