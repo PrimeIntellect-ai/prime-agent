@@ -494,7 +494,10 @@ impl Supervisor {
                     );
                 }
             };
-            if let Some(message) = known.warnings.first() {
+            for warning in &known.warnings {
+                self.log_line(warning);
+            }
+            if let Some(message) = known.walk_errors.first() {
                 self.log_line(message);
                 return response_failure(Some(&command_id), &type_name, message, None);
             }
