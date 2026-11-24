@@ -205,7 +205,8 @@ mod tests {
     }
 
     /// Byte-chunked observation: HEADERS, DATA, then GOAWAY(1) split across arbitrary read
-    /// boundaries is still recognized.
+    /// boundaries is still recognized. A later GOAWAY-shaped frame on a stream (not stream 0)
+    /// is ignored.
     #[test]
     fn tracks_goaway_across_chunk_boundaries() {
         let observer = GoAwayObserver::default();
@@ -217,6 +218,11 @@ mod tests {
         goaway_payload.extend_from_slice(&1u32.to_be_bytes()); // last stream id
         goaway_payload.extend_from_slice(&1u32.to_be_bytes()); // error code
         wire.extend_from_slice(&frame(0x7, 0x0, 0, &goaway_payload));
+        let mut stream_scoped = Vec::new();
+        stream_scoped.extend_from_slice(&1u32.to_be_bytes());
+        stream_scoped.extend_from_slice(&2u32.to_be_bytes());
+        // A GOAWAY-shaped frame on the wrong stream.
+        wire.extend_from_slice(&frame(0x7, 0x0, 3, &stream_scoped));
         // Feed in odd-size chunks.
         let mut rest = wire.as_slice();
         while !rest.is_empty() {
@@ -225,20 +231,5 @@ mod tests {
             rest = &rest[take..];
         }
         assert_eq!(tracker.last_goaway_code, Some(1));
-    }
-
-    /// A connection-level GOAWAY (stream 0) only; a stream-scoped frame with the same type is
-    /// ignored (reserved-bit stripped on read).
-    #[test]
-    fn ignores_non_connection_frames() {
-        let observer = GoAwayObserver::default();
-        {
-            let mut tracker = observer.inner.lock().unwrap();
-            let wire = frame(0x7, 0x0, 3, &[0u8; 8]); // GOAWAY-shaped, wrong stream
-            tracker.observe(&wire);
-            assert_eq!(tracker.last_goaway_code, None);
-        }
-        let error = h2::Error::from(h2::Reason::PROTOCOL_ERROR);
-        assert_eq!(observer.classify_mid_body(&error), H2Failure::Protocol);
     }
 }

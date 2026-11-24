@@ -1210,6 +1210,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.05; printf detached",
                 "exitCode": 0,
+                "outputTail": "detached",
             },
         )
         reply_ok(self.repl, request)
@@ -1240,6 +1241,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
+                "outputTail": "degraded",
             },
         )
         reply_ok(self.repl, request)
@@ -1276,6 +1278,7 @@ class ReplTest(unittest.TestCase):
                 "pid": int(pid),
                 "command": "sleep 1.5; printf persisted",
                 "exitCode": 0,
+                "outputTail": "persisted",
             },
         )
         reply_ok(repl, request)
@@ -1322,30 +1325,88 @@ class ReplTest(unittest.TestCase):
         withdrawal = wait_for_host_request(self.repl, [])["data"]
         self.assertEqual(withdrawal, {"type": "bash.consumed", "pid": notice["data"]["pid"], "command": "printf early"})
 
-    def test_detached_read_between_turns_keeps_bash_completion(self):
+    def accepted_notice(self, rid: str, code: str) -> tuple[dict, list[dict]]:
+        """Run code that starts `handle`, accept its [bash-done] notice."""
+        events = self.repl.execute(rid, f"from rlm import bash\nimport asyncio, os\n{code}")
+        notice = wait_for_host_request(self.repl, events)
+        self.assertEqual(notice["data"]["type"], "bash.completed")
+        reply_ok(self.repl, notice)
+        return notice["data"], events
+
+    def test_read_in_a_later_cell_withdraws_the_notice(self):
+        reads = {
+            "output": "handle.output()",
+            "task-await": (
+                "async def read():\n    return (await handle).output\n"
+                "reader = asyncio.create_task(read())\nawait asyncio.sleep(0.05)\nreader.result()"
+            ),
+        }
+        for label, read_code in reads.items():
+            with self.subTest(label=label):
+                command = f"sleep 0.05; printf later-{label}"
+                notice, _ = self.accepted_notice(f"later-{label}", f"handle = bash({command!r})")
+                read = self.repl.execute(f"later-{label}-read", read_code)
+                self.assertIn(f"later-{label}", one(read, "result")["text"])
+                requests = [e["data"] for e in read if e.get("event") == "host_request"]
+                self.assertEqual(
+                    requests, [{"type": "bash.consumed", "pid": notice["pid"], "command": command}]
+                )
+
+    def test_poll_before_completion_keeps_the_notice_and_a_later_poll_withdraws_it(self):
+        command = "sleep 0.1; printf polled"
+        notice, events = self.accepted_notice("poll-early", f"handle = bash({command!r})\nhandle.poll()")
+        self.assertIsNone(one(events, "result"))
+        read = self.repl.execute("poll-late", "handle.poll().output")
+        self.assertEqual(one(read, "result")["text"], "'polled'")
+        requests = [e["data"] for e in read if e.get("event") == "host_request"]
+        self.assertEqual(requests, [{"type": "bash.consumed", "pid": notice["pid"], "command": command}])
+
+    def test_read_with_no_live_cell_keeps_the_notice(self):
         # A watcher reading the handle with no cell running reaches nobody: the
         # notice is the only wake-up an idle session gets, so it must survive.
-        code = "\n".join(
-            [
-                "from rlm import bash",
-                "import asyncio",
-                "handle = bash('sleep 0.2; printf detached-read')",
-                "async def watch():",
-                "    await handle._wait()",
-                "    globals()['seen'] = handle.output()",
-                "asyncio.create_task(watch())",
-                "handle.pid",
-            ]
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        gate = os.path.join(temp.name, "gate")
+        read = os.path.join(temp.name, "read")
+        command = "sleep 0.05; printf no-cell"
+        self.accepted_notice(
+            "no-cell",
+            "\n".join(
+                [
+                    f"handle = bash({command!r})",
+                    "async def watch():",
+                    f"    while not os.path.exists({gate!r}):",
+                    "        await asyncio.sleep(0.01)",
+                    "    globals()['seen'] = (await handle).output",
+                    f"    open({read!r}, 'w').close()",
+                    "asyncio.create_task(watch())",
+                ]
+            ),
         )
-        started = self.repl.execute("detached-read", code)
-        pid = int(one(started, "result")["text"])
-        request = wait_for_host_request(self.repl, started)
-        self.assertEqual(request["data"]["type"], "bash.completed")
-        self.assertEqual(request["data"]["pid"], pid)
-        reply_ok(self.repl, request)
-        probe = self.repl.execute("detached-read-probe", "await asyncio.sleep(0.05)\nseen")
+        open(gate, "w").close()
+        deadline = time.monotonic() + 5
+        while not os.path.exists(read) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        probe = self.repl.execute("no-cell-seen", "seen")
         self.assertIsNone(one(probe, "host_request"))
-        self.assertEqual(one(probe, "result")["text"], "'detached-read'")
+        self.assertEqual(one(probe, "result")["text"], "'no-cell'")
+
+    def test_unread_failed_command_still_notifies(self):
+        notice, _ = self.accepted_notice(
+            "failed", "handle = bash('sleep 0.05; exit 3')\nhandle.poll()"
+        )
+        self.assertEqual(
+            notice,
+            {
+                "type": "bash.completed",
+                "pid": notice["pid"],
+                "command": "sleep 0.05; exit 3",
+                "exitCode": 3,
+                "outputTail": "",
+            },
+        )
+        probe = self.repl.execute("failed-probe", "await asyncio.sleep(0.05)")
+        self.assertIsNone(one(probe, "host_request"))
 
     def test_result_read_in_creating_cell_suppresses_bash_completion(self):
         events = self.repl.execute(
@@ -1427,64 +1488,6 @@ class ReplTest(unittest.TestCase):
                 if request is not None:
                     reply_ok(self.repl, request)
                 self.assertIsNone(request)
-
-    def test_as_completed_outside_creating_cell_keeps_one_bash_completion(self):
-        snippets = {
-            "no-await": (
-                "iterator = asyncio.as_completed([handle])\n"
-                "next(iterator).close()\n"
-                "await asyncio.sleep(0.05)"
-            ),
-            "detached": (
-                "async def consume():\n"
-                "    for completed in asyncio.as_completed([handle]):\n"
-                "        await completed\n"
-                "consumer = asyncio.create_task(consume())\n"
-                "await asyncio.sleep(0.05)"
-            ),
-        }
-        for label, snippet in snippets.items():
-            with self.subTest(label=label):
-                command = f"printf {label}"
-                events = self.repl.execute(
-                    f"as-completed-{label}",
-                    f"from rlm import bash\nimport asyncio\nhandle = bash({command!r})\n{snippet}",
-                )
-                events += self.repl.execute(
-                    f"as-completed-{label}-probe", "await asyncio.sleep(0.05)"
-                )
-                requests = [event for event in events if event.get("event") == "host_request"]
-                for request in requests:
-                    reply_ok(self.repl, request)
-                self.assertEqual(len(requests), 1)
-                self.assertEqual(requests[0]["data"]["type"], "bash.completed")
-                self.assertEqual(requests[0]["data"]["command"], command)
-                self.assertFalse(any(event.get("event") == "error" for event in events))
-
-    def test_background_task_await_does_not_suppress_bash_completion(self):
-        code = "\n".join(
-            [
-                "from rlm import bash",
-                "import asyncio",
-                "task_handle = bash('sleep 0.05; printf background-waiter')",
-                "async def consume():",
-                "    globals()['task_result'] = await task_handle",
-                "waiter = asyncio.create_task(consume())",
-                "bookkeeping = asyncio.get_running_loop().create_future()",
-                "def callback_for(marker):",
-                "    return lambda _: marker.cancelled()",
-                "waiter.add_done_callback(callback_for(bookkeeping))",
-                "asyncio.get_running_loop().call_later(0.02, bookkeeping.set_result, None)",
-                "await bookkeeping",
-                "task_handle.pid",
-            ]
-        )
-        started = self.repl.execute("bash-task-waiter", code)
-        pid = int(one(started, "result")["text"])
-        request = wait_for_host_request(self.repl, started)
-        self.assertEqual(request["data"]["type"], "bash.completed")
-        self.assertEqual(request["data"]["pid"], pid)
-        reply_ok(self.repl, request)
 
     def test_bash_activity_and_notice_wait_for_group_reap(self):
         mime = "application/vnd.prime-agent.bash-activity+json"
@@ -3300,6 +3303,78 @@ class OwnerExitWaitTest(unittest.TestCase):
         ):
             self.repl_module._wait_owner_posix(self.owner.pid, os.getppid())
         sleep.assert_called_once()
+
+
+class InheritedSigintMaskTest(unittest.TestCase):
+    """The kernel owns its SIGINT mask: a host that blocks SIGINT on the
+    spawning thread (tokio-style signal handling) leaks that mask through
+    fork+exec, and the kernel must unblock it at startup, or no user
+    interrupt can ever land in a stuck cell."""
+
+    def test_an_interrupt_lands_even_when_the_host_blocked_sigint(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masks required")
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            repl = ReplProcess()
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        self.addCleanup(repl.close)
+        repl.ready()
+        repl.send({"type": "execute", "id": "stuck", "code": "print('spinning', flush=True)\nn = 0\nwhile True:\n    n += 1"})
+        # Interrupt once the cell is observably running, not after a fixed sleep.
+        events = []
+        while not any(event.get("event") == "stdout" for event in events):
+            events.append(repl.read_event())
+        repl.send({"type": "interrupt", "id": "stuck"})
+        events.extend(repl.until_done("stuck"))
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+
+class ProtocolFrameAtomicityTest(unittest.TestCase):
+    """An interrupt raised by the handler must not tear a protocol frame: the
+    write blocks SIGINT on the main thread, so the signal lands after the last
+    byte instead of splitting the frame the host is parsing."""
+
+    def test_interrupt_during_a_display_write_keeps_the_frame_whole(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        cell = "\n".join(
+            [
+                "import os",
+                "import rlm.repl as repl_module",
+                "real_write = repl_module.os.write",
+                "armed = []",
+                "def write(fd, data):",
+                "    if fd == repl_module._protocol_fd and len(data) > 4096 and not armed:",
+                "        armed.append(True)",
+                "        sent = real_write(fd, bytes(data[:4096]))",
+                # The request-interrupt path: mark the rid, then SIGINT the
+                # main thread while the frame is only partly on the wire.
+                "        repl_module._request_interrupt(repl_module._active['rid'])",
+                "        return sent",
+                "    return real_write(fd, data)",
+                "repl_module.os.write = write",
+                "try:",
+                "    repl_module.emit({'text/plain': 'x' * 200000})",
+                "finally:",
+                "    repl_module.os.write = real_write",
+            ]
+        )
+        repl.send({"type": "execute", "id": "tear", "code": cell})
+        events = repl.until_done("tear")
+        display = one(events, "display")
+        self.assertIsNotNone(display, f"events: {events}")
+        self.assertEqual(len(display["data"]["text/plain"]), 200000)
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
 
 
 if __name__ == "__main__":

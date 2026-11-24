@@ -1,5 +1,5 @@
 //! The composition root's MCP auth flows behind the TUI's
-//! `/mcp login <name>` and `/mcp logout <name>` plus the `/mcp` view's
+//! `/mcp` view's connect flows plus its
 //! api-key credential flow (`key <name>`): resolve the server through
 //! the settings + builtin catalog, run the pa-core OAuth login against
 //! the inline auth panel (the authorization URL block and the paste
@@ -204,22 +204,6 @@ impl TerminalMcpAuth {
             "Saved API key for {label}. Its skill activates in new sessions (/new)."
         ))
     }
-
-    fn logout_inner(&self, server: &str) -> Result<String> {
-        let provider = format!("mcp:{server}");
-        let mut auth = AuthStorage::create(&self.agent_dir);
-        // A missing credential is a no-op notice, not an error.
-        if auth.get_all().get(&provider).is_none() {
-            return Ok(format!("{server} is not connected."));
-        }
-        auth.logout(&provider);
-        if let Some(error) = auth.drain_errors().pop() {
-            return Err(anyhow!(error)).context("could not remove the stored credential");
-        }
-        Ok(format!(
-            "Disconnected {server}. Its skill deactivates in new sessions (/new)."
-        ))
-    }
 }
 
 impl ClientAuthCommands for TerminalMcpAuth {
@@ -236,11 +220,6 @@ impl ClientAuthCommands for TerminalMcpAuth {
     fn api_key(&self, credential: &str, panel: pa_tui::auth_panel::AuthPanelHandle) -> AuthFuture {
         let (auth, credential) = (self.clone(), credential.to_string());
         Box::pin(async move { auth.api_key_inner(&credential, panel).await })
-    }
-
-    fn logout(&self, server: &str) -> AuthFuture {
-        let (auth, server) = (self.clone(), server.to_string());
-        Box::pin(async move { auth.logout_inner(&server) })
     }
 }
 
@@ -490,47 +469,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Unknown MCP integration: nope");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn logout_removes_the_credential_with_ts_wording() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let agent_dir = dir.path().join("agent");
-        std::fs::create_dir_all(&agent_dir)?;
-        let mut auth = AuthStorage::create(&agent_dir);
-        auth.set(
-            "mcp:linear",
-            pa_core::auth::AuthCredential::Oauth {
-                access: "linear-access".to_string(),
-                refresh: None,
-                expires: i64::MAX,
-                account_id: None,
-                endpoint: Some("https://mcp.linear.app/mcp".to_string()),
-                token_endpoint: None,
-                client_id: None,
-                resource: None,
-                issuer: None,
-                audience_mode: None,
-                enterprise_url: None,
-            },
-        );
-
-        let hook = TerminalMcpAuth::new(dir.path().to_path_buf(), agent_dir.clone());
-        let status = hook.logout_inner("linear")?;
-        assert_eq!(
-            status,
-            "Disconnected linear. Its skill deactivates in new sessions (/new)."
-        );
-        let stored: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(agent_dir.join("auth.json")).expect("auth.json"),
-        )?;
-        assert!(
-            stored.get("mcp:linear").is_none(),
-            "the credential was removed"
-        );
-        let status = hook.logout_inner("linear")?;
-        assert_eq!(status, "linear is not connected.");
         Ok(())
     }
 

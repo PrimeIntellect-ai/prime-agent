@@ -28,12 +28,12 @@
 #
 # THE PR SMOKE MODEL (the touched-crate path filter): the PR wave narrows
 # the TEST phase to touched crates and their reverse dependents' units
-# (the `changes` job maps the PR's changed files to crates; any path
-# outside crates/<pkg>/** fails safe
-# to the full selection — CI/scripts/vendor/runtime changes affect the
-# whole suite, and docs-only waste is cheaper than a silent hole). The
-# stable crc32 shard assignment is untouched — only the unit selection
-# narrows — and the push wave keeps running the full union, so main is the
+# (the `changes` job maps the PR's changed files to crates; `.changes/` and
+# `docs/` paths are skipped, and any other path outside crates/<pkg>/** fails
+# safe to the full selection — CI/scripts/vendor/runtime changes affect the
+# whole suite, and a PR with no crate path runs the full selection). The
+# shard assignment is untouched — only the unit selection narrows — and the
+# push wave keeps running the full union, so main is the
 # authority: the PR proves the touched crates' runtime behavior fast, the
 # merge proves the whole workspace. fmt + check/clippy stay full-scope on
 # PRs (the compile authority); reverse-dep selection also runs tests of
@@ -45,10 +45,10 @@
 # The test phase is sharded: `cargo test --workspace` ran every test binary
 # serially in one job (~13 minutes; the per-PR wall-clock floor). It is now
 # the union of SHARD_COUNT parallel shard jobs: scripts/ci_test_shard.py enumerates
-# the workspace's test binaries via `cargo metadata --no-deps` and each shard
-# runs the units whose stable crc32 hash lands in its slice — every binary
-# lands in exactly one shard on every run (never rebalanced mid-suite), so
-# flake attribution stays put when tests are added or renamed. The union
+# the workspace's test binaries via `cargo metadata --no-deps` and assigns
+# them by the durations recorded in scripts/ci_test_shard_durations.json
+# (longest first onto the least-loaded shard) — every binary lands in exactly
+# one shard, and adding or re-recording units can move others. The union
 # covers exactly what the serial `cargo test --workspace` built and ran:
 # lib/bin/doc unittests, every tests/ integration target, the
 # example/bench compile targets (compile parity, `--no-run`), and the
@@ -102,20 +102,15 @@ env:
   # A partial bump cannot pass silently: too few legs leaves units
   # unassigned and the summary audit goes red; too many leaves dead 0-unit
   # legs visible in the summary report (the partition that ran is still
-  # audited complete - waste, never a coverage hole).
-  # THE ATTRIBUTION RULE (the conductor's 2026-09-29 ruling, 4 -> 8): bump
-  # only in powers of two — crc32 % 8 is a bit-refinement of crc32 % 4, so
-  # an 8-way shard s contains only units whose 4-way home was
-  # ((s-1) % 4) + 1; the flake history stays interpretable and every old
-  # manifest stays derivable (measured at the flip: 0/186 units left
-  # their 4-way parent).
+  # audited complete - waste, never a coverage hole). Any count works: the
+  # duration-balanced assignment is computed for the given --total.
   SHARD_COUNT: "8"
 
 jobs:
   # The touched-crate path filter (the PR smoke's selection). Push and queue
   # runs use the full selection; PR runs select crates plus reverse deps,
-  # skipping the guaranteed-metadata paths (.changes/ fragments - no test
-  # unit reads them) and failing safe to the full selection on any other
+  # skipping the guaranteed-metadata paths (.changes/ fragments and docs/ -
+  # no test unit reads them) and failing safe to the full selection on any other
   # non-crate path. The output feeds test shards' --crates; empty means
   # "the full union".
   changes:
@@ -150,9 +145,9 @@ jobs:
           # under-map a large PR, and its field names differ from the REST
           # rows (`path` vs `filename`). The mapping is fail-safe by
           # construction (scripts/ci_pr_crates.py + its battery): a crate
-          # path narrows to its wave; `.changes/` fragments are skipped
-          # (no test unit reads them, and a fragment-only PR keeps the
-          # FULL selection); any OTHER non-crate path, a rename's removed
+          # path narrows to its wave; `.changes/` fragments and `docs/`
+          # are skipped (no test unit reads them, and a PR with only those
+          # keeps the FULL selection); any OTHER non-crate path, a rename's removed
           # side, an empty column, or the API's 3000-file ceiling means
           # the FULL selection runs.
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
@@ -271,7 +266,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # The test suite, sharded per the SHARD_COUNT knob above: each shard runs
-  # the test binaries whose stable crc32 hash lands in its slice
+  # the test binaries the duration-balanced assignment gives it
   # (scripts/ci_test_shard.py); fmt and clippy run above, a shard job runs
   # ONLY its test subset. The union of the shards is exactly the old serial
   # `cargo test --workspace`.
@@ -387,6 +382,12 @@ jobs:
           if-no-files-found: error
       - name: Run this shard's test subset
         if: ${{ !cancelled() && (success() || steps.lifecycle_checks.outcome == 'failure') }}
+        env:
+          # The runner's account venv is a throwaway: the bootstrap step above
+          # built it for these suites, which share it (skills sync into it
+          # lazily). Opt out of the account-venv refusal that .cargo/config.toml
+          # turns on for every cargo-launched process.
+          PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV: "0"
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json"
       - name: Upload the shard manifest (always — the summary audits it)

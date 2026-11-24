@@ -17,7 +17,15 @@ static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// The HTTP/1.1 client every provider shares, pinned with `http1_only()` so that enabling the
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
-fn client() -> &'static reqwest::Client {
+/// Caller-owned transports outside the providers (pa-core's decision path) ride it too, reusing
+/// one pool and one TLS handshake instead of paying a `ClientBuilder::build`'s trust-store reload
+/// per call.
+///
+/// # Panics
+///
+/// Never: the builder sets only transport/pool options, and its certificate
+/// roots were already filtered on load.
+pub fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .tls_backend_preconfigured(crate::utils_inner::tls::tls_config(&[b"http/1.1"]))
@@ -389,49 +397,32 @@ mod tests {
     }
 
     /// A multi-byte character split across two body chunks decodes once, whole: the first chunk
-    /// ends inside 你, and the server sends the rest only after that chunk was read.
+    /// ends inside 你, and the server sends the rest only after that chunk was read. A body that
+    /// ends inside a multi-byte character yields the valid text plus exactly one U+FFFD.
     #[tokio::test]
     async fn next_text_rejoins_a_multi_byte_character_split_across_body_chunks() {
-        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel();
-        let addr = serve_split_body(b"hi \xE4".to_vec(), b"\xBD\xA0!".to_vec(), hold_rx).await;
-        let mut response = send(RequestOptions::new(
-            reqwest::Method::GET,
-            format!("http://{addr}/"),
-        ))
-        .await
-        .unwrap();
-        let mut text = String::new();
-        if let Some(chunk) = response.next_text().await.unwrap() {
-            text.push_str(&chunk);
-            let _ = hold_tx.send(());
+        for (first, rest, expected) in [
+            (&b"hi \xE4"[..], &b"\xBD\xA0!"[..], "hi 你!"),
+            (&b"cut \xE4"[..], &b"\xBD"[..], "cut \u{FFFD}"),
+        ] {
+            let (hold_tx, hold_rx) = tokio::sync::oneshot::channel();
+            let addr = serve_split_body(first.to_vec(), rest.to_vec(), hold_rx).await;
+            let mut response = send(RequestOptions::new(
+                reqwest::Method::GET,
+                format!("http://{addr}/"),
+            ))
+            .await
+            .unwrap();
+            let mut text = String::new();
+            if let Some(chunk) = response.next_text().await.unwrap() {
+                text.push_str(&chunk);
+                let _ = hold_tx.send(());
+            }
+            while let Some(chunk) = response.next_text().await.unwrap() {
+                text.push_str(&chunk);
+            }
+            assert_eq!(text, expected);
         }
-        while let Some(chunk) = response.next_text().await.unwrap() {
-            text.push_str(&chunk);
-        }
-        assert_eq!(text, "hi 你!");
-    }
-
-    /// A body that ends inside a multi-byte character yields the valid text plus exactly one
-    /// U+FFFD at end of stream.
-    #[tokio::test]
-    async fn next_text_ends_a_torn_body_with_one_replacement_character() {
-        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel();
-        let addr = serve_split_body(b"cut \xE4".to_vec(), b"\xBD".to_vec(), hold_rx).await;
-        let mut response = send(RequestOptions::new(
-            reqwest::Method::GET,
-            format!("http://{addr}/"),
-        ))
-        .await
-        .unwrap();
-        let mut text = String::new();
-        if let Some(chunk) = response.next_text().await.unwrap() {
-            text.push_str(&chunk);
-            let _ = hold_tx.send(());
-        }
-        while let Some(chunk) = response.next_text().await.unwrap() {
-            text.push_str(&chunk);
-        }
-        assert_eq!(text, "cut \u{FFFD}");
     }
 
     /// Each shared client offers exactly its own ALPN protocols: reqwest uses the preconfigured

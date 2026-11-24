@@ -144,8 +144,12 @@ where
         return Err(aborted_error());
     }
     tokio::select! {
-        value = operation => Ok(value),
+        // A cancellation the caller requested wins over a result that became
+        // ready in the same poll: the abort branch is polled first, and the
+        // result branch re-checks the signal when it consumes the result.
+        biased;
         () = signal.aborted() => Err(aborted_error()),
+        value = operation => throw_if_aborted(signal).map(|()| value),
     }
 }
 
@@ -188,13 +192,18 @@ mod tests {
                 true
             }
         });
+        assert!(throw_if_aborted(&signal).is_ok());
         controller.abort();
         assert!(signal.is_aborted());
+        assert!(throw_if_aborted(&signal).is_err());
         assert!(observer.await.unwrap());
     }
 
     #[tokio::test]
-    async fn race_with_abort_wins_on_abort() {
+    async fn race_with_abort_resolves_unless_aborted() {
+        let value = race_with_abort(async { 7 }, &AbortSignal::never()).await;
+        assert_eq!(value.unwrap(), 7);
+
         let controller = AbortController::new();
         let signal = controller.signal();
         let aborter = {
@@ -212,16 +221,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn race_with_abort_resolves_operation() {
-        let signal = AbortSignal::never();
-        let value = race_with_abort(async { 7 }, &signal).await.unwrap();
-        assert_eq!(value, 7);
-    }
-
-    #[tokio::test]
-    async fn pre_aborted_signal_short_circuits() {
+    async fn a_requested_abort_wins_over_a_result_ready_in_the_same_poll() {
+        // The operation requests the abort in the poll that makes its result,
+        // so the abort branch has not seen it. Only the re-check in the result
+        // branch reports cancelled, and poll order cannot change that, so one
+        // run is exact.
         let controller = AbortController::new();
-        controller.abort();
-        assert!(throw_if_aborted(&controller.signal()).is_err());
+        let signal = controller.signal();
+        let result = race_with_abort(
+            async {
+                controller.abort();
+                7
+            },
+            &signal,
+        )
+        .await;
+        assert!(is_abort_error(&result.unwrap_err()));
     }
 }

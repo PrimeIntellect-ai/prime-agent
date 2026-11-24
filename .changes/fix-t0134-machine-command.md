@@ -1,0 +1,1 @@
+- `prime-agent machine <...>` now exits at once with a pointer to the matching `prime-agent factory` command (`machine validate` points at `factory import`, which validates), instead of starting a silent agent turn on those words.

@@ -74,7 +74,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
         core,
         input_pauses: crate::session_input_pause::InputPauseTable::new(),
         prompt_admissions: crate::prompt_admission::WorkerAdmissions::new(),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         idle_notify: Arc::new(Notify::new()),
         events,
         engine,
@@ -89,6 +89,8 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
             worker_token: "token".to_string(),
         },
         herdr: std::sync::Arc::new(std::sync::Mutex::new(crate::herdr::HerdrReporter::default())),
+        inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
+        inbox_engine: None,
     }
 }
 
