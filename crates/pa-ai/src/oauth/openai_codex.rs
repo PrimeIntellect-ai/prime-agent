@@ -80,18 +80,24 @@ pub async fn login_openai_codex(
     let callback = CodexCallbackServer::start(&state).await;
     ui.on_auth(&url, AUTH_INSTRUCTIONS);
 
-    let code = wait_for_code(&callback, ui, &state).await?;
-    if ui.is_cancelled() {
-        return Err(LOGIN_CANCELLED.to_string());
+    let result = async {
+        let code = wait_for_code(&callback, ui, &state).await?;
+        if ui.is_cancelled() {
+            return Err(LOGIN_CANCELLED.to_string());
+        }
+        let token = exchange_authorization_code(http, &code, &verifier).await?;
+        let account_id = account_id_of(&token.access)?;
+        Ok(OAuthCredentials {
+            access: token.access,
+            refresh: token.refresh,
+            expires: token.expires,
+            account_id,
+        })
     }
-    let token = exchange_authorization_code(http, &code, &verifier).await?;
-    let account_id = account_id_of(&token.access)?;
-    Ok(OAuthCredentials {
-        access: token.access,
-        refresh: token.refresh,
-        expires: token.expires,
-        account_id,
-    })
+    .await;
+    // The TS flow's `finally { server.close() }`: every return leaves the registered port free.
+    callback.shutdown().await;
+    result
 }
 
 /// Refresh an expired credential.
@@ -514,8 +520,6 @@ mod tests {
         prompt: ScriptedAnswer,
         cancelled: Arc<AtomicBool>,
         cancel_on_auth: bool,
-        /// Whether the flow's live callback server held the registered port at `onAuth`.
-        callback_live_at_auth: Mutex<Option<bool>>,
     }
 
     impl ScriptedUi {
@@ -526,7 +530,6 @@ mod tests {
                 prompt,
                 cancelled: Arc::new(AtomicBool::new(false)),
                 cancel_on_auth: false,
-                callback_live_at_auth: Mutex::new(None),
             }
         }
 
@@ -550,8 +553,6 @@ mod tests {
     impl CodexLoginUi for ScriptedUi {
         fn on_auth(&self, url: &str, _instructions: &str) {
             *self.auth_url.lock().unwrap() = Some(url.to_string());
-            *self.callback_live_at_auth.lock().unwrap() =
-                Some(stage_busy_registered_port().is_none());
             if self.cancel_on_auth {
                 self.cancelled.store(true, Ordering::Relaxed);
             }
@@ -687,11 +688,6 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_at_every_step() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // Skip when another process holds the registered port: every case
-        // must run against its own live callback server.
-        if stage_busy_registered_port().is_none() {
-            return;
-        }
         // Cancel at the paste, at the prompt after a code-less paste, and
         // between polls once the url lands: no step exchanges a code.
         let cases = [
@@ -708,17 +704,6 @@ mod tests {
             (Some(ScriptedAnswer::Pending), ScriptedAnswer::Pending, true),
         ];
         for (manual, prompt, cancel_on_auth) in cases {
-            // Each case starts on a free port. Dropping the last flow's server
-            // only aborts its accept task, so the port frees on a later runtime
-            // poll. Yield until it binds again.
-            let deadline = std::time::Instant::now() + Duration::from_secs(1);
-            while stage_busy_registered_port().is_none() {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the last flow never released the registered port"
-                );
-                tokio::task::yield_now().await;
-            }
             let http = token_http(&account_jwt(Some("acct-1")));
             let mut ui = ScriptedUi::new(manual, prompt);
             ui.cancel_on_auth = cancel_on_auth;
@@ -727,9 +712,29 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error, LOGIN_CANCELLED);
             assert!(http.seen_bodies(TOKEN_URL).is_empty());
-            // The port was free before the flow, so a held port is its live server.
-            assert_eq!(*ui.callback_live_at_auth.lock().unwrap(), Some(true));
         }
+    }
+
+    /// Regression: a cancelled login returns with its callback listener closed, so a retry right
+    /// after the cancel binds the registered port instead of falling back to the dead server.
+    #[tokio::test]
+    async fn a_retry_right_after_a_cancel_binds_the_registered_port() {
+        let _registered_port = REDIRECT_PORT.lock().await;
+        // Skip when another process holds the registered port.
+        if stage_busy_registered_port().is_none() {
+            return;
+        }
+        let http = token_http(&account_jwt(Some("acct-1")));
+        let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), ScriptedAnswer::Pending);
+        ui.cancel_on_auth = true;
+        let error = login_openai_codex(&http, &ui, DEFAULT_ORIGINATOR)
+            .await
+            .unwrap_err();
+        assert_eq!(error, LOGIN_CANCELLED);
+        assert!(
+            stage_busy_registered_port().is_some(),
+            "the cancelled login still holds the registered port"
+        );
     }
 
     #[tokio::test]

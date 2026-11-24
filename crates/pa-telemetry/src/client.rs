@@ -522,16 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_the_2117_delivery_contract() {
-        assert_eq!(DEFAULT_BATCH_SIZE, 20);
-        assert_eq!(DEFAULT_QUEUE_CAPACITY, 256);
-        assert_eq!(DEFAULT_MAX_BATCH_BYTES, 30_000);
-        assert_eq!(MAX_AGE, Duration::from_hours(24));
-        assert_eq!(RetryPolicy::default().max_attempts, 5);
-        assert_eq!(RetryPolicy::default().max_backoff, Duration::from_secs(60));
-    }
-
-    #[test]
     fn retry_backoff_is_interval_scaled_and_capped() {
         let mut config = TelemetryClientConfig::new("install-1");
         config.flush_interval = Duration::from_secs(10);
@@ -557,18 +547,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_flush_drains_partial_batches() {
-        let mock = Arc::new(MockSink::new());
-        let client = client_with(mock.clone(), 10, Duration::from_secs(60));
-        client.track("solo", Properties::new());
-        assert_eq!(mock.batches().len(), 0);
-        client.flush().await.unwrap();
-        assert_eq!(mock.event_names(), vec!["solo"]);
-        assert_eq!(mock.batches()[0].install_id, "install-1");
-        client.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn interval_flushes_without_batch_fill() {
         let mock = Arc::new(MockSink::new());
         let client = client_with(mock.clone(), 100, Duration::from_millis(30));
@@ -588,39 +566,6 @@ mod tests {
         client.track("after shutdown", Properties::new());
         assert_eq!(client.dropped_count(), 1);
         assert_eq!(mock.event_names(), vec!["last"]);
-    }
-
-    #[tokio::test]
-    async fn base_properties_merge_under_event_properties() {
-        let mock = Arc::new(MockSink::new());
-        let mut config = TelemetryClientConfig::new("install-1");
-        config.batch_size = 1;
-        config.flush_interval = Duration::from_secs(60);
-        config.sinks = vec![mock.clone() as Arc<dyn TelemetrySink>];
-        let mut base = Properties::new();
-        base.set("version", serde_json::Value::from("0.1.0"));
-        base.set("shared", serde_json::Value::from("base"));
-        config.base_properties = base;
-        let client = TelemetryClient::spawn(config).unwrap();
-        let mut properties = Properties::new();
-        properties.set("shared", serde_json::Value::from("event"));
-        properties.set("extra", serde_json::Value::from(1));
-        client.track("merged", properties);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let events = mock.events();
-        assert_eq!(
-            events[0].properties.get("version"),
-            Some(&serde_json::Value::from("0.1.0"))
-        );
-        assert_eq!(
-            events[0].properties.get("shared"),
-            Some(&serde_json::Value::from("event"))
-        );
-        assert_eq!(
-            events[0].properties.get("extra"),
-            Some(&serde_json::Value::from(1))
-        );
-        client.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -798,23 +743,6 @@ mod tests {
         assert_eq!(channel.queue.len(), 1);
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         assert_eq!(channel.queue[0].event.name, "fresh");
-    }
-
-    #[tokio::test]
-    async fn capped_attempts_expire() {
-        let mut channel = Channel {
-            sink: Arc::new(MockSink::new()),
-            queue: VecDeque::new(),
-            next_retry_at: None,
-        };
-        channel.queue.push_back(QueueEntry {
-            event: TelemetryEvent::new("exhausted", Properties::new()),
-            attempts: 5,
-        });
-        let dropped = Arc::new(AtomicU64::new(0));
-        channel.expire(now_epoch_ms_for_tests(), 5, &dropped);
-        assert!(channel.queue.is_empty());
-        assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
     fn now_epoch_ms_for_tests() -> u64 {

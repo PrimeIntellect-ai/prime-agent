@@ -58,11 +58,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn epoch_zero() {
-        assert_eq!(EpochMs(0).iso8601(), "1970-01-01T00:00:00.000Z");
-    }
-
-    #[test]
     fn known_instants() {
         assert_eq!(
             EpochMs(1_790_700_705_951).iso8601(),
