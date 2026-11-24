@@ -17,7 +17,7 @@ mod load;
 mod machine;
 pub mod types;
 
-pub use compile::{compile, compile_template};
+pub use compile::compile;
 pub use convert::{convert_spec, DirFile, MachineMeta};
 pub use duration::parse_duration_ms;
 pub use emit::Contract;

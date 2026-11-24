@@ -481,53 +481,26 @@ impl FactoryActivityRequest {
 /// The kernel host request that loads and compiles a machine directory.
 pub const FACTORY_COMPILE_REQUEST_TYPE: &str = "factory.compile";
 
-/// The kernel host request that loads a machine directory for a reader:
-/// its fields, its params, and its spec compiled as a template (no params
-/// bound), for the factory page's machine list and diagram.
-pub const FACTORY_DESCRIBE_REQUEST_TYPE: &str = "factory.describe";
-
-/// What a machine directory request compiles.
-#[derive(Clone, Copy)]
-enum Compiled {
-    /// With the start params bound: the spec a run executes.
-    ForRun,
-    /// With no params bound: the spec a reader inspects.
-    Template,
-}
-
-/// Register `factory.compile` and `factory.describe`: the kernel sends a
-/// machine directory's path (and, to compile for a run, the start params),
-/// and the one Rust loader (`pa-factory`) checks and compiles it, so the
-/// CLI, a running session, and the factory page accept exactly the same
-/// machines.
+/// Register `factory.compile`, the shared loader used by CLI and sessions.
 pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers) {
-    for (request_type, compiled) in [
-        (FACTORY_COMPILE_REQUEST_TYPE, Compiled::ForRun),
-        (FACTORY_DESCRIBE_REQUEST_TYPE, Compiled::Template),
-    ] {
-        handlers.register(
-            request_type,
-            host_handler(move |payload| {
-                Box::pin(async move {
-                    tokio::task::spawn_blocking(move || {
-                        compile_machine_dir(&payload.data, compiled)
-                    })
+    handlers.register(
+        FACTORY_COMPILE_REQUEST_TYPE,
+        host_handler(|payload| {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || compile_machine_dir(&payload.data))
                     .await
-                    .map_err(|error| anyhow!("{request_type} stopped: {error}"))?
-                })
-            }),
-        );
-    }
+                    .map_err(|error| anyhow!("factory.compile stopped: {error}"))?
+            })
+        }),
+    );
 }
 
-/// Load `data.path` and compile it; every problem is one line of the
-/// error.
-fn compile_machine_dir(data: &Value, compiled: Compiled) -> anyhow::Result<Value> {
+fn compile_machine_dir(data: &Value) -> anyhow::Result<Value> {
     let path = data
         .get("path")
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
-        .ok_or_else(|| anyhow!("a machine directory request requires a path"))?;
+        .ok_or_else(|| anyhow!("factory.compile requires a machine directory path"))?;
     let params = match data.get("params") {
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(params)) => params.clone(),
@@ -539,56 +512,14 @@ fn compile_machine_dir(data: &Value, compiled: Compiled) -> anyhow::Result<Value
         anyhow!("{}: {}", dir.display(), lines.join("; "))
     };
     let machine = pa_factory::load_machine_dir(&dir).map_err(joined)?;
-    let mut reply = json!({
+    let spec = pa_factory::compile(&machine, &params).map_err(joined)?;
+    Ok(json!({
         "name": machine.name,
         "version": machine.version,
         "description": machine.description,
         "author": machine.author,
-    });
-    match compiled {
-        Compiled::ForRun => {
-            reply["spec"] = pa_factory::compile(&machine, &params).map_err(joined)?;
-        }
-        Compiled::Template => {
-            reply["spec"] = pa_factory::compile_template(&machine).map_err(joined)?;
-            let declared: Vec<Value> = machine
-                .params
-                .iter()
-                .map(|param| {
-                    let mut row = json!({"name": param.name, "type": param.ty.to_string()});
-                    if let Some(default) = &param.default {
-                        row["default"] = default.clone();
-                    }
-                    if let Some(description) = &param.description {
-                        row["description"] = json!(description);
-                    }
-                    row
-                })
-                .collect();
-            reply["params"] = Value::Array(declared);
-            // Each state's files, every file's text once (states share a
-            // context file and python modules).
-            let state_files = machine.state_files();
-            let mut paths: Vec<&String> = state_files.iter().flat_map(|(_, files)| files).collect();
-            paths.sort();
-            paths.dedup();
-            let files: Vec<Value> = paths
-                .into_iter()
-                .filter_map(|path| {
-                    let text = std::fs::read_to_string(machine.dir.join(path)).ok()?;
-                    Some(json!({"path": path, "text": text}))
-                })
-                .collect();
-            reply["files"] = Value::Array(files);
-            reply["state_files"] = Value::Array(
-                state_files
-                    .into_iter()
-                    .map(|(state, paths)| json!({"state": state, "paths": paths}))
-                    .collect(),
-            );
-        }
-    }
-    Ok(reply)
+        "spec": spec,
+    }))
 }
 
 /// The kernel host request a parent uses to check a python state's

@@ -28,25 +28,6 @@ use crate::types::{self, check_value, record_names, Type};
 pub fn compile(machine: &Machine, given: &Map<String, Value>) -> Result<Value, Vec<Diagnostic>> {
     let mut problems = Vec::new();
     let params = bind_params(machine, given, &mut problems);
-    assemble(machine, Some(params), problems)
-}
-
-/// Compile `machine` as a template, with no params bound: the spec a
-/// reader inspects (the factory page's diagram), whose prompts keep their
-/// param placeholders. It is never run: the executor needs every required
-/// param.
-///
-/// # Errors
-/// Returns a python file whose absolute path cannot be resolved.
-pub fn compile_template(machine: &Machine) -> Result<Value, Vec<Diagnostic>> {
-    assemble(machine, None, Vec::new())
-}
-
-fn assemble(
-    machine: &Machine,
-    params: Option<Map<String, Value>>,
-    mut problems: Vec<Diagnostic>,
-) -> Result<Value, Vec<Diagnostic>> {
     let mut states = Vec::new();
     for state in &machine.states {
         match compile_state(machine, state) {
@@ -59,7 +40,7 @@ fn assemble(
     }
     let mut spec = Map::new();
     spec.insert("run".to_string(), compile_run(machine));
-    if let Some(params) = params.filter(|params| !params.is_empty()) {
+    if !params.is_empty() {
         spec.insert("params".to_string(), Value::Object(params));
     }
     spec.insert("states".to_string(), Value::Array(states));

@@ -1045,7 +1045,6 @@ __all__ = [
     "export_machine",
     "factory_enabled",
     "import_machine",
-    "library_graph",
     "list_machines",
     "machine_library_dirs",
     "parse_machine_file",
@@ -1058,7 +1057,6 @@ __all__ = [
     "FactoryEmitError",
     "emit_factory_outputs",
     "factory_inputs",
-    "spec_to_mermaid",
     "status_factory",
     "stop_factory",
     "topological_order",
@@ -1132,34 +1130,11 @@ FACTORY_FRAME_CAP = 262_144
 full 1024-state machine cap fits; a snapshot that cannot shrink under the
 cap fails loudly instead of being silently truncated."""
 
-ACTIVITY_ACTIONS = (
-    "graph",
-    "status",
-    "watch",
-    "run",
-    "stop",
-    "resume",
-    "library",
-    "peek",
-    "node",
-)
-"""The host bridge's actions over the factory surface, the
-``factory_activity`` frame's action vocabulary: one run's
-``graph``/``status``/``watch``/``stop``/``resume``, a ``run`` by spec id,
-the machine library's list/graph reads, and ``peek`` — the unscoped graph
-minus the rehydration re-arm, the read another session's display polls
-through (the kernel namespace is the same surface plus
+ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume", "peek")
+"""The host bridge's actions over one factory run, the ``factory_activity``
+frame's action vocabulary; ``peek`` is the all-session overview's
+non-arming unscoped read (the kernel namespace is the same surface plus
 ``graph``/``watch`` for agents)."""
-
-NODE_PROMPT_CAP = 65_536
-"""Byte cap on one ``node`` reply's realized prompt (the exact spawn text
-the child received), with ``promptTruncated`` set when it fires."""
-
-NODE_INPUTS_CAP = 16_384
-"""Byte cap on one ``node`` reply's serialized bound inputs."""
-
-NODE_OUTPUTS_CAP = 16_384
-"""Byte cap on one ``node`` reply's serialized settle outputs."""
 
 ACTIVITY_TIMEOUT_MS_CAP = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
 """Upper bound on one factory_activity frame's timeoutMs (the watch wait
@@ -3518,126 +3493,6 @@ class FactoryExecutor:
                 row["provisional_answer"] = provisional[:ANSWER_CAPTURE_CAP]
         return row
 
-    def _node_report(
-        self,
-        run_id: str,
-        state_id: str,
-        entry_at: int | None = None,
-        instance_at: int | None = None,
-    ) -> dict[str, Any]:
-        """One state's node document (the ``node`` lane's reply): the
-        state's live report (the instance list), the selected entry's
-        settle-output preview, and the selected instance's realized prompt,
-        inputs, and answer — capped and flagged, never silently truncated.
-        Stored settle outputs remain full. The default selection is the
-        latest entry and its latest instance, or no instance for an empty
-        entry, or neither for a state never entered; selectors pick any
-        other."""
-        run = self._require_run(run_id)
-        state = run.states.get(state_id)
-        if state is None:
-            raise ValueError(f"unknown state {state_id!r} in run {run_id!r}")
-        entries = state.entries
-        if not entries:
-            if entry_at is not None:
-                raise ValueError(
-                    f"unknown entry {entry_at!r} for state {state_id!r} in run {run_id!r}"
-                )
-            return {
-                "run_id": run.run_id,
-                "spec_id": run.spec_id,
-                "name": run.name,
-                "state": self._state_report(state, include_answer=False),
-                "entry": None,
-                "instance": None,
-            }
-        entry = (
-            next((row for row in entries if row.index == entry_at), None)
-            if entry_at is not None
-            else entries[-1]
-        )
-        if entry is None:
-            raise ValueError(
-                f"unknown entry {entry_at!r} for state {state_id!r} in run {run_id!r}"
-            )
-        instances = entry.instances
-        if instance_at is not None:
-            instance = next((row for row in instances if row.index == instance_at), None)
-            if instance is None:
-                raise ValueError(
-                    f"unknown instance {instance_at!r} for state {state_id!r} in run {run_id!r}"
-                )
-        else:
-            instance = instances[-1] if instances else None
-        prompt = (instance.prompt if instance is not None else None) or ""
-        prompt_truncated = len(prompt.encode("utf-8")) > NODE_PROMPT_CAP
-        if prompt_truncated:
-            prompt = prompt.encode("utf-8")[:NODE_PROMPT_CAP].decode(
-                "utf-8", errors="ignore"
-            )
-        inputs_text = None
-        inputs_truncated = False
-        if instance is not None and instance.inputs is not None:
-            inputs_text = json.dumps(instance.inputs, indent=2, default=str)
-            inputs_truncated = len(inputs_text.encode("utf-8")) > NODE_INPUTS_CAP
-            if inputs_truncated:
-                inputs_text = inputs_text.encode("utf-8")[:NODE_INPUTS_CAP].decode(
-                    "utf-8", errors="ignore"
-                )
-        answer = instance.answer if instance is not None else None
-        answer_truncated = bool(
-            answer and len(answer.encode("utf-8")) > ANSWER_BINDING_CAP
-        )
-        if answer_truncated and answer is not None:
-            answer = answer.encode("utf-8")[:ANSWER_BINDING_CAP].decode(
-                "utf-8", errors="ignore"
-            )
-        outputs_text = None
-        outputs_truncated = False
-        if entry.outputs is not None:
-            outputs_text = json.dumps(entry.outputs, indent=2, default=str)
-            outputs_truncated = len(outputs_text.encode("utf-8")) > NODE_OUTPUTS_CAP
-            if outputs_truncated:
-                outputs_text = outputs_text.encode("utf-8")[:NODE_OUTPUTS_CAP].decode(
-                    "utf-8", errors="ignore"
-                )
-        instance_report = None
-        if instance is not None:
-            instance_report = {
-                "index": instance.index,
-                "entry": entry.index,
-                "status": instance.status,
-                "attempt": instance.attempt,
-                "child": instance.child_id,
-                "child_name": instance.child_name,
-                "session_dir": instance.session_dir,
-                "duration_ms": instance.duration_ms,
-                "error": instance.error,
-                "prompt": prompt,
-                "prompt_truncated": prompt_truncated,
-                "inputs": inputs_text,
-                "inputs_truncated": inputs_truncated,
-                "answer": answer,
-                "answer_truncated": answer_truncated,
-                "provisional": instance.provisional,
-                "capture_failed": instance.capture_failed,
-            }
-        return {
-            "run_id": run.run_id,
-            "spec_id": run.spec_id,
-            "name": run.name,
-            "state": self._state_report(state, include_answer=False),
-            "entry": {
-                "index": entry.index,
-                "status": entry.status,
-                "outputs": outputs_text,
-                "outputs_truncated": outputs_truncated,
-                "output_errors": entry.output_errors,
-                "output_errors_truncated": False,
-            },
-            "instance": instance_report,
-        }
-
     def _usage_report(self, run: FactoryRun) -> dict[str, Any]:
         """The usage block ``status()`` returns; the graph snapshot reuses it."""
         return {
@@ -3970,76 +3825,6 @@ class FactoryExecutor:
             raise ValueError(
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
-        if action == "library":
-            # The library lane: the machine list (no target), or one
-            # machine's graph payload (``specId`` names it) — the same
-            # snapshot shape a stored spec's ``graph`` answers, plus the
-            # machine file's fields and the mermaid rendering. The machine
-            # resolves through the library's own contract (repo first,
-            # user second; broken machines name their errors), so the
-            # lane, run, and export never disagree about a name.
-            if spec_id is None:
-                machines, warnings = await library_listing()
-                return _wire_payload(
-                    {
-                        "machines": [
-                            {
-                                "name": entry["name"],
-                                "description": entry["description"],
-                                "source": entry["source"],
-                                "kind": entry["kind"],
-                            }
-                            for entry in machines
-                        ],
-                        "warnings": warnings,
-                    }
-                )
-            graph = await library_graph_any(spec_id)
-            canonical = canonicalize_factory_spec(graph["spec"])
-            snapshot = self._spec_snapshot(graph["name"], canonical, compact=True)
-            snapshot["mermaid"] = graph["mermaid"]
-            snapshot["description"] = graph["description"]
-            snapshot["version"] = graph["version"]
-            snapshot["author"] = graph["author"]
-            snapshot["params"] = graph.get("params") or []
-            snapshot["files"] = graph.get("files") or []
-            snapshot["state_files"] = graph.get("state_files") or []
-            return _wire_payload(snapshot)
-        if action == "node":
-            # The node lane: one state's inspection document — the
-            # instance list (the node report's own rows), the selected
-            # entry's settle outputs, and the selected instance's
-            # REALIZED prompt (the exact text the executor handed the
-            # child: the template with params and bound inputs
-            # substituted), inputs, and answer. Selectors pick one
-            # instance (both or neither); without them the latest entry
-            # and its latest instance answer.
-            if not run_id:
-                raise ValueError("factory activity node requires runId")
-            if not spec_id:
-                raise ValueError("factory activity node requires specId")
-            # The kernel frame always carries both keys, null meaning "no
-            # selector" (the daemon adapter rejects a client's explicit
-            # null). Any other value is validated as given, never read as
-            # "the latest".
-            entry_at = request.get("entry")
-            instance_at = request.get("instance")
-            if (entry_at is None) != (instance_at is None):
-                raise ValueError(
-                    "factory activity node entry and instance selectors must be provided together"
-                )
-            for key, value in (("entry", entry_at), ("instance", instance_at)):
-                if value is not None and (not _is_int(value) or value < 0):
-                    raise ValueError(f"factory activity node {key} must be a non-negative integer")
-            node_report = self._node_report(run_id, spec_id, entry_at, instance_at)
-            wire_report = _wire_payload(node_report)
-            # Port names are user-authored identifiers, not schema fields;
-            # keep their spelling verbatim through the wire conversion.
-            if node_report["entry"] is not None:
-                wire_report["entry"]["outputErrors"] = copy.deepcopy(
-                    node_report["entry"]["output_errors"]
-                )
-            return wire_report
         if action in ("graph", "peek"):
             # ``peek`` and ``graph`` answer the same compact snapshot; only
             # the re-arm above differs between them. A run the peek lists
@@ -7016,69 +6801,6 @@ def schedule_activity(request: dict[str, Any]) -> None:
     asyncio.get_running_loop().create_task(_run_activity(request))
 
 
-def _cap_node_presentation_frame(frame: dict[str, Any]) -> None:
-    """Trim node preview text against the actual serialized activity frame.
-
-    The field caps bound each preview separately, but JSON escaping makes
-    their combined wire representation larger than their UTF-8 source. Keep
-    the displayed prefixes and their flags while fitting the final wrapper
-    under the unchanged factory frame cap; stored outputs are untouched.
-    """
-    result = frame.get("result")
-    if not isinstance(result, dict):
-        return
-    candidates: list[tuple[dict[str, Any], str, dict[str, Any], str]] = []
-    entry = result.get("entry")
-    if isinstance(entry, dict):
-        outputs = entry.get("outputs")
-        if isinstance(outputs, str) and outputs:
-            candidates.append((entry, "outputs", entry, "outputsTruncated"))
-        errors = entry.get("outputErrors")
-        if isinstance(errors, dict):
-            candidates.extend(
-                (errors, port, entry, "outputErrorsTruncated")
-                for port, error in errors.items()
-                if isinstance(error, str) and error
-            )
-    instance = result.get("instance")
-    if isinstance(instance, dict):
-        candidates.extend(
-            (instance, field, instance, truncated)
-            for field, truncated in (
-                ("prompt", "promptTruncated"),
-                ("inputs", "inputsTruncated"),
-                ("answer", "answerTruncated"),
-            )
-            if isinstance(instance.get(field), str) and instance[field]
-        )
-    while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
-        candidates = [
-            candidate
-            for candidate in candidates
-            if isinstance(candidate[0].get(candidate[1]), str)
-            and candidate[0][candidate[1]]
-        ]
-        if not candidates:
-            return
-        container, field, flags, flag = max(
-            candidates,
-            key=lambda candidate: len(json.dumps(candidate[0][candidate[1]])) - 2,
-        )
-        value = container[field]
-        encoded_size = len(json.dumps(value)) - 2
-        excess = len(json.dumps(frame)) - FACTORY_FRAME_CAP
-        target_size = max(0, encoded_size - excess)
-        low, high = 0, len(value)
-        while low < high:
-            middle = (low + high + 1) // 2
-            if len(json.dumps(value[:middle])) - 2 <= target_size:
-                low = middle
-            else:
-                high = middle - 1
-        container[field] = value[:low]
-        flags[flag] = True
-
-
 async def _run_activity(request: dict[str, Any]) -> None:
     """Run one factory_activity request to completion and emit its reply."""
     from .repl import _send
@@ -7098,8 +6820,6 @@ async def _run_activity(request: dict[str, Any]) -> None:
         _send(frame)
         return
     frame: dict[str, Any] = {"event": "done", "id": rid, "status": "ok", "result": result}
-    if request.get("action") == "node":
-        _cap_node_presentation_frame(frame)
     _cap_factory_frame(frame)
     _send(frame)
 
@@ -7562,234 +7282,6 @@ def render_machine_file(machine: MachineFile) -> str:
     return "\n".join(sections) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# Mermaid rendering: one spec's graph as diagram text (the library view's
-# copyable payload — GitHub, previews, and external tools render it).
-# ---------------------------------------------------------------------------
-
-_MERMAID_ID_PATTERN = re.compile(r"[a-z0-9_]+")
-
-# stateDiagram keywords: an id spelled like these parses as a statement
-# (`note`, `state`, `class`, `style`, `direction`, `as`, `end`), not a node.
-_MERMAID_STATE_RESERVED = frozenset(
-    {"note", "state", "class", "style", "classdef", "direction", "as", "end", "click", "linkstyle"}
-)
-
-
-def _mermaid_state_ids(states: list[Any]) -> dict[str, str]:
-    """Map every state id to a mermaid-safe ``stateDiagram-v2`` identifier.
-
-    Mermaid state ids cannot carry hyphens (the parser reads
-    ``review-a --> b`` as a malformed edge) while machine ids may, so a
-    hyphenated id aliases to its underscored form — with a deterministic
-    numeric suffix when two ids alias to the same spelling (``a-b`` and
-    ``a_b``), so two states never merge into one diagram node. Safe ids
-    pass through verbatim.
-    """
-    ids: dict[str, str] = {}
-    taken: set[str] = set()
-    for state in states:
-        if not isinstance(state, dict) or not isinstance(state.get("id"), str):
-            continue
-        state_id = state["id"]
-        safe = (
-            _MERMAID_ID_PATTERN.fullmatch(state_id) is not None
-            and state_id not in _MERMAID_STATE_RESERVED
-        )
-        base = state_id if safe else state_id.replace("-", "_")
-        if base in _MERMAID_STATE_RESERVED:
-            base = f"{base}_state"
-        candidate = base
-        suffix = 2
-        while candidate in taken:
-            candidate = f"{base}_{suffix}"
-            suffix += 1
-        taken.add(candidate)
-        ids[state_id] = candidate
-    return ids
-
-
-def _mermaid_label(text: str) -> str:
-    """Escape label text with Mermaid's numeric character entities."""
-    return "".join(
-        char if char.isalnum() or char in " ._-" else f"#{ord(char)};"
-        for char in text
-    )
-
-
-def _mermaid_guard_label(when: Any) -> str:
-    """One guard's edge label: ``<output>[.<path>] <op>[ <value>]``.
-
-    The same shape the machine contract and the TUI's compact guard
-    rendering use (``verdict.approved eq false``): the output, the dotted
-    path when the guard drills one, the op, and the JSON value when the
-    guard declares one (``exists`` carries none).
-    """
-    if not isinstance(when, dict):
-        return ""
-    output = when.get("output")
-    path = when.get("path")
-    target = f"{output}.{path}" if isinstance(path, str) and path else str(output)
-    label = f"{target} {when.get('op')}"
-    if when.get("op") != "exists" and "value" in when:
-        label += f" {json.dumps(when.get('value'))}"
-    return _mermaid_label(label)
-
-
-def _machine_to_mermaid_lines(machine: dict[str, Any]) -> list[str]:
-    """Machine form: a ``stateDiagram-v2``.
-
-    Every state is a node (one ``state`` declaration per state, labeled
-    with the state's own id — the declaration keeps an edge-less state on
-    the diagram instead of dropping it), every entry state is marked with
-    a ``[*] -->`` edge, and every transition is an edge per source state
-    labeled with its guard (``stateDiagram-v2`` has no multi-source edge,
-    so a join renders its connectivity: one edge per source).
-    """
-    states = machine.get("states") if isinstance(machine.get("states"), list) else []
-    ids = _mermaid_state_ids(states)
-    lines = ["stateDiagram-v2"]
-    for state in states:
-        if isinstance(state, dict) and isinstance(state.get("id"), str):
-            lines.append(f'    state "{state["id"]}" as {ids[state["id"]]}')
-    for state in states:
-        if isinstance(state, dict) and state.get("entry") is True and isinstance(state.get("id"), str):
-            lines.append(f'    [*] --> {ids[state["id"]]}')
-    transitions = machine.get("transitions") if isinstance(machine.get("transitions"), list) else []
-    for transition in transitions:
-        if not isinstance(transition, dict):
-            continue
-        raw_from = transition.get("from")
-        sources = raw_from if isinstance(raw_from, list) else [raw_from]
-        guard = _mermaid_guard_label(transition.get("when"))
-        to = ids.get(transition.get("to")) if isinstance(transition.get("to"), str) else None
-        for source in sources:
-            source_id = ids.get(source) if isinstance(source, str) else None
-            if source_id is None or to is None:
-                continue
-            edge = f"    {source_id} --> {to}"
-            if guard:
-                edge += f": {guard}"
-            lines.append(edge)
-    return lines
-
-
-def _mermaid_id_is_safe(node_id: str) -> bool:
-    """True when a dag node id can be written as a mermaid flowchart id.
-
-    Mermaid reserves keywords (lowercase ``end`` closes a subgraph, and
-    ``graph``/``subgraph``/``style``/``class`` begin statements) and reads
-    punctuation as syntax, so an id may be a perfectly valid dag id and
-    still produce unrenderable text."""
-    if not node_id or node_id.lower() in _MERMAID_RESERVED_WORDS:
-        return False
-    first = node_id[0]
-    if not (first.isalpha() or first == "_"):
-        return False
-    return all(character.isalnum() or character in "_-" for character in node_id)
-
-
-_MERMAID_RESERVED_WORDS = frozenset(
-    {"end", "graph", "flowchart", "subgraph", "style", "class", "classdef", "click", "linkstyle"}
-)
-
-
-def _dag_to_mermaid_lines(dag: dict[str, Any]) -> list[str]:
-    """Dag form: a ``flowchart TB`` over the effective dependency edges.
-
-    Every node is a node line (bare, or labeled with the machine
-    annotation when the node declares a ``foreach``: ``foreach: over
-    <input> (max N)``); every node's effective dependencies
-    (``depends_on`` plus every ``inputs[].from`` source) render as one
-    edge each. An id mermaid cannot read as an id (a keyword such as
-    ``end``, or punctuation) is aliased to a generated id and carries its
-    original spelling as the label.
-    """
-    nodes = dag.get("nodes") if isinstance(dag.get("nodes"), list) else []
-    lines = ["flowchart TB"]
-    aliases: dict[str, str] = {}
-    taken = {node["id"] for node in nodes
-             if isinstance(node, dict) and isinstance(node.get("id"), str)}
-
-    def render_id(node_id: str) -> str:
-        if _mermaid_id_is_safe(node_id):
-            return node_id
-        if node_id not in aliases:
-            counter = len(aliases)
-            alias = f"m{counter}"
-            while alias in taken:
-                counter += 1
-                alias = f"m{counter}"
-            taken.add(alias)
-            aliases[node_id] = alias
-        return aliases[node_id]
-
-    def label_for(node: dict[str, Any], node_id: str) -> str:
-        text = _mermaid_label(node_id)
-        foreach = node.get("foreach")
-        if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
-            text += (f"<br/>foreach: over {_mermaid_label(foreach['over'])} "
-                     f"(max {foreach.get('max')})")
-        return text
-
-    for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
-            continue
-        node_id = node["id"]
-        rendered = render_id(node_id)
-        if rendered != node_id:
-            lines.append(f'    {rendered}["{label_for(node, node_id)}"]')
-            continue
-        foreach = node.get("foreach")
-        if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
-            lines.append(
-                f'    {rendered}["{node_id}<br/>foreach: over '
-                f'{_mermaid_label(foreach["over"])} (max {foreach.get("max")})"]'
-            )
-        else:
-            lines.append(f"    {rendered}")
-    declared: set[str] = set()
-    for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
-            continue
-        target = render_id(node["id"])
-        declared.add(target)
-        for dependency in _effective_dag_edges(node):
-            source = render_id(dependency)
-            if source != dependency and source not in declared:
-                declared.add(source)
-                lines.insert(1, f'    {source}["{_mermaid_label(dependency)}"]')
-            lines.append(f"    {source} --> {target}")
-    return lines
-
-
-def spec_to_mermaid(spec: Any) -> str:
-    """Render one factory spec as Mermaid diagram text (pure).
-
-    Machine form (``states``/``transitions``) renders as a
-    ``stateDiagram-v2``: each state a node, each entry state marked
-    ``[*] --> entryId``, and each transition an edge labeled with its
-    guard (``<output>[.<path>] <op>[ <value>]``) when it carries one.
-    Dag form (``nodes``) renders as a ``flowchart TB``: each node a node
-    line, a ``foreach`` node annotated ``foreach: over <input> (max N)``,
-    and the effective dependency set one edge each. The output is plain
-    mermaid text — GitHub, previews, and external tools render it; a
-    terminal renders the in-page ANSI diagram instead. The renderer is
-    pure and defensive: it renders the shape it is given (the library and
-    the run lane only feed it validated specs) without touching the
-    filesystem or validating.
-    """
-    if (
-        not _is_machine_form(spec)
-        and isinstance(spec, dict)
-        and isinstance(spec.get("nodes"), list)
-    ):
-        lines = _dag_to_mermaid_lines(spec)
-    else:
-        lines = _machine_to_mermaid_lines(spec if isinstance(spec, dict) else {})
-    return "\n".join(lines) + "\n"
-
-
 def _machine_env_dir(name: str) -> str | None:
     # Set-but-empty env values behave as unset (mirrors harness._env_dir).
     value = (os.environ.get(name) or "").strip()
@@ -8050,175 +7542,6 @@ def resolve_machine(
         f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})",
         broken=False,
     )
-
-
-def library_graph(
-    name: str,
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-) -> dict[str, Any]:
-    """One library machine's graph payload.
-
-    Resolves the machine exactly like a run does (``resolve_machine``:
-    repo directory first, user second) and returns the machine file's own
-    fields with the spec rendered as diagram text:
-    ``{"name", "description", "version", "author", "spec", "mermaid"}``.
-    The spec is the file's payload as written (machine form, or dag sugar
-    — the same object ``parse_machine_file`` read); ``mermaid`` is its
-    ``spec_to_mermaid`` rendering. Raises ``ValueError`` for an invalid
-    machine name and ``MachineResolutionError`` when no valid machine
-    carries the name — the library's own resolution contract, so the graph
-    seam can never disagree with run/export about a name.
-    """
-    machine, _path = resolve_machine(name, repo_dir=repo_dir, user_dir=user_dir)
-    files, state_files = _spec_state_files(machine.spec)
-    return {
-        "name": machine.name,
-        "description": machine.description,
-        "version": machine.version,
-        "author": machine.author,
-        "spec": machine.spec,
-        "files": files,
-        "state_files": state_files,
-        "mermaid": spec_to_mermaid(machine.spec),
-    }
-
-
-def _spec_state_files(spec: Any) -> "tuple[list[dict[str, str]], list[dict[str, Any]]]":
-    """What a reader inspects for each state of a MACHINE.md spec: an
-    inline prompt (``MACHINE.md · <state>``), or a line naming where the
-    work comes from (a harness subagent entry, a python module in the
-    session's directory). The factory page's node view shows them."""
-    rows = spec.get("states") if isinstance(spec, dict) and "states" in spec else None
-    if rows is None and isinstance(spec, dict):
-        rows = spec.get("nodes")
-    files: list[dict[str, str]] = []
-    state_files: list[dict[str, Any]] = []
-    for row in rows or []:
-        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
-            continue
-        state_id = row["id"]
-        subagent, python = row.get("subagent"), row.get("python")
-        if isinstance(python, dict):
-            text = f"Runs {python.get('import')}.{python.get('callable')} from the session's working directory."
-        elif isinstance(subagent, dict):
-            text = str(subagent.get("prompt") or "")
-        elif isinstance(subagent, str):
-            text = f"Runs the harness subagent entry {subagent!r}; its content is the prompt."
-        else:
-            continue
-        path = f"MACHINE.md \u00b7 {state_id}"
-        files.append({"path": path, "text": text})
-        state_files.append({"state": state_id, "paths": [path]})
-    return files, state_files
-
-
-async def library_listing(
-    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
-) -> "tuple[list[dict[str, Any]], list[str]]":
-    """The whole machine library, as the factory page lists it.
-
-    MACHINE.md machines come from the kernel's own scan; machine
-    directories (``machine.toml``) are described by the session's Rust
-    loader (the ``factory.describe`` host request), so the page lists
-    exactly what runs. One row per name, in the order ``run`` resolves it:
-    an earlier level wins over a later one, and within a level a machine
-    directory wins over a MACHINE.md. Each row carries ``kind`` (``file``
-    or ``directory``). A directory that fails to load, or whose declared
-    name is not its directory's name (``run`` resolves by directory), is
-    a warning, never a row.
-    """
-    from . import host_request
-
-    files, warnings = _scan_machine_library(repo_dir=repo_dir, user_dir=user_dir)
-    levels = machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir)
-    rank = {source: index for index, (source, _directory) in enumerate(levels)}
-    chosen: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
-
-    def offer(order: tuple[int, int], row: dict[str, Any]) -> None:
-        held = chosen.get(row["name"])
-        if held is None or order < held[0]:
-            chosen[row["name"]] = (order, row)
-
-    for entry in files:
-        offer((rank.get(entry["source"], len(levels)), 1), {**entry, "kind": "file"})
-    for index, (source, directory) in enumerate(levels):
-        if not directory.is_dir():
-            continue
-        try:
-            manifests = sorted(directory.glob(f"*/{MACHINE_DIR_FILE_NAME}"))
-        except OSError as error:
-            warnings.append(f"{_shown(str(directory))}: {error}")
-            continue
-        for manifest in manifests:
-            machine_dir = manifest.parent
-            # An undecodable directory name (round-12 R12-02, carried from
-            # round-9 R9-01's third trigger): PEP 383 hands it through as
-            # a lone surrogate with NO raise, and str() would carry it
-            # raw into the factory.describe frame — the reply the host's
-            # parser rejects. The undecodable entry skips with a safe
-            # warning instead.
-
-            if _frame_has_lone_surrogate(str(machine_dir)):
-                warnings.append(
-                    f"{_shown(str(directory))}: the entry "
-                    f"{_shown(machine_dir.name)!r} is not decodable and cannot be listed"
-                )
-                continue
-            try:
-                described = await host_request("factory.describe", {"path": str(machine_dir)})
-            except RuntimeError as error:
-                warnings.append(str(error))
-                continue
-            if described["name"] != machine_dir.name:
-                warnings.append(
-                    f"{machine_dir}: declares the name {described['name']!r}; rename the "
-                    "directory or the machine so they match"
-                )
-                continue
-            offer(
-                (index, 0),
-                {
-                    "name": described["name"],
-                    "description": described["description"],
-                    "version": str(described["version"]),
-                    "author": described.get("author") or "",
-                    "source": source,
-                    "path": str(machine_dir),
-                    "kind": "directory",
-                },
-            )
-    return [chosen[name][1] for name in sorted(chosen)], warnings
-
-
-async def library_graph_any(
-    name: str,
-    *,
-    repo_dir: "str | Path | None" = None,
-    user_dir: "str | Path | None" = None,
-) -> dict[str, Any]:
-    """``library_graph`` for either kind of machine: a machine directory
-    (resolved like ``run`` resolves it) is described by the Rust loader as
-    a template, with its declared params; a MACHINE.md machine is
-    ``library_graph``."""
-    from . import host_request
-
-    directory = _resolve_machine_dir(name, repo_dir=repo_dir, user_dir=user_dir)
-    if directory is None:
-        return library_graph(name, repo_dir=repo_dir, user_dir=user_dir)
-    described = await host_request("factory.describe", {"path": str(directory)})
-    return {
-        "name": described["name"],
-        "description": described["description"],
-        "version": str(described["version"]),
-        "author": described.get("author") or "",
-        "spec": described["spec"],
-        "params": described.get("params") or [],
-        "files": described.get("files") or [],
-        "state_files": described.get("state_files") or [],
-        "mermaid": spec_to_mermaid(described["spec"]),
-    }
 
 
 def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None) -> "dict[str, Any]":
@@ -8942,8 +8265,8 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   `file` port takes a path and the file is copied beside the child's
   session. `await rlm.factory.inputs()` returns the bound inputs and params
   as values. A child that ends its turn still owing a required output gets
-  one message in its own session asking for it; if it still owes one ten
-  minutes later the entry fails with `missing_output`. No fresh child is
+  one message in its own session asking for it; if it still owes one when
+  that turn ends, the entry fails with `missing_output`. No fresh child is
   started for a missing output. A python state's returned dict goes
   through the same check. `text?` marks an optional output, and an input
   that reads one must be optional too.
@@ -8974,25 +8297,14 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   instead of pretending the name is unknown. The bundled seeds are
   `builder`, `pr-manager`, and `review-sweep`; the worked examples above
   derive from their shapes.
-- The TUI machines page lists every library machine (MACHINE.md files and
-  machine directories, with their source) and nests every session's
-  active runs under their machine, machines with a live run first, like
-  the agents view nests subagents; runs of stored specs list in their
-  own group. Open it from any session with the
-  activity dock's `⚙ N machines` group or a bare `/factory`, or from the
-  agents view with Ctrl+F (through the selected session). Enter on a
-  machine shows its diagram, params, and its mermaid rendered as a
-  diagram (a mermaid fence in a node's Markdown renders the same way;
-  types the page cannot draw collapse to a one-line placeholder); Enter
-  on this session's run opens the run page: one live diagram, where
-  the up/down arrows walk the run header and the states that spawned a
-  child, Enter or Right opens a state's latest child session, Ctrl+X (the
-  agents view's stop key) twice stops the selected row (the whole run on
-  its header, or the state's running child), and `r` resumes a paused
-  run; another session's run names its owner instead, and a row of this
-  session's that no live read backs names its read-only state (both
-  report on the page; no run page mounts for either). Esc steps back:
-  run page to machines page to wherever you came from.
+- The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
+  click) opens one live diagram per run, newest run first. The up/down
+  arrows walk the run headers and the states that spawned a child;
+  Enter or Right opens the selected state's latest child session, and
+  Left or Esc closes the page. Ctrl+X (the agents view's stop key) twice
+  stops the selected row: the whole run on its header, or the state's
+  running child (that attempt fails under the state's `retries` and
+  `failure_policy`). `r` resumes a paused run.
 
 ## Safety
 
@@ -9008,9 +8320,8 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   outputs compact — the rosters and ledger previews stay ~160 characters
   — and let the full answer live in the child's session.
 - Runs survive kernel restarts: the registry snapshots to the session
-  artifact dir (forced on state changes and settle evaluations, throttled
-  otherwise, with a mutation journal for batches and admissions in
-  between), a restarted kernel rehydrates it on the next factory use, and
+  artifact dir (at the control loop's consistent points, with a mutation
+  journal for batches and admissions in between), a restarted kernel rehydrates it on the next factory use, and
   the runs continue (a run that was stopping
   finishes its cancellations; a python call the restart orphaned fails
   through its state's `retries` and `failure_policy`; children, supervisor-
