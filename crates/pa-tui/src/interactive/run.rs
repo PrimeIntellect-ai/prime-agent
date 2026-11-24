@@ -197,9 +197,23 @@ async fn run_interactive_surface(
     crossterm::style::force_color_output(true);
     // The first open attempt uses this connection (a fresh-pane connect failure must stay a
     // pre-mount failure); a wait retry reconnects against the successor daemon.
-    let (client, events) = DaemonClient::connect_with_retry(&options.socket_path)
-        .await
-        .with_context(|| "the interactive UI could not attach to the daemon")?;
+    let (client, events) = match &options.session {
+        // A failed bot connect hands back to the page that asked for it (the origin), never to
+        // the shell.
+        SessionSelection::Bot(bot) => match crate::session_ui::connect_bot(bot).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    ..Default::default()
+                })
+            }
+        },
+        _ => DaemonClient::connect_with_retry(&options.socket_path)
+            .await
+            .with_context(|| "the interactive UI could not attach to the daemon")?,
+    };
     let (notes_tx, mut notes_rx) = mpsc::unbounded_channel::<String>();
     let (compaction_abort_tx, mut compaction_abort_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
@@ -222,6 +236,7 @@ async fn run_interactive_surface(
     // into the session — the open page's panels and the dock's count.
     let (factory_tx, mut factory_rx) =
         mpsc::unbounded_channel::<crate::session_ui::FactoryUpdate>();
+    let (bots_tx, mut bots_rx) = mpsc::unbounded_channel::<crate::session_ui::BotsUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
     // here; the loop folds the session's skill commands into the
     // autocomplete provider.
@@ -334,6 +349,7 @@ async fn run_interactive_surface(
         let heartbeats_tx = heartbeats_tx.clone();
         let bash_tx = bash_tx.clone();
         let factory_tx = factory_tx.clone();
+        let bots_tx = bots_tx.clone();
         let commands_tx = commands_tx.clone();
         let page_tx = page_tx.clone();
         let waits_through_update_restart = !matches!(route, SessionOpenRoute::Cli);
@@ -362,6 +378,7 @@ async fn run_interactive_surface(
                     let heartbeats_tx = heartbeats_tx.clone();
                     let bash_tx = bash_tx.clone();
                     let factory_tx = factory_tx.clone();
+                    let bots_tx = bots_tx.clone();
                     let commands_tx = commands_tx.clone();
                     let page_tx = page_tx.clone();
                     async move {
@@ -390,6 +407,7 @@ async fn run_interactive_surface(
                                 bash: bash_tx,
                                 factory: factory_tx,
                                 commands: commands_tx,
+                                bots: bots_tx,
                             },
                             page_tx,
                         )
@@ -650,8 +668,11 @@ async fn run_interactive_surface(
                     ..Default::default()
                 });
             }
-            // Any other daemon refusal gets the same session-picker fallback.
-            if crate::daemon_client::is_daemon_rejection(&error) {
+            // Any other daemon refusal gets the same session-picker fallback. A bot view hands every
+            // open failure back to the bots page: its single-use link cannot be retried.
+            if crate::daemon_client::is_daemon_rejection(&error)
+                || matches!(options.session, SessionSelection::Bot(_))
+            {
                 exit_guard.cancel();
                 let frames = renderer.finish(&mut view, true);
                 return Ok(InteractiveOutcome {
@@ -1494,6 +1515,11 @@ async fn run_interactive_surface(
             maybe_factory = factory_rx.recv() => {
                 if let Some(update) = maybe_factory {
                     session.apply_factory_update(update, &mut view);
+                }
+            }
+            maybe_bots = bots_rx.recv() => {
+                if let Some(update) = maybe_bots {
+                    session.apply_bots_update(update, &mut view);
                 }
             }
             maybe_commands = commands_rx.recv() => {

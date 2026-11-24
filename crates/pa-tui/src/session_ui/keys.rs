@@ -351,6 +351,7 @@ impl SessionUi {
             }
             Some(Overlay::Mcp(_)) => return self.handle_mcp_view_key(key, view),
             Some(Overlay::Factory(_)) => return self.handle_factory_view_key(key, view).await,
+            Some(Overlay::Bots(_)) => return self.handle_bots_view_key(key, view),
             Some(Overlay::Heartbeats(_)) => {
                 return self.handle_heartbeats_picker_key(key, view).await;
             }
@@ -791,6 +792,11 @@ impl SessionUi {
                 // A completion request parked by this same press must not materialize
                 // a dropdown over the menu on the next tick.
                 view.editor.cancel_autocomplete();
+                if let Some(refusal) = self.bot_refusal(&command) {
+                    self.error_row(&refusal, view);
+                    self.dirty = true;
+                    return Ok(());
+                }
                 // The menu takes the frame from a queue browse: the next Enter must submit a
                 // prompt, not route into apply_queue_selection; ending the browse restores the
                 // stashed draft, so a failed menu open loses nothing.

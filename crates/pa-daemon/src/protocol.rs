@@ -53,6 +53,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "get_direct_worker_transport",
     "roster_subscribe",
     "roster_unsubscribe",
+    "attach_bot",
     "list_saved_sessions",
     "create",
     "attach",
@@ -934,6 +935,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::WorkerIdlePassivation { .. }
         | DaemonCommand::WorkerRosterDelta { .. }
         | DaemonCommand::RosterUnsubscribe { .. }
+        | DaemonCommand::AttachBot { .. }
         | DaemonCommand::Create { .. }
         | DaemonCommand::SendMessage { .. }
         | DaemonCommand::SpawnBot { .. }
@@ -965,6 +967,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::WorkerIdlePassivation { .. } => "worker_idle_passivation",
         DaemonCommand::WorkerRosterDelta { .. } => "worker_roster_delta",
         DaemonCommand::RosterUnsubscribe { .. } => "roster_unsubscribe",
+        DaemonCommand::AttachBot { .. } => "attach_bot",
         DaemonCommand::Create { .. } => "create",
         DaemonCommand::Attach { .. } => "attach",
         DaemonCommand::Reattach { .. } => "reattach",

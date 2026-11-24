@@ -78,6 +78,10 @@ impl AgentView {
                 dock.extend(factory_view.render(&self.theme, width, kb));
                 Some(dock)
             }
+            Some(Overlay::Bots(bots_view)) => {
+                dock.extend(bots_view.render(&self.theme, width, kb, info_viewport_rows));
+                Some(dock)
+            }
             Some(Overlay::Heartbeats(picker)) => {
                 dock.extend(picker.render(&self.theme, width, kb));
                 Some(dock)

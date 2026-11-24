@@ -229,6 +229,15 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// `attach_bot`: resume the bot when needed, open its link, check the guest version, and
+    /// answer a single-use local endpoint that pipes the guest daemon connection.
+    AttachBot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        bot_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     Create {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

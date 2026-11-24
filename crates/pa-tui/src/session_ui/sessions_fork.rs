@@ -168,6 +168,10 @@ impl SessionUi {
 
     /// Open the `/fork` selector over the session's user messages.
     pub(super) async fn open_fork_selector(&mut self, view: &mut AgentView) -> Result<()> {
+        if let Some(refusal) = self.bot_refusal("fork") {
+            self.error_row(&refusal, view);
+            return Ok(());
+        }
         let data = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -496,7 +500,10 @@ pub(super) async fn create_session(
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         Some(
-            SessionSelection::New | SessionSelection::NewChild { .. } | SessionSelection::Attach(_),
+            SessionSelection::New
+            | SessionSelection::NewChild { .. }
+            | SessionSelection::Attach(_)
+            | SessionSelection::Bot(_),
         )
         | None => None,
     };

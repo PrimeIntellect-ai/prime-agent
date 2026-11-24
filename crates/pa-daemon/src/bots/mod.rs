@@ -5,6 +5,7 @@
 //! truth; [`registry`] is a private cache. A bot always runs this binary's
 //! exact version ([`version`]).
 
+pub mod attach;
 pub mod commands;
 pub mod credentials;
 pub mod exec_stream;

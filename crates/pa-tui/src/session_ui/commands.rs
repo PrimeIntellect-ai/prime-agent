@@ -100,6 +100,10 @@ impl SessionUi {
     /// Create a fresh session and rebind the view to it (the `/new` flow,
     /// shared with the `app.session.new` action).
     pub(super) async fn start_new_session(&mut self, view: &mut AgentView) -> Result<()> {
+        if let Some(refusal) = self.bot_refusal("new") {
+            self.error_row(&refusal, view);
+            return Ok(());
+        }
         let id = create_session(&self.client, &self.create_options(), None).await?;
         self.attach_session(&id, DockFold::Fresh).await?;
         // The tray's context usage rode the attach snapshot: the
@@ -122,6 +126,10 @@ impl SessionUi {
         text: &str,
         view: &mut AgentView,
     ) -> Result<()> {
+        if let Some(refusal) = self.bot_refusal(resolved.name) {
+            self.error_row(&refusal, view);
+            return Ok(());
+        }
         match resolved.name {
             // `/clear` stays the no-argument alias of `/new`.
             "new" if resolved.original_name == "clear" && !resolved.args.is_empty() => {
@@ -385,11 +393,13 @@ impl SessionUi {
             // factory surfaces on the next client start (the running
             // connection keeps the advertisement its hello was built
             // with).
+            // Bare `/bots` opens the bots page.
             // `/bots on|off|status`: the hosted-sandbox spawn opt-in. The
             // toggle persists `bots.enabled`, the global settings key the
             // daemon's sandbox-admission gate reads fresh per attempt, so
             // `/bots off` blocks the next sandbox spawn on a running
             // daemon. Existing bots keep their lifecycle either way.
+            "bots" if resolved.args.trim().is_empty() => self.open_bots_page(view),
             "bots" => {
                 let Some(settings) = &self.client_settings else {
                     self.note("/bots is not available in this client yet", view);
@@ -410,7 +420,7 @@ impl SessionUi {
                         };
                         self.note(note, view);
                     }
-                    "" | "status" => {
+                    "status" => {
                         let note = if settings.bots_enabled() {
                             "Bots are enabled. New sandbox spawns are admitted; run /bots off to refuse them."
                         } else {

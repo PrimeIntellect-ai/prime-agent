@@ -6,6 +6,7 @@
 mod apply;
 mod auth;
 mod bash;
+mod bots;
 mod commands;
 mod factory;
 mod heartbeats;
@@ -27,6 +28,7 @@ pub(crate) use apply::CompactionAbortNote;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
 pub(crate) use bash::BashActivityUpdate;
 use bash::{ResyncBash, SideBashRun};
+pub(crate) use bots::{connect_bot, BotsUpdate};
 pub(crate) use factory::FactoryUpdate;
 use heartbeats::paused_heartbeat_count;
 pub(crate) use heartbeats::HeartbeatsUpdate;
@@ -331,6 +333,14 @@ pub(crate) struct SessionUi {
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
     /// The open view's selected run id: the refresh's watch target.
     factory_selected_run: Option<String>,
+    /// Where the `/bots` page's background fetch and attach deliver.
+    bots_updates: mpsc::UnboundedSender<BotsUpdate>,
+    /// The bot this view is attached to: `Some` when the client talks to a bot's guest daemon.
+    bot: Option<crate::interactive::BotAttach>,
+    /// The last `/bots` request number (a fetch or attach result answers one request).
+    bots_requests: u64,
+    /// The bot view's link closed (its error row showed once).
+    bot_link_closed: bool,
     /// The activity dock holds keyboard focus (and renders expanded).
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,

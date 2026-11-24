@@ -685,6 +685,12 @@ impl Supervisor {
                 let response = Self::handle_roster_unsubscribe(&command_id, &type_name);
                 (vec![response_line(&response)], false)
             }
+            DaemonCommand::AttachBot { bot_id, .. } => {
+                let response = self
+                    .handle_attach_bot(&command_id, &type_name, bot_id)
+                    .await;
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::WorkerIdlePassivation {
                 worker_token,
                 idle_minutes,

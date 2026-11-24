@@ -771,6 +771,7 @@ mod tests {
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
+                bots: mpsc::unbounded_channel().0,
             },
             page_tx.clone(),
         )
