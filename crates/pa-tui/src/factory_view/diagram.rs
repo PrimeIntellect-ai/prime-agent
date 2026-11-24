@@ -178,6 +178,10 @@ impl FactoryEdge {
 pub struct FactoryInstance {
     pub status: String,
     pub child: Option<String>,
+    /// The entry the instance belongs to and its index in it (a foreach
+    /// fans one entry out to many instances).
+    pub entry: u64,
+    pub index: u64,
 }
 
 /// One live node's runtime state (the `status()` node shape, compact
@@ -233,6 +237,14 @@ impl FactoryNodeState {
                                     .and_then(Value::as_str)
                                     .filter(|child| !child.is_empty())
                                     .map(str::to_string),
+                                entry: instance
+                                    .get("entry")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or_default(),
+                                index: instance
+                                    .get("index")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or_default(),
                             })
                         })
                         .collect()
