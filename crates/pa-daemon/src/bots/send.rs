@@ -1,7 +1,7 @@
 //! Owner-to-bot messages: at most once through the bot ledger.
 
 use anyhow::anyhow;
-use pa_types::daemon::DaemonCommand;
+use pa_types::daemon::{DaemonCommand, PromptInput};
 use serde_json::{Map, Value};
 
 use super::guest::{CommandError, GuestClient};
@@ -79,9 +79,6 @@ pub async fn send_message(
     message: &str,
     delivery_mode: Option<Value>,
 ) -> Result<Value, SendError> {
-    ledger
-        .begin_message(msg_id)
-        .map_err(SendError::NotDelivered)?;
     let command = DaemonCommand::SendMessage {
         id: None,
         target_active_session_id: guest_session_id.to_string(),
@@ -91,7 +88,57 @@ pub async fn send_message(
         delivery_mode,
         rest: Map::default(),
     };
-    let outcome = client.command(&command).await;
+    send_once(ledger, client, msg_id, &command).await
+}
+
+/// Prompt the bot session `guest_session_id` with its task as `msg_id`,
+/// under the same at-most-once ledger rules as [`send_message`]. The task
+/// is the session's user prompt, so the model reads it without an inbox
+/// read, like a local child's task.
+///
+/// # Errors
+///
+/// As [`send_message`].
+pub async fn send_task(
+    ledger: &BotLedger,
+    client: &mut GuestClient,
+    guest_session_id: &str,
+    msg_id: &str,
+    task: &str,
+) -> Result<Value, SendError> {
+    let command = DaemonCommand::Prompt {
+        id: None,
+        active_session_id: guest_session_id.to_string(),
+        message: format!("[task from parent]\n\n{task}"),
+        input: PromptInput {
+            content: None,
+            images: None,
+            streaming_behavior: None,
+            queue_if_busy: None,
+            expand_prompt_templates: None,
+            source: Some(Value::from("rpc")),
+            agent_message_id: None,
+            custom_message: None,
+            queue_key: None,
+            prefix_messages: None,
+            admission_id: None,
+            rlm_notice_nonce: None,
+        },
+        rest: Map::default(),
+    };
+    send_once(ledger, client, msg_id, &command).await
+}
+
+async fn send_once(
+    ledger: &BotLedger,
+    client: &mut GuestClient,
+    msg_id: &str,
+    command: &DaemonCommand,
+) -> Result<Value, SendError> {
+    ledger
+        .begin_message(msg_id)
+        .map_err(SendError::NotDelivered)?;
+    let outcome = client.command(command).await;
     let state = if outcome.is_ok() {
         MessageState::Sent
     } else {
