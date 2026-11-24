@@ -23,7 +23,6 @@ pub(super) struct ResidentFile {
 pub(super) struct KnownSessionRoots {
     /// The directory whose saved sessions list.
     pub(super) catalog_dir: PathBuf,
-    pub(super) default_dir: PathBuf,
     pub(super) residents: Vec<ResidentFile>,
     /// Roster-known top-level session files outside the default directory.
     pub(super) roster_files: Vec<PathBuf>,
@@ -89,7 +88,8 @@ impl Supervisor {
         }
         // Production admission writes every spawn edge to the default
         // ledger whatever `sessionDir` the create carried, while a custom
-        // directory's own ledger holds older edges: each root walks both.
+        // directory's own ledger holds older edges: the walk reads the
+        // default ledger and the ledger of every directory a root lives in.
         let mut ledgers = BTreeMap::new();
         ledgers.insert(default_dir.clone(), self.rlm_spawn_ledger_for(None).await?);
         let mut dirs: Vec<PathBuf> = std::iter::once(catalog_dir.clone())
@@ -113,7 +113,6 @@ impl Supervisor {
         }
         Ok(KnownSessionRoots {
             catalog_dir,
-            default_dir,
             residents,
             roster_files,
             ledgers,
@@ -155,11 +154,7 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
         .map(|resident| canonical_session_path(&resident.session_file))
         .collect();
     let mut hosted = vec![false; resident_files.len()];
-    let mut walk_groups: BTreeMap<PathBuf, Vec<RosterWalkRoot>> = BTreeMap::new();
-    let root_dir = |file: &PathBuf| {
-        file.parent()
-            .map_or_else(|| roots.default_dir.clone(), PathBuf::from)
-    };
+    let mut walk_roots: Vec<RosterWalkRoot> = Vec::new();
     let saved: Vec<(SessionInfo, Option<usize>)> = infos
         .into_iter()
         .map(|info| {
@@ -168,14 +163,11 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
             if let Some(index) = resident {
                 hosted[index] = true;
             }
-            walk_groups
-                .entry(root_dir(&info.path))
-                .or_default()
-                .push(RosterWalkRoot {
-                    session_file: info.path.clone(),
-                    active_session_id: resident
-                        .map(|index| roots.residents[index].active_session_id.clone()),
-                });
+            walk_roots.push(RosterWalkRoot {
+                session_file: info.path.clone(),
+                active_session_id: resident
+                    .map(|index| roots.residents[index].active_session_id.clone()),
+            });
             (info, resident)
         })
         .collect();
@@ -184,32 +176,22 @@ pub(super) fn scan_known_sessions(roots: &KnownSessionRoots, cwd: Option<&str>) 
         .collect();
     for &index in &resident_only {
         let resident = &roots.residents[index];
-        walk_groups
-            .entry(root_dir(&resident.session_file))
-            .or_default()
-            .push(RosterWalkRoot {
-                session_file: resident.session_file.clone(),
-                active_session_id: Some(resident.active_session_id.clone()),
-            });
+        walk_roots.push(RosterWalkRoot {
+            session_file: resident.session_file.clone(),
+            active_session_id: Some(resident.active_session_id.clone()),
+        });
     }
+    // Every ledger walks with every root, so a resident (a root) never
+    // reads as another root's passive child.
     let mut children: Vec<PassiveRlmChild> = Vec::new();
     let mut seen_children = HashSet::new();
-    for (dir, group) in walk_groups {
-        let mut ledger_dirs = vec![dir.clone()];
-        if dir != roots.default_dir {
-            ledger_dirs.push(roots.default_dir.clone());
-        }
-        for ledger_dir in ledger_dirs {
-            let Some(ledger) = roots.ledgers.get(&ledger_dir) else {
-                continue;
-            };
-            match walk_passive_rlm_children(ledger, &group) {
-                Ok(walked) => children.extend(
-                    walked
-                        .into_iter()
-                        .filter(|child| seen_children.insert(canonical_session_path(&child.info.path))),
-                ),
-                Err(error) => warnings.push(format!("Could not walk passive RLM children: {error:#}")),
+    for ledger in roots.ledgers.values() {
+        match walk_passive_rlm_children(ledger, &walk_roots) {
+            Ok(walked) => children.extend(walked.into_iter().filter(|child| {
+                seen_children.insert(canonical_session_path(&child.info.path))
+            })),
+            Err(error) => {
+                warnings.push(format!("Could not walk passive RLM children: {error:#}"));
             }
         }
     }

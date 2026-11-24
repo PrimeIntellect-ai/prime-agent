@@ -2,11 +2,11 @@
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
 use super::{
-    anyhow, bail, join_all, json, mpsc, name_unavailable_error, paths,
-    reservation_key, response_failure, response_line, response_success, subscribers, Arc,
-    DaemonCommand, DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf,
-    ResidentWorker, Result, RosterFamilySeedOwner, RouteAdmission, Supervisor, Value,
-    ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS,
+    anyhow, bail, join_all, json, mpsc, name_unavailable_error, paths, reservation_key,
+    response_failure, response_line, response_success, subscribers, Arc, DaemonCommand,
+    DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
+    Result, RosterFamilySeedOwner, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
+    SUMMARY_TIMEOUT_MS,
 };
 use crate::session_scan::list_sessions_with;
 
@@ -506,7 +506,12 @@ impl Supervisor {
                     None => saved_session_summary(info),
                 })
                 .collect();
-            summaries.extend(known.children.iter().map(crate::rlm_roster::passive_child_summary));
+            summaries.extend(
+                known
+                    .children
+                    .iter()
+                    .map(crate::rlm_roster::passive_child_summary),
+            );
             summaries.extend(
                 known
                     .resident_only
@@ -1037,8 +1042,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // the env guard must span the async list
     #[tokio::test]
     async fn list_all_includes_a_roster_known_session_of_a_custom_directory() {
-        let _env =
-            crate::test_support::KernelEnvOverride::apply(&[(paths::SESSION_DIR_ENV, None)]);
+        let _env = crate::test_support::KernelEnvOverride::apply(&[(paths::SESSION_DIR_ENV, None)]);
         let dir = tempfile::TempDir::new().expect("temp dir");
         let supervisor = Arc::new(supervisor(dir.path()));
         let custom = dir.path().join("custom");

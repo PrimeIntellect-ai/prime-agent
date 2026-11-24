@@ -196,7 +196,7 @@ impl Supervisor {
         let records_cache = Arc::clone(&self.factory_records);
         let scan_owners = resident_owners.clone();
         let catalog_task = tokio::task::spawn_blocking(move || {
-            catalog_and_records(&roots, scan_owners, &records_cache)
+            catalog_and_records(&roots, &scan_owners, &records_cache)
         });
         let (owners, live_owner_ids, records, mut warnings) = match catalog_task.await {
             Ok(catalog) => catalog,
@@ -437,7 +437,7 @@ pub(crate) type FactoryRecordsCache = std::sync::Mutex<BTreeMap<PathBuf, CachedR
 /// shape. Pure filesystem reads: no kernel, no worker, no boot.
 fn catalog_and_records(
     roots: &KnownSessionRoots,
-    residents: Vec<ResidentOwner>,
+    residents: &[ResidentOwner],
     records_cache: &FactoryRecordsCache,
 ) -> CatalogScan {
     let known = scan_known_sessions(roots, None);
@@ -452,20 +452,25 @@ fn catalog_and_records(
         .filter(|(_, resident)| resident.session_file.is_some())
         .map(|(index, _)| index)
         .collect();
-    let mut live_owner_ids: Vec<String> = residents.iter().map(|resident| resident.id.clone()).collect();
+    let mut live_owner_ids: Vec<String> = residents
+        .iter()
+        .map(|resident| resident.id.clone())
+        .collect();
     for (info, hosted) in &known.saved {
         let resident = hosted.map(|index| file_residents[index]);
         if let Some(index) = resident {
-            live_owner_ids[index] = info.id.clone();
+            live_owner_ids[index].clone_from(&info.id);
         }
-        owners.entry(info.id.clone()).or_insert_with(|| CatalogOwner {
-            id: info.id.clone(),
-            name: info
-                .name
-                .clone()
-                .or_else(|| resident.and_then(|index| residents[index].name.clone())),
-            log: Some(info.path.clone()),
-        });
+        owners
+            .entry(info.id.clone())
+            .or_insert_with(|| CatalogOwner {
+                id: info.id.clone(),
+                name: info
+                    .name
+                    .clone()
+                    .or_else(|| resident.and_then(|index| residents[index].name.clone())),
+                log: Some(info.path.clone()),
+            });
     }
     for child in &known.children {
         owners
@@ -1307,7 +1312,10 @@ mod tests {
         }]);
         {
             let cache = supervisor.factory_live.lock().unwrap();
-            assert!(!cache.rows.contains_key("w-gone"), "the gone worker's rows drop");
+            assert!(
+                !cache.rows.contains_key("w-gone"),
+                "the gone worker's rows drop"
+            );
             assert!(!cache.read_at.contains_key("w-gone"));
             assert_eq!(cache.rows["w-stays"][0]["runId"], "w-stays");
         }
@@ -1325,9 +1333,15 @@ mod tests {
             supervisor.fold_factory_live("w-gone", "owner", Some(late));
         }
         let cache = supervisor.factory_live.lock().unwrap();
-        assert!(!cache.rows.contains_key("w-gone"), "the late fold adds no rows");
+        assert!(
+            !cache.rows.contains_key("w-gone"),
+            "the late fold adds no rows"
+        );
         assert!(!cache.read_at.contains_key("w-gone"));
-        assert!(cache.warnings.is_empty(), "the late failure is never published");
+        assert!(
+            cache.warnings.is_empty(),
+            "the late failure is never published"
+        );
         assert!(!cache.in_flight.contains("w-gone"));
     }
 
@@ -1697,7 +1711,6 @@ mod tests {
     fn no_roots(sessions: &std::path::Path) -> KnownSessionRoots {
         KnownSessionRoots {
             catalog_dir: sessions.to_path_buf(),
-            default_dir: sessions.to_path_buf(),
             residents: Vec::new(),
             roster_files: Vec::new(),
             ledgers: BTreeMap::new(),
@@ -1747,7 +1760,7 @@ mod tests {
         let missing = agent_dir.join("sessions-missing");
         let (owners, _, records, warnings) = catalog_and_records(
             &no_roots(&missing),
-            Vec::new(),
+            &[],
             &FactoryRecordsCache::default(),
         );
         assert!(owners.is_empty() && records.is_empty() && warnings.is_empty());
@@ -1758,7 +1771,7 @@ mod tests {
         std::fs::write(&unreadable, "not a directory").expect("regular file");
         let (owners, _, records, warnings) = catalog_and_records(
             &no_roots(&unreadable),
-            Vec::new(),
+            &[],
             &FactoryRecordsCache::default(),
         );
         assert!(owners.is_empty() && records.is_empty());
@@ -1817,8 +1830,7 @@ mod tests {
             )),
         );
         let roots = KnownSessionRoots {
-            catalog_dir: default_sessions.clone(),
-            default_dir: default_sessions,
+            catalog_dir: default_sessions,
             residents: vec![ResidentFile {
                 session_file: parent_log,
                 active_session_id: "active-a".to_string(),
@@ -1827,7 +1839,7 @@ mod tests {
             ledgers,
         };
         let (owners, _, records, warnings) =
-            catalog_and_records(&roots, Vec::new(), &FactoryRecordsCache::default());
+            catalog_and_records(&roots, &[], &FactoryRecordsCache::default());
         assert!(warnings.is_empty(), "no partial failures: {warnings:?}");
         let child = owners
             .get("custom-child")
@@ -1974,8 +1986,7 @@ mod tests {
             )),
         );
         let roots = KnownSessionRoots {
-            catalog_dir: sessions.clone(),
-            default_dir: sessions,
+            catalog_dir: sessions,
             residents: Vec::new(),
             roster_files: Vec::new(),
             ledgers,
@@ -1983,7 +1994,7 @@ mod tests {
         let cache = FactoryRecordsCache::default();
         let scan = |residents: &[ResidentOwner], cache: &FactoryRecordsCache| {
             let (owners, _, records, warnings) =
-                catalog_and_records(&roots, residents.to_vec(), cache);
+                catalog_and_records(&roots, residents, cache);
             (owners, records, warnings)
         };
         let gone: Vec<ResidentOwner> = Vec::new();
