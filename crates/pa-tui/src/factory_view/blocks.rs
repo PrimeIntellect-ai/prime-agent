@@ -88,8 +88,11 @@ pub(crate) struct DiagramOverlay {
 }
 
 impl DiagramOverlay {
-    /// One fired-edge key, matching a transition's identity.
+    /// One fired-edge key, matching a transition's identity (a join's
+    /// sources in any order, like `FactoryEdge::matches`).
     pub(crate) fn fired_key(from: &[String], to: &str, when: Option<&str>) -> String {
+        let mut from = from.to_vec();
+        from.sort();
         format!("{}->{}@{}", from.join(" + "), to, when.unwrap_or(""))
     }
 }
@@ -133,6 +136,16 @@ fn short_label(when: &str) -> String {
         .map_or(when, |(_, value)| value)
         .trim_matches('"')
         .to_string()
+}
+
+/// An edge's label: `join` for a join's edges, else its guard's short
+/// label.
+fn edge_label(transition: &FactoryTransition) -> Option<String> {
+    if transition.from.len() > 1 {
+        Some("join".to_string())
+    } else {
+        transition.when.as_deref().map(short_label)
+    }
 }
 
 /// A box's second line: what runs there (a mermaid node's shape label,
@@ -214,9 +227,9 @@ pub(crate) fn block_diagram(
                 })
                 .collect()
         });
-    // The fired guards' short labels, keyed by target: a sibling guarded
-    // edge with the same from+to never cross-marks (the fired window
-    // names the guard that fired).
+    // The fired edges' labels, keyed by target: a sibling guarded edge
+    // with the same from+to never cross-marks (the fired window names the
+    // guard that fired).
     let fired_labels: std::collections::HashSet<(usize, String)> =
         overlay.map_or_else(std::collections::HashSet::new, |overlay| {
             transitions
@@ -228,10 +241,7 @@ pub(crate) fn block_diagram(
                         transition.when.as_deref(),
                     ))
                 })
-                .filter_map(|transition| {
-                    let label = transition.when.as_deref().map(short_label)?;
-                    Some((index_of(&transition.to)?, label))
-                })
+                .filter_map(|transition| Some((index_of(&transition.to)?, edge_label(transition)?)))
                 .collect()
         });
     // Every transition source is one edge; a join labels its edges "join".
@@ -241,11 +251,7 @@ pub(crate) fn block_diagram(
         let Some(to) = index_of(&transition.to) else {
             continue;
         };
-        let label = if transition.from.len() > 1 {
-            Some("join".to_string())
-        } else {
-            transition.when.as_deref().map(short_label)
-        };
+        let label = edge_label(transition);
         for source in &transition.from {
             let Some(from) = index_of(source) else {
                 continue;
