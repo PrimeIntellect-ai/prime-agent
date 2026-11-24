@@ -2455,7 +2455,7 @@ fn paging_reaches_the_last_row_while_an_error_shows() {
     });
     let mut view =
         node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
-    view.set_error("the node request timed out");
+    view.set_error("the node request timed out".to_string());
     let theme = theme();
     let kb = kb();
     let page_down = kb
