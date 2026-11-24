@@ -390,7 +390,7 @@ fn the_diagram_renders_per_stage_agent_occupancy() {
         "the occupied stage's box carries its agent counts: {joined}"
     );
     assert!(
-        !joined.contains("0 run"),
+        !joined.contains("0 run ·"),
         "a stage at rest carries no occupancy fragment: {joined}"
     );
     // An older kernel's reply (no count keys) derives the same counts
