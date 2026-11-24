@@ -25,12 +25,9 @@ mod uv;
 mod version;
 
 use layout::home_dir;
-pub(crate) use layout::retired_venvs;
 pub(crate) use layout::{expand_home, home_kernel_venv_dir, resolve_writable_kernel_venv_dir};
 pub use layout::{kernel_venv_dir, kernel_venv_python};
-use layout::{prune_retired_venvs, retire_venv};
-#[cfg(test)]
-pub(crate) use layout::{STALE_VENV_KEEP, STALE_VENV_RETENTION};
+use layout::{remove_retired_venvs, retire_venv, retired_venvs};
 pub use probe::invalidate_runtime_probe_cache;
 #[cfg(test)]
 use probe::{installed_rlm_dir, lock_probe_memo, runtime_probe_key};
@@ -166,19 +163,21 @@ pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
 
 /// Move a fully built `candidate` onto the live `venv` path.
 ///
-/// The old venv is renamed to `<venv>.stale-<unix-ms>` first and is never
-/// deleted here. The live path is absent only between the two renames; a
-/// killed process can leave it so, and the next lock holder restores the
-/// retired copy. An incomplete candidate is rejected before the live venv is
-/// touched, and a failed candidate move restores the old venv at once. Only
-/// after a complete replacement are old retired copies pruned.
+/// The old venv is renamed to `<venv>.stale-<unix-ms>` first. The live path
+/// is absent only between the two renames; a killed process can leave it so,
+/// and the next lock holder restores the retired copy. An incomplete candidate
+/// is rejected before the live venv is touched, and a failed candidate move
+/// restores the old venv at once. Once the new venv is in place, every retired
+/// copy is removed.
 pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Result<()> {
     if !venv_structure_complete(candidate) {
         anyhow::bail!("candidate venv {} is incomplete", candidate.display());
     }
     if !venv.exists() {
-        return crate::platform::rename_onto(candidate, venv)
-            .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
+        crate::platform::rename_onto(candidate, venv)
+            .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()))?;
+        remove_retired_venvs(venv);
+        return Ok(());
     }
     let retired = retire_venv(venv)?;
     if let Err(error) = crate::platform::rename_onto(candidate, venv) {
@@ -198,7 +197,7 @@ pub(crate) fn swap_venv_into_place(candidate: &Path, venv: &Path) -> anyhow::Res
         return Err(error)
             .with_context(|| format!("moving {} into {}", candidate.display(), venv.display()));
     }
-    prune_retired_venvs(venv, &retired);
+    remove_retired_venvs(venv);
     Ok(())
 }
 

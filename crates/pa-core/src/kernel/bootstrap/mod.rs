@@ -274,7 +274,7 @@ fn refuse_account_venv_under_test(venv: &Path, account_home: Option<&Path>) -> a
             "refusing to bootstrap the account's kernel venv ({}) from a cargo-launched build: \
              it serves your live sessions. Set PRIME_AGENT_KERNEL_VENV to a scratch dir, or set \
              {REFUSE_ACCOUNT_KERNEL_VENV_ENV}=0 to use the account venv deliberately (it will be \
-             renamed to kernel-venv.stale-<timestamp> and rebuilt).",
+             rebuilt and replaced).",
             venv.display()
         ));
     }
@@ -452,13 +452,6 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&live_python).unwrap(), "new");
         assert!(!candidate.exists(), "the candidate is consumed by the swap");
-        let retired = venv::retired_venvs(&venv);
-        assert_eq!(retired.len(), 1, "{retired:?}");
-        assert_eq!(
-            std::fs::read_to_string(kernel_venv_python(&retired[0].1)).unwrap(),
-            "old",
-            "the swap renames the old venv aside instead of deleting it"
-        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -537,41 +530,12 @@ mod tests {
         std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
     }
 
-    /// A retired copy's name, stamped `age` before now.
-    fn retired_name(age: std::time::Duration) -> String {
-        let stamp = std::time::SystemTime::now()
-            .checked_sub(age)
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        format!("kernel-venv.stale-{stamp}")
-    }
-
-    /// Three earlier retired copies stamped `age` (plus a few ms apart), oldest
-    /// first.
-    fn three_retired_copies(root: &Path, age: std::time::Duration) -> Vec<String> {
-        let names: Vec<String> = [3, 2, 1]
-            .into_iter()
-            .map(|ms| retired_name(age + std::time::Duration::from_millis(ms)))
-            .collect();
-        for name in &names {
-            write_complete_venv(&root.join(name), name);
-        }
-        names
-    }
-
-    fn aged_past_retention() -> std::time::Duration {
-        venv::STALE_VENV_RETENTION + std::time::Duration::from_secs(60)
-    }
-
-    /// The ordering guarantee: nothing is pruned unless the old venv was
-    /// renamed aside and the new one took its place. A failed swap keeps the old
-    /// venv live and leaves even a prunable copy on disk.
+    /// A failed swap keeps the old venv live and removes nothing, not even
+    /// a leftover retired copy.
     #[test]
     fn a_failed_swap_restores_the_old_venv_and_prunes_nothing() {
         let root = tempfile::tempdir().unwrap();
-        let earlier = three_retired_copies(root.path(), aged_past_retention());
+        write_complete_venv(&root.path().join("kernel-venv.stale-1"), "leftover");
         let venv = root.path().join("kernel-venv");
         write_complete_venv(&venv, "old");
         let before = sibling_names(root.path());
@@ -586,16 +550,14 @@ mod tests {
             "old"
         );
         assert_eq!(sibling_names(root.path()), before);
-        assert!(root.path().join(&earlier[0]).exists());
     }
 
-    /// The old venv is renamed, never deleted. The just-retired copy and the
-    /// two newest earlier ones stay even past seven days; the third earlier
-    /// copy, past seven days, is pruned.
+    /// Once the new venv is live, the copy the swap just retired and the
+    /// leftovers of earlier swaps are all removed.
     #[test]
-    fn a_swap_keeps_the_retired_venv_and_the_two_newest_earlier_copies() {
+    fn a_swap_removes_every_retired_venv() {
         let root = tempfile::tempdir().unwrap();
-        let earlier = three_retired_copies(root.path(), aged_past_retention());
+        write_complete_venv(&root.path().join("kernel-venv.stale-1"), "leftover");
         let venv = root.path().join("kernel-venv");
         write_complete_venv(&venv, "old");
         let candidate = venv::venv_candidate_path(&venv);
@@ -607,62 +569,20 @@ mod tests {
             std::fs::read_to_string(kernel_venv_python(&venv)).unwrap(),
             "new"
         );
-        let retired = venv::retired_venvs(&venv);
-        assert_eq!(retired.len(), 1 + venv::STALE_VENV_KEEP, "{retired:?}");
-        assert_eq!(
-            std::fs::read_to_string(kernel_venv_python(&retired[0].1)).unwrap(),
-            "old",
-            "the newest retired copy is the venv the swap replaced"
-        );
-        let mut want = vec![
-            "kernel-venv".to_string(),
-            retired[0]
-                .1
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-            earlier[1].clone(),
-            earlier[2].clone(),
-        ];
-        want.sort();
-        assert_eq!(sibling_names(root.path()), want);
+        assert_eq!(sibling_names(root.path()), ["kernel-venv"]);
     }
 
     #[test]
-    fn a_retired_copy_younger_than_seven_days_is_never_pruned() {
+    fn a_failed_removal_never_fails_the_swap() {
         let root = tempfile::tempdir().unwrap();
-        let young = venv::STALE_VENV_RETENTION
-            .checked_sub(std::time::Duration::from_secs(60))
-            .unwrap();
-        let earlier = three_retired_copies(root.path(), young);
-        let venv = root.path().join("kernel-venv");
-        write_complete_venv(&venv, "old");
-        let candidate = venv::venv_candidate_path(&venv);
-        write_complete_venv(&candidate, "new");
-
-        venv::swap_venv_into_place(&candidate, &venv).unwrap();
-
-        let names = sibling_names(root.path());
-        for name in &earlier {
-            assert!(names.contains(name), "{name} survives: {names:?}");
-        }
-        assert_eq!(venv::retired_venvs(&venv).len(), 4);
-    }
-
-    #[test]
-    fn a_pruning_failure_never_fails_the_swap() {
-        let root = tempfile::tempdir().unwrap();
-        let earlier = three_retired_copies(root.path(), aged_past_retention());
         // `remove_dir_all` cannot remove a file, even as root.
-        std::fs::remove_dir_all(root.path().join(&earlier[0])).unwrap();
-        std::fs::write(root.path().join(&earlier[0]), "x").unwrap();
+        std::fs::write(root.path().join("kernel-venv.stale-1"), "x").unwrap();
         let venv = root.path().join("kernel-venv");
         write_complete_venv(&venv, "old");
         let candidate = venv::venv_candidate_path(&venv);
         write_complete_venv(&candidate, "new");
 
-        venv::swap_venv_into_place(&candidate, &venv).expect("a pruning failure is not fatal");
+        venv::swap_venv_into_place(&candidate, &venv).expect("a failed removal is not fatal");
 
         assert_eq!(
             std::fs::read_to_string(kernel_venv_python(&venv)).unwrap(),

@@ -132,8 +132,8 @@ pub(crate) fn lock_creation_denied(error: &anyhow::Error) -> bool {
 const BOOTSTRAP_STAGING_STALE_AFTER: Duration = Duration::from_hours(1);
 
 /// The staging kinds beside the venv: build candidates and recovered partial
-/// trees. A retired `<venv>.stale-*` copy is kept on purpose and is not staging;
-/// only the rebuild's own prune removes it.
+/// trees. A retired `<venv>.stale-*` copy is not staging: recovery may need it,
+/// and only a completed swap removes it.
 const VENV_STAGING_KINDS: [&str; 2] = ["candidate-", "partial-"];
 
 /// The staging kinds beside the lock: publication candidates and stale renames.

@@ -1,6 +1,6 @@
 //! The venv dir-layout concern: the override-aware
 //! kernel venv dir, the writable-dir fallback, the interpreter path, and the
-//! retired `.stale-*` copy kept beside the venv.
+//! retired `.stale-*` copy held beside the venv during a swap.
 
 use super::{anyhow, Context, Path, PathBuf};
 
@@ -34,15 +34,6 @@ pub(crate) fn home_kernel_venv_dir(home: &Path) -> PathBuf {
     home.join(".prime").join("agent").join("kernel-venv")
 }
 
-/// How long a retired `<venv>.stale-<unix-ms>` copy is kept before it can be
-/// pruned. Age is counted from the stamp in the name, the moment of retirement.
-pub(crate) const STALE_VENV_RETENTION: std::time::Duration =
-    std::time::Duration::from_hours(7 * 24);
-
-/// How many earlier retired copies are always kept beside the one just
-/// retired, newest first. With the just-retired copy, up to three survive.
-pub(crate) const STALE_VENV_KEEP: usize = 2;
-
 fn unix_ms(time: std::time::SystemTime) -> u128 {
     time.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -51,10 +42,9 @@ fn unix_ms(time: std::time::SystemTime) -> u128 {
 
 /// Move the venv at `venv` to `<venv>.stale-<unix-ms>` beside it.
 ///
-/// A rebuild never deletes the venv it replaces: the caller may be a worktree
-/// binary or an older install whose runtime differs from the one the user's
-/// sessions run, and the retired copy can be renamed back. A failed rename
-/// leaves `venv` untouched.
+/// The retired copy covers the swap's crash window: if the process dies
+/// before the new venv is in place, the next lock holder renames it back. A
+/// failed rename leaves `venv` untouched.
 pub(crate) fn retire_venv(venv: &Path) -> anyhow::Result<PathBuf> {
     let name = venv.file_name().unwrap_or_default().to_string_lossy();
     let retired = venv.with_file_name(format!(
@@ -91,22 +81,12 @@ pub(crate) fn retired_venvs(venv: &Path) -> Vec<(u128, PathBuf)> {
     retired
 }
 
-/// Best-effort removal of old retired copies; never fails the caller.
-///
-/// Kept: `just_retired`, plus the newest [`STALE_VENV_KEEP`] earlier copies.
-/// Any other copy is removed only when it is older than
-/// [`STALE_VENV_RETENTION`]. A copy that cannot be removed now is retried by
-/// the next rebuild.
-pub(crate) fn prune_retired_venvs(venv: &Path, just_retired: &Path) {
-    let now = unix_ms(std::time::SystemTime::now());
-    for (stamp, path) in retired_venvs(venv)
-        .into_iter()
-        .filter(|(_, path)| path != just_retired)
-        .skip(STALE_VENV_KEEP)
-    {
-        if now.saturating_sub(stamp) > STALE_VENV_RETENTION.as_millis() {
-            let _ = std::fs::remove_dir_all(&path);
-        }
+/// Best-effort removal of every retired copy once a complete venv is live;
+/// never fails the caller. A copy that cannot be removed now, for example
+/// while a kernel still runs from it on Windows, is retried by the next swap.
+pub(crate) fn remove_retired_venvs(venv: &Path) {
+    for (_, path) in retired_venvs(venv) {
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
 
