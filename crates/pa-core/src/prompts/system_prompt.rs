@@ -315,8 +315,12 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             }
         ));
         lines.push(
-            "Sleeping and long waits inside a cell are fine (`time.sleep(...)`, awaiting a handle). A user message or inbox arrival ends the wait early: the cell auto-backgrounds (it keeps running; nothing is killed) and its `[cell-done]` completion notice arrives in the inbox. A cell that outlives its wait budget auto-backgrounds the same way."
-                .to_string(),
+            if options.daemonless {
+                "Do not run long blocking work in a cell; start long Python work as an asyncio task and check on it in later cells."
+            } else {
+                "Sleeping and long waits inside a cell are fine (`time.sleep(...)`, awaiting a handle). A user message or inbox arrival ends the wait early: the cell auto-backgrounds (it keeps running; nothing is killed) and its `[cell-done]` completion notice arrives in the inbox. A cell that outlives its wait budget auto-backgrounds the same way."
+            }
+            .to_string(),
         );
     } else {
         lines.push(
@@ -579,6 +583,20 @@ mod tests {
         assert!(breakdown
             .assembled
             .contains("Enabled generic MCP servers: `t`."));
+    }
+
+    #[test]
+    fn only_daemon_sessions_are_told_that_cells_auto_background() {
+        let fixture = Fixture::new();
+        assert!(build_system_prompt(&fixture.options()).contains("the cell auto-backgrounds"));
+        let mut daemonless = fixture.options();
+        daemonless.daemonless = true;
+        let daemonless = build_system_prompt(&daemonless);
+        assert!(
+            !daemonless.contains("auto-backgrounds"),
+            "no wait budget or wake is armed without a daemon"
+        );
+        assert!(daemonless.contains("Do not run long blocking work in a cell"));
     }
 
     #[test]

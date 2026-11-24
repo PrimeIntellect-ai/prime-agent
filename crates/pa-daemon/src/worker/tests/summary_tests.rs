@@ -409,16 +409,17 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
     );
 }
 
-/// Every `get_state` summary now carries the live background-work count.
+/// Every `get_state` summary now carries the owed background-completion
+/// count.
 ///
 /// This is a deliberate wire-shape change: the field was absent from
-/// `get_state`, and an ordinary child's settle watcher could not see a live
-/// backgrounded cell or a queued completion, so the child settled
+/// `get_state`, and an ordinary child's settle watcher could not see a
+/// detached cell or a queued completion, so the child settled
 /// done/no-reply while the work was still landing. The count rides every
 /// read. The zero case is pinned too, so dropping the insertion fails here.
 #[allow(clippy::await_holding_lock)] // faux registry is process-global for this worker flow
 #[tokio::test]
-async fn get_state_reports_background_jobs_on_every_read() {
+async fn get_state_reports_owed_background_completions_on_every_read() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -469,7 +470,7 @@ async fn get_state_reports_background_jobs_on_every_read() {
     let ordinary = worker.dispatch("get_state", &json!({})).await;
     assert!(ordinary.success, "get_state failed: {ordinary:?}");
     assert_eq!(
-        ordinary.data.as_ref().unwrap_or(&Value::Null)["outstandingBackgroundJobs"],
+        ordinary.data.as_ref().unwrap_or(&Value::Null)["pendingBackgroundCompletions"],
         json!(1),
         "ordinary summaries carry the queued cell completion"
     );
@@ -478,7 +479,7 @@ async fn get_state_reports_background_jobs_on_every_read() {
     worker.core.lock().unwrap().steering.clear();
     let idle = worker.dispatch("get_state", &json!({})).await;
     assert_eq!(
-        idle.data.as_ref().unwrap_or(&Value::Null)["outstandingBackgroundJobs"],
+        idle.data.as_ref().unwrap_or(&Value::Null)["pendingBackgroundCompletions"],
         json!(0),
         "the field is always present, zero included"
     );

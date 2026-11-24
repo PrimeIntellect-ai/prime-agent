@@ -42,6 +42,9 @@ pub(crate) use queue::{
 
 mod create;
 mod turn;
+mod work_notify;
+
+pub(crate) use work_notify::WorkNotify;
 
 use create::{active_session_id_of, worker_server_capabilities};
 // session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
@@ -142,7 +145,7 @@ pub struct Worker {
     /// authoritative pulls embed: a push can race a fresher pull, so the
     /// supervisor's gate drops the stale snapshot.
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) work_notify: Arc<Notify>,
+    pub(crate) work_notify: Arc<WorkNotify>,
     pub(crate) idle_notify: Arc<Notify>,
     /// The per-connection session-attach registry (the fresh bots'
     /// release findings): connection tokens -> the client ids their
@@ -362,7 +365,24 @@ impl Worker {
         // Shared worker recovery journal: the turn runner persists queue
         // snapshots, `serve` opens the file, commands record busy state.
         let recovery = Arc::new(Mutex::new(None));
-        let work_notify = Arc::new(Notify::new());
+        // The worker's queue-backed cell wake: the pending predicate
+        // reads the live steering lane (wakeable rows only — a cell-done
+        // row never detaches a later cell), so an arrival that lands while
+        // the model is still streaming the tool call ends the cell's wait
+        // at once instead of waiting out the budget. Every work wake
+        // requests it; the agent engine installs it before it is shared.
+        let wake_core = Arc::clone(&core);
+        let cell_wake_pending: pa_core::kernel::cell_wake::CellWakePending =
+            std::sync::Arc::new(move || {
+                let core = wake_core
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                core.steering.iter().any(row_wakes_a_cell)
+            });
+        let worker_cell_wake = std::sync::Arc::new(
+            pa_core::kernel::cell_wake::CellWake::with_pending(cell_wake_pending),
+        );
+        let work_notify = Arc::new(WorkNotify::new(std::sync::Arc::clone(&worker_cell_wake)));
         let idle_notify = Arc::new(Notify::new());
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner and the command arms
@@ -443,23 +463,6 @@ impl Worker {
             let orphan_journal_path =
                 std::env::var_os(pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV)
                     .map(std::path::PathBuf::from);
-            // The worker's queue-backed cell wake: the pending predicate
-            // reads the live steering lane (wakeable rows only — a
-            // cell-done row never detaches a later cell), so an arrival
-            // that lands while the model is still streaming the tool call
-            // ends the cell's wait at once instead of waiting out the
-            // budget. Installed on the engine before it is shared.
-            let wake_core = Arc::clone(&core);
-            let cell_wake_pending: pa_core::kernel::cell_wake::CellWakePending =
-                std::sync::Arc::new(move || {
-                    let core = wake_core
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    core.steering.iter().any(row_wakes_a_cell)
-                });
-            let worker_cell_wake = std::sync::Arc::new(
-                pa_core::kernel::cell_wake::CellWake::with_pending(cell_wake_pending),
-            );
             let engine: std::sync::Arc<dyn SessionEngine> = match &script {
                 // A `{"engine": "faux", ...}` script drives the real agent
                 // engine over the scripted faux provider (verification only).
@@ -726,7 +729,6 @@ impl Worker {
                     // Revalidated inside the admission's lock section: the
                     // close paths mark the session BEFORE clearing the lanes.
                     let closed = || engine.session_is_closed();
-                    let wakes_cell = notice.wakes_cell_wait();
                     if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
                         if let (Some(inbox), Some(fields)) = (
                             engine.inbox(),
@@ -744,11 +746,6 @@ impl Worker {
                                 Some(engine.as_ref()),
                             );
                             if admitted.is_ok() {
-                                // The arrival rides the steering lane: it must
-                                // reach a running (possibly sleeping) cell too.
-                                if wakes_cell {
-                                    engine.fire_cell_wake();
-                                }
                                 return;
                             }
                             // The store moved on between the capture and
@@ -764,11 +761,6 @@ impl Worker {
                         notice,
                         closed,
                     );
-                    // The full-row steer wakes a running cell the same way:
-                    // the arrival is a steering-class interrupt either way.
-                    if wakes_cell {
-                        engine.fire_cell_wake();
-                    }
                 });
                 crate::agent_inbox::spawn_inbox_reminder(
                     std::sync::Arc::downgrade(concrete),
