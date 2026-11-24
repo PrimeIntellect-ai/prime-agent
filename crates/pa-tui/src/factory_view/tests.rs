@@ -321,6 +321,22 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
     );
 }
 
+/// Each spawned instance of one state nests under its box with its own
+/// label, so a foreach's children stay apart.
+#[test]
+fn each_instance_of_a_state_nests_with_its_own_label() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["nodes"][0]["instances"] = json!([
+        { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-1" },
+        { "index": 1, "entry": 0, "status": "done", "attempt": 1, "child": "child-4" }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let joined = frame_text(&mut view).join("\n");
+    for label in ["run-ab-researcher #0 · e0", "run-ab-researcher #1 · e0"] {
+        assert!(joined.contains(label), "missing {label:?}: {joined}");
+    }
+}
+
 /// A python state paints its callable where a subagent state paints its
 /// subagent name.
 #[test]
@@ -668,6 +684,29 @@ fn the_fired_edge_identity_includes_the_guard() {
     assert!(
         joined.contains("false") && joined.contains("true"),
         "both sibling guards render: {joined}"
+    );
+}
+
+/// A join's fired edge lights whatever order the fired window lists its
+/// sources in, and its `join` label paints as fired.
+#[test]
+fn a_fired_join_lights_whatever_its_source_order() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"] = json!([
+        { "from": ["collect", "reviewing"], "to": "fixing", "on": "settled" }
+    ]);
+    snapshot["lastFired"] = json!([
+        { "from": ["reviewing", "collect"], "to": "fixing", "seq": 9 }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    assert!(
+        spans.iter().any(|row| row
+            .iter()
+            .any(|span| span.content.contains("join") && span.style == success)),
+        "the fired join's label paints success: {:?}",
+        frame_text(&mut view)
     );
 }
 

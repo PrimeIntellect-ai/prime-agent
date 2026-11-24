@@ -1150,8 +1150,13 @@ impl FactoryView {
                 })
                 .map(|instance| {
                     let (_, instance_color) = node_glyph(instance.status.as_str());
+                    // The node view's `#index · e<entry>` names each instance
+                    // apart (a foreach, a re-entry).
                     let name = state.subagent.as_deref().unwrap_or("agent");
-                    let label = format!("{run_short}-{name}");
+                    let label = format!(
+                        "{run_short}-{name} #{} · e{}",
+                        instance.index, instance.entry
+                    );
                     OverlayChild {
                         label,
                         color: if instance.status == "running" {
