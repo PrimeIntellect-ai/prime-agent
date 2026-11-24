@@ -1146,9 +1146,11 @@ class BashHandle:
             self._end_await()
         if degraded:
             snapshot = self._degrade_snapshot()
-            # Only the running cell's own await gets the note: a background
-            # task's note would land in a later, unrelated cell's output.
-            if _creating_cell_waits_for(_live_cell_owner(), current_task):
+            # Only the calling cell's own await gets the note, while that cell
+            # runs (beside a newer cell too): a background task's note would
+            # land in a later, unrelated cell's output.
+            context = _current_cell_completion_context()
+            if context is not None and _creating_cell_waits_for(context[1], current_task):
                 _note_degrade(snapshot)
             return snapshot
         return cast("BashResult", result)
