@@ -54,6 +54,7 @@ pub struct PrimeSandboxClient<T: SandboxTransport = ReqwestSandboxTransport> {
     pub(crate) base_url: String,
     pub(crate) team_id: Option<String>,
     pub(crate) request_timeout: Duration,
+    pub(crate) allow_insecure_localhost: bool,
 }
 
 impl<T: SandboxTransport + std::fmt::Debug> std::fmt::Debug for PrimeSandboxClient<T> {
@@ -64,6 +65,7 @@ impl<T: SandboxTransport + std::fmt::Debug> std::fmt::Debug for PrimeSandboxClie
             .field("base_url", &self.base_url)
             .field("team_id", &self.team_id)
             .field("request_timeout", &self.request_timeout)
+            .field("allow_insecure_localhost", &self.allow_insecure_localhost)
             .finish()
     }
 }
@@ -112,6 +114,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             base_url,
             team_id: options.team_id.filter(|team_id| !team_id.is_empty()),
             request_timeout,
+            allow_insecure_localhost: options.allow_insecure_localhost,
         })
     }
 
