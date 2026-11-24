@@ -70,7 +70,7 @@ pub struct SystemPromptBreakdown {
 pub enum FactoryChild {
     /// The factory reads the child's final message.
     FinalMessage,
-    /// The state declares an `emit` contract: the child calls
+    /// The state's `emit` contract declares outputs: the child calls
     /// `rlm.factory.emit`, and its final message is not read.
     Emit,
 }
