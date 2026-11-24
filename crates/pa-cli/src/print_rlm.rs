@@ -855,7 +855,10 @@ impl RlmSubagentHost for InlineHost {
             // (TS `spawnMessage`), delivered through the one steer path.
             let kickoff_content = format!("[task from parent]\n\n{}", request.prompt);
             let kickoff_row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
-                id: &format!("spawn:{child_id}"),
+                id: &format!(
+                    "{}{child_id}",
+                    pa_core::session_engine::agent_messaging::SPAWN_KICKOFF_ID_PREFIX
+                ),
                 prompt: &kickoff_content,
                 message: &request.prompt,
                 from: &node.endpoint(),
@@ -1247,6 +1250,7 @@ impl AgentMessageController for InlineMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pa_core::session_engine::rlm_host::RlmSpawnKind;
 
     fn run_options(directory: &std::path::Path) -> crate::mode::RunOptions {
         crate::mode::RunOptions {
@@ -1291,6 +1295,7 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
             spawned_by_request_id: None,
             factory: None,

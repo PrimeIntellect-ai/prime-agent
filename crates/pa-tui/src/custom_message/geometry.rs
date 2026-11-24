@@ -50,8 +50,8 @@ pub(crate) fn agent_message_row_count(
         }
 }
 
-/// The inbox-notice rows always paint the body (no expansion gate):
-/// leading blank + header wrap + the agent-message body geometry.
+/// One expanded inbox notice: leading blank + header wrap + the
+/// agent-message body geometry.
 pub(crate) fn inbox_notice_row_count(
     row: &InboxNoticeRow,
     theme: &Theme,
