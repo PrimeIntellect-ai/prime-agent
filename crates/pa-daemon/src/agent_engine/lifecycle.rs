@@ -141,7 +141,7 @@ impl AgentSessionEngine {
             inbox: std::sync::Mutex::new(None),
             inbox_read_hook: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
-            goal_backoff_wake_job_id: std::sync::Mutex::new(None),
+            background_skip_wake_armed: std::sync::atomic::AtomicBool::new(false),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             queue_modes,
             registered_jobs_probe: std::sync::Mutex::new(None),
@@ -820,6 +820,7 @@ impl AgentSessionEngine {
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
         images: &[pa_agent::types::ImageContent],
+        compaction_abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<SessionCommandExecution> {
         // `/refine` is the refinement child's command (fire-and-wake): the
         // planning spawn returns immediately and the child's proposal applies
@@ -840,6 +841,7 @@ impl AgentSessionEngine {
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
+            compaction_abort,
             api_key,
             autonomous: &mut autonomous,
         };
@@ -885,6 +887,7 @@ impl AgentSessionEngine {
             messages: vec![session_command_echo_row(command), row],
             compaction: None,
             compaction_skipped: None,
+            compaction_aborted: false,
             continuation_message: None,
             error: None,
             pending_refinement: None,

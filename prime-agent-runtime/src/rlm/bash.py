@@ -81,25 +81,26 @@ def _set_completion_notices_wired(wired: bool) -> None:
     _completion_notices_wired = wired
 
 
-# One stderr hint per degrade, budgeted per kernel (nano-rlm's
-# MAX_LONG_RUN_NOTES shape): the first few degrades teach the contract, later
-# ones stay quiet.
-_MAX_DEGRADE_HINTS = 3
-_degrade_hints_written = 0
+# The machine-facing directive every degraded await carries: the command is
+# backgrounded, so this turn's work on it is done. Shared by the stderr note
+# and the snapshot repr so both tell the same story.
+_DEGRADE_DIRECTIVE = (
+    "The command runs in the background: do not await it again this turn; "
+    "end the turn and collect the final result on the completion notice."
+)
 
 
-def _note_degrade(handle: "BashHandle", bound: float) -> None:
-    """Write the degrade hint to the awaiting cell's stderr, within budget."""
-    global _degrade_hints_written
-    if _degrade_hints_written >= _MAX_DEGRADE_HINTS:
-        return
-    _degrade_hints_written += 1
-    sys.stderr.write(
-        f"bash: still running after {bound:g}s (pid {handle._pid}); "
-        "returned a snapshot: r.running is True, r.output is the output so "
-        "far, r.handle is the live handle. End the turn — a completion "
-        "notice arrives when it finishes.\n"
-    )
+def _note_degrade(snapshot: "BashSnapshot") -> None:
+    """Write the snapshot's directive to the awaiting cell's stderr.
+
+    One note per degrade of the cell's own await, never budgeted: for an
+    assignment-form await the note is the model's only feedback (no trailing
+    expression means no repr in the tool result), and a quiet repeat reads as
+    progress. The note is
+    what makes the re-await loop visible: every repeat shows the pid, the
+    growing elapsed, and the end-the-turn contract.
+    """
+    sys.stderr.write(f"{snapshot.directive()}\n")
 
 
 async def _bounded_wait(
@@ -141,6 +142,91 @@ _ACTIVITY_HISTORY_CAP = 64
 _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
+
+# ── the waiting keepalive: paced notices for parked sessions ───────────────
+#
+# A parked session with live background work races every idle clock: the
+# eval's idle close can end the session mid-wait (the work never lands), and
+# the product's own idle passivation gate sees user bash, not kernel handles.
+# While any handle is live and no request is in flight, pace one [waiting]
+# notice per window so the session's activity clock stays fresh and the
+# parked-turn contract stays taught — the model stops inventing watcher
+# loops to keep its own session alive. `0` disables; invalid values use 240 seconds.
+try:
+    _WAITING_KEEPALIVE_SECONDS = max(
+        0.0, float(os.environ.get("PRIME_AGENT_BASH_WAITING_KEEPALIVE_SECONDS", "240"))
+    )
+except ValueError:
+    _WAITING_KEEPALIVE_SECONDS = 240.0
+_WAITING_TICK_SECONDS = 15.0
+_waiting_keepalive_task: "asyncio.Task[None] | None" = None
+
+
+def _start_waiting_keepalive() -> None:
+    """Arm the keepalive loop once, on the first detached background launch."""
+    global _waiting_keepalive_task
+    if _waiting_keepalive_task is not None or _WAITING_KEEPALIVE_SECONDS <= 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _waiting_keepalive_task = loop.create_task(_waiting_keepalive_loop())
+
+
+async def _waiting_keepalive_loop() -> None:
+    """Pace one [waiting] notice per window while background commands run.
+
+    Skips ticks while a request is in flight (the session's own turn keeps
+    the clocks warm) and stops firing once the last handle settles — its own
+    [bash-done] wake takes over. A host without the handler (an older
+    daemon) answers with an error: disable instead of re-asking every
+    window.
+    """
+    from . import repl
+
+    tick = min(_WAITING_TICK_SECONDS, _WAITING_KEEPALIVE_SECONDS / 4.0)
+    # The window starts at the loop's own start and restarts on every tick
+    # with nothing running, so each job's first notice waits one window:
+    # `time.monotonic()` has an unspecified origin (typically boot).
+    last_sent = time.monotonic()
+    while True:
+        await asyncio.sleep(tick)
+        with _live_lock:
+            live = [
+                handle
+                for handle in _live_handles | set(_activity_handles.values())
+                if not handle._reaped
+            ]
+        if not live:
+            last_sent = time.monotonic()
+            continue
+        if repl.request_in_flight():
+            continue
+        now = time.monotonic()
+        if now - last_sent < _WAITING_KEEPALIVE_SECONDS:
+            continue
+        shown = live[:_COMPLETION_NOTICE_COMMAND_CAP]
+        pids = [handle._pid for handle in shown]
+        commands = [_capped(handle.command) for handle in shown]
+        try:
+            reply = await repl.host_request(
+                {
+                    "type": "bash.waiting",
+                    "pids": pids,
+                    "commands": commands,
+                    "count": len(live),
+                }
+            )
+        except (OSError, RuntimeError):
+            return
+        # A host without the handler answers with an error reply (an older
+        # daemon, or the TS daemon): disable instead of re-asking every
+        # window.
+        if not isinstance(reply, dict) or reply.get("status") != "ok":
+            return
+        if reply.get("result", {}).get("admitted") is True:
+            last_sent = time.monotonic()
 
 # bash(persistent=True): every session's persistent shells live in one home
 # under the agent dir (the cross-language contract pa-daemon reads): per shell
@@ -297,23 +383,36 @@ class BashSnapshot:
     """A degraded await's still-running snapshot (`BashHandle.__await__`).
 
     `r.output`/`r.exit_code` read like a BashResult's — output so far and
-    None while running — and `r.running` is True; `r.handle` is the live
-    handle: collect the final result on the completion notice or with
-    `await r.handle`. The snapshot itself is not awaitable (that was #3076's
-    rejected wrapper shape).
+    None while running — and `r.running` is True. `r.duration` is the
+    command's elapsed running time at `r.result_time` (UTC), the wall-clock
+    moment the snapshot was taken, so repeated snapshots show the elapsed
+    growing. `r.handle` is the live handle: collect the final result on the
+    completion notice. The snapshot itself is not awaitable (that was
+    #3076's rejected wrapper shape), and its repr carries the background
+    directive so a bare-expression await states it in the tool result.
     """
 
     output: str
     exit_code: None
     running: bool
     duration: float
+    result_time: datetime
     handle: "BashHandle"
+
+    def directive(self) -> str:
+        """The model-facing note for this snapshot: elapsed, result time,
+        and the end-the-turn directive, in the stderr note's exact wording."""
+        return (
+            f"bash: still running after {self.duration:g}s "
+            f"(pid {self.handle._pid}, snapshot at "
+            f"{self.result_time.strftime('%Y-%m-%dT%H:%M:%SZ')}). {_DEGRADE_DIRECTIVE}"
+        )
 
     def __repr__(self) -> str:
         return (
             f"<BashSnapshot running pid={self.handle._pid} "
-            f"after {self.duration:g}s: collect on the completion "
-            "notice or await .handle>"
+            f"after {self.duration:g}s at "
+            f"{self.result_time.strftime('%Y-%m-%dT%H:%M:%SZ')}: {_DEGRADE_DIRECTIVE}>"
         )
 
 
@@ -835,6 +934,10 @@ class BashHandle:
             return
         from . import repl
 
+        # The first detached launch arms the waiting keepalive: parked
+        # sessions with live background work stay awake on paced notices.
+        _start_waiting_keepalive()
+
         activity = {"id": self._activity_id, "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.
         repl.emit({"application/vnd.prime-agent.bash-activity+json": activity})
@@ -1100,8 +1203,12 @@ class BashHandle:
             if completed:
                 self._note_result_consumed()
         if degraded:
-            _note_degrade(self, cast("float", bound))
-            return self._degrade_snapshot()
+            snapshot = self._degrade_snapshot()
+            # Only the running cell's own await gets the note: a background
+            # task's note would land in a later, unrelated cell's output.
+            if _creating_cell_waits_for(_live_cell_owner(), current_task):
+                _note_degrade(snapshot)
+            return snapshot
         return cast("BashResult", result)
 
     def _degrade_snapshot(self) -> BashSnapshot:
@@ -1113,6 +1220,7 @@ class BashHandle:
             exit_code=None,
             running=True,
             duration=time.monotonic() - self._started,
+            result_time=datetime.now(timezone.utc),
             handle=self,
         )
 
@@ -1286,6 +1394,7 @@ class PersistentBashHandle(BashHandle):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        _start_waiting_keepalive()
         loop.create_task(self._notify_completion()).add_done_callback(_consume_notice_task)
 
     async def _notify_completion(self) -> None:

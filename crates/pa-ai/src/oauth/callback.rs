@@ -115,6 +115,17 @@ impl CodexCallbackServer {
         }
     }
 
+    /// Stop the accept loop and return once its listener is closed: the registered port is free
+    /// when this returns, so an immediate retry binds it. Dropping only schedules that release.
+    pub(crate) async fn shutdown(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            // An aborted task's join resolves after its future, and so the listener, is dropped;
+            // the cancellation error is the abort itself.
+            let _ = task.await;
+        }
+    }
+
     /// The bound port (`None` on the dead server).
     #[must_use]
     pub fn port(&self) -> Option<u16> {
@@ -434,41 +445,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_state_mismatch_answers_and_keeps_waiting() {
+    async fn a_non_matching_request_answers_and_keeps_waiting() {
+        // (path, status line, page text): a state mismatch, a missing
+        // code and an unknown route never settle the login.
+        let cases = [
+            (
+                "/auth/callback?code=c&state=other",
+                "HTTP/1.1 400 Bad Request",
+                "State mismatch.",
+            ),
+            (
+                "/auth/callback?state=the-state",
+                "HTTP/1.1 400 Bad Request",
+                "Missing authorization code.",
+            ),
+            (
+                "/other?code=c&state=the-state",
+                "HTTP/1.1 404 Not Found",
+                "Callback route not found.",
+            ),
+        ];
         let (server, port) = live("the-state").await;
-        let response = request(port, "/auth/callback?code=c&state=other").await;
-        assert!(
-            response.starts_with("HTTP/1.1 400 Bad Request"),
-            "{response}"
-        );
-        assert!(response.contains("State mismatch."), "{response}");
-        // A mismatch never settles the login; cancellation does.
-        server.cancel().await;
-        assert_eq!(server.wait_for_code().await, None);
-    }
-
-    #[tokio::test]
-    async fn a_missing_code_answers_and_keeps_waiting() {
-        let (server, port) = live("the-state").await;
-        let response = request(port, "/auth/callback?state=the-state").await;
-        assert!(
-            response.starts_with("HTTP/1.1 400 Bad Request"),
-            "{response}"
-        );
-        assert!(
-            response.contains("Missing authorization code."),
-            "{response}"
-        );
-        server.cancel().await;
-        assert_eq!(server.wait_for_code().await, None);
-    }
-
-    #[tokio::test]
-    async fn an_unknown_route_answers_404_without_settling() {
-        let (server, port) = live("the-state").await;
-        let response = request(port, "/other?code=c&state=the-state").await;
-        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
-        assert!(response.contains("Callback route not found."), "{response}");
+        for (path, status, text) in cases {
+            let response = request(port, path).await;
+            assert!(response.starts_with(status), "{response}");
+            assert!(response.contains(text), "{response}");
+        }
+        // No request settled the login; cancellation does.
         server.cancel().await;
         assert_eq!(server.wait_for_code().await, None);
     }

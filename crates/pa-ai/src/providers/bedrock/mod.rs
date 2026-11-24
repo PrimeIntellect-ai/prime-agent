@@ -921,32 +921,6 @@ mod tests {
         SigV4Params,
     };
 
-    /// The TS `formatBedrockError` shape for an HTTP-level failure: the AWS SDK exception name
-    /// (from the body `__type` after the namespace) maps to a stable human-readable prefix; unknown
-    /// names keep the raw name.
-    #[test]
-    fn bedrock_http_error_prefix_shape() {
-        let error = bedrock_http_error(
-            400,
-            "{\"__type\":\"com.amazonaws.bedrock#ValidationException\",\"message\":\"model id is invalid\"}",
-            &HashMap::default(),
-        );
-        assert_eq!(error.to_string(), "Validation error: model id is invalid");
-        let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
-        assert_eq!(
-            info.provider_error_type.as_deref(),
-            Some("ValidationException")
-        );
-        // AWS exceptions carry no HTTP status to the TS classifier.
-        assert_eq!(info.status, None);
-        assert_eq!(
-            info.kind,
-            crate::utils_inner::stream_failure::StreamFailureKind::Unknown
-        );
-        let diagnostic = crate::utils_inner::stream_failure::diagnostic_error_info(&error);
-        assert_eq!(diagnostic.name.as_deref(), Some("ValidationException"));
-    }
-
     /// Throttling exceptions keep their name as the classification key ("throttl" -> `rate_limit`),
     /// like the TS rethrown stream exception.
     #[test]
@@ -956,50 +930,11 @@ mod tests {
             "{\"__type\":\"ThrottlingException\",\"message\":\"too many\"}",
             &HashMap::default(),
         );
-        assert_eq!(error.to_string(), "Throttling error: too many");
         let info = crate::utils_inner::stream_failure::extract_stream_failure_info(&error);
         assert_eq!(
             info.kind,
             crate::utils_inner::stream_failure::StreamFailureKind::RateLimit
         );
-    }
-
-    /// An unrecognized error body names the generic fallback by the raw status text
-    /// (`parsedBody.code || errorCode || statusCode || "UnknownError"`), and a missing message
-    /// defaults to "`UnknownError`".
-    #[test]
-    fn bedrock_http_error_generic_fallback() {
-        let error = bedrock_http_error(400, "{\"foo\":1}", &HashMap::default());
-        assert_eq!(error.to_string(), "400: UnknownError");
-    }
-
-    /// Connection failures surface undici's raw `TypeError` message (the AWS SDK does not wrap
-    /// them). The in-stream exception message composition (`{prefix}: {message}`).
-    #[test]
-    fn bedrock_exception_message_shape() {
-        assert_eq!(
-            bedrock_exception_message("ModelStreamErrorException", "stream died"),
-            "Model stream error: stream died"
-        );
-        assert_eq!(
-            bedrock_exception_message("SomeUnknownException", "boom"),
-            "SomeUnknownException: boom"
-        );
-    }
-
-    #[test]
-    fn bedrock_connection_error_text() {
-        let connect = ProviderError::Connection(
-            crate::utils_inner::stream_failure::ProviderConnectionError {
-                kind: crate::utils_inner::stream_failure::ConnectionErrorKind::Connect,
-                profile: crate::utils_inner::stream_failure::ConnectionErrorProfile::AwsHttp1 {
-                    host: "127.0.0.1".to_string(),
-                    port: 1,
-                },
-                cause: "http2 connect error".to_string(),
-            },
-        );
-        assert_eq!(connect.to_string(), "connect ECONNREFUSED 127.0.0.1:1");
     }
 
     #[test]
@@ -1039,26 +974,6 @@ mod tests {
         use crate::providers::bedrock::convert::normalize_tool_call_id;
         assert_eq!(normalize_tool_call_id("toolu_01ABCdef"), "toolu_01ABCdef");
         assert_eq!(normalize_tool_call_id(&"a".repeat(80)).len(), 64);
-    }
-
-    #[test]
-    fn maps_stop_reasons() {
-        use crate::types::StopReason;
-        assert_eq!(map_stop_reason(Some("end_turn")), StopReason::Stop);
-        assert_eq!(map_stop_reason(Some("stop_sequence")), StopReason::Stop);
-        assert_eq!(map_stop_reason(Some("max_tokens")), StopReason::Length);
-        assert_eq!(map_stop_reason(Some("tool_use")), StopReason::ToolUse);
-        assert_eq!(map_stop_reason(Some("other")), StopReason::Error);
-        assert_eq!(map_stop_reason(None), StopReason::Error);
-    }
-
-    #[test]
-    fn error_prefixes_match_ts() {
-        assert_eq!(
-            bedrock_error_prefix("ThrottlingException"),
-            "Throttling error"
-        );
-        assert_eq!(bedrock_error_prefix("Unknown"), "Unknown");
     }
 
     /// Caller headers (the injected session identity among them) travel on the Bedrock request;

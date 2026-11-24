@@ -16,6 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from datetime import timezone
 from types import FunctionType, SimpleNamespace
 from unittest import mock
 
@@ -46,6 +47,119 @@ def _win_spawn(procs=None, resume=True):
         return proc
 
     return spawn_in_job
+
+
+class BashWaitingKeepaliveTest(unittest.IsolatedAsyncioTestCase):
+    async def run_ticks(self, live_handles, activity_handles, ticks, replies, *, started=0.0):
+        from rlm import repl
+
+        clock = SimpleNamespace(now=started, busy=False)
+        ticks = iter(ticks)
+        replies = iter(replies)
+        sent = []
+
+        async def tick(_delay):
+            try:
+                clock.now, clock.busy = next(ticks)
+            except StopIteration:
+                raise asyncio.CancelledError from None
+
+        async def host_request(payload):
+            sent.append((clock.now, payload))
+            return next(replies, {"status": "ok", "result": {"admitted": True}})
+
+        namespace = dict(bash_module._waiting_keepalive_loop.__globals__)
+        namespace.update(
+            _live_handles=live_handles,
+            _activity_handles=activity_handles,
+            _WAITING_KEEPALIVE_SECONDS=240.0,
+            asyncio=SimpleNamespace(sleep=tick),
+            time=SimpleNamespace(monotonic=lambda: clock.now),
+        )
+        run = FunctionType(bash_module._waiting_keepalive_loop.__code__, namespace)
+        with (
+            mock.patch.object(repl, "request_in_flight", side_effect=lambda: clock.busy),
+            mock.patch.object(repl, "host_request", side_effect=host_request),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await run()
+        return sent
+
+    def handle(self, cls=bash_module.BashHandle, *, pid=42, reaped=False):
+        handle = object.__new__(cls)
+        handle._pid = pid
+        handle._reaped = reaped
+        handle._released = False
+        handle.command = f"sleep 60 # {pid}"
+        return handle
+
+    async def test_waiting_scan_preserves_one_shot_ownership(self):
+        handle = self.handle()
+        sent = await self.run_ticks(
+            {handle}, {}, [(1000.0, False)],
+            [{"status": "ok", "result": {"admitted": True}}],
+        )
+        self.assertEqual(sent, [(1000.0, {
+            "type": "bash.waiting", "pids": [42],
+            "commands": ["sleep 60 # 42"], "count": 1,
+        })])
+        self.assertFalse(handle._released, "an internal scan must not disable kill-on-cancel")
+
+    async def test_waiting_includes_persistent_activity_without_exit_cleanup(self):
+        ordinary = self.handle()
+        persistent = self.handle(bash_module.PersistentBashHandle, pid=43)
+        finished = self.handle(bash_module.PersistentBashHandle, pid=44, reaped=True)
+        live = {ordinary}
+        sent = await self.run_ticks(
+            live, {"ordinary": ordinary, "persistent": persistent, "finished": finished},
+            [(1000.0, False)], [{"status": "ok", "result": {"admitted": True}}],
+        )
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(set(sent[0][1]["pids"]), {42, 43})
+        self.assertEqual(set(sent[0][1]["commands"]), {"sleep 60 # 42", "sleep 60 # 43"})
+        self.assertEqual(sent[0][1]["count"], 2)
+        self.assertEqual(live, {ordinary})
+
+    async def test_waiting_first_notice_waits_one_window_independent_of_uptime(self):
+        for started in (0.0, 1_000_000.0):
+            with self.subTest(started=started):
+                handle = self.handle()
+                ticks = [(started + offset, busy) for offset, busy in (
+                    (1.0, True), (16.0, False), (239.0, False),
+                    (240.0, False), (255.0, False), (480.0, False),
+                )]
+                sent = await self.run_ticks(
+                    {handle}, {}, ticks,
+                    [{"status": "ok", "result": {"admitted": True}}] * 2,
+                    started=started,
+                )
+                self.assertEqual([when - started for when, _ in sent], [240.0, 480.0])
+
+    async def test_waiting_window_restarts_while_nothing_runs(self):
+        handle = self.handle()
+        live = set()
+
+        def ticks():
+            live.add(handle)
+            yield (240.0, False)
+            live.clear()
+            yield (300.0, False)
+            yield (1000.0, False)
+            # A later job's first idle tick comes before one window of its own.
+            live.add(handle)
+            yield (1015.0, False)
+            yield (1255.0, False)
+
+        sent = await self.run_ticks(live, {}, ticks(), [])
+        self.assertEqual([when for when, _ in sent], [240.0, 1255.0])
+
+    async def test_waiting_rejected_notice_does_not_delay_next_idle_tick(self):
+        handle = self.handle()
+        sent = await self.run_ticks(
+            {handle}, {}, [(1000.0, False), (1015.0, False), (1030.0, False), (1255.0, False)],
+            [{"status": "ok", "result": {"admitted": admitted}} for admitted in (False, True, True)],
+        )
+        self.assertEqual([when for when, _ in sent], [1000.0, 1015.0, 1255.0])
 
 
 class BashTest(unittest.IsolatedAsyncioTestCase):
@@ -1387,8 +1501,6 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
     def _wire_notices(self) -> None:
         bash_module._set_completion_notices_wired(True)
         self.addCleanup(bash_module._set_completion_notices_wired, False)
-        bash_module._degrade_hints_written = 0
-        self.addCleanup(setattr, bash_module, "_degrade_hints_written", 0)
 
     @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.3)
     async def test_bounded_await_degrades_to_a_snapshot(self):
@@ -1400,6 +1512,20 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(returned.exit_code)
         self.assertTrue(returned.running)
         self.assertIsInstance(returned.output, str)
+        # The snapshot carries its timestamps: the command's elapsed running
+        # time (past the window) and the UTC wall-clock moment it was taken.
+        self.assertGreaterEqual(returned.duration, 0.3)
+        self.assertEqual(returned.result_time.tzinfo, timezone.utc)
+        # The repr is the directive: pid, elapsed, result time, and the
+        # end-the-turn contract, never the old "await .handle" invitation
+        # whose re-await degraded to the same snapshot again.
+        text = repr(returned)
+        self.assertIn(f"pid={handle.pid} ", text)
+        self.assertIn(f"after {returned.duration:g}s at ", text)
+        self.assertIn("do not await it again this turn", text)
+        self.assertIn("collect the final result on the completion notice", text)
+        self.assertIn(returned.result_time.strftime("%Y-%m-%dT%H:%M:%SZ"), text)
+        self.assertNotIn("await .handle", text)
         # The prompt's collect idiom: re-awaiting the live handle returns the
         # final result once the command finishes inside the window.
         result = await returned.handle
@@ -1441,18 +1567,49 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
 
     @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.2)
-    async def test_degrade_hints_are_budgeted_to_the_first_three(self):
+    async def test_every_degrade_notes_the_directive_with_growing_elapsed(self):
+        # The observed loop (T-0011): an agent re-awaits a running handle
+        # instead of ending the turn. Every degrade must write the
+        # directive (a quiet repeat reads as a successful empty call), and
+        # the elapsed it shows must grow so the loop is visible to the model.
         self._wire_notices()
-        handles = []
-        hints = io.StringIO()
-        with mock.patch.object(sys, "stderr", hints):
-            for _ in range(5):
-                handle = bash("sleep 3")
-                handles.append(handle)
-                self.assertIsInstance(await handle, bash_module.BashSnapshot)
-        for handle in handles:
-            handle.kill(grace=0.1)
-        self.assertEqual(hints.getvalue().count("still running after"), 3)
+        handle = bash("sleep 2")
+        notes = io.StringIO()
+        # Five degrades, past the size of the removed three-note budget:
+        # a budget revert (or an upstream parity sync restoring it) must go
+        # red here, not quietly silence degrades four and five.
+        cell = asyncio.current_task()
+        with (
+            mock.patch.object(sys, "stderr", notes),
+            mock.patch.object(bash_module, "_live_cell_owner", lambda: cell),
+        ):
+            snapshots = [await handle for _ in range(5)]
+
+            # A background task's degrade writes no note: the cell does not
+            # wait for it, so the note would land in a later cell's output.
+            async def background_poll() -> object:
+                return await handle
+
+            background = asyncio.create_task(background_poll())
+            for _ in range(100):
+                if background.done():
+                    break
+                await asyncio.sleep(0.05)
+        handle.kill(grace=0.1)
+        self.assertIsInstance(background.result(), bash_module.BashSnapshot)
+        for snapshot in snapshots:
+            self.assertIsInstance(snapshot, bash_module.BashSnapshot)
+        elapsed = [snapshot.duration for snapshot in snapshots]
+        self.assertTrue(all(a < b for a, b in zip(elapsed, elapsed[1:])), elapsed)
+        # Each note is its snapshot's directive: pid, elapsed, result time,
+        # and the end-the-turn contract, on every repeat.
+        note_text = notes.getvalue()
+        for snapshot in snapshots:
+            self.assertIn(snapshot.directive(), note_text)
+        self.assertEqual(note_text.count("still running after"), 5)
+        self.assertEqual(note_text.count("do not await it again this turn"), 5)
+        self.assertEqual(note_text.count("on the completion notice"), 5)
+        self.assertIn(f"(pid {handle.pid}, snapshot at ", note_text)
 
 
 async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:
@@ -1591,6 +1748,23 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         await held
         await _poll_group_dead(held_pid)
         self.assertEqual(self.files(), [])
+
+    async def test_persistent_only_launch_arms_waiting_without_exit_cleanup(self):
+        with (
+            mock.patch.object(bash_module, "_waiting_keepalive_task", None),
+            mock.patch.object(bash_module, "_WAITING_KEEPALIVE_SECONDS", 240.0),
+            mock.patch.object(bash_module, "_waiting_keepalive_loop", new=mock.AsyncMock()),
+        ):
+            handle = bash("sleep 60", persistent=True)
+            self.pgids.append(handle._pid)
+            try:
+                self.assertNotIn(handle, bash_module._live_handles)
+                task = bash_module._waiting_keepalive_task
+                self.assertIsNotNone(task)
+                await task
+            finally:
+                handle.kill(signal.SIGKILL)
+                await handle
 
     async def test_fresh_persistent_shell_reports_through_files(self):
         go = os.path.join(os.path.dirname(self.home), "go")

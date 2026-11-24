@@ -5,9 +5,10 @@
 use super::{
     artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
     BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, GoalWakeKind,
+    ParentIdentity, PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine,
+    SideQuestionOutcome, SideQuestionRequest, StartupScope, TurnPrompt, Value,
+    DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -89,9 +90,18 @@ impl SessionEngine for AgentSessionEngine {
         let last_turn = self.last_loop_assistant_message();
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
-            // The quiescence arm: unsettled work defers the mint (owed, not consumed).
-            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+            // The quiescence arm: unsettled work defers the mint (owed, not
+            // consumed). A live background bash handle also arms the
+            // fallback wake (once per deferral): the shell's [bash-done]
+            // notice is the normal retry, and a shell that never completes
+            // gets one marker turn after one window.
+            let live_background_bash = self.has_live_background_bash_handles();
+            if self.has_unsettled_rlm_work().await || live_background_bash {
                 driver.mark_continuation_owed();
+                if live_background_bash {
+                    drop(driver);
+                    self.arm_background_skip_wake().await;
+                }
                 return None;
             }
             // Now the failed pair can leave the loop (`last_turn` still
@@ -126,7 +136,8 @@ impl SessionEngine for AgentSessionEngine {
                 drop(driver);
                 live.publish_goal(&state);
                 if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
+                    self.schedule_goal_wake(GoalWakeKind::Backoff, wake_at)
+                        .await;
                 }
                 return None;
             }
@@ -136,7 +147,7 @@ impl SessionEngine for AgentSessionEngine {
             let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = live.publish_goal(&driver.state_with_creation_elapsed());
             drop(driver);
-            self.cancel_goal_backoff_wake();
+            self.cancel_goal_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),

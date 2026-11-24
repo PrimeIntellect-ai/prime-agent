@@ -4,6 +4,9 @@
 //! never arrives (the spin fix). `/compact` emits the echo row and
 //! `compaction_start` before the summarizer, the settled `compaction_end` after.
 
+use std::sync::Arc;
+
+use pa_agent::abort::AbortController;
 use pa_core::session_engine::session_commands::{
     session_command_echo_row, session_command_failure_row, SessionCommandExecution,
 };
@@ -31,15 +34,33 @@ pub(crate) fn run_session_command(
     ))) {
         return None;
     }
+    // `/compact` registers its controller before `compaction_start`, like the wire
+    // `compact` run, so `abort_compaction` cancels it up to the commit.
+    let controller = is_compact.then(|| {
+        let controller = Arc::new(AbortController::new());
+        *engine
+            .auto_compaction_abort
+            .lock()
+            .expect("auto compaction abort lock") = Some(Arc::clone(&controller));
+        controller
+    });
     if is_compact {
         let custom_instructions = compact_custom_instructions(command);
         let start =
             crate::compaction::compaction_start_event("manual", custom_instructions.as_deref());
         if !emit(EngineEvent::CompactionStart { event: start }) {
+            if let Some(controller) = &controller {
+                engine.clear_auto_compaction_abort(controller);
+            }
             return None;
         }
     }
-    let mut execution = match engine.execute_session_command(command, images) {
+    let signal = controller.as_ref().map(|controller| controller.signal());
+    let result = engine.execute_session_command(command, images, signal.as_ref());
+    if let Some(controller) = &controller {
+        engine.clear_auto_compaction_abort(controller);
+    }
+    let mut execution = match result {
         Ok(execution) => execution,
         // Pre-execution failures (model resolution, session build) still record the
         // attempted command as a failure result row (the echo row above already went out).
@@ -49,6 +70,7 @@ pub(crate) fn run_session_command(
                 messages: vec![session_command_failure_row(command, &error)],
                 compaction: None,
                 compaction_skipped: None,
+                compaction_aborted: false,
                 continuation_message: None,
                 error: Some(error),
                 pending_refinement: None,
@@ -106,8 +128,8 @@ fn compact_custom_instructions(command: &SessionSlashCommand) -> Option<String> 
 }
 
 /// The settled `compaction_end` event for one `/compact` execution: success
-/// carries the client-facing `CompactionResult`; a skip carries its message with
-/// warning severity; a failure carries `Compaction failed: <message>` with error severity.
+/// carries the client-facing `CompactionResult`; an abort carries `aborted`; a skip
+/// carries its message with warning severity; a failure carries `Compaction failed: <message>` with error severity.
 fn emit_compact_end(
     command: &SessionSlashCommand,
     execution: &SessionCommandExecution,
@@ -126,6 +148,17 @@ fn emit_compact_end(
                 "manual",
                 &result,
                 false,
+                custom_instructions.as_deref(),
+            ),
+        )
+    } else if execution.compaction_aborted {
+        (
+            serde_json::Value::Null,
+            crate::compaction::compaction_end_unsuccessful(
+                "manual",
+                true,
+                None,
+                Some("error"),
                 custom_instructions.as_deref(),
             ),
         )
