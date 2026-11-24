@@ -314,7 +314,7 @@ pub struct AgentSessionEngine {
     /// last writer leaves the newest target standing.
     pub(crate) reload_lock: std::sync::Mutex<()>,
 
-    /// Turn-boundary runs register their controller here;
+    /// Turn-boundary runs and the prompt-route `/compact` register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
     /// The model-allowlist refusal telemetry, shared with the RLM children
