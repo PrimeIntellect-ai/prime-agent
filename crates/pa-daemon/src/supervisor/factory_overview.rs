@@ -442,6 +442,7 @@ fn catalog_and_records(
 ) -> CatalogScan {
     let known = scan_known_sessions(roots, None);
     let mut warnings = known.warnings;
+    warnings.extend(known.walk_errors);
     let mut owners: BTreeMap<String, CatalogOwner> = BTreeMap::new();
     // A resident hosting a saved session is that session's owner (a
     // booting worker has no persisted id yet, and its file's records must
