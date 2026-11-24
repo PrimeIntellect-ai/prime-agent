@@ -31,12 +31,13 @@
 //! unchanged); only the transcript row's class moves.
 //!
 //! The inbox notice rows (`inbox_notice`: the daemon agent-inbox arrival
-//! and reminder notices) render in their own class with the same envelope
-//! geometry — daemon-attributed mail, never user input — the notice text
-//! always visible as the body (the count and the read call-to-action never
-//! collapse away).
+//! and reminder notices) render in their own class — daemon-attributed
+//! mail, never user input. Collapsed, a run of consecutive notices paints
+//! one dim counter line (`inbox_counter`); expanded, each notice paints the
+//! envelope summary line over its notice text.
 
 pub(crate) mod geometry;
+pub(crate) mod inbox_counter;
 pub(crate) use geometry::agent_message_body_count;
 pub(crate) mod injected_prompt;
 pub(crate) mod refinement;
@@ -111,10 +112,9 @@ pub struct AgentMessageRow {
 }
 
 /// One inbox-notice row: the daemon's inbox system announcing waiting
-/// machine messages. The summary line attributes the notice to the inbox
-/// system and says how many messages are new or unread; the body is the
-/// notice text, always visible — the count and the `rlm.inbox.read()`
-/// call-to-action never collapse away.
+/// machine messages. Collapsed, a run of consecutive notices paints one dim
+/// counter line; expanded, each notice paints the summary line (the inbox
+/// system and how many messages are new or unread) over the notice text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboxNoticeRow {
     /// `details.class`: `arrival` or `reminder`.

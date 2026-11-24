@@ -336,8 +336,19 @@ fn run_runtime_bootstrap() -> Result<i32, String> {
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
+    // The bundled Python skills go in too: the venv is shared, so a later
+    // kernel that reuses it must not depend on which session synced first.
+    let bundled = pa_core::skills::load_skills_from_dir(
+        &pa_core::packages::get_bundled_skills_dir(),
+        "builtin",
+    );
     match runtime.block_on(pa_core::kernel::ensure_kernel_python(
-        pa_core::kernel::EnsureKernelPythonOptions::default(),
+        pa_core::kernel::EnsureKernelPythonOptions {
+            python_skills: pa_core::session_engine::runtime_wiring::kernel_python_skills(
+                &bundled.skills,
+            ),
+            on_progress: None,
+        },
     )) {
         Ok(python) => {
             println!("kernel python: {}", python.display());
