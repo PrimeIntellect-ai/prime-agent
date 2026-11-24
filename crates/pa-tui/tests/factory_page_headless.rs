@@ -886,7 +886,6 @@ fn the_docks_machines_item_shows_one_number_the_running_count() {
         // two state-labeled run items — never the stored specs, a
         // running segment, or a paused segment.
         HeadlessStep::Key(alt_a()),
-        HeadlessStep::WaitMs(150),
         HeadlessStep::WaitRender {
             needle: "1 machine  \u{b7}  doc-sweep paused  \u{b7}  nightly-pr running".to_string(),
             timeout_ms: 10_000,
@@ -898,7 +897,12 @@ fn the_docks_machines_item_shows_one_number_the_running_count() {
         // Back to the editor; the machines page keeps painting the
         // paused run's state (the state lives on the page, not the bar).
         HeadlessStep::Key(escape()),
-        HeadlessStep::WaitMs(150),
+        // The expanded breakdown's run item leaves with the collapse, so the
+        // submit goes to the editor.
+        HeadlessStep::WaitGone {
+            needle: "doc-sweep paused".to_string(),
+            timeout_ms: 5_000,
+        },
         HeadlessStep::Submit("/factory".to_string()),
         HeadlessStep::WaitRender {
             needle: "doc-sweep \u{b7} library session \u{b7} paused".to_string(),
@@ -919,7 +923,6 @@ fn the_docks_machines_item_shows_one_number_the_running_count() {
         // holds two running runs, so the first editor frame after Esc
         // reads the plural.
         HeadlessStep::Key(escape()),
-        HeadlessStep::WaitMs(150),
         HeadlessStep::WaitRender {
             needle: "\u{2699} 2 machines".to_string(),
             timeout_ms: 15_000,
