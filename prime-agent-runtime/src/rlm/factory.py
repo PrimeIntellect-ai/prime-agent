@@ -3489,22 +3489,16 @@ class FactoryExecutor:
                     failed_instance.provisional = True
                     failed_instance.capture_failed = True
                 generation = run.loop_generation
-                for index, failed_instance in enumerate(failed):
+                for failed_instance in failed:
                     await self._apply_instance_failure(
                         run, state, entry, failed_instance, capture_failure, retry=True
                     )
                     if run.loop_generation != generation:
                         return  # resume() re-admitted the entry; this list is stale
-                    if entry.status == "error":
-                        # This instance spent its retries and failed the
-                        # entry; the other omitted instances settle as
-                        # errors under the same failure.
-                        for other in failed[index + 1:]:
-                            await self._apply_instance_failure(
-                                run, state, entry, other, capture_failure, retry=True
-                            )
-                        return
-                    if entry.status != "running":
+                    # Once one instance spent its retries and failed the
+                    # entry, the other omitted instances still settle as
+                    # errors under the same failure.
+                    if entry.status not in ("running", "error"):
                         return
                 return
             entry.status = "done"
