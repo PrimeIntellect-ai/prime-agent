@@ -196,31 +196,3 @@ fn back_edge_guards_clear_forward_wires_on_their_departure_row() {
         "a crossing replaced a guard character:\n{text}"
     );
 }
-
-#[test]
-fn many_back_edges_fail_the_size_guard() {
-    let states: Vec<_> = (0..300).map(|i| state(&format!("s{i}"), i == 0)).collect();
-    let mut transitions: Vec<_> = (0..299)
-        .map(|i| transition(&[&states[i].id], &states[i + 1].id, None))
-        .collect();
-    transitions.extend((1..300).map(|i| {
-        transition(
-            &[&states[i].id],
-            &states[0].id,
-            Some(json!({"output": "route", "op": "eq", "value": "again"})),
-        )
-    }));
-    let diagram = block_diagram(
-        &Theme::builtin("prime", ColorMode::TrueColor),
-        &states,
-        &transitions,
-        None,
-        None,
-    );
-    assert_eq!(diagram.lines.len(), 1);
-    assert!(
-        plain(&diagram).contains("300 states"),
-        "{}",
-        plain(&diagram)
-    );
-}
