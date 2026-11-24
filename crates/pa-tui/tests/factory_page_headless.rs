@@ -452,12 +452,7 @@ fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
 }
 
-/// One right-arrow key event (the dock's next-group step).
-fn dock_right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
-}
-
-/// One down-arrow key event (the page's `tui.select.down`).
+/// One down-arrow key event (the page's `tui.select.down`, and the focused dock's next-group step).
 fn down() -> KeyEvent {
     KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
 }
@@ -1620,26 +1615,29 @@ fn enter_on_an_owned_unarmed_row_reports_the_re_arm() {
 }
 
 /// The opt-in contract's off surface: a daemon whose hello advertises no
-/// `factory_activity` lane mounts no factory group, and a bare `/factory`
-/// opens no page.
+/// `factory_activity` lane mounts no factory group (the focused dock's walk
+/// visits every group), and a bare `/factory` answers the gate status
+/// instead of opening a page.
 #[test]
 fn an_unadvertised_lane_mounts_no_factory_group_or_page() {
     let steps = vec![
         HeadlessStep::Key(alt_a()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(escape()),
         HeadlessStep::Submit("/factory".to_string()),
-        // The refusal note is the barrier: `/factory` was handled and opened nothing.
         HeadlessStep::WaitRender {
-            needle: "The machines page needs a daemon".to_string(),
+            needle: "/factory is not available in this client yet".to_string(),
             timeout_ms: 15_000,
         },
     ];
     let frames = run_plan(Vec::new(), steps);
-    assert!(!frames.is_empty(), "frames were captured");
+    let last = flat_text(&frames[frames.len() - 1..]);
+    assert!(
+        last.contains("/factory is not available in this client yet"),
+        "a bare /factory without the lane answers the gate status:\n{last}"
+    );
     let joined = frames.join("\n");
     assert!(
         !joined.contains('\u{2699}'),
