@@ -1610,12 +1610,12 @@ fn a_settled_child_lands_its_child_notice_in_the_parent_inbox() {
     );
     assert!(
         journal.contains("\"class\":\"child-exited\"")
-            && journal.contains("\"sender\":\"f20-worker\"")
+            && journal.contains("\"sessionName\":\"f20-worker\"")
             && journal.contains("completed_without_reply"),
-        "the journal names the class, the sender, and the kind: {journal}"
+        "the journal names the class, the child, and the kind: {journal}"
     );
     assert!(
-        journal.contains("\"kind\":\"withdrawn\""),
+        journal.contains("\"kind\":\"removed\""),
         "the delivery journaled its consumption: {journal}"
     );
 
