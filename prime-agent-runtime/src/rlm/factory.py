@@ -1101,11 +1101,35 @@ FACTORY_FRAME_CAP = 262_144
 full 1024-state machine cap fits; a snapshot that cannot shrink under the
 cap fails loudly instead of being silently truncated."""
 
-ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume", "peek")
-"""The host bridge's actions over one factory run, the ``factory_activity``
-frame's action vocabulary; ``peek`` is the all-session overview's
-non-arming unscoped read (the kernel namespace is the same surface plus
-``graph``/``watch`` for agents)."""
+ACTIVITY_ACTIONS = (
+    "graph",
+    "status",
+    "watch",
+    "run",
+    "stop",
+    "resume",
+    "library",
+    "peek",
+    "node",
+)
+"""The host bridge's actions over the factory surface, the
+``factory_activity`` frame's action vocabulary: one run's
+``graph``/``status``/``watch``/``stop``/``resume``, a ``run`` by spec id,
+``library`` (one library machine's graph for the machines page's drill-in;
+the daemon answers the machine list itself), ``peek`` — the unscoped graph
+minus the rehydration re-arm, the read another session's display polls
+through — and ``node`` (one run state's detail for the node view). The
+kernel namespace is the same surface plus ``graph``/``watch`` for agents."""
+
+NODE_PROMPT_CAP = 65_536
+"""Byte cap on one ``node`` reply's realized prompt (the exact spawn text
+the child received), with ``promptTruncated`` set when it fires."""
+
+NODE_INPUTS_CAP = 16_384
+"""Byte cap on one ``node`` reply's serialized bound inputs."""
+
+NODE_OUTPUTS_CAP = 16_384
+"""Byte cap on one ``node`` reply's serialized settle outputs."""
 
 ACTIVITY_TIMEOUT_MS_CAP = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
 """Upper bound on one factory_activity frame's timeoutMs (the watch wait
@@ -3466,6 +3490,126 @@ class FactoryExecutor:
                 row["provisional_answer"] = provisional[:ANSWER_CAPTURE_CAP]
         return row
 
+    def _node_report(
+        self,
+        run_id: str,
+        state_id: str,
+        entry_at: int | None = None,
+        instance_at: int | None = None,
+    ) -> dict[str, Any]:
+        """One state's node document (the ``node`` lane's reply): the
+        state's live report (the instance list), the selected entry's
+        settle-output preview, and the selected instance's realized prompt,
+        inputs, and answer — capped and flagged, never silently truncated.
+        Stored settle outputs remain full. The default selection is the
+        latest entry and its latest instance, or no instance for an empty
+        entry, or neither for a state never entered; selectors pick any
+        other."""
+        run = self._require_run(run_id)
+        state = run.states.get(state_id)
+        if state is None:
+            raise ValueError(f"unknown state {state_id!r} in run {run_id!r}")
+        entries = state.entries
+        if not entries:
+            if entry_at is not None:
+                raise ValueError(
+                    f"unknown entry {entry_at!r} for state {state_id!r} in run {run_id!r}"
+                )
+            return {
+                "run_id": run.run_id,
+                "spec_id": run.spec_id,
+                "name": run.name,
+                "state": self._state_report(state, include_answer=False),
+                "entry": None,
+                "instance": None,
+            }
+        entry = (
+            next((row for row in entries if row.index == entry_at), None)
+            if entry_at is not None
+            else entries[-1]
+        )
+        if entry is None:
+            raise ValueError(
+                f"unknown entry {entry_at!r} for state {state_id!r} in run {run_id!r}"
+            )
+        instances = entry.instances
+        if instance_at is not None:
+            instance = next((row for row in instances if row.index == instance_at), None)
+            if instance is None:
+                raise ValueError(
+                    f"unknown instance {instance_at!r} for state {state_id!r} in run {run_id!r}"
+                )
+        else:
+            instance = instances[-1] if instances else None
+        prompt = (instance.prompt if instance is not None else None) or ""
+        prompt_truncated = len(prompt.encode("utf-8")) > NODE_PROMPT_CAP
+        if prompt_truncated:
+            prompt = prompt.encode("utf-8")[:NODE_PROMPT_CAP].decode(
+                "utf-8", errors="ignore"
+            )
+        inputs_text = None
+        inputs_truncated = False
+        if instance is not None and instance.inputs is not None:
+            inputs_text = json.dumps(instance.inputs, indent=2, default=str)
+            inputs_truncated = len(inputs_text.encode("utf-8")) > NODE_INPUTS_CAP
+            if inputs_truncated:
+                inputs_text = inputs_text.encode("utf-8")[:NODE_INPUTS_CAP].decode(
+                    "utf-8", errors="ignore"
+                )
+        answer = instance.answer if instance is not None else None
+        answer_truncated = bool(
+            answer and len(answer.encode("utf-8")) > ANSWER_BINDING_CAP
+        )
+        if answer_truncated and answer is not None:
+            answer = answer.encode("utf-8")[:ANSWER_BINDING_CAP].decode(
+                "utf-8", errors="ignore"
+            )
+        outputs_text = None
+        outputs_truncated = False
+        if entry.outputs is not None:
+            outputs_text = json.dumps(entry.outputs, indent=2, default=str)
+            outputs_truncated = len(outputs_text.encode("utf-8")) > NODE_OUTPUTS_CAP
+            if outputs_truncated:
+                outputs_text = outputs_text.encode("utf-8")[:NODE_OUTPUTS_CAP].decode(
+                    "utf-8", errors="ignore"
+                )
+        instance_report = None
+        if instance is not None:
+            instance_report = {
+                "index": instance.index,
+                "entry": entry.index,
+                "status": instance.status,
+                "attempt": instance.attempt,
+                "child": instance.child_id,
+                "child_name": instance.child_name,
+                "session_dir": instance.session_dir,
+                "duration_ms": instance.duration_ms,
+                "error": instance.error,
+                "prompt": prompt,
+                "prompt_truncated": prompt_truncated,
+                "inputs": inputs_text,
+                "inputs_truncated": inputs_truncated,
+                "answer": answer,
+                "answer_truncated": answer_truncated,
+                "provisional": instance.provisional,
+                "capture_failed": instance.capture_failed,
+            }
+        return {
+            "run_id": run.run_id,
+            "spec_id": run.spec_id,
+            "name": run.name,
+            "state": self._state_report(state, include_answer=False),
+            "entry": {
+                "index": entry.index,
+                "status": entry.status,
+                "outputs": outputs_text,
+                "outputs_truncated": outputs_truncated,
+                "output_errors": entry.output_errors,
+                "output_errors_truncated": False,
+            },
+            "instance": instance_report,
+        }
+
     def _usage_report(self, run: FactoryRun) -> dict[str, Any]:
         """The usage block ``status()`` returns; the graph snapshot reuses it."""
         return {
@@ -3798,6 +3942,61 @@ class FactoryExecutor:
             raise ValueError(
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
+        if action == "library":
+            # One library machine's graph for the machines page's drill-in
+            # (the daemon answers the machine list itself, from its scan):
+            # the Rust loader describes the machine by name — the same
+            # resolution a run uses — and the reply is the snapshot shape a
+            # stored spec's ``graph`` answers, plus the machine's fields.
+            if spec_id is None:
+                raise ValueError("factory activity library requires specId")
+            from . import host_request
+
+            described = await host_request("factory.describe", {"name": spec_id})
+            canonical = canonicalize_factory_spec(described["spec"])
+            snapshot = self._spec_snapshot(described["name"], canonical, compact=True)
+            snapshot["description"] = described["description"]
+            snapshot["version"] = str(described["version"])
+            snapshot["author"] = described.get("author") or ""
+            snapshot["params"] = described.get("params") or []
+            snapshot["files"] = described.get("files") or []
+            snapshot["state_files"] = described.get("state_files") or []
+            return _wire_payload(snapshot)
+        if action == "node":
+            # The node lane: one state's inspection document — the
+            # instance list (the node report's own rows), the selected
+            # entry's settle outputs, and the selected instance's
+            # REALIZED prompt (the exact text the executor handed the
+            # child: the template with params and bound inputs
+            # substituted), inputs, and answer. Selectors pick one
+            # instance (both or neither); without them the latest entry
+            # and its latest instance answer.
+            if not run_id:
+                raise ValueError("factory activity node requires runId")
+            if not spec_id:
+                raise ValueError("factory activity node requires specId")
+            # The kernel frame always carries both keys, null meaning "no
+            # selector" (the daemon adapter rejects a client's explicit
+            # null). Any other value is validated as given, never read as
+            # "the latest".
+            entry_at = request.get("entry")
+            instance_at = request.get("instance")
+            if (entry_at is None) != (instance_at is None):
+                raise ValueError(
+                    "factory activity node entry and instance selectors must be provided together"
+                )
+            for key, value in (("entry", entry_at), ("instance", instance_at)):
+                if value is not None and (not _is_int(value) or value < 0):
+                    raise ValueError(f"factory activity node {key} must be a non-negative integer")
+            node_report = self._node_report(run_id, spec_id, entry_at, instance_at)
+            wire_report = _wire_payload(node_report)
+            # Port names are user-authored identifiers, not schema fields;
+            # keep their spelling verbatim through the wire conversion.
+            if node_report["entry"] is not None:
+                wire_report["entry"]["outputErrors"] = copy.deepcopy(
+                    node_report["entry"]["output_errors"]
+                )
+            return wire_report
         if action in ("graph", "peek"):
             # ``peek`` and ``graph`` answer the same compact snapshot; only
             # the re-arm above differs between them. A run the peek lists
@@ -6751,6 +6950,69 @@ def schedule_activity(request: dict[str, Any]) -> None:
     asyncio.get_running_loop().create_task(_run_activity(request))
 
 
+def _cap_node_presentation_frame(frame: dict[str, Any]) -> None:
+    """Trim node preview text against the actual serialized activity frame.
+
+    The field caps bound each preview separately, but JSON escaping makes
+    their combined wire representation larger than their UTF-8 source. Keep
+    the displayed prefixes and their flags while fitting the final wrapper
+    under the unchanged factory frame cap; stored outputs are untouched.
+    """
+    result = frame.get("result")
+    if not isinstance(result, dict):
+        return
+    candidates: list[tuple[dict[str, Any], str, dict[str, Any], str]] = []
+    entry = result.get("entry")
+    if isinstance(entry, dict):
+        outputs = entry.get("outputs")
+        if isinstance(outputs, str) and outputs:
+            candidates.append((entry, "outputs", entry, "outputsTruncated"))
+        errors = entry.get("outputErrors")
+        if isinstance(errors, dict):
+            candidates.extend(
+                (errors, port, entry, "outputErrorsTruncated")
+                for port, error in errors.items()
+                if isinstance(error, str) and error
+            )
+    instance = result.get("instance")
+    if isinstance(instance, dict):
+        candidates.extend(
+            (instance, field, instance, truncated)
+            for field, truncated in (
+                ("prompt", "promptTruncated"),
+                ("inputs", "inputsTruncated"),
+                ("answer", "answerTruncated"),
+            )
+            if isinstance(instance.get(field), str) and instance[field]
+        )
+    while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate[0].get(candidate[1]), str)
+            and candidate[0][candidate[1]]
+        ]
+        if not candidates:
+            return
+        container, field, flags, flag = max(
+            candidates,
+            key=lambda candidate: len(json.dumps(candidate[0][candidate[1]])) - 2,
+        )
+        value = container[field]
+        encoded_size = len(json.dumps(value)) - 2
+        excess = len(json.dumps(frame)) - FACTORY_FRAME_CAP
+        target_size = max(0, encoded_size - excess)
+        low, high = 0, len(value)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(json.dumps(value[:middle])) - 2 <= target_size:
+                low = middle
+            else:
+                high = middle - 1
+        container[field] = value[:low]
+        flags[flag] = True
+
+
 async def _run_activity(request: dict[str, Any]) -> None:
     """Run one factory_activity request to completion and emit its reply."""
     from .repl import _send
@@ -6770,6 +7032,8 @@ async def _run_activity(request: dict[str, Any]) -> None:
         _send(frame)
         return
     frame: dict[str, Any] = {"event": "done", "id": rid, "status": "ok", "result": result}
+    if request.get("action") == "node":
+        _cap_node_presentation_frame(frame)
     _cap_factory_frame(frame)
     _send(frame)
 
@@ -7680,14 +7944,25 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   instead of pretending the name is unknown. The bundled seeds are
   `builder`, `pr-manager`, and `review-sweep`; the worked examples above
   derive from their shapes.
-- The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
-  click) opens one live diagram per run, newest run first. The up/down
-  arrows walk the run headers and the states that spawned a child;
-  Enter or Right opens the selected state's latest child session, and
-  Left or Esc closes the page. Ctrl+X (the agents view's stop key) twice
-  stops the selected row: the whole run on its header, or the state's
-  running child (that attempt fails under the state's `retries` and
-  `failure_policy`). `r` resumes a paused run.
+- The TUI machines page lists every library machine (MACHINE.md files and
+  machine directories, with their source) and nests every session's
+  active runs under their machine, machines with a live run first, like
+  the agents view nests subagents; runs of stored specs list in their
+  own group. Open it from any session with the
+  activity dock's `⚙ N machines` group or a bare `/factory`, or from the
+  agents view with Ctrl+F (through the selected session). Enter on a
+  machine shows its diagram, params, and each state's files (a mermaid
+  fence in a node's Markdown renders as a diagram; types the page cannot
+  draw collapse to a one-line placeholder); Enter
+  on this session's run opens the run page: one live diagram, where
+  the up/down arrows walk the run header and the states that spawned a
+  child, Enter or Right opens a state's latest child session, Ctrl+X (the
+  agents view's stop key) twice stops the selected row (the whole run on
+  its header, or the state's running child), and `r` resumes a paused
+  run; another session's run names its owner instead, and a row of this
+  session's that no live read backs names its read-only state (both
+  report on the page; no run page mounts for either). Esc steps back:
+  run page to machines page to wherever you came from.
 
 ## Safety
 

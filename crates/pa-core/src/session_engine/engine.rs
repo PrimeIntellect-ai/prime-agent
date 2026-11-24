@@ -1155,9 +1155,10 @@ impl SessionEngine {
                 .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
             preflight?;
         }
-        // The factory page's `library` read is an explicit open: it starts
-        // the kernel the library lives in. Every other action (the dock's
-        // run polling among them) never builds one.
+        // The machines page's drill-in (`library` with a machine name) is an
+        // explicit open: it starts the kernel that builds the machine's
+        // graph. Every other action (the dock's run polling among them)
+        // never builds one.
         let manager = if request.action == "library" {
             self.provisioner.ensure(None, None).await?
         } else {

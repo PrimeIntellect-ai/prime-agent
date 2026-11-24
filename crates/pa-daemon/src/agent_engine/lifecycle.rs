@@ -760,9 +760,10 @@ impl AgentSessionEngine {
     }
 
     /// One factory activity over this session's kernel (the `/factory`
-    /// view's lane). Only the machines page's `library` read builds the
-    /// core session (like a prompt read), so the session can start its
-    /// kernel; every other action never builds one.
+    /// view's lane). Only the machines page's drill-in (`library` with a
+    /// machine name; the worker answers the list itself) builds the core
+    /// session (like a prompt read), so the session can start its kernel;
+    /// every other action never builds one.
     ///
     /// # Errors
     ///

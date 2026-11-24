@@ -882,6 +882,75 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
     );
 }
 
+/// `factory.describe` resolves a library machine by name for the machines
+/// page's drill-in: a machine directory answers its template spec (param
+/// placeholders kept), its params and each state's files; a `MACHINE.md`
+/// answers its spec and one inline file per state.
+#[tokio::test]
+async fn factory_describe_answers_a_library_machine_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let machines = dir.path().join("machines");
+    let machine_dir = machines.join("hello-describe");
+    std::fs::create_dir_all(machine_dir.join("prompts")).unwrap();
+    std::fs::write(
+        machine_dir.join("machine.toml"),
+        "format = 1\nname = \"hello-describe\"\nversion = 1\ndescription = \"Say hello\"\n\n[params]\nwho = { type = \"text\" }\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\n",
+    )
+    .unwrap();
+    std::fs::write(machine_dir.join("prompts/greet.md"), "Greet {{who}}.\n").unwrap();
+    std::fs::create_dir_all(machines.join("notes-describe")).unwrap();
+    std::fs::write(
+        machines.join("notes-describe/MACHINE.md"),
+        "---\nname: notes-describe\ndescription: Take notes.\nversion: 1\nauthor: Tester\n---\n\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": {\"prompt\": \"Write notes.\"}}], \"transitions\": []}\n```\n",
+    )
+    .unwrap();
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers, dir.path());
+    let describe = handlers
+        .get(super::FACTORY_DESCRIBE_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call = |name: &str| {
+        describe(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "name": name }),
+        })
+    };
+
+    let described = call("hello-describe").await.unwrap();
+    assert_eq!(
+        described["params"],
+        json!([{"name": "who", "type": "text"}])
+    );
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "prompts/greet.md", "text": "Greet {{who}}.\n"}]),
+            &json!([{"state": "greet", "paths": ["prompts/greet.md"]}])
+        )
+    );
+    assert_eq!(
+        described["spec"]["states"][0]["subagent"]["prompt"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .next(),
+        Some("Greet {who}.")
+    );
+    assert!(described["spec"].get("params").is_none());
+
+    let described = call("notes-describe").await.unwrap();
+    assert_eq!(described["spec"]["states"][0]["id"], json!("a"));
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "MACHINE.md \u{b7} a", "text": "Write notes."}]),
+            &json!([{"state": "a", "paths": ["MACHINE.md \u{b7} a"]}])
+        )
+    );
+
+    assert!(call("no-such-machine-describe").await.is_err());
+}
+
 /// A temp session dir, a cwd holding `DESIGN.md`, and the emit and check
 /// handlers registered for a contract with a file port and a record port.
 struct EmitFixture {

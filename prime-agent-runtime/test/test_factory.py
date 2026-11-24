@@ -73,6 +73,7 @@ from rlm.factory import (
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
     MACHINE_SPEC_FENCE,
+    NODE_OUTPUTS_CAP,
     POLL_TIMEOUT_MS,
     RUN_MAX_CHILDREN_DEFAULT,
     RUN_MAX_PARALLEL_DEFAULT,
@@ -2722,6 +2723,8 @@ class FakeHost:
         # factory.compile replies by machine directory path or library
         # name (the Rust loader's answer, scripted).
         self.compiled: dict[str, dict[str, Any]] = {}
+        # factory.describe replies by library name (the drill-in's template).
+        self.described: dict[str, dict[str, Any]] = {}
         # Emit-state children: with session_root set, each spawn gets a real
         # session dir; ``emitted[node]`` is written there as the child's
         # accepted outputs at spawn, and ``on_message`` runs on every
@@ -2930,6 +2933,11 @@ class FakeHost:
             if key not in self.compiled:
                 raise RuntimeError(f"no library machine named {key!r} (machines: none)")
             return self.compiled[key]
+        if request_type == "factory.describe":
+            name = (payload or {}).get("name")
+            if name not in self.described:
+                raise RuntimeError(f"no library machine named {name!r} (machines: none)")
+            return self.described[name]
         if request_type == "factory.limits":
             if self.limits_error is not None:
                 raise RuntimeError(self.limits_error)
@@ -6305,6 +6313,12 @@ class FactoryExecutorTest(_ExecutorTestCase):
             [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
             ["foreach expanded to zero items; nothing to run"] * 2,
         )
+        node_reply = self.executor._node_report(result["run_id"], "fan")
+        self.assertEqual(node_reply["state"]["id"], "fan")
+        self.assertEqual(node_reply["entry"]["status"], "done")
+        self.assertIn("outputs", node_reply["entry"])
+        self.assertIn("output_errors", node_reply["entry"])
+        self.assertIsNone(node_reply["instance"])
 
     @async_test
     async def test_optional_input_waits_for_a_live_upstream_before_spawning(self) -> None:
@@ -7519,6 +7533,126 @@ class FactoryEmitTest(_ExecutorTestCase):
         )
         self.assertEqual(self.host.calls_of("agent_message.send"), [])
 
+    @async_test
+    async def test_node_report_caps_large_outputs_without_changing_the_settle(self) -> None:
+        large_output = "x" * 300_000
+        self.host.emitted["report"] = {"result": large_output}
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                        "emit": {"outputs": [{"name": "result", "type": "text"}], "records": {}},
+                    }
+                ]
+            },
+            spec_id="node-report",
+        )
+        result = await self.start("node-report")
+        await self.executor._runs[result["run_id"]].task
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "done")
+
+        run = self.executor._require_run(result["run_id"])
+        stored = run.states["report"].entries[-1].outputs
+        self.assertEqual(stored, {"result": large_output})
+        node = self.executor._node_report(result["run_id"], "report")
+        preview = node["entry"]["outputs"]
+        self.assertTrue(node["entry"]["outputs_truncated"])
+        self.assertEqual(len(preview.encode("utf-8")), NODE_OUTPUTS_CAP)
+        self.assertLess(len(json.dumps(node).encode("utf-8")), 262_144)
+
+    @async_test
+    async def test_node_activity_caps_aggregate_previews_in_the_final_frame(self) -> None:
+        backslashes = "\\" * 65_536
+        self.store_machine(
+            {
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": {"prompt": backslashes},
+                        "outputs": [{"name": "result", "type": "text"}],
+                        "emit": {"outputs": [{"name": "result", "type": "text"}], "records": {}},
+                    }
+                ]
+            },
+            spec_id="node-frame",
+        )
+        self.host.emitted["report"] = {"result": backslashes}
+        self.host.outcomes["report"] = {"status": "done", "answer": backslashes}
+        started = await self.start("node-frame")
+        await self.executor._runs[started["run_id"]].task
+        entry = self.executor._require_run(started["run_id"]).states["report"].entries[-1]
+        self.assertEqual(entry.outputs, {"result": backslashes})
+        entry.output_errors = {"risk_score": backslashes}
+
+        sent: list[dict[str, Any]] = []
+        with patch("rlm.repl._send", sent.append):
+            await factory_module._run_activity(
+                {
+                    "id": "node-frame",
+                    "action": "node",
+                    "runId": started["run_id"],
+                    "specId": "report",
+                }
+            )
+        self.assertEqual(len(sent), 1)
+        frame = sent[0]
+        self.assertEqual(frame["event"], "done")
+        self.assertEqual(frame["id"], "node-frame")
+        self.assertEqual(frame["status"], "ok")
+        self.assertIn("result", frame, "the bounded Node result stays available")
+        self.assertLessEqual(
+            len(json.dumps(frame).encode("utf-8")),
+            factory_module.FACTORY_FRAME_CAP,
+            "the actual event/id/status/result frame stays under the existing cap",
+        )
+        self.assertTrue(
+            frame["result"]["instance"]["promptTruncated"]
+            or frame["result"]["instance"]["answerTruncated"]
+            or frame["result"]["entry"]["outputErrorsTruncated"],
+            "the aggregate preview reduction is visible",
+        )
+        self.assertTrue(frame["result"]["entry"]["outputsTruncated"])
+        self.assertTrue(frame["result"]["entry"]["outputErrorsTruncated"])
+        self.assertEqual(set(frame["result"]["entry"]["outputErrors"]), {"risk_score"})
+        self.assertEqual(
+            self.executor._require_run(started["run_id"]).states["report"].entries[-1].outputs,
+            {"result": backslashes},
+            "wire preview reduction never mutates stored outputs",
+        )
+
+    @async_test
+    async def test_node_wire_preserves_output_error_port_names(self) -> None:
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "report",
+                        "entry": True,
+                        "subagent": {"prompt": "Capture the result."},
+                        "outputs": [{"name": "risk_score", "type": "json"}],
+                    }
+                ],
+            },
+            spec_id="node-errors",
+        )
+        self.host.outcomes["report"] = {"status": "done", "answer": "not json"}
+        started = await self.start("node-errors")
+        await self.executor._runs[started["run_id"]].task
+
+        node = await self.executor.activity(
+            {"action": "node", "runId": started["run_id"], "specId": "report"}
+        )
+        errors = node["entry"]["outputErrors"]
+        self.assertEqual(set(errors), {"risk_score"})
+        self.assertIn("no JSON object containing output 'risk_score'", errors["risk_score"])
+
     async def _run_with_a_never_entered_state(self) -> str:
         self.store_machine(
             {
@@ -7546,6 +7680,42 @@ class FactoryEmitTest(_ExecutorTestCase):
         await self.executor._runs[started["run_id"]].task
         self.assertEqual(self.executor._require_run(started["run_id"]).states["fix"].entries, [])
         return started["run_id"]
+
+    @async_test
+    async def test_a_never_entered_node_state_reports_no_entry(self) -> None:
+        run_id = await self._run_with_a_never_entered_state()
+
+        node = await self.executor.activity({"action": "node", "runId": run_id, "specId": "fix"})
+        self.assertIsNone(node["entry"])
+        self.assertIsNone(node["instance"])
+        self.assertEqual(node["state"]["instances"], [])
+        with self.assertRaisesRegex(ValueError, "unknown entry 0"):
+            await self.executor.activity(
+                {"action": "node", "runId": run_id, "specId": "fix", "entry": 0, "instance": 0}
+            )
+
+    @async_test
+    async def test_present_malformed_node_selectors_are_rejected_without_defaulting_to_latest(
+        self,
+    ) -> None:
+        run_id = await self._run_with_a_never_entered_state()
+        base = {"action": "node", "runId": run_id, "specId": "report"}
+        latest = await self.executor.activity(base)
+        self.assertEqual(latest["entry"]["index"], 0)
+        # The kernel frame's own "no selector" shape: both keys null.
+        framed = await self.executor.activity({**base, "entry": None, "instance": None})
+        self.assertEqual(framed["entry"], latest["entry"])
+
+        for selectors in (
+            {"entry": 0, "instance": None},
+            {"entry": True, "instance": 0},
+            {"entry": "0", "instance": 0},
+            {"entry": -1, "instance": 0},
+            {"entry": 0},
+        ):
+            with self.subTest(selectors=selectors):
+                with self.assertRaises(ValueError):
+                    await self.executor.activity({**base, **selectors})
 
     @async_test
     async def test_a_successful_emit_waits_for_background_quiescence_before_dependent_writer(self) -> None:
@@ -8522,6 +8692,39 @@ class FactoryEmitApiTest(unittest.TestCase):
             finally:
                 os.chdir(previous)
             self.assertEqual(sent, [{"outputs": {"design": "PLAN.md"}, "cwd": os.path.realpath(moved)}])
+
+
+class FactoryLibraryDrillInTest(_ExecutorTestCase):
+    """The machines page's drill-in: ``library`` with a machine name answers
+    the Rust loader's template in a stored spec's graph shape."""
+
+    @async_test
+    async def test_library_answers_one_machines_graph_from_the_rust_loader(self) -> None:
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 2,
+            "author": None,
+            "params": [{"name": "task", "type": "text"}],
+            "files": [{"path": "MACHINE.md \u00b7 plan", "text": "Plan {task}."}],
+            "state_files": [{"state": "plan", "paths": ["MACHINE.md \u00b7 plan"]}],
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan {task}."}}]},
+        }
+        graph = await self.executor.activity({"action": "library", "specId": "sweep"})
+        self.assertIn(("factory.describe", {"name": "sweep"}), self.host.calls)
+        self.assertIsNone(graph["runId"])
+        self.assertEqual(graph["specId"], "sweep")
+        self.assertEqual([state["id"] for state in graph["machine"]["states"]], ["plan"])
+        self.assertEqual(graph["version"], "2")
+        self.assertEqual(graph["author"], "")
+        self.assertEqual(graph["params"], [{"name": "task", "type": "text"}])
+        self.assertEqual(graph["stateFiles"], [{"state": "plan", "paths": ["MACHINE.md \u00b7 plan"]}])
+        self.assertEqual(len(graph["files"]), 1)
+
+    @async_test
+    async def test_library_needs_a_machine_name(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.executor.activity({"action": "library"})
 
 
 class FactoryGraphWatchTest(_ExecutorTestCase):
