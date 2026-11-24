@@ -1245,10 +1245,6 @@ async fn a_withdrawal_from_a_replaced_store_leaves_the_successors_rows_alone() {
 async fn a_withdrawal_racing_an_arrival_settles_both() {
     let (worker, inbox, arrivals, notify) = routing_state();
     worker.dispatch("clear_queue", &json!({})).await;
-    // The admission stamps `inbox_wake_due` from the runtime clock
-    // (`tokio::time::Instant::now`), like every production caller; the
-    // racing threads enter the runtime so they read that clock.
-    let runtime = tokio::runtime::Handle::current();
     for i in 0..200u32 {
         let _ = admit_inbox_notice(
             &worker.recovery,
@@ -1264,17 +1260,15 @@ async fn a_withdrawal_racing_an_arrival_settles_both() {
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let admit = {
-            let (worker, inbox, arrivals, notify, barrier, done_tx, runtime) = (
+            let (worker, inbox, arrivals, notify, barrier, done_tx) = (
                 Arc::clone(&worker),
                 Arc::clone(&inbox),
                 Arc::clone(&arrivals),
                 Arc::clone(&notify),
                 Arc::clone(&barrier),
                 done_tx.clone(),
-                runtime.clone(),
             );
             std::thread::spawn(move || {
-                let _runtime = runtime.enter();
                 barrier.wait();
                 let _ = admit_inbox_notice(
                     &worker.recovery,

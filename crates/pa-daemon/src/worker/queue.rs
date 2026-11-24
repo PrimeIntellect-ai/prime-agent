@@ -1,6 +1,6 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
-use super::inbox_router::{delivered_notice_text, notice_text, shown_items, wake_delay};
+use super::inbox_router::{delivered_notice_text, notice_text, shown_items};
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Result, SessionCore,
     Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE, AUTONOMOUS_QUEUE_KEY,
@@ -616,8 +616,6 @@ pub(crate) fn admit_inbox_notice(
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
-    // Read before the lock: the settings lookup touches the disk.
-    let wake_delay = wake_delay(&notice, engine);
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
     // them would queue an invisible row for a busy session. The guard
@@ -627,7 +625,6 @@ pub(crate) fn admit_inbox_notice(
         inbox,
         arrivals,
         notice,
-        wake_delay,
         lane,
         session_is_closed,
         engine,
@@ -641,8 +638,8 @@ pub(crate) fn admit_inbox_notice(
             operation: "steer_queued",
         },
     );
-    // The runner decides when the row starts a turn (the row's due time,
-    // `SessionCore::inbox_wake_hold`); an arrival may have moved it closer.
+    // The runner decides whether the row starts a turn now
+    // (`TurnRunner::inbox_row_held`).
     work_notify.notify_one();
     Ok(queued)
 }
@@ -650,15 +647,13 @@ pub(crate) fn admit_inbox_notice(
 /// [`admit_inbox_notice`] over an already locked core, without the
 /// checkpoint and wake (the checkpoint re-locks the core, so the caller
 /// runs both after releasing its guard): the heartbeat route holds the
-/// lock across its live-job check and withdrawal. `wake_delay` is the
-/// arrival's [`wake_delay`], read before the caller took the lock.
+/// lock across its live-job check and withdrawal.
 #[allow(clippy::too_many_arguments)] // the wrapper's seams minus the lock-order handles
 pub(crate) fn admit_inbox_notice_locked(
     core_guard: &mut SessionCore,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     notice: pa_core::session_engine::inbox::InboxNotice,
-    wake_delay: std::time::Duration,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
@@ -703,13 +698,6 @@ pub(crate) fn admit_inbox_notice_locked(
         if !coalescing {
             arrivals.clear();
         }
-        // Rules 2 and 4: the row's due time is the earliest of its
-        // arrivals' own, so a waking arrival flushes held successes.
-        let due = tokio::time::Instant::now() + wake_delay;
-        core_guard.inbox_wake_due = Some(match core_guard.inbox_wake_due {
-            Some(earlier) if coalescing => earlier.min(due),
-            _ => due,
-        });
         arrivals.push(message);
         // The wake eligibility and the cell-delivery bit, derived once at
         // the row render: only a batch that contains something besides
@@ -887,7 +875,6 @@ pub(crate) fn deliver_inbox_arrival_row_locked(
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
 ) {
-    core_guard.inbox_wake_due = None;
     let mut batch = arrivals.lock().unwrap();
     let waiting = inbox.waiting_ids();
     batch.retain(|message| waiting.contains(&message.id));

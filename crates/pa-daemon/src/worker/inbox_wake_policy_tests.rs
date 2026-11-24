@@ -1,17 +1,12 @@
 //! The inbox wake rules wired through the queue admission and the
-//! runner's pickup: a success-only idle wake is held (never dropped) and
-//! delivers at its hold expiry, a waking arrival flushes the held
-//! successes into its own row, a run cut at a tool boundary continues at
-//! once while a run that ended on its own holds the successes that landed
-//! during it, and a delivery consumes the items it shows.
+//! runner's pickup: a row of only successes waits while other background
+//! work runs and delivers when that work settles, anything else wakes at
+//! once, other queued work takes a waiting row along, and a delivery
+//! consumes the items it shows.
 use super::inbox_queue_tests::{routing_state, steering_rows};
+use super::inbox_router::only_successes;
 use super::*;
 use pa_core::session_engine::inbox::{InboxArrivals, InboxNotice, SessionInbox};
-
-/// The default `agentInbox.successHoldMs` (30 s) and `idleDebounceMs` (5 s).
-const HOLD: Duration = Duration::from_secs(30);
-const DEBOUNCE: Duration = Duration::from_secs(5);
-const JUST_BEFORE_THE_HOLD: Duration = Duration::from_millis(29_999);
 
 fn notice(class: &'static str, text: &str, exit_code: i64) -> InboxNotice {
     InboxNotice {
@@ -37,17 +32,6 @@ fn admit(
     arrivals: &InboxArrivals,
     notice: InboxNotice,
 ) {
-    admit_on(worker, notify, inbox, arrivals, notice, Lane::Steering);
-}
-
-fn admit_on(
-    worker: &Worker,
-    notify: &Arc<crate::worker::WorkNotify>,
-    inbox: &Arc<SessionInbox>,
-    arrivals: &InboxArrivals,
-    notice: InboxNotice,
-    lane: Lane,
-) {
     admit_inbox_notice(
         &worker.recovery,
         &worker.core,
@@ -55,19 +39,11 @@ fn admit_on(
         inbox,
         arrivals,
         notice,
-        lane,
+        Lane::Steering,
         || false,
         None,
     )
     .expect("the admission succeeds");
-}
-
-fn hold(worker: &Worker) -> Option<tokio::time::Instant> {
-    worker
-        .core
-        .lock()
-        .unwrap()
-        .inbox_wake_hold(tokio::time::Instant::now())
 }
 
 /// Take the queued arrival row the way the runner's pickup does.
@@ -93,42 +69,133 @@ fn deliver(
     delivered
 }
 
-#[tokio::test(start_paused = true)]
-async fn an_idle_success_is_held_and_delivers_at_the_hold_expiry() {
-    let (worker, inbox, arrivals, _) = routing_state();
-    let start = tokio::time::Instant::now();
-    // The worker's own runner takes the row: it parks until the due time.
-    admit(
-        &worker,
-        &worker.work_notify,
-        &inbox,
-        &arrivals,
-        bash_done(1, 0),
-    );
-    assert_eq!(hold(&worker), Some(start + HOLD));
-    tokio::time::advance(JUST_BEFORE_THE_HOLD).await;
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        steering_rows(&worker).len(),
-        1,
-        "held, neither dropped nor delivered early"
-    );
-    tokio::time::advance(Duration::from_millis(1)).await;
-    // The runner parks again after it takes the row; register before the
-    // check, so a park between the two still wakes this waiter.
-    loop {
-        let parked = worker.idle_notify.notified();
-        if steering_rows(&worker).is_empty() {
-            break;
-        }
-        parked.await;
-    }
+/// Wake the runner and wait until it parks again: it re-read the queue
+/// after every earlier admission. The bound is only the failure bound.
+async fn after_runner_pass(worker: &Worker) {
+    let parked = worker.idle_notify.notified();
+    tokio::pin!(parked);
+    parked.as_mut().enable();
+    worker.work_notify.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), parked)
+        .await
+        .expect("the runner parks");
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_waking_arrival_flushes_the_held_successes_into_its_row() {
+/// Wait until the runner took every queued row and parked idle.
+async fn until_delivered(worker: &Worker) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let parked = worker.idle_notify.notified();
+            tokio::pin!(parked);
+            parked.as_mut().enable();
+            {
+                let core = worker.core.lock().unwrap();
+                if !core.busy && core.steering.is_empty() {
+                    return;
+                }
+            }
+            parked.await;
+        }
+    })
+    .await
+    .expect("the runner delivers the row");
+}
+
+/// The real runner over the faux engine: with background work running, a
+/// success-only row waits through every success; the work's settle
+/// delivers it in one turn. A failure wakes at once while work still runs.
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global for this worker flow
+#[tokio::test]
+async fn a_success_only_row_waits_for_background_work_and_a_failure_wakes_at_once() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("pa-inbox-wake-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let worker = Arc::new(Worker::new(
+        WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "wake-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "engine": "faux", "responses": ["ack", "ack"] })),
+        },
+        None,
+    ));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": dir.join("sessions").to_string_lossy(),
+            }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let engine = worker.agent_engine.clone().expect("the faux engine");
+    engine
+        .ensure_core_session_async(&engine.resolve_model().expect("faux model"))
+        .await
+        .expect("session build");
+    let background_work = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe = Arc::clone(&background_work);
+    engine.set_test_probes(
+        Some(Arc::new(move || {
+            probe.load(std::sync::atomic::Ordering::SeqCst)
+        })),
+        None,
+    );
+    let set_work = |count| background_work.store(count, std::sync::atomic::Ordering::SeqCst);
+    let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
+    engine.register_kernel_notice_host_handlers(&mut handlers);
+    let completion = handlers
+        .get(pa_core::kernel::shared::BASH_COMPLETED_REQUEST_TYPE)
+        .expect("the bash completion handler")
+        .clone();
+    let complete = |pid: u32, exit_code: i64| {
+        completion(pa_core::kernel::shared::HostRequestPayload {
+            data: json!({ "pid": pid, "command": "job", "exitCode": exit_code }),
+        })
+    };
+    let inbox = engine.inbox().expect("the built session's inbox");
+
+    // Two jobs run. Each success lands while other work still counts.
+    set_work(2);
+    complete(4001, 0).await.expect("the notice admits");
+    after_runner_pass(&worker).await;
+    set_work(1);
+    complete(4002, 0).await.expect("the notice admits");
+    after_runner_pass(&worker).await;
+    let rows = steering_rows(&worker);
+    assert_eq!(rows.len(), 1, "one waiting row: {rows:?}");
+    assert!(rows[0].0.contains("2 new"), "{rows:?}");
+
+    // The last job settles: the kernel's settle wakes the runner.
+    set_work(0);
+    let settled = engine
+        .background_work_settled_sink
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the worker wires the settle seam");
+    settled();
+    until_delivered(&worker).await;
+    assert_eq!(inbox.count().0, 0, "the delivery consumed both successes");
+
+    // A failure wakes at once, while work still runs.
+    set_work(1);
+    complete(4003, 1).await.expect("the notice admits");
+    until_delivered(&worker).await;
+    assert_eq!(inbox.count().0, 0, "the delivery consumed the failure");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_waking_arrival_joins_the_successes_and_wakes() {
     for waking in [
         bash_done(3, 7),
         notice(
@@ -144,34 +211,21 @@ async fn a_waking_arrival_flushes_the_held_successes_into_its_row() {
     ] {
         let (worker, inbox, arrivals, notify) = routing_state();
         admit(&worker, &notify, &inbox, &arrivals, bash_done(1, 0));
-        tokio::time::advance(Duration::from_secs(10)).await;
         admit(&worker, &notify, &inbox, &arrivals, bash_done(2, 0));
-        let flushed_at = tokio::time::Instant::now();
+        assert!(only_successes(&arrivals.lock().unwrap()));
         admit(&worker, &notify, &inbox, &arrivals, waking);
-        assert_eq!(hold(&worker), Some(flushed_at + DEBOUNCE));
+        assert!(!only_successes(&arrivals.lock().unwrap()));
         let rows = steering_rows(&worker);
         assert_eq!(rows.len(), 1, "one row carries all three: {rows:?}");
         assert!(rows[0].0.contains("3 new"), "{rows:?}");
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_success_landing_in_a_turn_joins_it_or_is_held_after_it() {
+#[tokio::test]
+async fn other_queued_work_takes_a_waiting_row_along() {
     let (worker, inbox, arrivals, notify) = routing_state();
-    worker.core.lock().unwrap().busy = true;
-    let start = tokio::time::Instant::now();
     admit(&worker, &notify, &inbox, &arrivals, bash_done(1, 0));
-    // The run was cut at a tool boundary: the row continues the turn now.
-    {
-        let mut core = worker.core.lock().unwrap();
-        core.busy = false;
-        core.run_cut_at_tool_boundary = true;
-    }
-    assert_eq!(hold(&worker), None);
-    // The run ended on its own: no fresh turn for the success alone.
-    worker.core.lock().unwrap().run_cut_at_tool_boundary = false;
-    assert_eq!(hold(&worker), Some(start + HOLD));
-    // Any other queued work starts a turn the held row joins.
+    assert!(worker.core.lock().unwrap().inbox_row_holdable());
     worker.core.lock().unwrap().follow_up.push_back(QueuedItem {
         priority: QueuePriority::Human,
         preview: None,
@@ -186,7 +240,7 @@ async fn a_success_landing_in_a_turn_joins_it_or_is_held_after_it() {
         policy: TurnPolicy::Queued,
         forced_batch: false,
     });
-    assert_eq!(hold(&worker), None);
+    assert!(!worker.core.lock().unwrap().inbox_row_holdable());
 }
 
 #[tokio::test]
@@ -251,23 +305,4 @@ async fn a_picked_row_that_is_never_accepted_leaves_its_items_waiting() {
             .collect::<Vec<_>>(),
         vec!["[bash-done pid:1 exit:0]"]
     );
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_sole_follow_up_arrival_waits_out_the_debounce() {
-    let (worker, inbox, arrivals, notify) = routing_state();
-    let start = tokio::time::Instant::now();
-    admit_on(
-        &worker,
-        &notify,
-        &inbox,
-        &arrivals,
-        notice(
-            pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE,
-            "hello",
-            0,
-        ),
-        Lane::FollowUp,
-    );
-    assert_eq!(hold(&worker), Some(start + DEBOUNCE));
 }

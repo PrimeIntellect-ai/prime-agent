@@ -1,22 +1,20 @@
 //! The daemon's inbox wake row: how much one row carries (rule 3), when an
-//! idle session takes it (rules 2 and 4), and what its delivery consumes.
+//! idle session takes it, and what its delivery consumes.
 //! The queue admission in `queue.rs` owns the state: the durable inbox
 //! holds every message, the coalescing batch holds the messages one queued
 //! row covers, and the row itself is the wake. A read before delivery
 //! withdraws the message (rule 1, driven by the kernel's lifecycle in
 //! `prime-agent-runtime/src/rlm/inbox_lifecycle.py`). Every unread arrival
 //! reaches the agent: a busy session folds it into the live turn, and an
-//! idle session takes the row once its due time passes, so an agent that
-//! ended its turn to wait for a command is always woken by it.
+//! idle session takes the row at once, unless the row holds only
+//! successes while other background work runs (see [`only_successes`]).
 
 #[cfg(test)]
 mod tests;
 
-use pa_core::session_engine::inbox::{arrival_notice, arrival_summary, InboxMessage, InboxNotice};
-use pa_core::settings::{Settings, SettingsManager};
+use pa_core::session_engine::inbox::{arrival_notice, arrival_summary, InboxMessage};
 use pa_types::inbox_notice::INBOX_CLASS_BASH_DONE;
 use serde_json::Value;
-use std::time::Duration;
 
 /// Rule 3: a row covering at most this many items carries their content
 /// under the summary line; a larger one is the summary line only.
@@ -25,25 +23,15 @@ const INLINE_ITEM_LIMIT: usize = 2;
 const INLINE_TAIL_MAX_LINES: usize = 5;
 const INLINE_TAIL_MAX_BYTES: usize = 400;
 
-/// How long an idle session waits before one arrival's wake row may start
-/// a turn: a successful bash completion is held
-/// (`agentInbox.successHoldMs`), anything else waits out the debounce
-/// window (`agentInbox.idleDebounceMs`); the heartbeat route admits with
-/// no delay. Without an engine (a bare test core), the defaults.
-pub(crate) fn wake_delay(
-    notice: &InboxNotice,
-    engine: Option<&crate::agent_engine::AgentSessionEngine>,
-) -> Duration {
-    let settings = match engine {
-        Some(engine) => SettingsManager::create(engine.cwd(), &engine.config.agent_dir),
-        None => SettingsManager::in_memory(&Settings::default()),
-    };
-    let ms = if is_success(notice.class, &notice.meta) {
-        settings.get_agent_inbox_success_hold_ms()
-    } else {
-        settings.get_agent_inbox_idle_debounce_ms()
-    };
-    Duration::from_millis(ms)
+/// Whether a wake row covers only successful bash completions: such a row
+/// waits on an idle session while other background work runs, and the
+/// last job's settle wakes it. Anything else, including a recovered row
+/// whose batch is unknown (empty), wakes at once.
+pub(crate) fn only_successes(batch: &[InboxMessage]) -> bool {
+    !batch.is_empty()
+        && batch
+            .iter()
+            .all(|message| is_success(&message.class, &message.meta))
 }
 
 /// A bash completion that exited 0.

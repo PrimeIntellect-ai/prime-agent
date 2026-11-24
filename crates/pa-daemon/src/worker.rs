@@ -342,7 +342,6 @@ impl Worker {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
-            inbox_wake_due: None,
             inbox_shown_unaccepted: std::collections::BTreeSet::new(),
             run_cut_at_tool_boundary: false,
             running_tool_calls: std::collections::HashSet::new(),
@@ -813,7 +812,12 @@ impl Worker {
                         engine.as_deref().map(|engine| engine as &dyn SessionEngine),
                     );
                 });
-                concrete.set_kernel_notice_sinks(notice_sink, consumed);
+                let settled_notify = Arc::clone(&work_notify);
+                concrete.set_kernel_notice_sinks(
+                    notice_sink,
+                    consumed,
+                    Arc::new(move || settled_notify.notify_one()),
+                );
                 // The accepted note frames as a session event on the pump.
                 let note_core = Arc::clone(&core);
                 let note_events = events.clone();

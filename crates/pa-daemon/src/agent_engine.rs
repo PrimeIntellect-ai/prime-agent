@@ -159,6 +159,9 @@ pub struct AgentSessionEngine {
     /// and the work auto-backgrounds.
     pub(crate) cell_wake: std::sync::Arc<pa_core::kernel::cell_wake::CellWake>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
+    /// The worker's background-work settle seam: wakes the turn runner.
+    pub(crate) background_work_settled_sink:
+        std::sync::Mutex<Option<pa_core::kernel::shared::BackgroundWorkSettledCallback>>,
     /// The current session's agent inbox store (the notice sink routes
     /// `bash.completed`/`factory.progress` messages into it); set at
     /// every session build.

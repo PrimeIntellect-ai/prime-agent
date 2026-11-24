@@ -1651,3 +1651,212 @@ fn the_readiness_wait_holds_until_a_listener_accepts() {
         .accept()
         .expect("the wait connected to the listener");
 }
+
+/// The gate files the background-wake script's shell jobs wait on.
+static WAKE_GATES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn text_reply(text: &str) -> Vec<String> {
+    vec![
+        chunk(&json!({"role": "assistant", "content": text}), None),
+        chunk(&json!({}), Some("stop")),
+    ]
+}
+
+fn cell_reply(id: &str, code: &str) -> Vec<String> {
+    vec![
+        chunk(
+            &json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": id,
+                    "type": "function",
+                    "function": python_cell(code),
+                }]
+            }),
+            None,
+        ),
+        chunk(&json!({}), Some("tool_calls")),
+    ]
+}
+
+/// The background-wake script: each turn starts two jobs and ends. A job
+/// that waits on a gate file runs until the test creates the file.
+fn background_wake_script(request: usize) -> Vec<String> {
+    let gate = |name: &str| {
+        WAKE_GATES
+            .get()
+            .expect("gate dir")
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    };
+    match request {
+        0 => cell_reply(
+            "call-wake-1",
+            &format!(
+                "from rlm import bash\nha = bash('sleep 1; echo WAKE_A')\nhb = bash('while [ ! -f {} ]; do sleep 0.1; done; echo WAKE_B')\nprint('two jobs started')",
+                gate("gate-b")
+            ),
+        ),
+        1 => text_reply("jobs started"),
+        2 => text_reply("woken by both successes"),
+        3 => cell_reply(
+            "call-wake-2",
+            &format!(
+                "from rlm import bash\nhc = bash('while [ ! -f {} ]; do sleep 0.1; done; echo WAKE_C')\nhd = bash('sleep 1; echo WAKE_D; exit 3')\nprint('two more jobs started')",
+                gate("gate-c")
+            ),
+        ),
+        4 => text_reply("failure jobs started"),
+        5 => text_reply("woken by the failure"),
+        6 => text_reply("woken by the last success"),
+        _ => text_reply("unexpected wake"),
+    }
+}
+
+/// An idle agent is woken by events, never by a timer: a success that
+/// lands while another job runs waits, the last job's completion wakes
+/// once with both, a failure wakes at once while a job still runs, and a
+/// success with nothing else running wakes at once.
+#[test]
+fn background_completions_wake_an_idle_agent_only_when_the_work_settles_or_fails() {
+    static NEXT_WAKE: AtomicUsize = AtomicUsize::new(0);
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.join("daemon.sock");
+    let kernel_venv = dir.join("kernel-venv");
+    WAKE_GATES.set(dir.clone()).expect("one gate dir");
+    let bodies = RequestBodies::default();
+    let url = spawn_mock_with(&NEXT_WAKE, background_wake_script, Arc::clone(&bodies));
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": url.to_string_lossy(),
+                    "apiKey": "sk-inbox",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let _supervisor = spawn_daemon(&socket, &agent_dir, &kernel_venv);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let created = client.request(
+        "c1",
+        &json!({
+            "type": "create",
+            "name": "background-wake-lane",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active session id")
+        .to_string();
+
+    // Two jobs start and the turn ends. Job A succeeds while job B runs:
+    // its message lands in the inbox, and no wake follows.
+    let turn = client.request(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "start two jobs",
+        }),
+    );
+    assert_eq!(turn["success"], true, "first turn failed: {turn}");
+    wait_until(Duration::from_secs(120), || {
+        let journal = std::fs::read_to_string(inbox_journal_path(&sessions)?).ok()?;
+        journal.contains("echo WAKE_A").then_some(())
+    });
+    assert_eq!(
+        NEXT_WAKE.load(Ordering::SeqCst),
+        2,
+        "a success that lands while other work runs does not wake"
+    );
+
+    // Job B succeeds: ONE wake carries both successes.
+    std::fs::write(dir.join("gate-b"), "").expect("open gate b");
+    wait_until(Duration::from_secs(120), || {
+        client
+            .transcript(&active_id)
+            .contains("woken by both successes")
+            .then_some(())
+    });
+    let wake = last_user_text(&captured_request_body(&bodies, 2));
+    assert!(
+        wake.contains("2 new bash-done messages")
+            && wake.contains("echo WAKE_A")
+            && wake.contains("echo WAKE_B"),
+        "the one wake carries both successes: {wake}"
+    );
+
+    // The next request is the next prompt, not a second wake. Job D
+    // fails while job C runs: the failure wakes at once.
+    let turn = client.request(
+        "p2",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": active_id,
+            "message": "start two more jobs",
+        }),
+    );
+    assert_eq!(turn["success"], true, "second turn failed: {turn}");
+    assert_eq!(
+        last_user_text(&captured_request_body(&bodies, 3)),
+        "start two more jobs",
+        "no second wake followed the first"
+    );
+    wait_until(Duration::from_secs(120), || {
+        client
+            .transcript(&active_id)
+            .contains("woken by the failure")
+            .then_some(())
+    });
+    let wake = last_user_text(&captured_request_body(&bodies, 5));
+    assert!(
+        wake.contains("exit:3") && !wake.contains("WAKE_C"),
+        "the failure wakes while job C still runs: {wake}"
+    );
+
+    // Job C succeeds with nothing else running: it wakes at once.
+    std::fs::write(dir.join("gate-c"), "").expect("open gate c");
+    wait_until(Duration::from_secs(120), || {
+        client
+            .transcript(&active_id)
+            .contains("woken by the last success")
+            .then_some(())
+    });
+    let wake = last_user_text(&captured_request_body(&bodies, 6));
+    assert!(
+        wake.contains("echo WAKE_C"),
+        "the last success woke: {wake}"
+    );
+    assert_eq!(NEXT_WAKE.load(Ordering::SeqCst), 7, "no other wake");
+}

@@ -1,5 +1,6 @@
 //! The idle-park family: the parent-owned kernel release at the idle
-//! park, the held inbox wake, and the compacting admission gate.
+//! park, the inbox wake hold's run-cut rule, and the compacting admission
+//! gate.
 use super::*;
 
 /// A recording engine for the settled-child kernel release: the park arm
@@ -133,10 +134,8 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
     );
 }
 
-/// The inbox arrival row, due `due_in` from now: what the queue admission
-/// queues for a held success.
-fn queue_arrival_row(core: &mut SessionCore, due_in: std::time::Duration) {
-    core.inbox_wake_due = Some(tokio::time::Instant::now() + due_in);
+/// The inbox arrival row the queue admission queues.
+fn queue_arrival_row(core: &mut SessionCore) {
     core.steering.push_back(QueuedItem {
         priority: QueuePriority::Human,
         preview: None,
@@ -151,40 +150,6 @@ fn queue_arrival_row(core: &mut SessionCore, due_in: std::time::Duration) {
         policy: TurnPolicy::Queued,
         forced_batch: false,
     });
-}
-
-/// A held arrival row parks the runner without releasing a parent-owned
-/// child's kernel: the wake turn reads handles the release would drop.
-#[tokio::test]
-async fn a_held_inbox_wake_keeps_a_childs_kernel() {
-    let releases = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runner = burst_runner(Arc::new(ReleaseCountingEngine {
-        releases: std::sync::Arc::clone(&releases),
-        fired: std::sync::Arc::new(tokio::sync::Notify::new()),
-    }));
-    {
-        let mut core = runner.core.lock().unwrap();
-        core.rlm_depth = 1;
-        queue_arrival_row(&mut core, std::time::Duration::from_secs(30));
-    }
-    let core = Arc::clone(&runner.core);
-    let idle = Arc::clone(&runner.idle_notify);
-    let parked = idle.notified();
-    tokio::pin!(parked);
-    parked.as_mut().enable();
-    // The current-thread runtime runs the runner until its select parks,
-    // so the release would already have fired when the test resumes.
-    let task = tokio::spawn(async move {
-        runner.run().await;
-    });
-    parked.await;
-    assert_eq!(core.lock().unwrap().steering.len(), 1, "the row is held");
-    assert_eq!(
-        releases.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "a held wake is not idle"
-    );
-    task.abort();
 }
 
 /// A run that ends at a tool boundary on its own (`rlm.end_turn()`) leaves a
@@ -208,9 +173,8 @@ async fn only_a_run_cut_by_a_queued_steer_skips_the_hold() {
             ..GateProbeEngine::default()
         });
         let runner = burst_runner(engine.clone());
-        let due_in = std::time::Duration::from_secs(30);
         if cut_by_the_row {
-            queue_arrival_row(&mut runner.core.lock().unwrap(), due_in);
+            queue_arrival_row(&mut runner.core.lock().unwrap());
         }
         runner
             .run_turn(
@@ -234,10 +198,13 @@ async fn only_a_run_cut_by_a_queued_steer_skips_the_hold() {
             .await;
         let mut core = runner.core.lock().unwrap();
         if !cut_by_the_row {
-            queue_arrival_row(&mut core, due_in);
+            queue_arrival_row(&mut core);
         }
-        let held = core.inbox_wake_hold(tokio::time::Instant::now()).is_some();
-        assert_eq!(held, !cut_by_the_row, "cut by the row: {cut_by_the_row}");
+        assert_eq!(
+            core.inbox_row_holdable(),
+            !cut_by_the_row,
+            "cut by the row: {cut_by_the_row}"
+        );
     }
 }
 

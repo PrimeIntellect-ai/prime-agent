@@ -10,6 +10,8 @@ use crate::agent_engine::AgentSessionEngine;
 impl AgentSessionEngine {
     /// Wire the worker's kernel-notice queue seams (called once at
     /// construction, before the first session build reads them).
+    /// `background_work_settled` wakes the turn runner when background work
+    /// settles, so a wake row held behind that work delivers.
     ///
     /// # Panics
     ///
@@ -19,6 +21,7 @@ impl AgentSessionEngine {
         &self,
         notice: crate::engine::KernelNoticeSink,
         consumed: crate::engine::BashConsumedSink,
+        background_work_settled: pa_core::kernel::shared::BackgroundWorkSettledCallback,
     ) {
         *self
             .kernel_notice_sink
@@ -28,6 +31,10 @@ impl AgentSessionEngine {
             .bash_consumed_sink
             .lock()
             .expect("bash consumed sink lock") = Some(consumed);
+        *self
+            .background_work_settled_sink
+            .lock()
+            .expect("background work settled sink lock") = Some(background_work_settled);
     }
 
     /// Route one auto-backgrounded cell's completion into the worker's kernel
