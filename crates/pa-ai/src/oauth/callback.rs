@@ -115,6 +115,17 @@ impl CodexCallbackServer {
         }
     }
 
+    /// Stop the accept loop and return once its listener is closed: the registered port is free
+    /// when this returns, so an immediate retry binds it. Dropping only schedules that release.
+    pub(crate) async fn shutdown(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            // An aborted task's join resolves after its future, and so the listener, is dropped;
+            // the cancellation error is the abort itself.
+            let _ = task.await;
+        }
+    }
+
     /// The bound port (`None` on the dead server).
     #[must_use]
     pub fn port(&self) -> Option<u16> {
