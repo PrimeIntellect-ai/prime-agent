@@ -14,7 +14,7 @@
 
 | Request | Fields |
 |---|---|
-| `execute` | `{"type":"execute","id":str,"code":str}` |
+| `execute` | `{"type":"execute","id":str,"code":str,"timeout_ms"?:int}` — the host's cell limit (a per-call `timeout`, else the `python_cell_timeout_ms` setting); the in-cell span guard fires just inside it, and an absent field or `0` keeps the guard disarmed |
 | `interrupt` | `{"type":"interrupt","id"?:str}` — no reply |
 | `host_reply` | `{"type":"host_reply","id":str,"data":{"status":"ok","result":{...}}}` or an error envelope — no reply |
 | `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |

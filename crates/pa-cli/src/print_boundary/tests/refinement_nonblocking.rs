@@ -128,6 +128,7 @@ impl Origin {
                     pa_core::autonomous::create_autonomous_runtime_state(None, None);
                 let mut params = pa_core::session_engine::session_commands::SessionCommandParams {
                     model: planner_model,
+                    compaction_abort: None,
                     api_key: None,
                     autonomous: &mut autonomous,
                 };

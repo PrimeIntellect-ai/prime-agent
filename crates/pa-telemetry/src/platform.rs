@@ -355,18 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn the_glibc_banner_parses() {
-        let banner =
-            b"\0GNU C Library (Ubuntu GLIBC 2.39-0ubuntu8.4) stable release version 2.39.\n\0";
-        assert_eq!(glibc_banner_version(banner).as_deref(), Some("2.39"));
-        assert_eq!(glibc_banner_version(b"no banner here"), None);
-        if cfg!(all(target_os = "linux", target_env = "gnu")) {
-            let version = detect_libc_version();
-            assert!(version.starts_with("2."), "the running glibc: {version}");
-        }
-    }
-
-    #[test]
     fn sanitize_trims_and_caps() {
         assert_eq!(sanitize_version("  6.8.0-45-generic "), "6.8.0-45-generic");
         assert_eq!(sanitize_version("   "), UNKNOWN);

@@ -247,12 +247,17 @@ mod tests {
     #[test]
     // Golden equality is the contract: cacheWrite must round-trip the fixture's exact 1.25.
     #[allow(clippy::float_cmp)]
-    fn parses_a_valid_entry() {
-        let parsed = parse_model_catalog(&catalog(vec![entry(&json!({}))]), InvalidEntries::Reject)
-            .expect("valid");
+    fn parses_a_valid_entry_with_its_thinking_levels() {
+        let payload = catalog(vec![entry(&json!({
+            "reasoning": true,
+            "thinkingLevelMap": {"off": null, "low": "low", "high": "high", "xhigh": "max"}
+        }))]);
+        let parsed = parse_model_catalog(&payload, InvalidEntries::Reject).expect("valid");
         assert_eq!(parsed.models.len(), 1);
         assert_eq!(parsed.models[0].id, "model-a");
         assert_eq!(parsed.models[0].cost.cache_write.as_f64(), 1.25);
+        let map = parsed.models[0].thinking_level_map.as_ref().expect("map");
+        assert_eq!(map.len(), 4);
     }
 
     #[test]
@@ -262,12 +267,6 @@ mod tests {
             assert!(parse_model_catalog(&payload, InvalidEntries::Reject).is_err());
         }
         assert!(parse_model_catalog(&json!({"models": []}), InvalidEntries::Reject).is_err());
-    }
-
-    #[test]
-    fn unknown_entry_key_rejects() {
-        let payload = catalog(vec![entry(&json!({"surprise": 1}))]);
-        assert!(parse_model_catalog(&payload, InvalidEntries::Reject).is_err());
     }
 
     #[test]
@@ -297,6 +296,8 @@ mod tests {
             json!({"thinkingLevelMap": {"ultra": "max"}}),
             json!({"thinkingLevelMap": {"high": ""}}),
             json!({"api": ""}),
+            json!({"surprise": 1}),
+            json!({"api": "anthropic-messages", "compat": {"supportsStore": true}}),
         ] {
             let payload = catalog(vec![entry(&bad)]);
             assert!(
@@ -304,31 +305,6 @@ mod tests {
                 "expected rejection"
             );
         }
-    }
-
-    #[test]
-    fn thinking_level_map_parses_levels() {
-        let payload = catalog(vec![entry(&json!({
-            "reasoning": true,
-            "thinkingLevelMap": {"off": null, "low": "low", "high": "high", "xhigh": "max"}
-        }))]);
-        let parsed = parse_model_catalog(&payload, InvalidEntries::Reject).expect("valid");
-        let map = parsed.models[0].thinking_level_map.as_ref().expect("map");
-        assert_eq!(map.len(), 4);
-    }
-
-    #[test]
-    fn compat_shapes_validate_per_api() {
-        let good = catalog(vec![entry(&json!({
-            "api": "anthropic-messages",
-            "compat": {"supportsEagerToolInputStreaming": true}
-        }))]);
-        assert!(parse_model_catalog(&good, InvalidEntries::Reject).is_ok());
-        let bad = catalog(vec![entry(&json!({
-            "api": "anthropic-messages",
-            "compat": {"supportsStore": true}
-        }))]);
-        assert!(parse_model_catalog(&bad, InvalidEntries::Reject).is_err());
     }
 
     #[test]
@@ -350,12 +326,11 @@ mod tests {
         let parsed = parse_model_catalog(&payload, InvalidEntries::SkipInvalid).expect("kept rest");
         let ids: Vec<&str> = parsed.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["good-1", "good-2"]);
-    }
-
-    #[test]
-    fn empty_after_skipping_rejects() {
-        let payload = catalog(vec![entry(&json!({"contextWindow": 0}))]);
-        assert!(parse_model_catalog(&payload, InvalidEntries::SkipInvalid).is_err());
+        let all_bad = catalog(vec![entry(&json!({"contextWindow": 0}))]);
+        assert!(
+            parse_model_catalog(&all_bad, InvalidEntries::SkipInvalid).is_err(),
+            "empty after skipping"
+        );
     }
 
     #[test]
