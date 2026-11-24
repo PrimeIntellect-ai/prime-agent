@@ -89,6 +89,8 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
             worker_token: "token".to_string(),
         },
         herdr: std::sync::Arc::new(std::sync::Mutex::new(crate::herdr::HerdrReporter::default())),
+        inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals::default(),
+        inbox_engine: None,
     }
 }
 

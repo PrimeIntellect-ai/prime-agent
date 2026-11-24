@@ -1,1 +1,0 @@
-- The bash-done notice carries the output tail and exit status.
