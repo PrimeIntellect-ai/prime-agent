@@ -491,9 +491,15 @@ def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
         raise KeyboardInterrupt
     # Loop idle in select() or another task mid-step: cancel the active task (same thread, safe).
     task.cancel()
-    if running is not None and running is not _serve_task and running not in _cell_tasks:
+    if (
+        running is not None
+        and running is not _serve_task
+        and running not in _cell_tasks
+        and running not in _active.values()
+    ):
         # A background task blocked in sync code occupies the only thread and would keep the
         # cancel from ever running: raise into it to unwind its step; it dies with the KI.
+        # Another cell's body is never such a task: the cancel runs when that cell yields.
         running.add_done_callback(_consume_task_exception)
         raise KeyboardInterrupt
 
@@ -537,7 +543,7 @@ def _request_interrupt(target: str | None) -> None:
             # Wake the selector so a cancel scheduled by the handler runs promptly.
             _loop.call_soon_threadsafe(lambda: None)
         return
-    if _loop is not None:
+    if _loop is not None and task is not None:
 
         def cancel_active() -> None:
             if _active.get(rid) is task and not task.done():
@@ -1505,10 +1511,15 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             # its handler reports the cancellation as its error and done.
             if _cell_tasks:
                 await asyncio.wait(set(_cell_tasks), timeout=0.5)
-            if _cell_tasks:
-                for task in list(_cell_tasks):
-                    task.cancel()
-                await asyncio.wait(set(_cell_tasks), timeout=0.5)
+                if _cell_tasks:
+                    for task in list(_cell_tasks):
+                        task.cancel()
+                    await asyncio.wait(set(_cell_tasks), timeout=0.5)
+                if req.get("eof"):
+                    # The first flush ran before these cells settled; it stays
+                    # first because the owner watchdog may exit at any moment.
+                    # Persist the settled cells' last writes too.
+                    _flush_final_snapshot(ns)
             # MCP children must close before the loop dies; close() is internally bounded under the host's 5s deadline.
             mcp_mod = sys.modules.get("rlm.mcp")
             if mcp_mod is not None:

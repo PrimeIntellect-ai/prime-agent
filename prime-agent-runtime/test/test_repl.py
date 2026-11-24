@@ -890,6 +890,26 @@ class ReplTest(unittest.TestCase):
             events = fresh.execute("r2", "x")
             self.assertEqual(one(events, "result")["text"], "42")
 
+    def test_stdin_eof_final_snapshot_keeps_a_running_cells_last_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            self.assertEqual(one(self.repl.execute("s1", "x = 1"), "done")["status"], "ok")
+            self.repl.send({"type": "snapshot", "id": "s2", "path": path, "manifest_path": manifest_path})
+            self.assertEqual(one(self.repl.until_done("s2"), "done")["status"], "ok")
+            self.repl.send({"type": "execute", "id": "s3", "code": "import asyncio\nawait asyncio.sleep(0.2)\nx = 42"})
+            assert self.repl.proc.stdin is not None
+            self.repl.proc.stdin.close()
+            self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+            fresh = ReplProcess()
+            self.addCleanup(fresh.close)
+            fresh.ready()
+            fresh.send({"type": "restore", "id": "r1", "path": path})
+            self.assertEqual(one(fresh.until_done("r1"), "done")["status"], "ok")
+            events = fresh.execute("r2", "x")
+            self.assertEqual(one(events, "result")["text"], "42")
+
     def test_stdin_eof_without_prior_snapshot_keeps_payload(self):
         # Until this process committed a snapshot of its own, an EOF must
         # not overwrite the on-disk payload with a namespace the host never
@@ -2169,6 +2189,19 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertEqual(refusal["ename"], "KernelBusy")
         self.assertNotIn("next ran", stream_text(events, "stdout"))
 
+    def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nawait asyncio.sleep(30)"})
+        time.sleep(0.5)
+        self.repl.send({"type": "execute", "id": "next", "code": "import time\ntime.sleep(2)\nprint('next ran')"})
+        time.sleep(0.5)
+        self.repl.send({"type": "interrupt", "id": "slow"})
+        events = self.until_both_done()
+        outcomes = {e["id"]: e["status"] for e in events if e.get("event") == "done"}
+        self.assertEqual(outcomes, {"slow": "error", "next": "ok"})
+        interrupted = next(e for e in events if e.get("event") == "error" and e.get("id") == "slow")
+        self.assertEqual(interrupted["ename"], "KeyboardInterrupt")
+        self.assertIn("next ran", stream_text(events, "stdout"))
+
 
 class FinishRequestTest(unittest.TestCase):
     """In-process checks of the parked-interrupt bookkeeping on request finish."""
@@ -2188,6 +2221,27 @@ class FinishRequestTest(unittest.TestCase):
         self.repl_module._sigint_target = None
         self.repl_module._active.clear()
         self.repl_module._interrupted.clear()
+
+    def test_interrupt_without_pthread_kill_in_the_finishing_phase_raises_nothing(self):
+        repl = self.repl_module
+        repl._inflight.add("fin")
+        repl._finishing_rid = "fin"
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+
+        async def main() -> list[dict]:
+            loop = asyncio.get_running_loop()
+            repl._loop = loop
+            errors: list[dict] = []
+            loop.set_exception_handler(lambda _loop, context: errors.append(context))
+            # A stand-in signal module without pthread_kill, as on Windows.
+            with mock.patch.object(repl, "signal", object()):
+                repl._request_interrupt(None)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return errors
+
+        self.assertEqual(asyncio.run(main()), [])
 
     def test_parked_any_survives_while_another_request_is_inflight(self):
         repl = self.repl_module
