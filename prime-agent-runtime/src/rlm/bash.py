@@ -93,9 +93,10 @@ _DEGRADE_DIRECTIVE = (
 def _note_degrade(snapshot: "BashSnapshot") -> None:
     """Write the snapshot's directive to the awaiting cell's stderr.
 
-    One note per degrade, never budgeted: for an assignment-form await the
-    note is the model's only feedback (no trailing expression means no repr
-    in the tool result), and a quiet repeat reads as progress. The note is
+    One note per degrade of the cell's own await, never budgeted: for an
+    assignment-form await the note is the model's only feedback (no trailing
+    expression means no repr in the tool result), and a quiet repeat reads as
+    progress. The note is
     what makes the re-await loop visible: every repeat shows the pid, the
     growing elapsed, and the end-the-turn contract.
     """
@@ -1234,7 +1235,10 @@ class BashHandle:
             self._end_await()
         if degraded:
             snapshot = self._degrade_snapshot()
-            _note_degrade(snapshot)
+            # Only the running cell's own await gets the note: a background
+            # task's note would land in a later, unrelated cell's output.
+            if _creating_cell_waits_for(_live_cell_owner(), current_task):
+                _note_degrade(snapshot)
             return snapshot
         return cast("BashResult", result)
 
