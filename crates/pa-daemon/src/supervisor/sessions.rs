@@ -1079,6 +1079,28 @@ mod tests {
                 .any(|row| row["id"] == "custom-owner"),
             "{rows:#}"
         );
+        // A listing of another named folder lists that folder only.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).expect("other dir");
+        let response = supervisor
+            .handle_list(
+                "l2".to_string(),
+                "list".to_string(),
+                Some(true),
+                None,
+                Some(other.to_string_lossy().to_string()),
+            )
+            .await;
+        assert!(response.success, "{response:?}");
+        let rows = response.data.expect("sessions data")["sessions"].clone();
+        assert!(
+            !rows
+                .as_array()
+                .expect("session rows")
+                .iter()
+                .any(|row| row["id"] == "custom-owner"),
+            "{rows:#}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
