@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"
 sha2 = "0.11"
+hmac = "0.13"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]

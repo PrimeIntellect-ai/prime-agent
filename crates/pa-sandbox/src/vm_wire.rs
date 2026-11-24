@@ -26,7 +26,7 @@ where
 {
     validate_gateway_credentials(
         &auth.gateway_url,
-        &auth.user_namespace,
+        &auth.namespace,
         &auth.job_id,
         inner.allow_insecure_localhost,
     )
@@ -34,7 +34,7 @@ where
     let gateway_url = auth.gateway_url.trim_end_matches('/');
     Ok(format!(
         "{gateway_url}/{}/{}/command_session.CommandSession/{method}",
-        auth.user_namespace, auth.job_id
+        auth.namespace, auth.job_id
     ))
 }
 

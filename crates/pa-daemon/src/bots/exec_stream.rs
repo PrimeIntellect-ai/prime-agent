@@ -124,7 +124,12 @@ pub async fn spawn_exec_halves(
     let write_client = auth_source
         .command_client()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    tokio::spawn(pump_stdin(stdin_read, write_client, session_uuid));
+    tokio::spawn(pump_stdin(
+        stdin_read,
+        write_client,
+        session_uuid,
+        auth_source.sandbox_id.clone(),
+    ));
 
     Ok(ExecStreamHalves {
         read: stdout_read,
@@ -142,6 +147,7 @@ async fn pump_stdin<T, A>(
     mut stdin: DuplexStream,
     client: CommandSessionClient<T, A>,
     session_uuid: String,
+    sandbox_id: String,
 ) where
     T: SandboxTransport + 'static,
     A: GatewayAuthSource + 'static,
@@ -175,7 +181,11 @@ async fn pump_stdin<T, A>(
         )
         .await
     {
-        eprintln!("pa-daemon: terminating exec process {session_uuid} failed: {error}");
+        // The error can quote the session id, so only its code is logged.
+        eprintln!(
+            "pa-daemon: terminating an exec process in sandbox {sandbox_id} failed: {}",
+            error.code()
+        );
     }
 }
 
@@ -228,7 +238,7 @@ mod tests {
             std::future::ready(Ok(GatewayAuth {
                 sandbox_id: "sb-1".to_string(),
                 gateway_url: "https://gateway.test".to_string(),
-                user_namespace: "ns".to_string(),
+                namespace: "ns".to_string(),
                 job_id: "job".to_string(),
                 token: "token".to_string(),
                 expires_at: "2099-01-01T00:00:00Z".to_string(),
@@ -250,6 +260,7 @@ mod tests {
             stdin_read,
             client,
             uuid::Uuid::new_v4().to_string(),
+            "sb-1".to_string(),
         ));
         stdin_write.write_all(b"{}\n").await.unwrap();
         drop(stdin_write);

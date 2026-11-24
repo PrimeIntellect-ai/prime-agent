@@ -32,8 +32,8 @@ pub struct GatewayAuth {
     pub sandbox_id: String,
     /// The gateway origin, e.g. `https://sandbox-gw.example.com`.
     pub gateway_url: String,
-    /// The gateway user namespace (URL path segment).
-    pub user_namespace: String,
+    /// The gateway namespace (URL path segment).
+    pub namespace: String,
     /// The gateway job id (URL path segment).
     pub job_id: String,
     /// The Bearer token for gateway calls. Never logged.
@@ -49,7 +49,7 @@ impl std::fmt::Debug for GatewayAuth {
         f.debug_struct("GatewayAuth")
             .field("sandbox_id", &self.sandbox_id)
             .field("gateway_url", &self.gateway_url)
-            .field("user_namespace", &self.user_namespace)
+            .field("namespace", &self.namespace)
             .field("job_id", &self.job_id)
             .field("token", &"[redacted]")
             .field("expires_at", &self.expires_at)
@@ -114,7 +114,7 @@ struct RawGatewayAuth {
     #[serde(rename = "gateway_url")]
     gateway_url: String,
     #[serde(rename = "user_ns")]
-    user_ns: String,
+    namespace: String,
     #[serde(rename = "job_id")]
     job_id: String,
     token: String,
@@ -133,7 +133,7 @@ fn parse_gateway_auth(
     })?;
     for (field, value) in [
         ("gateway_url", raw.gateway_url.as_str()),
-        ("user_ns", raw.user_ns.as_str()),
+        ("user_ns", raw.namespace.as_str()),
         ("job_id", raw.job_id.as_str()),
         ("token", raw.token.as_str()),
         ("expires_at", raw.expires_at.as_str()),
@@ -146,7 +146,7 @@ fn parse_gateway_auth(
     }
     validate_gateway_credentials(
         &raw.gateway_url,
-        &raw.user_ns,
+        &raw.namespace,
         &raw.job_id,
         allow_insecure_localhost,
     )?;
@@ -154,7 +154,7 @@ fn parse_gateway_auth(
         sandbox_id: String::new(),
         // Trailing slashes are trimmed (TS `gatewayUrl.replace(/\/+$/, "")`)
         gateway_url: raw.gateway_url.trim_end_matches('/').to_string(),
-        user_namespace: raw.user_ns,
+        namespace: raw.namespace,
         job_id: raw.job_id,
         token: raw.token,
         expires_at: raw.expires_at,
@@ -170,7 +170,7 @@ fn parse_gateway_auth(
 /// Returns [`SandboxErrorCode::InvalidResponse`] when any check fails.
 pub(crate) fn validate_gateway_credentials(
     gateway_url: &str,
-    user_namespace: &str,
+    namespace: &str,
     job_id: &str,
     allow_insecure_localhost: bool,
 ) -> Result<(), SandboxError> {
@@ -190,7 +190,7 @@ pub(crate) fn validate_gateway_credentials(
     if !scheme_ok {
         return Err(invalid());
     }
-    if !is_url_segment(user_namespace) || !is_url_segment(job_id) {
+    if !is_url_segment(namespace) || !is_url_segment(job_id) {
         return Err(SandboxError::invalid_response(
             "Sandbox auth user_ns and job_id must be URL-safe segments",
         ));
@@ -243,7 +243,7 @@ mod tests {
             "expires_at": "2026-09-16T01:00:00Z",
         });
         let parsed = parse_gateway_auth(value, false).unwrap();
-        assert_eq!(parsed.user_namespace, "ns_user1");
+        assert_eq!(parsed.namespace, "ns_user1");
         assert_eq!(parsed.job_id, "job_abc");
         assert_eq!(parsed.token, "gateway-token-xyz");
         let missing_token = serde_json::json!({
