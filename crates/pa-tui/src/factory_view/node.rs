@@ -916,7 +916,7 @@ impl NodeView {
         let esc = key("tui.select.cancel", "Esc");
         if self.files_open {
             return format!(
-                "{arrows}/{pages} scroll · {} back to the node · {esc} back to the diagram",
+                "{arrows}/{pages} scroll · {}/{esc} back to node document",
                 key("tui.select.confirm", "Enter")
             );
         }

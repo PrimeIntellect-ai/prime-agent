@@ -859,6 +859,17 @@ impl FactoryView {
             if let Some(line) = self.render_panel(theme, width, run, &mut panels) {
                 focus = Some((panel_start, line));
             }
+        } else if let Some(row) = self.selected.as_ref().filter(|_| !self.runs.is_empty()) {
+            // The selected run is not in the cached batch yet: the refresh
+            // the open fired lists it.
+            panels.push(vec![Span::raw("")]);
+            panels.push(vec![
+                Span::raw("  "),
+                theme.fg_span(
+                    ThemeColor::Muted,
+                    format!("Loading run {}…", self.row_label(row)),
+                ),
+            ]);
         }
         // The chrome area: the error line from the last failed refresh
         // and the trailing key hint (the view's only key legend).
