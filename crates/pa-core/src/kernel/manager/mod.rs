@@ -74,6 +74,16 @@ struct ExitInfo {
     signal: Option<i32>,
 }
 
+/// Which running requests a new request must wait out before it starts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// Internal ops and state requests: every running request.
+    Exclusive,
+    /// A user cell: attached requests only, so it runs beside backgrounded
+    /// cells (the kernel refuses it while one runs synchronous code).
+    BesideDetached,
+}
+
 /// Fields of a settled execution shared with the stdout reader task.
 #[allow(clippy::struct_excessive_bools)] // independent settlement flags, not a state machine
 #[derive(Default)]
@@ -421,7 +431,9 @@ struct Guarded {
     /// never hold the execution queue a python cell needs).
     mcp_status_waiters: HashMap<String, oneshot::Sender<Value>>,
     host_inflight: Vec<tokio::task::JoinHandle<()>>,
-    active_execution: Option<Arc<ActiveExecution>>,
+    /// Every physically running request, oldest first. More than one only
+    /// when user cells run beside backgrounded (detached) ones.
+    active_executions: Vec<Arc<ActiveExecution>>,
 }
 
 struct ChildHandle {
@@ -454,7 +466,8 @@ pub(crate) struct Inner {
     guarded: Mutex<Guarded>,
     child: Mutex<Option<ChildHandle>>,
     busy_notify: Notify,
-    /// Serializes `execute()` calls — the runtime runs one request at a time.
+    /// Serializes `execute()` calls. A call that detached has released it, so
+    /// a user cell can run beside the backgrounded one.
     execution_queue: tokio::sync::Mutex<()>,
     shutdown_memo: Mutex<Option<Arc<MemoSlot>>>,
     rebootstrap_memo: Mutex<Option<Arc<MemoSlot>>>,
@@ -485,14 +498,46 @@ struct StderrLog {
     budget: u64,
 }
 
+impl Guarded {
+    /// Whether `execution` is one of the physically running requests.
+    fn holds(&self, execution: &Arc<ActiveExecution>) -> bool {
+        self.active_executions
+            .iter()
+            .any(|active| Arc::ptr_eq(active, execution))
+    }
+
+    /// The running request that owns protocol id `id`.
+    fn active_execution(&self, id: &str) -> Option<Arc<ActiveExecution>> {
+        self.active_executions
+            .iter()
+            .find(|active| active.request_id == id)
+            .cloned()
+    }
+}
+
 impl Inner {
+    /// Fire the stop of every running execution `filter` selects; `false`
+    /// when it selects none.
+    fn stop_active_executions(&self, filter: impl Fn(&ActiveExecution) -> bool) -> bool {
+        let executions: Vec<_> = lock(&self.guarded)
+            .active_executions
+            .iter()
+            .filter(|execution| filter(execution))
+            .cloned()
+            .collect();
+        for execution in &executions {
+            execution.stop_signal.abort();
+        }
+        !executions.is_empty()
+    }
+
     /// Whether a detached (backgrounded) execution is physically active:
     /// internal ops queued behind it cannot run until the cell settles.
     pub(crate) fn has_detached_active_execution(&self) -> bool {
         lock(&self.guarded)
-            .active_execution
-            .as_ref()
-            .is_some_and(|execution| execution.detached.load(Ordering::SeqCst))
+            .active_executions
+            .iter()
+            .any(|execution| execution.detached.load(Ordering::SeqCst))
     }
 
     /// Fire the embedding's background-work settlement notice: the settlement is already recorded,
@@ -582,7 +627,7 @@ impl ReplKernelManager {
                 factory_activity_waiters: HashMap::new(),
                 mcp_status_waiters: HashMap::new(),
                 host_inflight: Vec::new(),
-                active_execution: None,
+                active_executions: Vec::new(),
             }),
             child: Mutex::new(None),
             busy_notify: Notify::new(),
@@ -624,36 +669,24 @@ impl ReplKernelManager {
         self.inner.pending_detached_completions.count()
     }
 
-    /// Stop the kernel's current USER execution out-of-band (attached or
+    /// Stop the kernel's current USER executions out-of-band (attached and
     /// detached): an interrupt now; when the interrupt is ignored, an
     /// attached cell is force-aborted and a detached one retires the
     /// kernel. `false` when no user execution is active —
     /// internal ops (bootstrap, restore, snapshot) are never targeted.
     #[must_use]
     pub fn abort_user_execution(&self) -> bool {
-        let execution = lock(&self.inner.guarded).active_execution.clone();
-        match execution {
-            Some(execution) if !execution.opts.internal => {
-                execution.stop_signal.abort();
-                true
-            }
-            _ => false,
-        }
+        self.inner
+            .stop_active_executions(|execution| !execution.opts.internal)
     }
 
-    /// Stop only a detached (backgrounded) execution — the scoped idle
+    /// Stop only detached (backgrounded) executions — the scoped idle
     /// cancel's target; attached work is never touched. `false` when no
     /// detached execution is running.
     #[must_use]
     pub fn abort_detached_execution(&self) -> bool {
-        let execution = lock(&self.inner.guarded).active_execution.clone();
-        match execution {
-            Some(execution) if execution.detached.load(Ordering::SeqCst) => {
-                execution.stop_signal.abort();
-                true
-            }
-            _ => false,
-        }
+        self.inner
+            .stop_active_executions(|execution| execution.detached.load(Ordering::SeqCst))
     }
 
     /// The number of live background `bash()` handles (the count behind
