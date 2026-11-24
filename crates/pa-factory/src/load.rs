@@ -303,6 +303,14 @@ pub(crate) fn is_state_id(text: &str) -> bool {
     text.len() <= 64 && types::is_word(text) && !text.contains('_')
 }
 
+/// Python's lowercase keywords: an output name is an `rlm.factory.emit`
+/// keyword argument, so it cannot be one of these.
+const PYTHON_KEYWORDS: [&str; 32] = [
+    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+    "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+];
+
 /// A name usable as a Python identifier and a prompt placeholder.
 pub(crate) fn is_identifier(text: &str) -> bool {
     let mut chars = text.chars();
@@ -726,11 +734,11 @@ fn build_state(
     let mut outputs = Vec::new();
     for (name, text) in in_file_order(raw.outputs) {
         let key = format!("{at}.outputs.{name}");
-        if !is_identifier(&name) {
+        if !is_identifier(&name) || PYTHON_KEYWORDS.contains(&name.as_str()) {
             problems.push(Diagnostic::new(
                 MACHINE_FILE,
                 &key,
-                "output names are lowercase identifiers (a-z, 0-9, _)",
+                "output names are lowercase identifiers (a-z, 0-9, _) and not Python keywords: the child emits each one as a keyword argument",
             ));
             continue;
         }
