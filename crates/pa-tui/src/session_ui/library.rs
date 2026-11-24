@@ -96,6 +96,8 @@ impl super::SessionUi {
         // foreign session's reply, and the spawn bumps the epoch for
         // every request it issues.
         self.library_list_epoch += 1;
+        // A drill-in fetched for an earlier open never lands on this one.
+        self.library_detail_epoch += 1;
         // The page draws whole diagrams and node files, so it takes the
         // terminal's height (less the top bar), not a picker's 20.
         let rows = usize::from(view.terminal_rows())

@@ -3958,10 +3958,13 @@ class FactoryExecutor:
             snapshot["description"] = described["description"]
             snapshot["version"] = str(described["version"])
             snapshot["author"] = described.get("author") or ""
-            snapshot["params"] = described.get("params") or []
             snapshot["files"] = described.get("files") or []
             snapshot["state_files"] = described.get("state_files") or []
-            return _wire_payload(snapshot)
+            wire = _wire_payload(snapshot)
+            # Param defaults are user values: they keep their keys verbatim
+            # (the row's own fields are single words the wire never renames).
+            wire["params"] = copy.deepcopy(described.get("params") or [])
+            return wire
         if action == "node":
             # The node lane: one state's inspection document — the
             # instance list (the node report's own rows), the selected

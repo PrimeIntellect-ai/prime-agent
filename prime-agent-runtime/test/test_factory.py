@@ -8722,6 +8722,18 @@ class FactoryLibraryDrillInTest(_ExecutorTestCase):
         self.assertEqual(len(graph["files"]), 1)
 
     @async_test
+    async def test_library_keeps_json_param_defaults_verbatim(self) -> None:
+        self.host.described["sweep"] = {
+            "name": "sweep",
+            "description": "Sweep a branch.",
+            "version": 1,
+            "params": [{"name": "weights", "type": "json", "default": {"risk_score": 1}}],
+            "spec": {"states": [{"id": "plan", "entry": True, "subagent": {"prompt": "Plan."}}]},
+        }
+        graph = await self.executor.activity({"action": "library", "specId": "sweep"})
+        self.assertEqual(graph["params"][0]["default"], {"risk_score": 1})
+
+    @async_test
     async def test_library_needs_a_machine_name(self) -> None:
         with self.assertRaises(ValueError):
             await self.executor.activity({"action": "library"})
