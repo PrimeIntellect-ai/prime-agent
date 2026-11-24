@@ -398,7 +398,7 @@ async fn child_wait_holds_while_a_background_completion_is_owed() {
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,
-        &std::sync::Arc::new(tokio::sync::Notify::new()),
+        &worker.work_notify,
         crate::engine::KernelNotice::bash_completion(4321, "fixture command", 0),
         || false,
     );
