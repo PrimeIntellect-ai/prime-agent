@@ -140,6 +140,11 @@ pub struct SessionSummary {
     pub model_fallback_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_kind: Option<String>,
+    /// The Decision API child flag (`decisionChild`): the agents view
+    /// hides these System 1 children from the user (their spend still
+    /// rolls into the parent). Absent on every ordinary session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_child: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unfinished_action_count: Option<u32>,
     /// Whether this session has already drawn the Anthropic subscription

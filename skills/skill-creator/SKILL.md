@@ -63,8 +63,7 @@ Unknown fields are ignored. Name violations produce warnings but the skill still
 
 The description is the only thing the model sees before deciding to load the skill. State what the skill does *and* the trigger conditions ("Use when ..."), naming the concrete tasks, tools, and phrases a request would contain.
 
-Good: `Extracts text and tables from PDF files, fills PDF forms, and merges PDFs. Use when working with PDF documents.`
-Poor: `Helps with PDFs.`
+Good: `Extracts text and tables from PDF files, fills PDF forms, and merges PDFs. Use when working with PDF documents.` Poor: `Helps with PDFs.`
 
 ### Write the body for progressive disclosure
 

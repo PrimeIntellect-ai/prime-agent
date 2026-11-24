@@ -93,14 +93,13 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                     &inbox,
                     &arrivals,
                     pa_core::session_engine::inbox::InboxNotice {
-                        class: pa_core::session_engine::inbox::INBOX_CLASS_BASH_DONE,
+                        class: pa_types::inbox_notice::INBOX_CLASS_BASH_DONE,
                         sender: Some("fixture command".to_string()),
                         text: "[bash-done pid:4321 exit:0]".to_string(),
                         meta: json!({ "pid": 4321, "command": "fixture command", "exitCode": 0 }),
                     },
                     Lane::Steering,
                     || false,
-                    |_, _| None,
                     None,
                 );
                 assert_eq!(

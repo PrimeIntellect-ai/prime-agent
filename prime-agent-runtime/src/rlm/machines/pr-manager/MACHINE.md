@@ -9,26 +9,15 @@ author: Prime Agent
 
 ## What this machine does
 
-Drives a pull request through review and fix cycles. One entry child
-resolves the pull request URL, a reviewer child judges the diff, and a
-fixer child addresses the findings; the guarded loop alternates until the
-verdict approves or the bounded re-entries run out, then a resident
-watcher stays available for follow-ups.
+Drives a pull request through review and fix cycles. One entry child resolves the pull request URL, a reviewer child judges the diff, and a fixer child addresses the findings; the guarded loop alternates until the verdict approves or the bounded re-entries run out, then a resident watcher stays available for follow-ups.
 
-This is the machine-form example: guarded transitions select the next
-state (`approved` true or false), `max_entries` bounds each loop state,
-the fixer's `fix_report` is an optional input on the reviewer's next
-re-entry (it binds only after the fixer settled at least once), and
-`monitoring` uses the `resident` lifecycle so its instance stays alive
-after approval instead of ending the run.
+This is the machine-form example: guarded transitions select the next state (`approved` true or false), `max_entries` bounds each loop state, the fixer's `fix_report` is an optional input on the reviewer's next re-entry (it binds only after the fixer settled at least once), and `monitoring` uses the `resident` lifecycle so its instance stays alive after approval instead of ending the run.
 
 ## How to run it
 
     result = await rlm.factory.run("pr-manager")
 
-Then watch progress with `await rlm.factory.status(result["run_id"])`.
-The alternation count is bounded by `max_transitions` and by each loop
-state's `max_entries`; the run pauses (escalates) instead of spinning.
+Then watch progress with `await rlm.factory.status(result["run_id"])`. The alternation count is bounded by `max_transitions` and by each loop state's `max_entries`; the run pauses (escalates) instead of spinning.
 
 ```machine-spec
 {
