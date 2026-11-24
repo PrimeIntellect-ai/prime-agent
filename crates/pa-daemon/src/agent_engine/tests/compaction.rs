@@ -1086,19 +1086,59 @@ fn compact_session_command_emits_the_result_on_success() {
     assert_eq!(rows[0]["customType"], "session_slash_command");
 }
 
+/// A threshold crossing inside one run, derived from a probe turn. The faux
+/// provider counts a session's first prompt twice (input plus cache write)
+/// and a later turn's cached prompt once, so the seed turn's usage grows
+/// faster with the system prompt (core prompt growth, a long checkout path
+/// in the absolute skill locations) than the tool turn's. The tool turn's
+/// output alone therefore carries the crossing: it lands 10k tokens above a
+/// threshold that sits 10k above the seed turn, at any prompt size.
+struct MidRunCrossing {
+    /// The faux model's window: the request budget, the threshold, and the
+    /// reserve, so the threshold is exactly `seed usage + 10_000`.
+    context_window: u64,
+    /// One tool turn's worth, so the post-compaction prompt (the kept tool
+    /// turn plus the system prompt) stays inside the derived window.
+    reserve: u64,
+    tool_text: String,
+}
+
+fn mid_run_crossing() -> MidRunCrossing {
+    let (probe, _probe_dir) =
+        faux_engine_with_settings(&json!({ "responses": [{"text": "seed reply"}] }), 1);
+    let mut probe_events = Vec::new();
+    admit(&probe, "seed".into(), &mut probe_events);
+    let baseline = probe_events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::AssistantMessage(message) => message["usage"]["totalTokens"].as_u64(),
+            _ => None,
+        })
+        .expect("probe turn produced usage");
+    let threshold = baseline + 10_000;
+    let tool_tokens = threshold + 10_000;
+    MidRunCrossing {
+        context_window: FAUX_REQUEST_BUDGET + threshold + tool_tokens,
+        reserve: tool_tokens,
+        tool_text: "x".repeat(usize::try_from(tool_tokens * 4).expect("tool text fits usize")),
+    }
+}
+
 #[test]
 fn threshold_crossing_inside_one_run_compacts_before_the_next_model_turn() {
+    let crossing = mid_run_crossing();
     let (engine, _dir) = faux_engine_with_settings(
         &json!({
+            "contextWindow": crossing.context_window,
             "responses": [
                 {"text":"seed reply"},
-                {"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]},
+                {"content":[{"type":"text","text":crossing.tool_text}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]},
                 {"text":"history summary"},
                 {"text":"prefix summary"},
                 {"text":"task finished"}
             ]
         }),
-        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+        crossing.reserve,
     );
     let mut events = Vec::new();
     admit(&engine, "seed".into(), &mut events);
@@ -1128,9 +1168,11 @@ fn threshold_crossing_inside_one_run_compacts_before_the_next_model_turn() {
 
 #[test]
 fn failed_mid_run_compaction_resumes_without_retrying_each_tool_round() {
-    let tool_turn = json!({"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]});
+    let crossing = mid_run_crossing();
+    let tool_turn = json!({"content":[{"type":"text","text":crossing.tool_text}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]});
     let (engine, _dir) = faux_engine_with_settings(
         &json!({
+            "contextWindow": crossing.context_window,
             "responses": [
                 {"text":"seed reply"}, tool_turn,
                 {"text":"", "stopReason":"error", "errorMessage":"synthetic summary failure"},
@@ -1138,7 +1180,7 @@ fn failed_mid_run_compaction_resumes_without_retrying_each_tool_round() {
                 {"text":"task finished"}
             ]
         }),
-        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+        crossing.reserve,
     );
     let mut events = Vec::new();
     admit(&engine, "seed".into(), &mut events);

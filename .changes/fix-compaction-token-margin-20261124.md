@@ -1,0 +1,1 @@
+- Test-only: the mid-run compaction tests size their scripted tool turn from a probe turn, so a longer system prompt or checkout path no longer breaks them. No change to shipped behavior.
