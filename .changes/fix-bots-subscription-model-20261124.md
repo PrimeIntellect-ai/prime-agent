@@ -1,0 +1,1 @@
+- A bot spawned from a session on a subscription login now runs on the Prime Inference default model, and the spawn prints why.

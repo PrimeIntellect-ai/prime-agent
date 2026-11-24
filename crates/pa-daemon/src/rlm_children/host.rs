@@ -449,6 +449,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 name,
                 session_dir: created.session_dir,
                 model,
+                notice: None,
             })
         })
     }
@@ -1053,9 +1054,41 @@ async fn spawn_bot(
     };
     this.assert_name_available(&name, identity.rlm_depth + 1)
         .await?;
-    let model =
+    let mut model =
         resolve_child_model_allowlisted(this, request.model.as_deref(), "spawn", "subagent")
             .await?;
+    let mut notice = None;
+    if request.model.is_none() {
+        let provider = model
+            .split_once('/')
+            .map_or("", |(provider, _)| provider)
+            .to_string();
+        let agent_dir = this.agent_dir.clone();
+        let fall_back = tokio::task::spawn_blocking(move || {
+            crate::bots::credentials::use_prime_inference_instead(
+                &mut pa_core::auth::AuthStorage::create(&agent_dir),
+                &provider,
+            )
+        })
+        .await
+        .context("the auth read task join failed")?;
+        if fall_back {
+            let selector = format!(
+                "{}/{}",
+                pa_core::auth::PRIME_INFERENCE_PROVIDER_ID,
+                pa_core::models::PRIME_INFERENCE_DEFAULT_MODEL_ID
+            );
+            if let Ok(fallback) =
+                resolve_child_model_allowlisted(this, Some(&selector), "spawn", "subagent").await
+            {
+                notice = Some(format!(
+                    "The bot runs on {fallback}: the inherited {model} uses a subscription \
+                     login, which a bot cannot use. Pass model= to choose another model."
+                ));
+                model = fallback;
+            }
+        }
+    }
     assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
     let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
     let bot = this
@@ -1085,6 +1118,7 @@ async fn spawn_bot(
         rlm_child_id: bot_id,
         name,
         model,
+        notice,
     })
 }
 

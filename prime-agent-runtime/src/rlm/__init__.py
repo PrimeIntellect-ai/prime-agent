@@ -31,6 +31,7 @@ class RLMSpawnHandle:
     name: str
     session_dir: Path
     model: str
+    notice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
         name=name,
         session_dir=Path(session_dir),
         model=model,
+        notice=payload.get("notice"),
     )
 
 
@@ -308,7 +310,10 @@ async def _spawn(
         kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
-    return _spawn_handle_from_payload(payload)
+    handle = _spawn_handle_from_payload(payload)
+    if handle.notice:
+        print(f"rlm.spawn: {handle.notice}")
+    return handle
 
 
 def _model_from_payload(payload: Any) -> RLMModel:
