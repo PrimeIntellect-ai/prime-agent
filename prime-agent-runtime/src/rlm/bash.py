@@ -48,6 +48,8 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
+# The output tail a [bash-done] wake row shows (the daemon caps it further).
+_COMPLETION_NOTICE_TAIL_CAP = 400
 # Display MIME the host aggregates into a per-cell summary of the bash()
 # commands the cell ran (first capped command, count, line total).
 _BASH_COMMAND_MIME = "application/vnd.prime-agent.bash-command+json"
@@ -179,6 +181,8 @@ def _capped(command: str) -> str:
     if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
         return command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
     return command
+
+
 
 
 def _completion_reaches(
@@ -864,6 +868,7 @@ class BashHandle:
                     "pid": self._pid,
                     "command": command,
                     "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
                 }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
@@ -1294,7 +1299,13 @@ class PersistentBashHandle(BashHandle):
                 return
             command = _capped(self.command)
             reply = await repl.host_request(
-                {"type": "bash.completed", "pid": self._pid, "command": command, "exitCode": result.exit_code}
+                {
+                    "type": "bash.completed",
+                    "pid": self._pid,
+                    "command": command,
+                    "exitCode": result.exit_code,
+                    "outputTail": result.output[-_COMPLETION_NOTICE_TAIL_CAP:],
+                }
             )
             if isinstance(reply, dict) and reply.get("status") == "ok":
                 self._arm_consumed_notice(command)
@@ -1306,7 +1317,11 @@ class PersistentBashHandle(BashHandle):
         return f"<BashHandle persistent pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str, persistent: bool = False) -> BashHandle:
+def bash(
+    command: str,
+    persistent: bool = False,
+    **unknown: Any,
+) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
@@ -1340,6 +1355,28 @@ def bash(command: str, persistent: bool = False) -> BashHandle:
     polled, so its result and completion notice lag by up to a second; its
     exit_code is -1 when it was killed before recording a status.
     """
+    if unknown:
+        # Invented wait parameters (`timeout=`) are the recurring failure the
+        # eval traces show: the model reaches for a common API shape, loses the
+        # cell to a bare TypeError, and flails. Decline with the real
+        # signature and the route this session can deliver: the parked-turn
+        # notice exists only where the host wires it, and a notice-less await
+        # waits for the command to finish.
+        route = (
+            "launch the command (bash() returns immediately and "
+            "auto-backgrounds it) and end the turn; a [bash-done] "
+            "notification resumes you. An await always yields after 1 second."
+            if _completion_notices_wired
+            else "launch the command (bash() returns immediately) and read "
+            "the handle in a later cell; this session has no [bash-done] "
+            "notice, so an await waits until the command finishes."
+        )
+        raise TypeError(
+            "bash() takes command, persistent — not "
+            + ", ".join(f"{name!r}" for name in sorted(unknown))
+            + ". There is no wait or timeout parameter: "
+            + route
+        )
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     if persistent:

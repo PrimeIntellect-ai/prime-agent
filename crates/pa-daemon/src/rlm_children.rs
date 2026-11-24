@@ -162,6 +162,11 @@ struct ChildRecord {
     label: String,
     started_at_ms: u64,
     run: RunState,
+    /// The Decision API child (`rlm.spawn kind="decision"`): its spawn
+    /// task is a readiness handshake, never its whole run — the settle
+    /// watcher's terminal handling (the ledger display's completed flip)
+    /// is withheld for it.
+    decision_child: bool,
     answer_preview: Option<String>,
     /// The full final-answer text (bounded by
     /// [`ANSWER_TEXT_MAX_CHARS`]), the collect envelope's binding lane:
@@ -681,6 +686,19 @@ impl SupervisorChildSessions {
         false
     }
 
+    /// Release a refine child's held task prompt: its parent calls this once
+    /// the child's flight is recorded, so the child's reply always finds it.
+    pub async fn release_child_prompt(&self, rlm_child_id: &str) {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let mut record = record.lock().await;
+            if record.rlm_child_id == rlm_child_id {
+                record.run.apply(RunEvent::ReleasePrompt);
+                return;
+            }
+        }
+    }
+
     /// Re-arm usage observation for a child after an agent message was
     /// delivered to it; no-op for non-children or already-observed targets.
     pub async fn observe_child_usage(&self, target: &str) {
@@ -745,6 +763,7 @@ impl SupervisorChildSessions {
                 label: String::new(),
                 started_at_ms: 0,
                 run: RunState::admitted(),
+                decision_child: false,
                 answer_preview: None,
                 answer_text: None,
                 answer_captured: false,

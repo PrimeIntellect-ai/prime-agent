@@ -1,41 +1,38 @@
 //! The refinement-child orchestration on the daemon engine: the
-//! fire-and-wake flow. `/refine` spawns one refinement child
-//! (`refine_child` in the spawn request, `runtimeMetadata.kind = "refine"`
-//! on its durable create) with the prepared request and returns immediately
-//! — the session lock
-//! and the compaction flight are never held; the child's proposal lands as
-//! the standard child-reply notification, the delivery is answered at once
-//! (the child's send never waits on the parent's apply), and the parked
-//! reply applies at the session's idle boundary — the runner owns turn
-//! admission, so the apply's rows never interleave with a running turn's
-//! history. The apply re-reads the harness state fresh and records the
-//! refinement event; the child's registry record retires at its own
-//! settle, so the one-shot child never orphans in the roster.
+//! fire-and-wake flow. `/refine` spawns one refinement child (the
+//! `RlmSpawnKind::Refine` spawn, `runtimeMetadata.kind = "refine"` on its
+//! durable create) with the prepared planning request and returns
+//! immediately — the session lock and the compaction flight are never held.
+//! Refinements may overlap, as in the in-process pipeline: each child has
+//! its own flight, keyed by the child's active session id. The child's
+//! reply lands as the standard child-reply notification, the delivery is
+//! answered at once (the child's send never waits on the parent's apply),
+//! and the parked reply commits at the session's idle boundary through the
+//! same `commit_refinement` the in-process pipeline uses. The child's
+//! registry record retires at its own settle, so the one-shot child never
+//! orphans in the roster.
 
-use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
 
 use anyhow::{anyhow, bail, Context as _};
 
-use pa_core::refinement::RefinementResult;
-use pa_core::session_engine::refine::{PreparedRefinement, RefineOptions, RefinementSource};
-use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_core::session_engine::refine::{
+    CommittedRefinement, PreparedRefinement, RefineOptions, RefinementSource,
+};
+use pa_core::session_engine::rlm_host::{RlmSpawnKind, RlmSpawnRequest, RlmSubagentHost};
 
 use crate::agent_engine::AgentSessionEngine;
 use crate::rlm_children::SupervisorChildSessions;
 
 /// One refinement child in flight: what the parent captured before the
-/// child's model pass, keyed by the child's ids for the reply match.
+/// child's model pass.
 pub(crate) struct RefineChildFlight {
     pub rlm_child_id: String,
-    pub active_session_id: String,
     pub prepared: PreparedRefinement,
     pub source: RefinementSource,
-    pub global_harness_dir: PathBuf,
 }
 
-/// The parked reply of one refinement child: the proposal (or the failure
-/// envelope) captured at the delivery, applied at the session's idle
+/// The parked reply of one refinement child, applied at the session's idle
 /// boundary.
 pub(crate) struct PendingRefineReply {
     pub flight: RefineChildFlight,
@@ -43,15 +40,13 @@ pub(crate) struct PendingRefineReply {
 }
 
 impl AgentSessionEngine {
-    /// Spawn the refinement child (fire): prepare the request, admit one
-    /// `refine_child` spawn with it, and return once the child
-    /// is admitted — the child's proposal applies on its reply's arrival.
+    /// Spawn a refinement child (fire) and return its id once it is
+    /// admitted; its reply applies on arrival.
     ///
     /// # Errors
     ///
     /// Returns an error when refinements are disabled, the session has no
-    /// child runtime, a refinement child is already in flight, or the
-    /// spawn admission fails.
+    /// child runtime, or the spawn admission fails.
     pub(crate) async fn spawn_refine_child(
         &self,
         options: &RefineOptions,
@@ -60,136 +55,101 @@ impl AgentSessionEngine {
         let children = self.children.as_ref().ok_or_else(|| {
             anyhow!("the refine command requires a daemon-backed session: this session has no RLM child runtime")
         })?;
-        // One refinement child at a time, admitted atomically: the spawn
-        // lock holds the dead-round release, the in-flight check, the
-        // prepare, and the flight's record as one admission, so the manual
-        // and the auto spawn cannot both pass the check and double-spawn
-        // (the in-flight child's reply owns the apply). A parked reply
-        // holds the same lane until its idle-boundary apply runs — a
-        // second spawn would otherwise overwrite the parked cell and lose
-        // the first child's only answer.
-        let _spawn = self.refine_spawn_lock.lock().await;
-        self.release_dead_refine_child_round().await;
-        {
-            let flight = self
-                .refine_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let pending = self
-                .pending_refine_reply
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if flight.is_some() || pending.is_some() {
-                bail!("a refinement child is already in flight; its reply applies on arrival");
-            }
-        }
-        self.spawn_refine_child_inner(children, options, source)
-            .await
+        self.release_dead_refine_child_rounds().await;
+        self.admit_refine_child(children, options, source).await
     }
 
-    /// A refinement child that died without replying releases its flight
-    /// and the compact round it carried, so the cadence never wedges
-    /// behind the in-flight guard (the registry retires the record at the
-    /// settle it observed, whichever way the child ended).
-    pub(crate) async fn release_dead_refine_child_round(&self) {
+    /// Release the flights of refinement children that died without
+    /// replying, and the compact rounds they carried, so the cadence never
+    /// wedges behind the round's in-flight guard (the registry retires the
+    /// record at the settle it observed, whichever way the child ended).
+    pub(crate) async fn release_dead_refine_child_rounds(&self) {
         let Some(children) = self.children.clone() else {
             return;
         };
-        // The candidate flight's ids, taken under the lock; the liveness
-        // probe then awaits without holding the mutex.
-        let candidate = {
-            let flight = self
-                .refine_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            flight
-                .as_ref()
-                .map(|current| (current.rlm_child_id.clone(), current.source))
-        };
-        let Some((rlm_child_id, _)) = candidate else {
-            return;
-        };
-        // The liveness probe: only a present, still-running record can
-        // still reply. A settled run (its own failure answered, or its
-        // reply lost in flight) and an absent record (deleted or
-        // replaced) never can — the flight and the round release, and the
-        // one-shot child's record tears down so no orphan refine child
-        // lingers.
-        if children.child_live(&rlm_child_id).await {
-            return;
-        }
-        // The flight is still the probed child's: release it. A
-        // concurrent spawn that replaced it in the meantime keeps its own
-        // flight — the in-flight guard holds the new child.
-        let finish_round = {
-            let mut flight = self
-                .refine_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            match flight.as_ref() {
-                Some(current) if current.rlm_child_id == rlm_child_id => {
-                    let finish_round = current.source == RefinementSource::Auto;
-                    *flight = None;
-                    finish_round
-                }
-                _ => return,
+        let candidates: Vec<(String, String)> = self
+            .refine_flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(active_session_id, flight)| {
+                (active_session_id.clone(), flight.rlm_child_id.clone())
+            })
+            .collect();
+        for (active_session_id, rlm_child_id) in candidates {
+            // Only a present, still-running record can still reply.
+            if children.child_live(&rlm_child_id).await {
+                continue;
             }
-        };
-        if finish_round {
-            if let Some(core) = self.session.lock().await.as_deref() {
-                core.session.finish_compact_auto_refine_round();
+            let released = self
+                .refine_flights
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&active_session_id);
+            if released.is_some_and(|flight| flight.source == RefinementSource::Auto) {
+                if let Some(core) = self.session.lock().await.as_deref() {
+                    core.session.finish_compact_auto_refine_round();
+                }
             }
         }
     }
 
     /// A branch move or a replacement teardown abandons the conversation
-    /// the refinement child plans on: the child is cancelled first, then
-    /// its lane drops — the flight, or the reply it parked meanwhile. The
-    /// proposal never applies to the moved-to conversation, and the lane
-    /// never holds off a later `/refine`. The cancel cannot recall a reply
-    /// that is already in delivery: the abandoned child's id is recorded
-    /// until that late reply arrives, so the park drops it and it never
-    /// lands as an agent message.
-    pub(crate) async fn abandon_refine_child(&self) {
+    /// the refinement children plan on: the children are cancelled first,
+    /// then their flights and parked replies drop, so no proposal applies to
+    /// the moved-to conversation. The cancel cannot recall a reply that is
+    /// already in delivery: each abandoned child's id is recorded until that
+    /// late reply arrives, so the park drops it and it never lands as an
+    /// agent message.
+    pub(crate) async fn abandon_refine_children(&self) {
+        // Under the spawn lock, no admission sits between its prepare and
+        // its flight's record, so every live child is in the map.
         let _spawn = self.refine_spawn_lock.lock().await;
-        let running = self
-            .refine_flight
+        let running: Vec<String> = self
+            .refine_flights
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .map(|flight| flight.rlm_child_id.clone());
-        if let (Some(children), Some(rlm_child_id)) = (self.children.as_ref(), running) {
-            children.cancel_child_run(&rlm_child_id).await;
+            .values()
+            .map(|flight| flight.rlm_child_id.clone())
+            .collect();
+        if let Some(children) = self.children.as_ref() {
+            for rlm_child_id in &running {
+                children.cancel_child_run(rlm_child_id).await;
+            }
         }
-        let mut flight = self
-            .refine_flight
+        let mut flights = self
+            .refine_flights
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let mut pending = self
-            .pending_refine_reply
+        self.abandoned_refine_children
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(abandoned) = flight.take() {
-            self.abandoned_refine_children
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(abandoned.active_session_id);
-        }
-        *pending = None;
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(
+                flights
+                    .drain()
+                    .map(|(active_session_id, _)| active_session_id),
+            );
+        self.pending_refine_replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
-    /// The spawn body after the flight check: the prepare, the admission,
-    /// and the flight's record.
-    pub(crate) async fn spawn_refine_child_inner(
+    /// Prepare the planning request, admit the refinement child, and record
+    /// its flight before the child's task prompt is released, so its reply
+    /// always finds the flight.
+    pub(crate) async fn admit_refine_child(
         &self,
         children: &Arc<SupervisorChildSessions>,
         options: &RefineOptions,
         source: RefinementSource,
     ) -> anyhow::Result<String> {
+        // The spawn lock orders the whole admission against an abandon: a
+        // branch move either sees this child's flight or runs before its
+        // prepare reads the conversation.
+        let _spawn = self.refine_spawn_lock.lock().await;
         let model = self.session_model()?;
         self.ensure_core_session_async(&model).await?;
-        let global_harness_dir =
-            pa_core::refinement::get_global_harness_state_dir(&self.config.agent_dir);
         let core = {
             let guard = self.session.lock().await;
             guard.clone()
@@ -197,144 +157,123 @@ impl AgentSessionEngine {
         let Some(core) = core else {
             bail!("the refinement child requires a built session");
         };
-        // The prepare: the gate check, the trimmed conversation, and the
-        // baseline captured before the child's model pass.
-        let (prepared, prompt) = core
-            .session
-            .prepare_refinement(options, &model, &global_harness_dir)
-            .await?;
+        let (prepared, prompt) = core.session.prepare_refinement(options, &model).await?;
         // The standard spawn semantics: the model and thinking default to
-        // the session's; the kind flag makes the child run the refinement
-        // protocol instead of the agent engine.
+        // the session's. A refine child's task prompt stays held until the
+        // release below.
         let handle = children
             .spawn(RlmSpawnRequest {
                 prompt,
                 name: None,
                 model: None,
                 thinking: None,
+                kind: RlmSpawnKind::Refine,
                 cwd: None,
-                refine_child: true,
                 spawned_by_request_id: None,
                 factory: None,
             })
             .await
             .context("the refinement child spawn failed")?;
+        let rlm_child_id = handle.rlm_child_id;
         let active_session_id = children
             .child_identities()
             .await
             .into_iter()
-            .find(|identity| identity.rlm_child_id == handle.rlm_child_id)
+            .find(|identity| identity.rlm_child_id == rlm_child_id)
             .map(|identity| identity.active_session_id)
             .ok_or_else(|| anyhow!("the refinement child admitted without a registry identity"))?;
-        let rlm_child_id = handle.rlm_child_id;
-        {
-            let mut flight = self
-                .refine_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            *flight = Some(RefineChildFlight {
-                rlm_child_id: rlm_child_id.clone(),
+        self.refine_flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
                 active_session_id,
-                prepared,
-                source,
-                global_harness_dir,
-            });
-        }
+                RefineChildFlight {
+                    rlm_child_id: rlm_child_id.clone(),
+                    prepared,
+                    source,
+                },
+            );
         // The planning pass bills on the parent's totals: register the
         // spawn with the usage attribution (the kernel path's own
         // `register_spawn`), so the child's answer-row usage folds in at
         // its settle.
         self.register_refine_child_usage(&rlm_child_id).await;
+        children.release_child_prompt(&rlm_child_id).await;
         Ok(rlm_child_id)
     }
 
-    /// The wake's first half: park the refinement child's reply for the
-    /// idle-boundary apply. The in-flight child's reply parks and the
-    /// delivery is answered at once — the child's send never waits on the
-    /// parent's apply. The late reply of a child that a branch move or a
-    /// replacement abandoned is consumed and dropped. `None` for any other
-    /// sender.
+    /// The wake's first half: park a refinement child's reply for the
+    /// idle-boundary apply; the delivery is answered at once. The late reply
+    /// of a child that a branch move or a replacement abandoned is consumed
+    /// and dropped. `None` for any other sender.
     pub(crate) fn park_refine_child_reply(
         &self,
         sender_active_session_id: &str,
         message: &str,
     ) -> Option<()> {
-        // One lock scope across the whole park: the spawn admission reads
-        // both cells under this same order (flight, then pending), so a
-        // take followed by a separate write would let a concurrent spawn
-        // observe both cells empty and admit a second child over this
-        // one's only answer.
-        let mut flight = self
-            .refine_flight
+        let flight = self
+            .refine_flights
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let in_flight = flight
-            .as_ref()
-            .is_some_and(|current| current.active_session_id == sender_active_session_id);
-        if !in_flight {
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(sender_active_session_id);
+        let Some(flight) = flight else {
             return self
                 .abandoned_refine_children
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(sender_active_session_id)
                 .then_some(());
-        }
-        let taken = flight.take()?;
-        *self
-            .pending_refine_reply
+        };
+        self.pending_refine_replies
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(PendingRefineReply {
-            flight: taken,
-            reply: message.to_string(),
-        });
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(PendingRefineReply {
+                flight,
+                reply: message.to_string(),
+            });
         Some(())
     }
 
-    /// The wake's second half: apply the parked reply at the session's
-    /// idle boundary. `None` when nothing is parked; otherwise the
-    /// proposal applied (`Ok`) or the refinement failed visibly (`Err`).
+    /// The wake's second half: apply the oldest parked reply at the
+    /// session's idle boundary. `None` when nothing is parked.
     pub(crate) async fn apply_pending_refine_reply(
         &self,
-    ) -> Option<anyhow::Result<(RefinementResult, RefinementSource)>> {
+    ) -> Option<anyhow::Result<CommittedRefinement>> {
         if self
-            .pending_refine_reply
+            .pending_refine_replies
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_none()
+            .is_empty()
         {
             return None;
         }
-        // The apply holds the lane until its harness write lands: under the
-        // spawn lock, a concurrent admission cannot see both cells empty
-        // and prepare a new child against a half-applied store.
+        // Under the spawn lock, an abandon either finishes first (and drops
+        // the parked reply) or waits until this apply landed.
         let _spawn = self.refine_spawn_lock.lock().await;
-        let pending = self
-            .pending_refine_reply
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()?;
-        let source = pending.flight.source;
-        let outcome = self
-            .apply_flight_reply(pending.flight, &pending.reply)
-            .await
-            .map(|result| (result, source));
-        Some(outcome)
+        let pending = {
+            let mut pending = self
+                .pending_refine_replies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (!pending.is_empty()).then(|| pending.remove(0))
+        }?;
+        Some(
+            self.apply_flight_reply(pending.flight, &pending.reply)
+                .await,
+        )
     }
 
-    /// Apply one in-flight refine child's reply through the existing apply
-    /// machinery, then finish the compact-trigger round the child carried —
-    /// on every outcome, so no round stays in flight (the child's record
-    /// retires at its settle, registry-side).
+    /// Commit one refinement child's reply, then finish the compact-trigger
+    /// round the child carried — on every outcome, so no round stays in
+    /// flight.
     async fn apply_flight_reply(
         &self,
         flight: RefineChildFlight,
         reply: &str,
-    ) -> anyhow::Result<RefinementResult> {
-        let (prepared, source, global_harness_dir) = (
-            flight.prepared,
-            flight.source,
-            flight.global_harness_dir.clone(),
-        );
+    ) -> anyhow::Result<CommittedRefinement> {
+        let RefineChildFlight {
+            prepared, source, ..
+        } = flight;
         let core = {
             let guard = self.session.lock().await;
             guard.clone()
@@ -342,31 +281,29 @@ impl AgentSessionEngine {
         let Some(core) = core else {
             bail!("the refinement reply arrived without a built session");
         };
-        // The child's own failure answered with the tagged error envelope:
-        // the refinement is never silent.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(reply) {
-            if value.get("type").and_then(serde_json::Value::as_str)
-                == Some(crate::refine_engine::REFINEMENT_ERROR_REPLY_TYPE)
+        let result = match serde_json::from_str::<serde_json::Value>(reply) {
+            // The child's own failure answered with the tagged error envelope.
+            Ok(value)
+                if value.get("type").and_then(serde_json::Value::as_str)
+                    == Some(crate::refine_engine::REFINEMENT_ERROR_REPLY_TYPE) =>
             {
                 let error = value
                     .get("error")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("the refinement child failed");
-                if source == RefinementSource::Auto {
-                    core.session.finish_compact_auto_refine_round();
-                }
-                // The pinned prefix (the old in-process refiner's
-                // `{failure}` label): a failed model pass surfaces as
-                // "Refinement failed: <reason>" on refine_failed.
-                bail!("Refinement failed: {error}");
+                Err(anyhow!("Refinement failed: {error}"))
             }
-        }
-        // The apply re-reads the target harness state fresh and applies the
-        // proposal through the stale-baseline contract.
-        let result = core
-            .session
-            .apply_child_refinement(prepared, reply, source, &global_harness_dir)
-            .await;
+            parsed => match parsed.and_then(serde_json::from_value) {
+                Ok(message) => {
+                    core.session
+                        .apply_child_refinement(prepared, &message, source)
+                        .await
+                }
+                Err(error) => Err(anyhow!(
+                    "Refinement failed: unreadable child reply: {error}"
+                )),
+            },
+        };
         if source == RefinementSource::Auto {
             core.session.finish_compact_auto_refine_round();
         }
@@ -380,14 +317,36 @@ mod tests {
     use crate::agent_engine::tests::admit;
     use crate::agent_engine::FAUX_TEST_LOCK;
     use crate::engine::SessionEngine as _;
-    use pa_core::refinement::{empty_harness_state, HarnessScope};
+    use pa_types::ai::{AssistantContentBlock, AssistantMessage, StopReason, TextContent};
     use serde_json::json;
 
-    /// The proposal the child answers with: one local memory create.
-    const PROPOSAL: &str = r#"{"summary":"tactic","rationale":"the seed turn repeats a tactic","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    /// The child's reply: the planning model reply carrying one local
+    /// memory create.
+    fn proposal_reply() -> String {
+        serde_json::to_string(&AssistantMessage {
+            content: vec![AssistantContentBlock::Text(TextContent {
+                text: r#"{"summary":"tactic","rationale":"the seed turn repeats a tactic","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#.to_string(),
+                text_signature: None,
+                rest: serde_json::Map::default(),
+            })],
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        })
+        .unwrap()
+    }
 
     /// One faux engine with a built session whose local harness store lives
-    /// under its temp dir, plus the flight fixture the wake parks.
+    /// under its temp dir.
     fn park_engine() -> (std::sync::Arc<AgentSessionEngine>, tempfile::TempDir) {
         // The engine is built here (not through the shared helper): the
         // apply's local store derives from the session dir, which the
@@ -421,45 +380,46 @@ mod tests {
         (engine, dir)
     }
 
-    fn flight_for(dir: &std::path::Path, source: RefinementSource) -> RefineChildFlight {
-        RefineChildFlight {
-            rlm_child_id: "rlm-child-1".to_string(),
-            active_session_id: "active-1".to_string(),
-            prepared: PreparedRefinement {
-                options: RefineOptions::default(),
-                requested_scope: HarnessScope::Local,
-                baseline_state: empty_harness_state(),
-                id: "refine_1".to_string(),
-                in_flight: pa_core::session_engine::refine::RefinementFlightGuard::enter(
-                    std::sync::Arc::default(),
-                ),
-            },
-            source,
-            global_harness_dir: dir.join("harness"),
-        }
-    }
-
-    fn park_flight(engine: &AgentSessionEngine, flight: RefineChildFlight) {
-        *engine
-            .refine_flight
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(flight);
-    }
-
-    fn pending_some(engine: &AgentSessionEngine) -> bool {
+    /// Record one flight the way the admission records it: the real
+    /// prepare over the engine's built session.
+    fn park_flight(engine: &AgentSessionEngine, active_session_id: &str) {
+        let model = engine.session_model().unwrap();
+        let core = engine.session.blocking_lock().clone().unwrap();
+        let (prepared, _prompt) = engine
+            .runtime
+            .block_on(
+                core.session
+                    .prepare_refinement(&RefineOptions::default(), &model),
+            )
+            .unwrap();
         engine
-            .pending_refine_reply
+            .refine_flights
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
+            .insert(
+                active_session_id.to_string(),
+                RefineChildFlight {
+                    rlm_child_id: format!("rlm-{active_session_id}"),
+                    prepared,
+                    source: RefinementSource::User,
+                },
+            );
     }
 
-    fn flight_some(engine: &AgentSessionEngine) -> bool {
+    fn pending_count(engine: &AgentSessionEngine) -> usize {
         engine
-            .refine_flight
+            .pending_refine_replies
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
+            .len()
+    }
+
+    fn flight_count(engine: &AgentSessionEngine) -> usize {
+        engine
+            .refine_flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     fn local_harness_state(dir: &std::path::Path) -> serde_json::Value {
@@ -478,199 +438,103 @@ mod tests {
     }
 
     /// The wake parks the child's reply instead of applying inside the
-    /// delivery: the delivery answers at once, the flight moves into the
-    /// parked cell, and nothing touches the harness store yet — the apply
-    /// runs at the session's idle boundary. A sender that is not the
-    /// in-flight child never parks. Red when the park is lost (the park
-    /// call applies, or the flight survives with a parked reply).
+    /// delivery: the flight moves into the parked queue, and nothing touches
+    /// the harness store yet. A sender that is not an in-flight child never
+    /// parks. Red when the park call applies, or when the flight survives a
+    /// parked reply.
     #[test]
-    fn a_reply_parks_without_applying_and_holds_the_lane() {
+    fn a_reply_parks_without_applying() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, dir) = park_engine();
-        park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
-        // Not this session's child: no park, the flight survives.
+        park_flight(&engine, "active-1");
         assert!(
             engine
-                .park_refine_child_reply("active-2", PROPOSAL)
+                .park_refine_child_reply("active-2", &proposal_reply())
                 .is_none(),
             "a foreign sender never parks"
         );
-        assert!(
-            flight_some(&engine),
+        assert_eq!(
+            flight_count(&engine),
+            1,
             "the flight survived the foreign reply"
         );
-        // The child's reply parks.
         assert_eq!(
-            engine.park_refine_child_reply("active-1", PROPOSAL),
+            engine.park_refine_child_reply("active-1", &proposal_reply()),
             Some(()),
             "the child's reply parks"
         );
-        assert!(!flight_some(&engine), "the flight consumed");
-        assert!(pending_some(&engine), "the reply parked");
+        assert_eq!(flight_count(&engine), 0, "the flight consumed");
+        assert_eq!(pending_count(&engine), 1, "the reply parked");
         assert_eq!(
             local_harness_state(dir.path()),
             serde_json::Value::Null,
             "the park never applied: no harness state was written"
         );
-        // The parked reply owns the apply lane: an armed compact-trigger
-        // round waits for it instead of failing its spawn.
-        engine.mark_compact_auto_refine_pending();
-        let outcome = engine.consume_compact_auto_refine();
-        assert!(outcome.is_ok(), "the collision stays silent: {outcome:?}");
-        assert!(
-            engine.compact_auto_refine_pending(),
-            "the trigger stays armed behind the parked reply"
-        );
     }
 
-    /// The park is ONE lock scope: a racing spawn admission (the same
-    /// flight-then-pending read order the spawn's pre-check uses) must never
-    /// observe both cells empty mid-park — that window let the admission
-    /// stack a second child over the first one's only answer. Red on the
-    /// two-region park: the reader catches the gap between the take and the
-    /// parked write.
+    /// Two refinements overlap: both children's replies park, and the idle
+    /// apply commits each one once, in arrival order, through the shared
+    /// commit (the second sees the first's entry through the stale check).
+    /// Red when a second flight is refused or replaces the first, or when a
+    /// parked reply applies twice.
     #[test]
-    fn the_park_never_exposes_an_empty_lane_to_a_racing_admission() {
+    fn overlapping_refinements_each_apply_once() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, dir) = park_engine();
-        for _ in 0..1000 {
-            park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
-            std::thread::scope(|scope| {
-                scope.spawn(|| {
-                    let _ = engine.park_refine_child_reply("active-1", PROPOSAL);
-                });
-                scope.spawn(|| loop {
-                    let Ok(flight) = engine.refine_flight.try_lock() else {
-                        continue;
-                    };
-                    let Ok(pending) = engine.pending_refine_reply.try_lock() else {
-                        continue;
-                    };
-                    assert!(
-                        flight.is_some() || pending.is_some(),
-                        "a racing admission observed both cells empty mid-park"
-                    );
-                    break;
-                });
-            });
-            *engine
-                .refine_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = None;
-            *engine
-                .pending_refine_reply
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = None;
-        }
-    }
-
-    /// The idle apply runs the parked reply once: the proposal applies,
-    /// the outcome reports the edit, and the parked cell clears — the
-    /// apply itself (the Auto round's `finish` release included) is the
-    /// unchanged wake-side body. Red when the apply is lost (the parked
-    /// reply never applies) or repeats (the cell never clears).
-    #[test]
-    fn the_idle_apply_runs_the_parked_reply_once() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (engine, dir) = park_engine();
-        park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
+        park_flight(&engine, "active-1");
+        park_flight(&engine, "active-2");
+        assert_eq!(flight_count(&engine), 2, "both refinements are in flight");
         assert_eq!(
-            engine.park_refine_child_reply("active-1", PROPOSAL),
+            engine.park_refine_child_reply("active-2", &proposal_reply()),
             Some(())
         );
-        let outcome = engine
-            .runtime
-            .block_on(async { engine.apply_pending_refine_reply().await });
-        let (result, source) = outcome
-            .expect("the parked reply applied")
-            .expect("the apply succeeded");
-        assert_eq!(source, RefinementSource::User);
-        assert_eq!(result.applied_edits.len(), 1);
-        assert!(result.applied_edits[0].applied);
+        assert_eq!(
+            engine.park_refine_child_reply("active-1", &proposal_reply()),
+            Some(())
+        );
+        let apply = || {
+            engine
+                .runtime
+                .block_on(async { engine.apply_pending_refine_reply().await })
+        };
+        let first = apply().expect("a parked reply").expect("the first apply");
+        assert!(first.result.applied_edits[0].applied);
+        assert!(
+            first
+                .rows
+                .iter()
+                .any(|row| row.custom_type == "refinement_notice"),
+            "the commit returns the notice row the worker emits"
+        );
         let state = local_harness_state(dir.path());
         assert_eq!(
             state["entries"]["memory"]["m1"]["title"], "Tactic",
             "the applied harness state: {state}"
         );
-        assert!(!pending_some(&engine), "the parked cell cleared");
-        assert!(
-            engine
-                .runtime
-                .block_on(async { engine.apply_pending_refine_reply().await })
-                .is_none(),
-            "the apply is one-shot"
-        );
-    }
-
-    /// The idle apply holds the lane until its harness write lands: a
-    /// racing spawn admission (the spawn lock, then the flight-then-pending
-    /// read) must never find both cells empty while the apply is still
-    /// mid-write — that admission would plan a second child against a
-    /// half-applied store. Red when the apply takes the parked reply
-    /// outside the spawn lock.
-    #[test]
-    fn the_apply_holds_the_lane_until_its_write_lands() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (engine, dir) = park_engine();
-        park_flight(&engine, flight_for(dir.path(), RefinementSource::User));
-        assert_eq!(
-            engine.park_refine_child_reply("active-1", PROPOSAL),
-            Some(())
-        );
-        // The held session cell pauses the apply right after its take.
-        let held = engine.session.blocking_lock();
-        std::thread::scope(|scope| {
-            let applying = scope.spawn(|| {
-                engine
-                    .runtime
-                    .block_on(async { engine.apply_pending_refine_reply().await })
-            });
-            while pending_some(&engine) {
-                std::thread::yield_now();
-            }
-            let admission = engine.refine_spawn_lock.try_lock();
-            assert!(
-                admission.is_err() || flight_some(&engine) || pending_some(&engine),
-                "a racing admission found an empty lane mid-apply"
-            );
-            drop(admission);
-            drop(held);
-            let (result, _) = applying
-                .join()
-                .expect("the applying thread")
-                .expect("the parked reply applied")
-                .expect("the apply succeeded");
-            assert_eq!(result.applied_edits.len(), 1);
-        });
+        assert!(apply().is_some(), "the second parked reply applies too");
+        assert_eq!(pending_count(&engine), 0, "the parked queue drained");
+        assert!(apply().is_none(), "each reply applies once");
     }
 
     /// A branch move and a replacement teardown abandon the conversation
-    /// the refinement child planned on: the move drops the in-flight
-    /// flight, and the teardown drops a reply parked before it, so nothing
+    /// the refinement children planned on: the move drops the in-flight
+    /// flights, and the teardown drops a reply parked before it, so nothing
     /// applies to the moved-to conversation. The late reply (already in
-    /// delivery when the cancel ran) of every abandoned child, not only the
-    /// last one, is consumed without a park, so it never falls through to
-    /// the agent-message path, and the consumed id is removed. Red when
-    /// either seam keeps the lane, or when a late reply is not consumed.
+    /// delivery when the cancel ran) of every abandoned child is consumed
+    /// without a park, so it never falls through to the agent-message path,
+    /// and the consumed id is removed. Red when either seam keeps a flight
+    /// or a parked reply, or when a late reply is not consumed.
     #[test]
-    fn a_branch_move_and_a_replacement_drop_the_abandoned_refine_lane() {
+    fn a_branch_move_and_a_replacement_drop_the_abandoned_refinements() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, dir) = park_engine();
-        let flight = |active_session_id: &str| RefineChildFlight {
-            active_session_id: active_session_id.to_string(),
-            ..flight_for(dir.path(), RefinementSource::User)
-        };
-        park_flight(&engine, flight("active-1"));
+        park_flight(&engine, "active-1");
         let mut moved = crate::session_store::SessionFile::create("/tmp", None, 0);
         moved.append_message(&json!({
             "role": "user",
@@ -683,17 +547,24 @@ mod tests {
                 pa_core::session_engine::goal_driver::GoalBranchReload::FaithfulBranch,
             )
             .expect("the branch move");
-        assert!(!flight_some(&engine), "the branch move dropped the flight");
-        park_flight(&engine, flight("active-2"));
         assert_eq!(
-            engine.park_refine_child_reply("active-2", PROPOSAL),
+            flight_count(&engine),
+            0,
+            "the branch move dropped the flight"
+        );
+        park_flight(&engine, "active-2");
+        assert_eq!(
+            engine.park_refine_child_reply("active-2", &proposal_reply()),
             Some(())
         );
+        park_flight(&engine, "active-3");
         engine.runtime.block_on(engine.teardown_for_replacement());
-        assert!(
-            !pending_some(&engine),
+        assert_eq!(
+            pending_count(&engine),
+            0,
             "the teardown dropped the parked reply"
         );
+        assert_eq!(flight_count(&engine), 0, "the teardown dropped the flight");
         assert!(
             engine
                 .runtime
@@ -706,21 +577,17 @@ mod tests {
             serde_json::Value::Null,
             "no abandoned proposal reached the harness store"
         );
-        // A second abandon before the first child's late reply arrives: a
-        // replacement with its child still in flight.
-        park_flight(&engine, flight("active-3"));
-        engine.runtime.block_on(engine.teardown_for_replacement());
         for sender in ["active-1", "active-3"] {
             assert_eq!(
-                engine.park_refine_child_reply(sender, PROPOSAL),
+                engine.park_refine_child_reply(sender, &proposal_reply()),
                 Some(()),
                 "the late reply of the abandoned child {sender} is consumed, not delivered as an agent message"
             );
         }
-        assert!(!pending_some(&engine), "no late reply parks");
+        assert_eq!(pending_count(&engine), 0, "no late reply parks");
         assert!(
             engine
-                .park_refine_child_reply("active-1", PROPOSAL)
+                .park_refine_child_reply("active-1", &proposal_reply())
                 .is_none(),
             "the consumed late reply removed its id"
         );

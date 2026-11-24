@@ -97,8 +97,8 @@ async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
             name: Some("batch-first".to_string()),
             model: None,
             thinking: None,
+            kind: pa_core::session_engine::rlm_host::RlmSpawnKind::Subagent,
             cwd: None,
-            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -110,8 +110,8 @@ async fn a_blocking_collect_releases_all_selected_prompts_before_waiting() {
             name: Some("batch-second".to_string()),
             model: None,
             thinking: None,
+            kind: pa_core::session_engine::rlm_host::RlmSpawnKind::Subagent,
             cwd: None,
-            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         })

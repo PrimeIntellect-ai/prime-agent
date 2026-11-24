@@ -23,7 +23,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -35,12 +35,6 @@ const PLAN_DELAY_MS: u64 = 4_000;
 /// The fire-and-wake boundary: the refine command's answer must land before
 /// the (delayed) planning call settles, with room for the spawn admission.
 const REFINE_ANSWER_BOUND_MS: u64 = 2_000;
-
-/// The mid-turn test's turn reply delay: the parent's second turn stays
-/// open past the child's reply (the child plans for [`PLAN_DELAY_MS`]),
-/// so the reply parks while the turn is still running and applies only
-/// after the turn settles.
-const TURN_DELAY_MS: u64 = 8_000;
 
 /// The refinement proposal the mock answers the child's planning call with:
 /// one memory create the wake-side apply persists into the local harness
@@ -60,14 +54,30 @@ enum PlanMode {
     Length,
 }
 
+/// The mock's turn hold: while `holding`, a turn request waits for the
+/// release and the planning request waits until a held turn arrived, so
+/// the child's reply always lands while the parent's turn is open.
+#[derive(Default)]
+struct TurnHold {
+    state: Mutex<TurnHoldState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct TurnHoldState {
+    holding: bool,
+    turn_seen: bool,
+}
+
 /// An OpenAI-compatible SSE mock: the refinement child's planning request
 /// (the one carrying the refinement prompt's harness overview) is answered
 /// per [`PlanMode`] after [`PLAN_DELAY_MS`]; every other request gets the
-/// fixed turn reply after [`RefineMock::turn_delay_ms`] (zero by default).
+/// fixed turn reply. While [`RefineMock::hold_turns`] is on, the
+/// [`TurnHold`] orders the two instead.
 struct RefineMock {
     requests: Arc<Mutex<Vec<Value>>>,
     plan_mode: Arc<Mutex<PlanMode>>,
-    turn_delay_ms: Arc<Mutex<u64>>,
+    hold: Arc<TurnHold>,
     port: u16,
 }
 
@@ -75,27 +85,27 @@ impl RefineMock {
     fn start() -> RefineMock {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let plan_mode = Arc::new(Mutex::new(PlanMode::Proposal));
-        let turn_delay_ms = Arc::new(Mutex::new(0));
+        let hold = Arc::new(TurnHold::default());
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
         let mode_for_thread = Arc::clone(&plan_mode);
-        let delay_for_thread = Arc::clone(&turn_delay_ms);
+        let hold_for_thread = Arc::clone(&hold);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 let mode = Arc::clone(&mode_for_thread);
-                let delay = Arc::clone(&delay_for_thread);
+                let hold = Arc::clone(&hold_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &requests, &mode, &delay);
+                    let _ = serve(stream, &requests, &mode, &hold);
                 });
             }
         });
         RefineMock {
             requests,
             plan_mode,
-            turn_delay_ms,
+            hold,
             port,
         }
     }
@@ -108,8 +118,27 @@ impl RefineMock {
         *self.plan_mode.lock().expect("mock lock") = mode;
     }
 
-    fn set_turn_delay_ms(&self, delay_ms: u64) {
-        *self.turn_delay_ms.lock().expect("mock lock") = delay_ms;
+    /// Hold every turn request until [`Self::release_turns`]; the planning
+    /// request answers once a held turn arrived.
+    fn hold_turns(&self) {
+        self.hold.state.lock().expect("mock lock").holding = true;
+    }
+
+    /// Wait until a turn request is held.
+    fn wait_for_held_turn(&self) {
+        drop(
+            self.hold
+                .changed
+                .wait_while(self.hold.state.lock().expect("mock lock"), |state| {
+                    !state.turn_seen
+                })
+                .expect("mock lock"),
+        );
+    }
+
+    fn release_turns(&self) {
+        self.hold.state.lock().expect("mock lock").holding = false;
+        self.hold.changed.notify_all();
     }
 
     fn planning_request_count(&self) -> usize {
@@ -235,13 +264,23 @@ fn serve(
     mut stream: TcpStream,
     requests: &Arc<Mutex<Vec<Value>>>,
     plan_mode: &Arc<Mutex<PlanMode>>,
-    turn_delay_ms: &Arc<Mutex<u64>>,
+    hold: &TurnHold,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let body = read_body(&mut reader)?;
     requests.lock().expect("mock lock").push(body.clone());
     if is_refinement_plan_request(&body) {
-        std::thread::sleep(Duration::from_millis(PLAN_DELAY_MS));
+        let state = hold.state.lock().expect("mock lock");
+        if state.holding {
+            drop(
+                hold.changed
+                    .wait_while(state, |state| state.holding && !state.turn_seen)
+                    .expect("mock lock"),
+            );
+        } else {
+            drop(state);
+            std::thread::sleep(Duration::from_millis(PLAN_DELAY_MS));
+        }
         let (reply, reason) = match *plan_mode.lock().expect("mock lock") {
             PlanMode::Proposal => (PROPOSAL, "stop"),
             PlanMode::Garbage => ("not a plan", "stop"),
@@ -249,8 +288,18 @@ fn serve(
         };
         return write_sse(&mut stream, reply, reason, &small_usage());
     }
-    let delay_ms = *turn_delay_ms.lock().expect("mock lock");
-    std::thread::sleep(Duration::from_millis(delay_ms));
+    let mut state = hold.state.lock().expect("mock lock");
+    if state.holding {
+        state.turn_seen = true;
+        hold.changed.notify_all();
+        drop(
+            hold.changed
+                .wait_while(state, |state| state.holding)
+                .expect("mock lock"),
+        );
+    } else {
+        drop(state);
+    }
     write_sse(&mut stream, "a reply", "stop", &small_usage())
 }
 
@@ -303,17 +352,6 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, stderr_path: &Path) -> Supe
 }
 
 fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
-    write_fixture_with_window(agent_dir, session_dir, mock_url, 128_000);
-}
-
-/// The fixture writer with a chosen `contextWindow`: the small-window
-/// variant makes the facade's input clamp bite the planning budget.
-fn write_fixture_with_window(
-    agent_dir: &Path,
-    session_dir: &Path,
-    mock_url: &str,
-    context_window: u64,
-) {
     std::fs::create_dir_all(session_dir).expect("session dir");
     std::fs::write(
         agent_dir.join("models.json"),
@@ -328,7 +366,7 @@ fn write_fixture_with_window(
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": context_window,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]
@@ -510,6 +548,23 @@ fn refine(client: &mut TimedClient, id: &str, session_id: &str) -> Value {
         }),
     );
     client.read_response(id)
+}
+
+/// Wait until the refinement child's run settled: the child sends its
+/// reply before its turn ends, so by then the parent has parked it.
+fn wait_for_refine_child_settle(client: &mut TimedClient, parent: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for attempt in 0.. {
+        let rows = rlm_children_rows(client, &format!("settle{attempt}"), parent);
+        if rows.iter().all(|row| row["status"] != "running") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refinement child never settled; rows: {rows:?}"
+        );
+        client.drain_events(100);
+    }
 }
 
 /// The parent's tracked-children wire surface (`get_rlm_children`).
@@ -896,12 +951,11 @@ fn a_failed_child_proposal_surfaces_the_refine_failed_event() {
     }
 }
 
-/// An output-limit stop names the budget the wire request actually
-/// carried: on a small-window model the facade's input clamp shrinks the
-/// planning budget below the model's default, and the `refine_failed` line
-/// must name the shrunk number, never the pre-facade default. Red when
-/// the child reverts to naming `default_request_max_tokens` (the message
-/// would carry the default while the wire carried the clamped budget).
+/// An output-limit stop fails visibly and names the budget the wire request
+/// carried: the parent's planning request fixes the budget, the child sends
+/// it, and the parent's shared reply check names it. Red when the child
+/// drops the parent's budget (the message would name a number the wire
+/// never carried) or the stop parses as JSON.
 #[test]
 fn a_length_stop_names_the_budget_the_wire_carries() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -909,10 +963,7 @@ fn a_length_stop_names_the_budget_the_wire_carries() {
     let session_dir = agent_dir.join("sessions");
     let mock = RefineMock::start();
     mock.set_plan_mode(PlanMode::Length);
-    // The window sits under the model's default output budget (4096) plus
-    // the estimated planning input, so the facade's clamp shrinks the
-    // wire budget; the exact number is read off the captured request.
-    write_fixture_with_window(&agent_dir, &session_dir, &mock.url(), 4_800);
+    write_fixture(&agent_dir, &session_dir, &mock.url());
     let socket = dir.path().join("daemon.sock");
     let _supervisor = spawn_supervisor(&socket, &agent_dir, &dir.path().join("daemon.stderr"));
     let mut client = TimedClient::connect(&socket);
@@ -944,8 +995,7 @@ fn a_length_stop_names_the_budget_the_wire_carries() {
         .unwrap_or_else(|_| panic!("the token count parses: {error}"));
 
     // The number the message names is the number the wire carried: the
-    // captured planning request's `max_tokens`, and the clamp bit (the
-    // default budget is 4096 — the unclamped number a revert would name).
+    // captured planning request's `max_tokens`.
     let requests = mock.requests.lock().expect("mock lock");
     let planning = requests
         .iter()
@@ -958,10 +1008,6 @@ fn a_length_stop_names_the_budget_the_wire_carries() {
     assert_eq!(
         named, wire_budget,
         "the Length failure must name the wire budget: {error}"
-    );
-    assert!(
-        wire_budget < 4_096,
-        "the clamp must bite on the small-window model: the wire budget is {wire_budget}"
     );
     drop(requests);
     assert!(
@@ -992,14 +1038,26 @@ fn a_reply_that_lands_mid_turn_applies_only_after_the_turn_settles() {
     let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
     prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
 
-    // Fire: the refinement child plans (answering in PLAN_DELAY_MS) while
-    // the parent is still idle; the parent then starts a turn the mock
-    // holds open for TURN_DELAY_MS — past the child's reply.
+    // Fire: the mock holds the parent's next turn open and answers the
+    // child's planning request only once that turn is in flight, so the
+    // child's reply lands mid-turn; the turn is released after the child
+    // settled (its reply parked).
+    mock.hold_turns();
     let response = refine(&mut client, "r1", &session_id);
     assert_eq!(response["success"], true, "refine failed: {response}");
     assert_eq!(response["data"]["refinementChildSpawned"], true);
-    mock.set_turn_delay_ms(TURN_DELAY_MS);
-    prompt_and_wait(&mut client, "p1", &session_id, "second turn");
+    client.send_command(
+        "p1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": session_id,
+            "message": "second turn",
+        }),
+    );
+    wait_for_refine_child_settle(&mut client, &session_id);
+    mock.release_turns();
+    let second = client.read_response("p1");
+    assert_eq!(second["success"], true, "second turn failed: {second}");
     client.drain_events(200);
 
     // The wake completed: the apply ran after the open turn settled.
@@ -1124,13 +1182,14 @@ fn a_queued_follow_up_sees_the_parked_apply_before_its_turn() {
     let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
     prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
 
-    // The child plans (PLAN_DELAY_MS) while the parent runs a turn the
-    // mock holds open for TURN_DELAY_MS; the follow-up is queued during
-    // that turn, before the child's reply parks.
+    // The mock holds the parent's next turn open and answers the child's
+    // planning request only once that turn is in flight; the follow-up is
+    // queued during that turn, and the turn is released only after the
+    // child settled (its reply parked).
+    mock.hold_turns();
     let response = refine(&mut client, "r1", &session_id);
     assert_eq!(response["success"], true, "refine failed: {response}");
     assert_eq!(response["data"]["refinementChildSpawned"], true);
-    mock.set_turn_delay_ms(TURN_DELAY_MS);
     client.send_command(
         "p1",
         &json!({
@@ -1139,6 +1198,9 @@ fn a_queued_follow_up_sees_the_parked_apply_before_its_turn() {
             "message": "second turn",
         }),
     );
+    // The follow-up is sent only once the second turn is in flight, so it
+    // queues behind that turn.
+    mock.wait_for_held_turn();
     client.send_command(
         "f1",
         &json!({
@@ -1149,6 +1211,8 @@ fn a_queued_follow_up_sees_the_parked_apply_before_its_turn() {
     );
     let follow = client.read_response("f1");
     assert_eq!(follow["success"], true, "follow_up failed: {follow}");
+    wait_for_refine_child_settle(&mut client, &session_id);
+    mock.release_turns();
     let second = client.read_response("p1");
     assert_eq!(second["success"], true, "second turn failed: {second}");
 

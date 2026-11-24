@@ -1,11 +1,8 @@
-//! The refinement child engine (the daemon's `refine_child` spawn): a spawned
-//! session whose one prompt is one refinement request — the planning model
-//! pass over the parent's conversation. The request envelope carries the
-//! resolvable harness paths, never a snapshot: the child reads the harness
-//! state and the refinement history from disk itself, runs one completion
-//! with the refinement system prompt, and answers with the refinement
-//! proposal JSON as its reply to the parent. The parent applies the
-//! proposal on the child-reply wake.
+//! The refinement child engine (the daemon's refine spawn): a spawned
+//! session whose one prompt is one refinement request — the planning
+//! request the parent built with the shared planner. The child sends it
+//! with the refinement system prompt and answers with the model reply as
+//! its message to the parent, which parses and commits it on the wake.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,11 +15,6 @@ use crate::engine::{
     AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome,
     CompactionRequest, EngineEvent, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
-};
-use pa_core::refinement::executor::{refinement_user_prompt, RefineOptions};
-use pa_core::refinement::{
-    load_global_refinement_history, load_harness_state, merge_harness_states,
-    merge_refinement_history, HarnessScope,
 };
 use pa_core::session_engine::agent_messaging::{
     AgentFamilyRelationship, AgentMessageController, AgentMessageSendInput,
@@ -151,139 +143,44 @@ impl RefineEngine {
                     target: parent.id,
                     message,
                     receiver_role: Some(AgentFamilyRelationship::Parent),
+                    delivery_mode: None,
                 })
                 .await
                 .map(|_| ())
         })
     }
 
-    /// Serve the one refinement request: read the harness state and the
-    /// refinement history from the envelope's paths, run one completion
-    /// with the refinement system prompt, and answer with the proposal
-    /// JSON text plus the model reply's usage and stop reason — the
-    /// answer row carries both, so child-usage attribution bills the
-    /// planning pass on the parent's totals.
-    fn serve(
-        &self,
-        request: &Value,
-    ) -> anyhow::Result<(String, pa_types::ai::Usage, pa_types::ai::StopReason)> {
-        let global_dir = request
-            .get("globalHarnessDir")
+    /// Serve the one refinement request: send the parent's planning request
+    /// with the refinement system prompt through the shared refiner call,
+    /// and answer with the model reply itself — the parent reads its stop
+    /// reason and proposal exactly as the in-process pass does.
+    fn serve(&self, request: &Value) -> anyhow::Result<pa_types::ai::AssistantMessage> {
+        let prompt = request
+            .get("prompt")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("the refinement request carries no globalHarnessDir"))?;
-        let global_dir = Path::new(global_dir);
-        let global = request.get("scope").and_then(Value::as_str) == Some("global");
-        let options = RefineOptions {
-            global,
-            instructions: request
-                .get("instructions")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            rollback_id: None,
-        };
-        let conversation = request
-            .get("conversation")
+            .ok_or_else(|| anyhow::anyhow!("the refinement request carries no prompt"))?
+            .to_string();
+        let max_tokens = request
+            .get("maxTokens")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("the refinement request carries no maxTokens"))?;
+        let session_id = request
+            .get("sessionId")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        // The harness state read from disk: the global store, plus the
-        // parent's local store for local-scope planning.
-        let global_state = load_harness_state(global_dir, HarnessScope::Global);
-        let planning_state = match request.get("localHarnessDir").and_then(Value::as_str) {
-            Some(local_dir) => {
-                let local_state = load_harness_state(Path::new(local_dir), HarnessScope::Local);
-                merge_harness_states(&global_state, Some(&local_state))
-            }
-            None => global_state,
-        };
-        // The refinement history: the global refinements file plus the
-        // parent session's audit rows.
-        let global_history = load_global_refinement_history(global_dir);
-        // The parent's in-session audit rows ride the envelope (its engine
-        // session is in-memory, so no file carries them); a malformed
-        // envelope fails the child visibly instead of planning on a
-        // partial history.
-        let session_history = match request.get("refinementHistory") {
-            Some(history) => serde_json::from_value::<Vec<pa_core::refinement::RefinementResult>>(
-                history.clone(),
-            )?,
-            None => Vec::new(),
-        };
-        let history = merge_refinement_history(&global_history, &session_history);
-        let user_prompt = refinement_user_prompt(&planning_state, &history, conversation, &options);
-        let (model, api_key, headers) = self.resolve_model()?;
-        let context = pa_types::ai::Context {
-            system_prompt: Some(pa_core::refinement::planner::REFINEMENT_SYSTEM_PROMPT.to_string()),
-            messages: vec![pa_types::ai::Message::User(pa_types::ai::UserMessage {
-                content: pa_types::ai::UserContent::Text(user_prompt),
-                timestamp: 0,
-                rest: serde_json::Map::default(),
-            })],
-            tools: None,
-        };
-        // The planning turn derives its budget from the model like any
-        // other spawned turn; pinning the default onto the request keeps
-        // the wire budget and the Length failure surface naming the same
-        // number (the old in-process refiner's `reply_text` contract).
-        let output_budget = pa_ai::default_request_max_tokens(&model);
-        let mut stream_options =
-            pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
-                max_tokens: output_budget,
-                api_key,
-                headers,
-                // The parent's own one-off requests: the parent's session id
-                // keeps the cache key and routing, and SSE never touches a
-                // Codex WebSocket.
-                session_id: request
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                transport: Some(pa_ai::types::Transport::Sse),
-                ..Default::default()
-            });
-        // Planning runs at the model's minimum reasoning, as every refiner
-        // call does; the parent's thinking level does not apply.
-        stream_options.reasoning = pa_types::ai::minimum_reasoning(&model);
-        // The failure surface names the budget the wire request actually
-        // carries — after the facade's input clamp and the budget-folding
-        // providers' thinking fold — read from pa-ai's own helper, never
-        // the pre-facade default (which `complete_simple` may still shrink
-        // or fold before the provider sees it).
-        let sent_budget = pa_ai::simple_request_max_tokens(&model, &context, Some(&stream_options));
-        let reply = self
-            .runtime
-            .block_on(async move {
-                pa_ai::complete_simple(&model, &context, Some(stream_options)).await
-            })
-            .map_err(|error| anyhow::anyhow!("the refinement model request failed: {error:?}"))?;
-        // The model pass's own terminal reasons are the child's failure:
-        // a reply cut off at its output limit or failed by the provider is
-        // an error that says so, never parsed as JSON (the old
-        // in-process refiner's `reply_text` taxonomy; the parent's
-        // envelope prefix composes the full "Refinement failed: ..." line).
-        match reply.stop_reason {
-            pa_types::ai::StopReason::Length => anyhow::bail!(
-                "the model hit its output limit ({} tokens, {}/{})",
-                sent_budget.map_or_else(|| "no".to_string(), |tokens| tokens.to_string()),
-                reply.provider,
-                reply.model
-            ),
-            pa_types::ai::StopReason::Error => anyhow::bail!(
-                "{}",
-                reply
-                    .error_message
-                    .unwrap_or_else(|| "unknown provider error".to_string())
-            ),
-            pa_types::ai::StopReason::Aborted => {
-                anyhow::bail!("the refinement model call was aborted")
-            }
-            _ => {}
-        }
-        let text = Self::reply_text(&reply);
-        anyhow::ensure!(
-            !text.trim().is_empty(),
-            "the refinement model returned no proposal text"
+            .unwrap_or_default()
+            .to_string();
+        let (mut model, api_key, headers) = self.resolve_model()?;
+        model.max_tokens = max_tokens;
+        let refiner = pa_core::session_engine::refine::default_refiner_call(
+            api_key,
+            headers.map(|headers| headers.into_iter().collect()),
+            session_id,
         );
-        Ok((text, reply.usage, reply.stop_reason))
+        self.runtime.block_on(refiner(
+            model,
+            pa_core::refinement::planner::REFINEMENT_SYSTEM_PROMPT,
+            prompt,
+        ))
     }
 
     /// Resolve the spawn's model through the registry (the create command's
@@ -326,19 +223,6 @@ impl RefineEngine {
                 .headers
                 .map(|headers| headers.into_iter().collect()),
         ))
-    }
-
-    /// The text of the planning reply (the proposal JSON).
-    fn reply_text(reply: &pa_types::ai::AssistantMessage) -> String {
-        reply
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     /// The transcript row pair for the child's answer: the assistant update
@@ -507,14 +391,14 @@ impl SessionEngine for RefineEngine {
         let (reply, text, usage, stop_reason) = match serde_json::from_str::<Value>(&raw) {
             Ok(parsed)
                 if parsed.get("type").and_then(Value::as_str)
-                    == Some(pa_core::refinement::executor::REFINEMENT_REQUEST_TYPE) =>
+                    == Some(pa_core::session_engine::refine::REFINEMENT_REQUEST_TYPE) =>
             {
                 match self.serve(&parsed) {
-                    Ok((proposal, usage, stop_reason)) => (
-                        proposal,
-                        "The refinement proposal was sent to the parent.",
-                        Some(usage),
-                        Some(stop_reason),
+                    Ok(reply) => (
+                        serde_json::to_string(&reply).unwrap_or_default(),
+                        "The refinement reply was sent to the parent.",
+                        Some(reply.usage),
+                        Some(reply.stop_reason),
                     ),
                     Err(error) => (
                         json!({

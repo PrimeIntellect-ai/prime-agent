@@ -1436,13 +1436,9 @@ async fn closing_session_cancels_background_planning_without_committing() {
 /// is applied or dropped.
 #[tokio::test]
 async fn a_prepared_child_refinement_counts_as_in_flight() {
-    let (session, tmp) = refine_test_session().await;
+    let (session, _tmp) = refine_test_session().await;
     let (prepared, _prompt) = session
-        .prepare_refinement(
-            &refine::RefineOptions::default(),
-            &session_ai_model(),
-            &tmp.path().join("harness"),
-        )
+        .prepare_refinement(&refine::RefineOptions::default(), &session_ai_model())
         .await
         .unwrap();
     let in_flight = || {

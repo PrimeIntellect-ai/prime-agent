@@ -10,14 +10,13 @@ use serde_json::json;
 use super::model_usage::ModelUsage;
 use super::AgentSession;
 use crate::refinement::executor::{
-    apply_refinement_plan, generate_refinement_id, parse_child_proposal, plan_refinement,
-    refinement_spawn_prompt, review_auto_refine, AutoRefineReview, AutoRefineReviewContext,
-    RefineOptions as CoreRefineOptions, RefinementPlan, RefinementRequest,
+    apply_refinement_plan, generate_refinement_id, plan_refinement, planner_reply_proposal,
+    planner_request, review_auto_refine, AutoRefineReview, AutoRefineReviewContext,
+    RefineOptions as CoreRefineOptions, RefinementPlan,
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
-    load_harness_state, merge_harness_states, try_update_harness_state, HarnessScope, HarnessState,
-    RefinementResult,
+    load_harness_state, merge_harness_states, HarnessScope, HarnessState, RefinementResult,
 };
 use crate::session::manager::SessionManager;
 
@@ -321,15 +320,15 @@ pub async fn execute_refinement(
     .result)
 }
 
-/// Counts the refinements currently planning or committing — the counter
-/// `refine.status` answers `in_flight` from. The guard spans a run's whole
-/// body; a refinement child's guard rides its `PreparedRefinement` until
-/// the reply applies or the flight drops.
-pub struct RefinementFlightGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+/// Counts the refinement runs currently planning or committing — the
+/// counter `refine.status` answers `in_flight` from. The guard spans a
+/// run's whole body (a refinement child's guard rides its
+/// `PreparedRefinement`), so every source reports its flight at the one
+/// shared start.
+struct RefinementFlightGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl RefinementFlightGuard {
-    #[must_use]
-    pub fn enter(in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+    fn enter(in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
         in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Self(in_flight)
     }
@@ -418,6 +417,42 @@ pub(crate) async fn prepare_refinement(
         messages,
         refinement_history,
     } = transcript;
+    let (basis, planning_state) =
+        refinement_basis(session, agent_dir, refinement_history, stores, options).await?;
+    let plan = plan_refinement(
+        messages,
+        &planning_state,
+        &basis.history,
+        model,
+        &basis.core_options,
+        refine_call,
+    )
+    .await?;
+    ready_refinement(basis, plan)
+}
+
+/// What a refinement captures before its model pass: the gate, the stores,
+/// the merged history, and the baseline the commit's stale check compares
+/// against.
+struct RefinementBasis {
+    core_options: CoreRefineOptions,
+    requested_scope: HarnessScope,
+    local_harness_dir: Option<PathBuf>,
+    global_harness_dir: PathBuf,
+    history: Vec<RefinementResult>,
+    baseline_state: crate::refinement::HarnessState,
+    settings: Option<crate::settings::SettingsManager>,
+}
+
+/// The pre-plan half of a refinement: the basis plus the planning state the
+/// model pass reads.
+async fn refinement_basis(
+    session: &tokio::sync::Mutex<SessionManager>,
+    agent_dir: Option<&Path>,
+    refinement_history: &[RefinementResult],
+    stores: &RefinementStores,
+    options: &RefineOptions,
+) -> anyhow::Result<(RefinementBasis, HarnessState)> {
     let (local_harness_dir, cwd) = {
         let session = session.lock().await;
         (stores.local_dir.clone(), session.get_cwd().to_path_buf())
@@ -461,7 +496,7 @@ pub(crate) async fn prepare_refinement(
     // Planning state: global, or merged global+local for local refinements.
     let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
     let planning_state = if requested_scope == HarnessScope::Global {
-        global_state.clone()
+        global_state
     } else {
         let local_state = local_harness_dir
             .as_deref()
@@ -483,21 +518,40 @@ pub(crate) async fn prepare_refinement(
         HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     let baseline_state = load_harness_state(&baseline_dir, baseline_scope);
+    Ok((
+        RefinementBasis {
+            core_options,
+            requested_scope,
+            local_harness_dir,
+            global_harness_dir: stores.global_dir.clone(),
+            history,
+            baseline_state,
+            settings,
+        },
+        planning_state,
+    ))
+}
 
-    let mut plan = plan_refinement(
-        messages,
-        &planning_state,
-        &history,
-        model,
-        &core_options,
-        refine_call,
-    )
-    .await?;
-    plan = strip_display_prefixes(plan);
+/// The post-plan half of a refinement: resolve the plan's target store and
+/// hand the commit everything it applies.
+fn ready_refinement(
+    basis: RefinementBasis,
+    plan: RefinementPlan,
+) -> anyhow::Result<ReadyRefinement> {
+    let RefinementBasis {
+        core_options,
+        requested_scope,
+        local_harness_dir,
+        global_harness_dir,
+        history,
+        baseline_state,
+        settings,
+    } = basis;
+    let plan = strip_display_prefixes(plan);
 
     let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
     let target_dir = match target_scope {
-        HarnessScope::Global => stores.global_dir.clone(),
+        HarnessScope::Global => global_harness_dir.clone(),
         HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     // A rollback must land in the store its target actually wrote, named
@@ -539,7 +593,7 @@ pub(crate) async fn prepare_refinement(
         baseline_state,
         target_scope,
         target_dir,
-        global_harness_dir: stores.global_dir.clone(),
+        global_harness_dir,
         settings,
     })
 }
@@ -1016,62 +1070,40 @@ pub fn default_refiner_call(
     })
 }
 
+/// The refinement child's request tag: the JSON envelope its engine parses
+/// off its first prompt.
+pub const REFINEMENT_REQUEST_TYPE: &str = "refinement.request";
+
+/// A refinement whose model pass runs in the refinement child: the basis
+/// captured before the pass, applied through [`commit_refinement`] when the
+/// child replies.
 pub struct PreparedRefinement {
-    pub options: RefineOptions,
-    /// The store this refinement applies to (the rollback may retarget it).
-    pub requested_scope: HarnessScope,
-    /// The harness state as observed at preparation time — the baseline the
-    /// apply's stale check compares the freshly re-read state against, so
-    /// concurrent kernel writes reject instead of clobber.
-    pub baseline_state: HarnessState,
-    /// The refinement id the applied result carries (minted before the
-    /// child, so history and rows agree).
-    pub id: String,
+    basis: RefinementBasis,
+    /// The planning request's output budget, which a `Length` stop names.
+    max_tokens: u64,
     /// Counts this refinement in `refine.status` until it is applied or
     /// dropped.
-    pub in_flight: RefinementFlightGuard,
+    _in_flight: RefinementFlightGuard,
 }
 
 /// The refinement child's session-side surface: prepare the planning request
-/// and apply the child's proposal on the wake.
+/// and apply the child's reply on the wake.
 impl AgentSession {
-    /// Prepare one refinement for the child: the gate check, the local-store
-    /// requirement, the trimmed conversation, and the baseline capture. The
-    /// child reads the harness state itself through the paths the request
-    /// carries — no snapshot rides the prompt.
+    /// Prepare one refinement for the child: the same basis and planning
+    /// request the in-process pipeline builds, wrapped in the child's
+    /// request envelope.
     ///
     /// # Errors
     ///
     /// Returns an error when refinements are disabled in /settings, when a
-    /// local refinement is requested on an unpersisted session, or when the
-    /// transcript cannot be read.
+    /// local refinement is requested on an unpersisted session, when the
+    /// transcript cannot be read, or when the request cannot fit the model.
     pub async fn prepare_refinement(
         &self,
         options: &RefineOptions,
         model: &pa_types::ai::Model,
-        global_harness_dir: &Path,
     ) -> anyhow::Result<(PreparedRefinement, String)> {
-        anyhow::ensure!(
-            self.harness_refinements_enabled(),
-            "Harness refinements are disabled in /settings"
-        );
-        let requested_scope = if options.global {
-            HarnessScope::Global
-        } else {
-            HarnessScope::Local
-        };
-        // A local refinement needs the session's own harness store (the
-        // digest context's local dir): a session without one refuses rather
-        // than write a store no digest ever shows.
         let stores = self.refinement_stores()?;
-        let local_harness_dir = match (requested_scope, stores.local_dir.clone()) {
-            (HarnessScope::Local, None) => anyhow::bail!(
-                "Local harness refinement requires a persisted session; use global refinement instead."
-            ),
-            (_, dir) => dir.unwrap_or_default(),
-        };
-        // The transcript's conversation is extracted under this first lock
-        // straight from the retained rows; the child runs without the lock.
         let (parts, session_id) = {
             let session = self.session.lock().await;
             (
@@ -1083,188 +1115,67 @@ impl AgentSession {
             messages,
             refinement_history,
         } = parts.await?;
-        let conversation =
-            crate::session_engine::compaction_utils::serialize_conversation(&messages);
-        // The baseline captured now — before the child's model pass, which
-        // can take many seconds — so concurrent kernel writes to the store
-        // are rejected at apply time instead of clobbered.
-        let baseline_dir = match requested_scope {
-            HarnessScope::Global => global_harness_dir.to_path_buf(),
-            HarnessScope::Local => local_harness_dir.clone(),
-        };
-        let baseline_state = load_harness_state(&baseline_dir, requested_scope);
-        let request = RefinementRequest {
-            global: options.global,
-            instructions: options.instructions.clone(),
-            local_harness_dir: (!options.global).then(|| local_harness_dir.display().to_string()),
-            global_harness_dir: global_harness_dir.display().to_string(),
-            // The in-session audit rows ride the prompt: the daemon's
-            // engine session is in-memory (no session file for the child
-            // to read), and the planner always saw this history.
-            session_history: refinement_history,
-            session_id,
-        };
-        let prompt = refinement_spawn_prompt(&request, model.context_window, &conversation);
+        let (basis, planning_state) = refinement_basis(
+            &self.session,
+            self.agent_dir.as_deref(),
+            &refinement_history,
+            &stores,
+            options,
+        )
+        .await?;
+        let request = planner_request(
+            &messages,
+            &planning_state,
+            &basis.history,
+            model,
+            &basis.core_options,
+        )?;
+        let max_tokens = request.model.max_tokens;
+        let prompt = json!({
+            "type": REFINEMENT_REQUEST_TYPE,
+            "sessionId": session_id,
+            "maxTokens": max_tokens,
+            "prompt": request.user_prompt,
+        })
+        .to_string();
         let prepared = PreparedRefinement {
-            options: options.clone(),
-            requested_scope,
-            baseline_state,
-            id: generate_refinement_id(),
-            in_flight: RefinementFlightGuard::enter(self.refinements_in_flight.clone()),
+            basis,
+            max_tokens,
+            _in_flight: RefinementFlightGuard::enter(self.refinements_in_flight.clone()),
         };
         Ok((prepared, prompt))
     }
 
-    /// Apply the refinement child's proposal on the wake: parse the reply,
-    /// re-read the target store FRESH, apply through the stale-baseline
-    /// contract, and push this run's rows onto the live context.
+    /// Apply the refinement child's planning reply: parse it like the
+    /// in-process pass does, then commit through [`commit_refinement`].
     ///
     /// # Errors
     ///
-    /// Returns an error when the proposal does not parse, when applying
-    /// fails (including a stale baseline and a mid-flight disable), or
-    /// when the durable rows fail to persist.
+    /// Returns an error when the reply was cut off, failed, or does not
+    /// parse, or when the commit fails.
     pub async fn apply_child_refinement(
         &self,
         prepared: PreparedRefinement,
-        reply: &str,
+        reply: &pa_types::ai::AssistantMessage,
         source: RefinementSource,
-        global_harness_dir: &Path,
-    ) -> anyhow::Result<RefinementResult> {
-        let proposal = parse_child_proposal(reply)?;
+    ) -> anyhow::Result<CommittedRefinement> {
         let plan = RefinementPlan {
-            proposal,
-            id: prepared.id.clone(),
+            proposal: planner_reply_proposal(reply, prepared.max_tokens)?,
+            id: generate_refinement_id(),
             rollback_of: None,
             rollback_scope: None,
         };
-        self.apply_prepared_refinement(plan, prepared, source, global_harness_dir)
-            .await
-    }
-
-    /// The apply core: the compaction flight, the fresh re-read, the
-    /// factory gate, the stale-baseline apply, and the durable rows, with
-    /// this run's live-context rows pushed under one agent-state lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns the apply or persist error.
-    async fn apply_prepared_refinement(
-        &self,
-        plan: RefinementPlan,
-        prepared: PreparedRefinement,
-        source: RefinementSource,
-        global_harness_dir: &Path,
-    ) -> anyhow::Result<RefinementResult> {
-        // The flight serializes every live-context replacer against a
-        // compaction's rebuild: this run's outcome rows persist and then
-        // push onto the context the compaction replaces, so the push must
-        // not interleave with a replace.
-        let _flight = self.compaction_flight.lock().await;
-        let PreparedRefinement {
-            options,
-            requested_scope,
-            baseline_state,
-            id: _,
-            in_flight: _in_flight,
-        } = prepared;
-        let core_options = CoreRefineOptions {
-            global: options.global,
-            instructions: options.instructions.clone(),
-            rollback_id: options.rollback_id.clone(),
-        };
-        let plan = strip_display_prefixes(plan);
-        let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
-        let stores = self.refinement_stores()?;
-        let target_dir = match target_scope {
-            HarnessScope::Global => global_harness_dir.to_path_buf(),
-            HarnessScope::Local => stores.local_dir.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Local harness refinement requires a persisted session; use global refinement instead."
-                )
-            })?,
-        };
-        // The apply's gates re-read their settings live inside the update
-        // (the settings manager reopens), and the factory opt-in resolves
-        // HERE — immediately before the apply — so a setting that changed
-        // during the child's pass decides, never a snapshot captured before
-        // it. Both reads ride `spawn_blocking`; a session without a wired
-        // agent dir keeps the fail-closed disabled default.
-        let agent_dir = self.agent_dir.clone();
-        let cwd = self.session.lock().await.get_cwd().to_path_buf();
-        let (mut result, state_path) = tokio::task::spawn_blocking(move || {
-            let settings = agent_dir
-                .as_deref()
-                .map(|dir| crate::settings::SettingsManager::create(&cwd, dir));
-            try_update_harness_state(&target_dir, target_scope, |state| {
-                anyhow::ensure!(
-                    super::refinement_gate::enabled(settings.as_ref()),
-                    "Harness refinements were disabled during planning; the result was discarded"
-                );
-                let factory_enabled = agent_dir
-                    .as_deref()
-                    .is_some_and(crate::refinement::factory_enabled);
-                Ok(apply_refinement_plan(
-                    state,
-                    plan,
-                    &core_options,
-                    Some(baseline_state),
-                    factory_enabled,
-                ))
-            })
-        })
+        let ready = ready_refinement(prepared.basis, plan)?;
+        commit_refinement(
+            &self.session,
+            &self.agent,
+            ready,
+            source,
+            self.agent_dir.as_deref(),
+            Some(&self.compaction_flight),
+            &self.refinement_signal(),
+        )
         .await
-        .map_err(|error| anyhow::anyhow!("refinement harness update task failed: {error}"))??;
-        result.harness_state_path = state_path.to_string_lossy().to_string();
-        if target_scope == HarnessScope::Global {
-            append_global_refinement(global_harness_dir, &result)?;
-        }
-        // The audit append is attempted first; a failed write is caught (the row
-        // stays live-indexed) and the audit error surfaces only after the outcome
-        // records — the user's view and the durable stores do not diverge.
-        let mut session = self.session.lock().await;
-        let (_, audit_write) = session.append_custom_entry_retained(
-            REFINEMENT_AUDIT_CUSTOM_TYPE,
-            Some(serde_json::to_value(&result)?),
-        );
-        // Outcome for the TUI; notice for the model (only when edits applied).
-        let outcome = create_refinement_outcome_message(&result);
-        let (outcome_id, outcome_write) = session.append_custom_message_retained(
-            &outcome.custom_type,
-            outcome.content.clone(),
-            outcome.display,
-            outcome.details.clone(),
-        );
-        let mut context_row_ids = vec![outcome_id];
-        if let Some(error) = audit_write {
-            anyhow::bail!("refinement audit row not persisted: {error}");
-        }
-        if let Some(error) = outcome_write {
-            anyhow::bail!("refinement outcome row not persisted: {error}");
-        }
-        if result.applied_edits.iter().any(|edit| edit.applied) {
-            let notice = create_refinement_notice_message(&result, source);
-            let notice_id = session.append_custom_message(
-                &notice.custom_type,
-                notice.content.clone(),
-                notice.display,
-                notice.details.clone(),
-            )?;
-            context_row_ids.push(notice_id);
-        }
-        // This run's rows push onto the live context after the durable
-        // append, never a full rebuild — a rebuild would resurrect a
-        // retried turn's dropped trailing assistant. The pushed rows are
-        // THIS run's, under ONE agent-state lock.
-        let rows = context_rows_by_ids(session.retained_entries(), &context_row_ids);
-        let loop_rows: Vec<pa_agent::types::AgentMessage> = rows
-            .iter()
-            .filter_map(|row| super::session_message_to_loop(&AgentMessage::Custom(row.clone())))
-            .collect();
-        if !loop_rows.is_empty() {
-            self.agent.append_messages(loop_rows).await;
-        }
-        Ok(result)
     }
 }
 

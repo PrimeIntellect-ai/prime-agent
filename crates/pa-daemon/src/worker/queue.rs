@@ -1,5 +1,6 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
+use super::inbox_router::{delivered_notice_text, notice_text, shown_items, wake_delay};
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
     SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
@@ -587,6 +588,69 @@ pub(crate) fn admit_kernel_notice(
     work_notify.notify_one();
 }
 
+/// Admit one turn-held pacing notice: the same steering-lane admission as a
+/// kernel notice, but the daemon-side held gate checks the delivery token
+/// and worker state inside the same lock section as the push. The gate must
+/// never arrive as the `session_is_closed` closure: that seam is invoked
+/// while the admission already holds the core lock, so a re-locking closure
+/// self-deadlocks the session.
+pub(crate) fn admit_turn_held_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    notice: crate::engine::KernelNotice,
+    delivery: &tokio_util::sync::CancellationToken,
+) {
+    let crate::engine::KernelNotice { row, preview_label } = notice;
+    let content = match &row.content {
+        pa_types::ai::UserContent::Text(text) => text.clone(),
+        pa_types::ai::UserContent::Blocks(_) => String::new(),
+    };
+    let mut core_guard = core.lock().unwrap();
+    // A cell in flight is what holds the turn. Without a running tool call
+    // the model is streaming, often its final answer, and a queued row would
+    // only start an extra turn after it.
+    if delivery.is_cancelled()
+        || !core_guard.busy
+        || core_guard.running_tool_calls.is_empty()
+        || !core_guard.steering.is_empty()
+        || core_guard.abort_requested
+        || core_guard.compacting
+        || core_guard.shutdown_requested
+    {
+        // The held gate refused: the delivery settled (or something else
+        // already queued to cut it), so the pacing notice stays quiet.
+        return;
+    }
+    core_guard.steering.push_back(QueuedItem {
+        priority: QueuePriority::Background,
+        preview: Some(format!("{preview_label}: {content}")),
+        message: content,
+        custom_message: Some(crate::session_commands::custom_message_value(&row)),
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+    // The checkpoint re-locks the core (documented order: recovery lock
+    // first), so the admission's guard must release first.
+    drop(core_guard);
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    work_notify.notify_one();
+}
+
 /// The queue-strip coalescing key of the inbox arrival notice: one
 /// queued short row covers every arrival of the busy window (a later
 /// arrival replaces it instead of stacking).
@@ -617,6 +681,8 @@ pub(crate) fn admit_inbox_notice(
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
 ) -> Result<bool, String> {
+    // Read before the lock: the settings lookup touches the disk.
+    let wake_delay = wake_delay(&notice, engine);
     // The busy sample, the batch, and the push share ONE critical
     // section, like the notice admission below: a turn starting between
     // them would queue an invisible row for a busy session. The guard
@@ -626,6 +692,7 @@ pub(crate) fn admit_inbox_notice(
         inbox,
         arrivals,
         notice,
+        wake_delay,
         lane,
         session_is_closed,
         engine,
@@ -639,6 +706,8 @@ pub(crate) fn admit_inbox_notice(
             operation: "steer_queued",
         },
     );
+    // The runner decides when the row starts a turn (the row's due time,
+    // `SessionCore::inbox_wake_hold`); an arrival may have moved it closer.
     work_notify.notify_one();
     Ok(queued)
 }
@@ -646,13 +715,15 @@ pub(crate) fn admit_inbox_notice(
 /// [`admit_inbox_notice`] over an already locked core, without the
 /// checkpoint and wake (the checkpoint re-locks the core, so the caller
 /// runs both after releasing its guard): the heartbeat route holds the
-/// lock across its live-job check and withdrawal.
+/// lock across its live-job check and withdrawal. `wake_delay` is the
+/// arrival's [`wake_delay`], read before the caller took the lock.
 #[allow(clippy::too_many_arguments)] // the wrapper's seams minus the lock-order handles
 pub(crate) fn admit_inbox_notice_locked(
     core_guard: &mut SessionCore,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     notice: pa_core::session_engine::inbox::InboxNotice,
+    wake_delay: std::time::Duration,
     lane: Lane,
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
@@ -697,9 +768,16 @@ pub(crate) fn admit_inbox_notice_locked(
         if !coalescing {
             arrivals.clear();
         }
+        // Rules 2 and 4: the row's due time is the earliest of its
+        // arrivals' own, so a waking arrival flushes held successes.
+        let due = tokio::time::Instant::now() + wake_delay;
+        core_guard.inbox_wake_due = Some(match core_guard.inbox_wake_due {
+            Some(earlier) if coalescing => earlier.min(due),
+            _ => due,
+        });
         arrivals.push(message);
         let (count, _, _) = inbox.count();
-        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&arrivals, count);
+        let (preview, text) = notice_text(&arrivals, count);
         // A follow-up arrival never demotes a queued steering notice: the
         // batch keeps the most urgent lane it has already ridden.
         let queued_steering = core_guard
@@ -799,7 +877,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .retain(|item| item.queue_key.as_deref() != Some(INBOX_ARRIVAL_QUEUE_KEY));
         changed |= core_guard.steering.len() + core_guard.follow_up.len() != before;
     } else {
-        let (preview, text) = pa_core::session_engine::inbox::arrival_notice(&batch, count);
+        let (preview, text) = notice_text(&batch, count);
         let text = inbox.with_persistence_error_clause(text);
         let core_guard = &mut *core_guard;
         let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
@@ -840,6 +918,56 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
         }
     }
     changed
+}
+
+/// Deliver the inbox arrival row the runner just picked: the row
+/// re-renders over the live batch, counting the items it shows
+/// (`inbox_router::shown_items`) as read, so the model is never told to
+/// read what it was just shown. The shown items stay in the inbox until
+/// the row's transcript row is accepted
+/// ([`consume_shown_inbox_items_locked`]); an abort or crash before that
+/// leaves them waiting. Items the row only counts wait for a read. A
+/// recovered row (its batch unknown) delivers as queued.
+pub(crate) fn deliver_inbox_arrival_row_locked(
+    core_guard: &mut SessionCore,
+    item: &mut QueuedItem,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) {
+    core_guard.inbox_wake_due = None;
+    let mut batch = arrivals.lock().unwrap();
+    let waiting = inbox.waiting_ids();
+    batch.retain(|message| waiting.contains(&message.id));
+    if batch.is_empty() {
+        return;
+    }
+    let shown: std::collections::BTreeSet<String> = shown_items(&batch)
+        .into_iter()
+        .map(|message| message.id.clone())
+        .collect();
+    let (preview, text) = delivered_notice_text(&batch, waiting.len() - shown.len());
+    rerender_inbox_notice(
+        item,
+        &inbox.with_persistence_error_clause(text),
+        batch.len(),
+    );
+    item.preview = Some(preview);
+    core_guard.inbox_shown_unaccepted = shown;
+}
+
+/// Withdraw the items the delivered arrival row showed, once its
+/// transcript row is accepted; a queued reminder follows the drained count.
+pub(crate) fn consume_shown_inbox_items_locked(
+    core_guard: &mut SessionCore,
+    arrivals: &pa_core::session_engine::inbox::InboxArrivals,
+    inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
+) {
+    let shown = std::mem::take(&mut core_guard.inbox_shown_unaccepted);
+    if shown.is_empty() {
+        return;
+    }
+    inbox.withdraw_ids(&shown);
+    refresh_inbox_wake_rows_locked(core_guard, arrivals, inbox);
 }
 
 /// Admit one periodic unread reminder: while the inbox stays non-empty,

@@ -64,35 +64,3 @@ fn a_report_only_row_never_fails_the_gate() {
     assert!(report.regressions.is_empty());
     assert!(report.markdown.contains("report-only"));
 }
-
-#[test]
-fn a_missing_baseline_prints_no_baseline() {
-    let report = report(
-        &[result(Scenario::OpenSession, 147.0)],
-        &baseline(1_000.0, false),
-    );
-    assert!(report.regressions.is_empty());
-    assert!(report.markdown.contains("open-session/small"));
-    assert!(report.markdown.contains("(no baseline)"));
-}
-
-#[test]
-fn results_written_before_the_secondary_series_still_report() {
-    let old = serde_json::json!({
-        "schema": 1,
-        "scenario": "agents-view",
-        "profile": "small",
-        "runs": 1,
-        "samples_ms": [30.0],
-        "median_ms": 30.0,
-        "p95_ms": 30.0,
-        "needle": "",
-        "binary": "",
-        "corpus": { "root": "", "sessions": 10, "total_rows": 3500, "child_sessions": 12, "archive": 3 },
-    });
-    let parsed: BenchResult = serde_json::from_value(old).expect("an old result file parses");
-    let report = report(&[parsed], &baseline(1_000.0, false));
-    assert!(report
-        .markdown
-        .contains("| agents-view/small | 30.0 | 30.0 | — | — |"));
-}

@@ -34,7 +34,7 @@ use pa_core::session_engine::agent_messaging::{
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     AgentFamilyRelationship, AgentMessageController,
 };
-use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_core::session_engine::rlm_host::{RlmSpawnKind, RlmSpawnRequest, RlmSubagentHost};
 use pa_daemon::agent_messaging::{LinkAgentMessageController, LinkAgentObserveController};
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
@@ -438,8 +438,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
-            refine_child: false,
             factory: None,
         })
         .await
@@ -771,8 +771,8 @@ async fn family_edges_never_cross_families_end_to_end() {
                 model: None,
                 thinking: None,
                 cwd: None,
+                kind: RlmSpawnKind::Subagent,
                 spawned_by_request_id: None,
-                refine_child: false,
                 factory: None,
             })
             .await
@@ -914,8 +914,8 @@ async fn family_edges_never_cross_families_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
-            refine_child: false,
             factory: None,
         })
         .await
@@ -1235,8 +1235,8 @@ async fn parent_renames_a_child_end_to_end() {
             model: None,
             thinking: None,
             cwd: None,
+            kind: RlmSpawnKind::Subagent,
             spawned_by_request_id: None,
-            refine_child: false,
             factory: None,
         })
         .await
@@ -1628,8 +1628,8 @@ async fn passivated_child_recent_messages_reads_its_file_end_to_end() {
             name: Some("kid-a".to_string()),
             model: None,
             thinking: None,
+            kind: RlmSpawnKind::Subagent,
             cwd: None,
-            refine_child: false,
             spawned_by_request_id: None,
             factory: None,
         })
@@ -1800,8 +1800,8 @@ async fn family_members_read_each_others_transcripts_end_to_end() {
                     name: Some((*kid).to_string()),
                     model: None,
                     thinking: None,
+                    kind: RlmSpawnKind::Subagent,
                     cwd: None,
-                    refine_child: false,
                     spawned_by_request_id: None,
                     factory: None,
                 })

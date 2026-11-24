@@ -133,6 +133,22 @@ pub struct RlmChildResult {
 
 // Requests into the host
 
+/// The child kind a spawn selects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RlmSpawnKind {
+    /// An ordinary agent subagent (the default).
+    #[default]
+    Subagent,
+    /// The Decision API child (`kind="decision"`): the settings
+    /// `decisionModel` serves it, and its intake answers every message
+    /// with one decision.
+    Decision,
+    /// The refinement child: the daemon's refine command spawns it to
+    /// run one planning pass instead of the agent engine. The kernel
+    /// surface never selects it.
+    Refine,
+}
+
 /// Validated `rlm.spawn` request handed to the child-session host.
 #[derive(Debug, Clone)]
 pub struct RlmSpawnRequest {
@@ -143,13 +159,11 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The child kind the spawn selects: the default subagent or a
+    /// dedicated child engine. One enum field, not a bool per kind.
+    pub kind: RlmSpawnKind,
     /// Working directory; the host resolves relative paths against the session cwd.
     pub cwd: Option<String>,
-    /// The refine-child spawn flag: `true` spawns the refinement child
-    /// (a child that runs the refinement protocol instead of the agent
-    /// engine). The daemon's refine command sets it on its own spawn; the
-    /// kernel surface never does.
-    pub refine_child: bool,
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
     pub spawned_by_request_id: Option<String>,
@@ -680,14 +694,33 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     reject_unsupported_kwargs(
         &kwargs,
         OPERATION,
-        &["name", "model", "thinking", "cwd", "factory"],
+        &["name", "model", "thinking", "cwd", "factory", "kind"],
     )?;
+    let kind = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
+        None => RlmSpawnKind::Subagent,
+        Some("decision") => RlmSpawnKind::Decision,
+        Some(other) => {
+            anyhow::bail!(
+                "rlm.spawn kind must be \"decision\" when given, not {other:?}. Only the Decision \
+                 API child has a kind."
+            )
+        }
+    };
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
         assert_direct_agent_message_target(name)?;
     }
     let model = optional_string_kwarg(&kwargs, "model", OPERATION)?;
+    // A decision child's model comes from the `decisionModel` setting —
+    // the same refusal the decision request path serves — so the pair is
+    // refused here instead of silently dropping the model.
+    if model.is_some() && kind == RlmSpawnKind::Decision {
+        anyhow::bail!(
+            "The decision child's model comes from the decisionModel setting; the spawn carries no \
+             model (got {model:?})."
+        );
+    }
     let model = normalize_requested_rlm_subagent_model(model, OPERATION)?;
     let thinking = optional_string_kwarg(&kwargs, "thinking", OPERATION)?;
     let thinking =
@@ -706,14 +739,8 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        kind,
         cwd,
-        // The kernel surface spawns ordinary subagents only: the refinement
-        // child is the daemon engine's own spawn (`spawn_refine_child`),
-        // never a model-initiated `kind="refine"` call — the refinement
-        // protocol (the flight, the park, the apply) lives behind the
-        // engine's refine command, and a kernel-spawned refine child
-        // would boot the refinement engine with no flight recorded.
-        refine_child: false,
         spawned_by_request_id: None,
         factory,
     })
@@ -1404,6 +1431,7 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        assert_eq!(requests[0].kind, RlmSpawnKind::Subagent);
         assert_eq!(requests[0].cwd.as_deref(), Some("lanes/a"));
         assert_eq!(
             requests[0].factory,
@@ -1415,18 +1443,45 @@ mod tests {
         );
         drop(requests);
 
-        // The kernel surface spawns ordinary subagents only: a `kind`
-        // kwarg is unsupported, exactly like any other unknown kwarg.
+        // The decision-child kind parses into the spawn request; unknown
+        // kinds refuse.
+        let response = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "decision" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["name"], "worker");
+        let requests = spawn_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].kind, RlmSpawnKind::Decision);
+        drop(requests);
         let error = call(
             &wiring,
             "rlm.run",
-            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "refine" } }),
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "oracle" } }),
         )
         .await
         .unwrap_err();
-        assert!(
-            error.to_string().contains("Unsupported rlm.spawn kwargs"),
-            "the kind kwarg must refuse as unsupported: {error}"
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn kind must be \"decision\" when given, not \"oracle\". Only the Decision API \
+             child has a kind."
+        );
+        // A decision child's model comes from the `decisionModel` setting:
+        // the pair is refused instead of silently dropping the model.
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "prompt": "p", "kwargs": { "name": "w", "kind": "decision", "model": "p/m" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The decision child's model comes from the decisionModel setting; the spawn carries no \
+             model (got Some(\"p/m\"))."
         );
 
         // Validation: prompt type, unsupported kwargs, name rules.

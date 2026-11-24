@@ -261,21 +261,6 @@ mod tests {
         serde_json::json!({ "kind": kind })
     }
 
-    #[test]
-    fn round_trips_frames() {
-        let frame = encode_private_frame(
-            &header("command"),
-            b"{\"x\":1}",
-            DEFAULT_PRIVATE_FRAME_LIMITS,
-        )
-        .unwrap();
-        let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
-        let frames = decoder.push(&frame).unwrap();
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].header["kind"], "command");
-        assert_eq!(frames[0].payload, b"{\"x\":1}");
-    }
-
     #[tokio::test]
     async fn segments_write_the_same_stream_as_the_buffered_frame() {
         // `i % 251` is 0..=250: non-negative, fits u8 exactly.

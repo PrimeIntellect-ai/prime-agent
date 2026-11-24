@@ -213,10 +213,10 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            // The replaced conversation's refinement child goes with it.
+            // The replaced conversation's refinement children go with it.
             // This runs before the retire takes the build gate: a spawn
             // admission takes the build gate under the spawn lock.
-            self.abandon_refine_child().await;
+            self.abandon_refine_children().await;
             self.retire_session_runtime().await;
         })
     }
@@ -323,8 +323,8 @@ impl SessionEngine for AgentSessionEngine {
         self.consume_compact_auto_refine_round()
     }
 
-    /// The refine child's reply wake, delivery half: the in-flight child's
-    /// proposal (or its failure envelope) parks for the idle-boundary
+    /// The refine child's reply wake, delivery half: an in-flight child's
+    /// reply (or its failure envelope) parks for the idle-boundary
     /// apply — the child's send never waits on the parent's apply.
     fn park_refine_child_reply(
         &self,
@@ -338,8 +338,8 @@ impl SessionEngine for AgentSessionEngine {
         Box::pin(async move { parked })
     }
 
-    /// The parked refine reply's idle-boundary apply: the proposal (or its
-    /// failure envelope) applies through the existing apply machinery.
+    /// The oldest parked refine reply's idle-boundary apply, through the
+    /// shared refinement commit.
     fn apply_pending_refine_reply(&self) -> crate::engine::PendingRefineApply<'_> {
         // The fully-qualified call names the inherent (async) apply over
         // this same-named trait method.
@@ -832,9 +832,9 @@ impl SessionEngine for AgentSessionEngine {
             return Ok(());
         }
         self.runtime.block_on(async move {
-            // The moved branch abandons the refinement child that plans on
+            // The moved branch abandons the refinement children that plan on
             // the conversation it leaves.
-            self.abandon_refine_child().await;
+            self.abandon_refine_children().await;
             let guard = self.session.lock().await;
             let Some(engine) = guard.as_deref() else {
                 return Ok(());

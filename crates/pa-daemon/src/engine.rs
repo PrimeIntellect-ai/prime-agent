@@ -6,21 +6,18 @@
 use std::sync::Arc;
 
 /// The refine child's reply park: `Some(())` when the message came from
-/// the session's in-flight refine child and is parked for the idle-boundary
-/// apply; `None` otherwise.
+/// one of the session's in-flight refine children and is parked for the
+/// idle-boundary apply; `None` otherwise.
 pub type RefineChildReplyPark<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + 'a>>;
 
-/// The parked refine reply's idle-boundary apply outcome (`None` when the
+/// One parked refine reply's idle-boundary apply outcome (`None` when the
 /// engine has nothing parked).
 pub type PendingRefineApply<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = Option<
-                    anyhow::Result<(
-                        pa_core::refinement::RefinementResult,
-                        pa_core::session_engine::refine::RefinementSource,
-                    )>,
+                    anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
                 >,
             > + Send
             + 'a,
@@ -177,9 +174,9 @@ pub trait SessionEngine: Send + Sync {
         Ok(())
     }
 
-    /// Park a refine child's reply at the child-reply wake: the engine's
-    /// in-flight refinement child's proposal (or its failure envelope) is
-    /// stored for the idle-boundary apply — the fire-and-wake contract's
+    /// Park a refine child's reply at the child-reply wake: an in-flight
+    /// refinement child's reply (or its failure envelope) is stored for the
+    /// idle-boundary apply — the fire-and-wake contract's
     /// delivery is answered at once, and the apply never runs inside the
     /// child's send. The late reply of a refine child that a branch move or
     /// a replacement abandoned is consumed and dropped. `None` for any
@@ -193,9 +190,9 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(async { None })
     }
 
-    /// Apply the parked refine reply at the session's idle boundary: the
-    /// worker's runner owns turn admission, so this never interleaves with
-    /// a running turn's rows. `None` when the engine has nothing parked.
+    /// Apply the oldest parked refine reply at the session's idle boundary:
+    /// the worker's runner owns turn admission, so this never interleaves
+    /// with a running turn's rows. `None` when the engine has nothing parked.
     fn apply_pending_refine_reply(&self) -> PendingRefineApply<'_> {
         Box::pin(async { None })
     }

@@ -128,18 +128,15 @@ pub fn adjust_max_tokens_for_thinking(
     Ok((max_tokens, thinking_budget))
 }
 
-/// The budget-folding providers' wire `max_tokens` for one base budget at a
-/// reasoning level: Anthropic and Bedrock models without adaptive thinking
-/// add the level's thinking budget on top of the base per-request budget,
-/// capped at the model's declared max output
-/// ([`adjust_max_tokens_for_thinking`]); every other provider sends the
-/// base budget itself.
+/// The `max_tokens` the provider will actually send for a request against `model` with this
+/// reasoning level: budget-folding providers (Anthropic and Bedrock models without adaptive
+/// thinking) add the level's thinking budget on top of the base per-request budget, capped at the
+/// model's declared max output ([`adjust_max_tokens_for_thinking`]); every other provider sends the
+/// base budget itself. Compaction thresholds must reserve this effective budget, or a request can
+/// claim `input + max_tokens > contextWindow` while the trigger still says "not due".
 #[must_use]
-pub fn folded_request_max_tokens_at(
-    model: &Model,
-    base: u64,
-    reasoning: ModelThinkingLevel,
-) -> u64 {
+pub fn effective_request_max_tokens(model: &Model, reasoning: ModelThinkingLevel) -> u64 {
+    let base = default_request_max_tokens(model).unwrap_or(0);
     if matches!(reasoning, ModelThinkingLevel::Off) || base == 0 {
         return base;
     }
@@ -163,19 +160,6 @@ pub fn folded_request_max_tokens_at(
         Ok((max_tokens, _thinking_budget)) => max_tokens.max(base),
         Err(_) => base,
     }
-}
-
-/// The `max_tokens` the provider will actually send for a request against `model` with this
-/// reasoning level (the default budget through [`folded_request_max_tokens_at`]): compaction
-/// thresholds must reserve this effective budget, or a request can claim
-/// `input + max_tokens > contextWindow` while the trigger still says "not due".
-#[must_use]
-pub fn effective_request_max_tokens(model: &Model, reasoning: ModelThinkingLevel) -> u64 {
-    folded_request_max_tokens_at(
-        model,
-        default_request_max_tokens(model).unwrap_or(0),
-        reasoning,
-    )
 }
 
 #[cfg(test)]

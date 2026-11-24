@@ -94,6 +94,9 @@ jobs:
     env:
       # Captured headless panes supplement native terminal validation.
       WINDOWS_RUNTIME_TRIAGE_DUMP_DIR: '${{ github.workspace }}\win-tui-dumps'
+      # The runner's account venv is a throwaway; opt out of the account-venv
+      # refusal that .cargo/config.toml turns on for cargo-launched processes.
+      PRIME_AGENT_REFUSE_ACCOUNT_KERNEL_VENV: "0"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

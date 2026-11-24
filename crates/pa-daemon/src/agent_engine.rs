@@ -235,31 +235,26 @@ pub struct AgentSessionEngine {
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
-    /// The in-flight refinement child (the `refine_child` spawn): what the
-    /// parent prepared before the child's model pass, keyed by the child's
-    /// ids for the child-reply wake.
-    pub(crate) refine_flight: std::sync::Mutex<Option<crate::refine_children::RefineChildFlight>>,
-    /// The parked refinement reply: the child's proposal (or its failure
-    /// envelope) waiting for the session's idle boundary, where it applies
-    /// — the wake answers the delivery at once, and the apply never
-    /// interleaves with a running turn's rows.
-    pub(crate) pending_refine_reply:
-        std::sync::Mutex<Option<crate::refine_children::PendingRefineReply>>,
+    /// The in-flight refinement children, keyed by the child's active
+    /// session id for the child-reply wake.
+    pub(crate) refine_flights: std::sync::Mutex<
+        std::collections::HashMap<String, crate::refine_children::RefineChildFlight>,
+    >,
+    /// The parked refinement replies, oldest first: each waits for the
+    /// session's idle boundary, where it applies — the wake answers the
+    /// delivery at once, and the apply never interleaves with a running
+    /// turn's rows.
+    pub(crate) pending_refine_replies:
+        std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
     /// The active session ids of the refinement children that a branch
     /// move or a replacement abandoned. The cancel cannot recall a reply
     /// that is already in delivery, so the park drops that late reply and
     /// removes its id. An id whose child never replied stays, as the child
     /// registry also keeps its own record of that child.
     pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Serializes refinement-child admissions: the dead-round release, the
-    /// in-flight check, the prepare, and the flight's record run as one
-    /// atomic spawn, so concurrent callers cannot double-spawn.
+    /// Orders refinement-child admissions (prepare, spawn, flight record,
+    /// prompt release) against an abandon.
     pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
-    /// Test seam: fires on the thread that is about to wait for the spawn
-    /// lock, so a test can prove the wait before it reads the trigger.
-    #[cfg(test)]
-    pub(crate) refine_spawn_lock_wait_probe:
-        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// The worker-installed summary-delta sink, adopted onto every built
     /// session. `None` without a worker pump.
     compaction_summary_sink:
