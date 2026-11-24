@@ -1190,6 +1190,7 @@ fn bot_entry(bot: &Value) -> RlmSubagentEntry {
         session_dir: bot_session_dir(&bot_id),
         status: match bot.get("status").and_then(Value::as_str) {
             Some("creating" | "running") => "running",
+            Some("paused") => "paused",
             Some("error") => "error",
             _ => "completed",
         },

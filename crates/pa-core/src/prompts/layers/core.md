@@ -70,7 +70,7 @@ The following programmatic tools are available in the REPL for subagent manageme
   - `session_id: str | None`
   - `session_name: str`
   - `session_dir: Path`
-  - `status: Literal["running", "completed", "error"]`
+  - `status: Literal["running", "paused", "completed", "error"]`
   - rows also carry live activity detail (current activity, tool use count, duration, answer preview, latest progress note)
 - `RLMModel`
   - `provider: str`
