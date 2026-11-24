@@ -139,15 +139,15 @@ impl super::SessionUi {
     }
 
     /// One key press while the view is open: the view resolves the key;
-    /// the drill-in rides the daemon lane (bounded, with the outcome on
-    /// the view's error row), and Esc closes.
-    pub(crate) async fn handle_library_view_key(
+    /// the drill-in's fetch runs off the key loop (its reply or error lands
+    /// through the library channel), and Esc closes.
+    pub(crate) fn handle_library_view_key(
         &mut self,
         key: crossterm::event::KeyEvent,
         view: &mut AgentView,
-    ) -> Result<()> {
+    ) {
         let Some(id) = super::key_event_to_id(&key) else {
-            return Ok(());
+            return;
         };
         let action = match view.overlay.as_mut() {
             Some(Overlay::Library(page)) => Some(page.handle_key(&id, view.editor.keybindings())),
@@ -207,7 +207,6 @@ impl super::SessionUi {
                 self.dirty = true;
             }
         }
-        Ok(())
     }
 
     /// Fetch one machine's graph payload over the lane (the drill-in) off
