@@ -406,6 +406,12 @@ mod tests {
         assert!(kernel_venv_python(&venv).is_file());
         assert!(venv.join("pyvenv.cfg").is_file());
         assert!(!aside.exists(), "recovery consumes the restored copy");
+        let partials: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".partial-"))
+            .collect();
+        assert!(partials.is_empty(), "recovery removes the incomplete tree: {partials:?}");
     }
 
     #[tokio::test]

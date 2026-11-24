@@ -146,18 +146,25 @@ pub(crate) fn recover_interrupted_venv_swap(venv: &Path) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
+    let mut partial = None;
     if venv.exists() {
         let name = venv.file_name().unwrap_or_default().to_string_lossy();
-        let partial = venv.with_file_name(format!(
+        let aside = venv.with_file_name(format!(
             "{name}.partial-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        crate::platform::rename_onto(venv, &partial)
+        crate::platform::rename_onto(venv, &aside)
             .with_context(|| format!("moving incomplete {} aside", venv.display()))?;
+        partial = Some(aside);
     }
     crate::platform::rename_onto(&retired, venv)
         .with_context(|| format!("restoring {} from {}", venv.display(), retired.display()))?;
+    // The staging sweep keeps entries named after a live pid, this process's
+    // included, so the incomplete tree is removed here.
+    if let Some(partial) = partial {
+        let _ = std::fs::remove_dir_all(partial);
+    }
     Ok(())
 }
 
