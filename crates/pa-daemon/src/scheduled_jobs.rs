@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::oneshot;
 
 use pa_core::cron::scheduler::{AgentCronScheduler, AgentCronSchedulerHooks};
 use pa_core::cron::store::{
@@ -49,7 +49,7 @@ struct InboxSeam {
 /// The scheduler hooks: how a claimed job reaches this session.
 pub(crate) struct QueueHooks {
     core: Arc<Mutex<SessionCore>>,
-    work_notify: Arc<Notify>,
+    work_notify: Arc<crate::worker::WorkNotify>,
     user_bash: Arc<crate::user_bash::UserBash>,
     store: Arc<AgentCronJobStore>,
     /// The worker recovery journal (the fire checkpoint's busy evidence).
@@ -175,11 +175,13 @@ impl QueueHooks {
             } else {
                 Lane::Steering
             };
+            // A fired heartbeat is a scheduled turn: it wakes at once.
             admit_inbox_notice_locked(
                 &mut core,
                 &inbox,
                 &seam.arrivals,
                 fields,
+                std::time::Duration::ZERO,
                 lane,
                 closed,
                 Some(engine.as_ref()),
@@ -353,7 +355,7 @@ pub(crate) struct ScheduledJobs {
 impl ScheduledJobs {
     pub(crate) fn new(
         core: Arc<Mutex<SessionCore>>,
-        work_notify: Arc<Notify>,
+        work_notify: Arc<crate::worker::WorkNotify>,
         user_bash: Arc<crate::user_bash::UserBash>,
         events: Arc<crate::worker::EventPump>,
         recovery: Arc<Mutex<Option<crate::journal::WorkerRecoveryJournal>>>,

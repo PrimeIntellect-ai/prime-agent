@@ -16,6 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from datetime import timezone
 from types import FunctionType, SimpleNamespace
 from unittest import mock
 
@@ -1387,8 +1388,6 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
     def _wire_notices(self) -> None:
         bash_module._set_completion_notices_wired(True)
         self.addCleanup(bash_module._set_completion_notices_wired, False)
-        bash_module._degrade_hints_written = 0
-        self.addCleanup(setattr, bash_module, "_degrade_hints_written", 0)
 
     @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.3)
     async def test_bounded_await_degrades_to_a_snapshot(self):
@@ -1400,6 +1399,20 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(returned.exit_code)
         self.assertTrue(returned.running)
         self.assertIsInstance(returned.output, str)
+        # The snapshot carries its timestamps: the command's elapsed running
+        # time (past the window) and the UTC wall-clock moment it was taken.
+        self.assertGreaterEqual(returned.duration, 0.3)
+        self.assertEqual(returned.result_time.tzinfo, timezone.utc)
+        # The repr is the directive: pid, elapsed, result time, and the
+        # end-the-turn contract, never the old "await .handle" invitation
+        # whose re-await degraded to the same snapshot again.
+        text = repr(returned)
+        self.assertIn(f"pid={handle.pid} ", text)
+        self.assertIn(f"after {returned.duration:g}s at ", text)
+        self.assertIn("do not await it again this turn", text)
+        self.assertIn("collect the final result on the completion notice", text)
+        self.assertIn(returned.result_time.strftime("%Y-%m-%dT%H:%M:%SZ"), text)
+        self.assertNotIn("await .handle", text)
         # The prompt's collect idiom: re-awaiting the live handle returns the
         # final result once the command finishes inside the window.
         result = await returned.handle
@@ -1441,18 +1454,49 @@ class BoundedAwaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
 
     @mock.patch.object(bash_module, "_YIELD_AFTER_SECONDS", 0.2)
-    async def test_degrade_hints_are_budgeted_to_the_first_three(self):
+    async def test_every_degrade_notes_the_directive_with_growing_elapsed(self):
+        # The observed loop (T-0011): an agent re-awaits a running handle
+        # instead of ending the turn. Every degrade must write the
+        # directive (a quiet repeat reads as a successful empty call), and
+        # the elapsed it shows must grow so the loop is visible to the model.
         self._wire_notices()
-        handles = []
-        hints = io.StringIO()
-        with mock.patch.object(sys, "stderr", hints):
-            for _ in range(5):
-                handle = bash("sleep 3")
-                handles.append(handle)
-                self.assertIsInstance(await handle, bash_module.BashSnapshot)
-        for handle in handles:
-            handle.kill(grace=0.1)
-        self.assertEqual(hints.getvalue().count("still running after"), 3)
+        handle = bash("sleep 2")
+        notes = io.StringIO()
+        # Five degrades, past the size of the removed three-note budget:
+        # a budget revert (or an upstream parity sync restoring it) must go
+        # red here, not quietly silence degrades four and five.
+        cell = asyncio.current_task()
+        with (
+            mock.patch.object(sys, "stderr", notes),
+            mock.patch.object(bash_module, "_live_cell_owner", lambda: cell),
+        ):
+            snapshots = [await handle for _ in range(5)]
+
+            # A background task's degrade writes no note: the cell does not
+            # wait for it, so the note would land in a later cell's output.
+            async def background_poll() -> object:
+                return await handle
+
+            background = asyncio.create_task(background_poll())
+            for _ in range(100):
+                if background.done():
+                    break
+                await asyncio.sleep(0.05)
+        handle.kill(grace=0.1)
+        self.assertIsInstance(background.result(), bash_module.BashSnapshot)
+        for snapshot in snapshots:
+            self.assertIsInstance(snapshot, bash_module.BashSnapshot)
+        elapsed = [snapshot.duration for snapshot in snapshots]
+        self.assertTrue(all(a < b for a, b in zip(elapsed, elapsed[1:])), elapsed)
+        # Each note is its snapshot's directive: pid, elapsed, result time,
+        # and the end-the-turn contract, on every repeat.
+        note_text = notes.getvalue()
+        for snapshot in snapshots:
+            self.assertIn(snapshot.directive(), note_text)
+        self.assertEqual(note_text.count("still running after"), 5)
+        self.assertEqual(note_text.count("do not await it again this turn"), 5)
+        self.assertEqual(note_text.count("on the completion notice"), 5)
+        self.assertIn(f"(pid {handle.pid}, snapshot at ", note_text)
 
 
 async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:
@@ -1610,6 +1654,34 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         rows = {row["pid"]: row for row in bash_module.activity_request("list")["activities"]}
         self.assertFalse(rows[plain.pid]["persistent"])
         await plain
+
+    async def test_persistent_completion_notice_waits_for_an_in_flight_await(self):
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        with mock.patch.object(bash_module.PersistentBashHandle, "_schedule_background_completion_notice"):
+            handle = bash("true", persistent=True)
+        self.pgids.append(handle.pid)
+        await handle._wait()
+        # The creating cell has finished; an await of THIS handle is in flight.
+        handle._creating_cell_finished = asyncio.Event()
+        handle._creating_cell_finished.set()
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            handle._begin_await()
+            notice = asyncio.ensure_future(handle._notify_completion())
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual([call["type"] for call in calls], ["bash.completed"])
 
     async def test_a_watched_leader_exit_kills_the_members_it_leaves_behind(self):
         handle = bash("( sleep 30 & ); exit 0", persistent=True)
@@ -1836,6 +1908,89 @@ class PersistentBashTest(unittest.IsolatedAsyncioTestCase):
         bash_module._rehydrate_persistent_shells()
         self.assertIsNone(self.handle_for(gone.pid))
         self.assertEqual(self.files(), [])
+
+class BashInventedKwargsTest(unittest.TestCase):
+    """The invented-kwarg teaching surface: `timeout=` (the eval trace's
+    recurring invention) is declined with the real signature and the
+    parked-turn alternative, never a bare TypeError."""
+
+    def test_invented_kwargs_teach_the_real_signature(self):
+        with mock.patch.object(bash_module, "_completion_notices_wired", True):
+            with self.assertRaises(TypeError) as ctx:
+                bash("echo hi", timeout=600)
+        message = str(ctx.exception)
+        self.assertIn("command, persistent", message)
+        self.assertIn("'timeout'", message)
+        self.assertIn("[bash-done]", message)
+        self.assertIn("end the turn", message)
+
+    def test_a_notice_less_session_is_told_its_await_waits(self):
+        # The decline must not promise a [bash-done] wake the host never
+        # sends: without completion notices an await runs to completion.
+        with mock.patch.object(bash_module, "_completion_notices_wired", False):
+            with self.assertRaises(TypeError) as ctx:
+                bash("echo hi", timeout=600)
+        message = str(ctx.exception)
+        self.assertIn("command, persistent", message)
+        self.assertIn("no [bash-done] notice", message)
+        self.assertNotIn("notification resumes you", message)
+        self.assertNotIn("always yields", message)
+        self.assertIn("waits until the command finishes", message)
+
+    def test_the_contract_docstring_survives_the_decline(self):
+        # The decline block sits after the docstring: help(bash) must keep
+        # serving the await-degrade contract models read.
+        self.assertIsNotNone(bash.__doc__)
+        self.assertIn("DEGRADES", bash.__doc__)
+
+    def test_positional_call_is_untouched(self):
+        handle = bash("echo okay")
+        try:
+            # Wait for the observable (the echo landing in the buffer), not a
+            # fixed sleep: bash() returns before the shell has run anything.
+            deadline = time.monotonic() + 5.0
+            while "okay" not in handle.output() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertIn("okay", handle.output())
+        finally:
+            handle.kill()
+
+
+class CompletionNoticeGateTest(unittest.IsolatedAsyncioTestCase):
+    """The completion notice must not race an await of the same handle."""
+
+    async def test_completion_notice_waits_for_an_in_flight_await(self):
+        bash_module._set_completion_notices_wired(True)
+        self.addCleanup(bash_module._set_completion_notices_wired, False)
+        from rlm import repl
+
+        calls = []
+
+        async def host_request(payload):
+            calls.append(payload)
+            return {"status": "ok"}
+
+        handle = bash("true")
+        await handle._wait()
+        await handle._wait_reaped()
+        cell_finished = asyncio.Event()
+        cell_finished.set()
+        activity = {"id": handle._activity_id, "pid": handle.pid, "active": True}
+        with mock.patch.object(repl, "is_active", return_value=True), mock.patch.object(
+            repl, "host_request", side_effect=host_request
+        ):
+            # An await of THIS handle is in flight.
+            handle._begin_await()
+            notice = asyncio.ensure_future(
+                handle._notify_background_completion(cell_finished, activity)
+            )
+            for _ in range(50):
+                await asyncio.sleep(0)
+            self.assertEqual(calls, [], "the notice fired inside the await window")
+            handle._end_await()
+            await notice
+        self.assertEqual(len(calls), 1, "the notice fires once the await clears")
+        self.assertEqual(calls[0]["type"], "bash.completed")
 
 
 if __name__ == "__main__":

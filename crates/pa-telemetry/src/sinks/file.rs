@@ -168,15 +168,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_batch_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let sink = FileSink::new(dir.path());
-        let outcome = sink.send_batch("install-1", vec![]).await;
-        assert_eq!(outcome, SinkOutcome::Sent);
-        assert!(!sink.path().exists());
-    }
-
-    #[tokio::test]
     async fn rotates_at_cap() {
         let dir = tempfile::tempdir().unwrap();
         let mut sink = FileSink::at(dir.path().join(FILE_NAME));

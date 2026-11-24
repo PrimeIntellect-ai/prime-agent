@@ -20,7 +20,10 @@ use serde_json::{json, Map, Value};
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
 use super::bash_notices::KernelNotice;
-use super::messages::{ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE};
+use super::messages::{
+    ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+    FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+};
 use pa_types::ai::UserContent;
 use pa_types::session::CustomMessage;
 
@@ -43,7 +46,8 @@ pub const INBOX_PERSISTENCE_ERROR_CLAUSE: &str =
 const JOURNAL_COMPACT_MIN_BYTES: u64 = 1024 * 1024;
 
 use pa_types::inbox_notice::{
-    INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE, INBOX_CLASS_CHILD_EXITED,
+    INBOX_CLASS_AGENT_MESSAGE, INBOX_CLASS_BASH_DONE, INBOX_CLASS_CELL_DONE,
+    INBOX_CLASS_CHILD_EXITED,
     INBOX_CLASS_CHILD_FAILED, INBOX_CLASS_FACTORY_PROGRESS, INBOX_CLASS_HEARTBEAT,
 };
 
@@ -78,6 +82,7 @@ pub struct InboxMessage {
 impl InboxMessage {
     /// The class's own identity a targeted read's `key` matches: the
     /// command of a bash completion, the run id of a factory milestone,
+    /// the cell id of a background cell completion,
     /// the child's session name of a child lifecycle notice, and the job
     /// id of a heartbeat fire. Agent messages have none (they filter by
     /// `sender`).
@@ -86,6 +91,7 @@ impl InboxMessage {
         let field = match self.class.as_str() {
             INBOX_CLASS_BASH_DONE => "command",
             INBOX_CLASS_FACTORY_PROGRESS => "runId",
+            INBOX_CLASS_CELL_DONE => "cellId",
             INBOX_CLASS_CHILD_EXITED | INBOX_CLASS_CHILD_FAILED => "sessionName",
             INBOX_CLASS_HEARTBEAT => "jobId",
             _ => return None,
@@ -172,6 +178,7 @@ pub fn inbox_class_for_custom_type(custom_type: &str) -> Option<&'static str> {
     match custom_type {
         ASYNC_BASH_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_BASH_DONE),
         FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE => Some(INBOX_CLASS_FACTORY_PROGRESS),
+        ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE => Some(INBOX_CLASS_CELL_DONE),
         _ => None,
     }
 }
@@ -760,17 +767,30 @@ pub fn utc_hh_mm(ms: u64) -> String {
 }
 
 /// The arrival notice for one batch of messages: the short steering row
-/// that replaces the notices' full rows. One count row per batch: a
-/// single arrival names its class ("1 new bash-done message"), a same
-/// class burst its count ("3 new bash-done messages"), a mixed burst
-/// the per-class breakdown ("3 new messages (2 bash-done, 1
-/// child-exited)"). The signature is the latest arrival's time; a
-/// wider batch carries the arrival window.
+/// that replaces the notices' full rows (see [`arrival_summary`] for the
+/// count wording), then the waiting count and the read instruction.
 #[must_use]
 pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, String) {
-    let Some(last) = batch.last() else {
+    let Some((window, summary)) = arrival_summary(batch) else {
         return (String::new(), String::new());
     };
+    (
+        format!("Inbox: {summary}"),
+        format!(
+            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
+        ),
+    )
+}
+
+/// One batch's `(window, summary)`. One count row per batch: a single
+/// arrival names its class ("1 new message (bash-done)"), a same class
+/// burst its count ("3 new bash-done messages"), a mixed burst the
+/// per-class breakdown ("3 new messages (2 bash-done, 1 child-exited)").
+/// The window is the latest arrival's UTC time; a wider batch carries
+/// the arrival window. `None` for an empty batch.
+#[must_use]
+pub fn arrival_summary(batch: &[InboxMessage]) -> Option<(String, String)> {
+    let last = batch.last()?;
     let signature = utc_hh_mm(last.arrived_at_ms);
     let mut classes: Vec<(&str, u64)> = Vec::new();
     for message in batch {
@@ -800,12 +820,7 @@ pub fn arrival_notice(batch: &[InboxMessage], total_waiting: usize) -> (String, 
     } else {
         format!("{}-{}", utc_hh_mm(batch[0].arrived_at_ms), signature)
     };
-    (
-        format!("Inbox: {summary}"),
-        format!(
-            "[inbox {window} UTC] {summary}; total waiting: {total_waiting}. Read them with msgs = await rlm.inbox.read()."
-        ),
-    )
+    Some((window, summary))
 }
 
 /// The periodic reminder text while the inbox stays unread: a minimal
@@ -830,8 +845,25 @@ use pa_types::inbox_notice::{INBOX_NOTICE_CUSTOM_TYPE, INBOX_NOTICE_SENDER};
 /// and the notice class for the transcript's own row class. `count` is
 /// the number the text announces (the arrival batch size, or the
 /// reminder's waiting count) for the transcript header.
+///
+/// `wakes_cell` is the arrival's wake eligibility — whether the covered
+/// batch contained anything besides bare cell completions — and
+/// `covers_cell_done` is whether the batch contained a bare cell
+/// completion: both stored once at the row render. A later cell's wake
+/// predicate reads `wakes_cell` (a restored row without the bit is
+/// conservatively wakeable), and the quiescence observation reads
+/// `covers_cell_done` so a pending cell-done delivery is never reported
+/// as zero outstanding work (a restored row without the bit counts
+/// conservatively).
 #[must_use]
-pub fn create_inbox_notice_row(text: &str, class: &str, count: usize, timestamp: u64) -> Value {
+pub fn create_inbox_notice_row(
+    text: &str,
+    class: &str,
+    count: usize,
+    wakes_cell: bool,
+    covers_cell_done: bool,
+    timestamp: u64,
+) -> Value {
     json!({
         "role": "custom",
         "customType": INBOX_NOTICE_CUSTOM_TYPE,
@@ -841,6 +873,8 @@ pub fn create_inbox_notice_row(text: &str, class: &str, count: usize, timestamp:
             "sender": INBOX_NOTICE_SENDER,
             "class": class,
             "count": count,
+            "wakesCell": wakes_cell,
+            "coversCellDone": covers_cell_done,
         },
         "timestamp": timestamp,
     })
@@ -1874,11 +1908,18 @@ mod tests {
             "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 3. Read them with msgs = await rlm.inbox.read(). {INBOX_PERSISTENCE_ERROR_CLAUSE}"
         );
         let reminder = format!("{} {INBOX_PERSISTENCE_ERROR_CLAUSE}", reminder_notice(3));
-        for (class, count, text) in [
-            (INBOX_NOTICE_CLASS_ARRIVAL, 1, arrival),
-            (INBOX_NOTICE_CLASS_REMINDER, 3, reminder),
+        for (class, count, text, covers_cell_done) in [
+            (INBOX_NOTICE_CLASS_ARRIVAL, 1, arrival, true),
+            (INBOX_NOTICE_CLASS_REMINDER, 3, reminder, false),
         ] {
-            let row = create_inbox_notice_row(&text, class, count, 1_730_000_000_000);
+            let row = create_inbox_notice_row(
+                &text,
+                class,
+                count,
+                true,
+                covers_cell_done,
+                1_730_000_000_000,
+            );
             // Whole-object equality: the exact wire shape, no extra keys,
             // every field present at once.
             let expected = json!({
@@ -1886,7 +1927,13 @@ mod tests {
                 "customType": INBOX_NOTICE_CUSTOM_TYPE,
                 "content": text.clone(),
                 "display": true,
-                "details": { "sender": INBOX_NOTICE_SENDER, "class": class, "count": count },
+                "details": {
+                    "sender": INBOX_NOTICE_SENDER,
+                    "class": class,
+                    "count": count,
+                    "wakesCell": true,
+                    "coversCellDone": covers_cell_done,
+                },
                 "timestamp": 1_730_000_000_000u64,
             });
             assert_eq!(row, expected, "the {class} notice row");

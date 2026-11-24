@@ -109,6 +109,7 @@ pub(crate) async fn execute_prompt_session_command(
         let mut autonomous = autonomous.lock().await;
         let mut params = SessionCommandParams {
             model,
+            compaction_abort: None,
             api_key,
             autonomous: &mut autonomous,
         };
@@ -303,6 +304,8 @@ mod tests {
         let engine = Arc::new(
             pa_core::session_engine::engine::create_session(
                 pa_core::session_engine::engine::SessionEngineConfig {
+                    cell_wake: None,
+                    on_background_cell: None,
                     on_late_sent_agent_message: None,
                     semantic_edges: None,
                     cron_store: None,

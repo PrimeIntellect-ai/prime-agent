@@ -102,7 +102,7 @@ async fn a_fire_at_a_killed_session_cancels_and_skips() {
     ));
     let hooks = QueueHooks {
         core: Arc::clone(&core),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
@@ -145,7 +145,7 @@ async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
     ));
     let hooks = Arc::new(QueueHooks {
         core: Arc::clone(&core),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
@@ -254,7 +254,7 @@ async fn settles_classify_ran_failed_or_skipped() {
         ));
         let hooks = Arc::new(QueueHooks {
             core: Arc::clone(&core),
-            work_notify: Arc::new(Notify::new()),
+            work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
             user_bash: Arc::new(crate::user_bash::UserBash::new()),
             store: Arc::new(AgentCronJobStore::for_session_artifacts()),
             recovery: Arc::new(std::sync::Mutex::new(None)),
@@ -506,7 +506,7 @@ async fn a_seam_set_heartbeat_fire_routes_into_the_inbox() {
     let mut strip_updates = events.subscribe();
     let hooks = Arc::new(QueueHooks {
         core: Arc::clone(&core),
-        work_notify: Arc::new(Notify::new()),
+        work_notify: Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         user_bash: Arc::new(crate::user_bash::UserBash::new()),
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
@@ -651,7 +651,7 @@ async fn a_dropped_queued_fire_withdraws_its_inbox_message_and_wake_row() {
     engine.set_inbox(Arc::clone(&inbox));
     let scheduled = Arc::new(ScheduledJobs::new(
         Arc::clone(&core),
-        Arc::new(Notify::new()),
+        Arc::new(crate::worker::WorkNotify::new(Arc::default())),
         Arc::new(crate::user_bash::UserBash::new()),
         Arc::new(crate::worker::EventPump::new()),
         Arc::new(std::sync::Mutex::new(None)),

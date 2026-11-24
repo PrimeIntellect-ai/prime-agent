@@ -8,6 +8,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }

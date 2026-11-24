@@ -131,7 +131,7 @@ class RLMInboxMessage:
     the epoch-ms arrival time; `sender` is the agent name of an agent
     message (None for the other classes); `key` is the other classes'
     own key: the command of a bash completion, the run id of a factory
-    milestone, the child's session name of a child lifecycle notice, or
+    milestone, the cell id of a background cell completion, the child's session name of a child lifecycle notice, or
     the job id of a heartbeat fire; `meta` carries the notice's metadata
     (pid/command/exitCode/exitClass, the run's fields, the message id,
     sender and family relationship, the child's status and ids, or the
@@ -251,6 +251,7 @@ async def spawn(
     model: str | None = None,
     thinking: str | None = None,
     cwd: str | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -260,8 +261,10 @@ async def spawn(
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     ``cwd`` starts the child in that directory (relative to the session cwd); defaults
     to the session cwd.
+    ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
+    child (the model comes from the ``decisionModel`` setting).
     """
-    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+    return await _spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
 
 async def _spawn(
@@ -272,6 +275,7 @@ async def _spawn(
     thinking: str | None = None,
     cwd: str | None = None,
     factory: dict[str, str] | None = None,
+    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """``spawn`` plus the factory executor's run tag (``{runId, specId,
     stateId}``), which the host records on the child's ledger spawn edge."""
@@ -286,6 +290,8 @@ async def _spawn(
         kwargs["cwd"] = cwd
     if factory is not None:
         kwargs["factory"] = factory
+    if kind is not None:
+        kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -598,8 +604,8 @@ async def inbox_read(
     ``inbox_class`` matches the message class (``bash-done``,
     ``factory-progress``, ``agent-message``, ``child-exited``,
     ``child-failed``, ``heartbeat``); ``key`` matches the class's own
-    key exactly (a command, a run id, a child's session name, or a
-    heartbeat job id) and needs ``inbox_class``; ``since_ms`` is the inclusive
+    key exactly (a command, a run id, a cell id, a child's session name,
+    or a heartbeat job id) and needs ``inbox_class``; ``since_ms`` is the inclusive
     arrival lower bound and ``before_ms`` the exclusive upper bound
     (epoch milliseconds). Only the matching messages leave the inbox.
 
@@ -950,8 +956,9 @@ class _RLMNamespace:
         model: str | None = None,
         thinking: str | None = None,
         cwd: str | None = None,
+        kind: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, cwd=cwd, kind=kind)
 
     async def create_session(
         self,

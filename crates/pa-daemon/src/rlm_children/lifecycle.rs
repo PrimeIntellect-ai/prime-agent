@@ -75,6 +75,7 @@ impl SupervisorChildSessionsInner {
         depth: u32,
         model: &str,
         thinking: Option<&str>,
+        decision_child: bool,
         cwd: &str,
         session_dir: &Path,
         // The parent's in-flight turn request the child anchors to (TS
@@ -91,6 +92,11 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
+        // The create key: descriptor.rs derives the worker's launch env
+        // from it, and the admission projects it onto the ledger edge.
+        if decision_child {
+            config["decisionChild"] = json!(true);
+        }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
             config["model"] = json!(id);
@@ -182,6 +188,7 @@ impl SupervisorChildSessionsInner {
                 depth,
                 model,
                 thinking,
+                /*decision_child*/ false,
                 cwd,
                 session_dir,
                 /*spawned_by_request_id*/ None,
@@ -439,7 +446,7 @@ impl SupervisorChildSessionsInner {
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         {
             let record = record.lock().await;
-            if !record.prompt_admitted {
+            if !record.run.prompt_admitted() {
                 return false;
             }
         }
@@ -592,10 +599,15 @@ impl SupervisorChildSessionsInner {
                 self.emit_child_update(record).await;
                 // Only a successful run completes the display (TS
                 // `completeRlmSubagentRuntime`); a cancelled or failed run
-                // stays `running`, which a restart relists as `error`.
+                // stays `running`, which a restart relists as `error`. A
+                // decision child never completes here: its spawn task is a
+                // readiness handshake, not its run — the child is meant to
+                // serve after the settle, and a completed display would
+                // stop the update roster from reviving it.
                 let completed = {
                     let record = record.lock().await;
-                    matches!(record.run.verdict(), Some(RunVerdict::Done))
+                    (matches!(record.run.verdict(), Some(RunVerdict::Done))
+                        && !record.decision_child)
                         .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
                 };
                 if let Some((session_dir, child_id)) = completed {
@@ -1009,7 +1021,11 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
 }
 
 /// The busy flags of one child `get_state` summary (streaming, its own
-/// descendants, or queued work in flight).
+/// descendants, queued work in flight, or owed background completions — a
+/// detached kernel cell and a queued completion both mean the child has
+/// work that will still land, so an ordinary child must not settle while the
+/// count is non-zero; the child's `waitForRlmQuiescence` wait holds on the
+/// same count).
 fn child_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
     flag("isStreaming")
@@ -1020,6 +1036,32 @@ fn child_busy_flags(state: &Value) -> bool {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             > 0
+        || state
+            .get("pendingBackgroundCompletions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+}
+
+#[cfg(test)]
+mod background_busy_tests {
+    use super::*;
+
+    /// A detached cell (or a queued completion) keeps an ordinary child
+    /// unsettled: the count is the only evidence that work will still land,
+    /// and a child that settles without it reports done/no-reply while its
+    /// cell still runs.
+    #[test]
+    fn a_child_with_owed_background_completions_is_not_idle() {
+        assert!(child_busy_flags(
+            &json!({ "pendingBackgroundCompletions": 1 })
+        ));
+        assert!(!child_busy_flags(
+            &json!({ "pendingBackgroundCompletions": 0 })
+        ));
+        // A summary that predates the field keeps the old rules only.
+        assert!(!child_busy_flags(&json!({})));
+    }
 }
 
 #[cfg(test)]

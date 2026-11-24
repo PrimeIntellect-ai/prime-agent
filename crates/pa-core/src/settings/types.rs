@@ -279,11 +279,17 @@ pub struct FactorySettings {
 /// `enabled: false` is the kill switch that restores direct notice-row
 /// steering. `reminderIntervalMs` (default 10 minutes, `0` disables)
 /// repeats the waiting count while the inbox stays unread.
+/// `idleDebounceMs` (default 5 s) is the window an idle agent's wake
+/// waits to cover every notice that arrives in it. `successHoldMs`
+/// (default 30 s) is how long a wake caused only by successful bash
+/// completions is held before it delivers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInboxSettings {
     pub enabled: Option<bool>,
     pub reminder_interval_ms: Option<u64>,
+    pub idle_debounce_ms: Option<u64>,
+    pub success_hold_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -301,6 +307,12 @@ pub const DEFAULT_PYTHON_CELL_TIMEOUT_MS: u64 = 60_000;
 
 /// The default inbox reminder repeat interval: 10 minutes.
 pub const DEFAULT_AGENT_INBOX_REMINDER_INTERVAL_MS: u64 = 600_000;
+
+/// The default idle wake debounce window: 5 seconds.
+pub const DEFAULT_AGENT_INBOX_IDLE_DEBOUNCE_MS: u64 = 5_000;
+
+/// The default hold of a success-only idle wake: 30 seconds.
+pub const DEFAULT_AGENT_INBOX_SUCCESS_HOLD_MS: u64 = 30_000;
 
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -338,10 +350,16 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
-    /// Default time limit for user `python_repl` cells, in milliseconds
+    /// The Decision API's model reference ("provider/model-id" or a bare
+    /// id), resolved through the model registry exactly like `imageModel`.
+    /// Unset (or unresolvable): the Decision API stays off.
+    pub decision_model: Option<String>,
+    /// Default wait budget for user `python_repl` cells, in milliseconds
     /// (default [`DEFAULT_PYTHON_CELL_TIMEOUT_MS`]; `0` disables). A cell
-    /// running longer is interrupted; the model can pass a per-call
-    /// `timeout` instead. Daemonless sessions never arm it.
+    /// outliving it auto-backgrounds: the call returns early, the cell
+    /// keeps running, and its completion lands in the inbox (a full
+    /// session row when it carries rich output). The model can pass a
+    /// per-call `timeout` instead. Daemonless sessions never arm it.
     pub python_cell_timeout_ms: Option<u64>,
     pub autonomous: Option<AutonomousSettings>,
     /// Custom shell that runs every kernel `bash()` and user-bash command as

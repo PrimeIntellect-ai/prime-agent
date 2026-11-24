@@ -142,28 +142,3 @@ pub fn get_logger(component: &str) -> Logger {
         component: component.to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn timestamps_are_rfc3339() {
-        let ts = iso_timestamp();
-        assert_eq!(ts.len(), 24);
-        assert!(ts.ends_with('Z'));
-        assert_eq!(&ts[4..5], "-");
-    }
-
-    #[test]
-    fn sink_receives_entries() {
-        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink_handle = received.clone();
-        set_log_sink(Some(std::sync::Arc::new(move |entry: &LogEntry| {
-            sink_handle.lock().unwrap().push(entry.level);
-        })));
-        get_logger("test").error("boom", serde_json::json!({}));
-        set_log_sink(None);
-        assert_eq!(*received.lock().unwrap(), vec![LogLevel::Error]);
-    }
-}

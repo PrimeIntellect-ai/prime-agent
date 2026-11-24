@@ -1,14 +1,17 @@
 //! Execution bookkeeping: request writes, interrupts, abort forcing, and
 //! active-execution resolution plus late-sent agent message handlers.
 
-use super::{
-    anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult,
-    LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
-    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
-    KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
-};
 use std::fmt::Write as _;
+use std::sync::atomic::Ordering;
+
+use super::{
+    anyhow, json, live_kernels, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc,
+    AsyncWriteExt, Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult,
+    LateSentAgentMessageCallback, Lifecycle, Signal, Value, AGENT_MESSAGE_DISPLAY_MIME,
+    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_BACKGROUND_CELL_MESSAGE,
+    KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS,
+    MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+};
 
 impl Inner {
     /// Write one JSON-lines request frame; completes when the OS accepted the bytes.
@@ -51,8 +54,63 @@ impl Inner {
         self.resolve_execution(execution, false);
     }
 
-    /// Wait until no execution is active, interrupting a busy cell, bounded by
-    /// the busy-reuse window.
+    /// Whether `execution` is still the physically active, unsettled
+    /// execution: the fence every out-of-band stop re-checks after an
+    /// await, so a settled execution's late watcher can never signal or
+    /// retire the next cell.
+    pub(crate) fn execution_is_live(&self, execution: &Arc<ActiveExecution>) -> bool {
+        let is_active = {
+            let g = lock(&self.guarded);
+            matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution))
+        };
+        is_active && !lock(&execution.buffers).settled
+    }
+
+    /// Retire the kernel of an execution that ignored its stop interrupt:
+    /// claim the manager terminal (the provisioner lazily revives a fresh
+    /// kernel on the next use), kill the process, and only then publish the
+    /// captured execution's forced-stop completion — the "work ended" claim
+    /// follows the kill, so no code keeps running unchecked behind it. The
+    /// single delivery owner is the result channel: taking the sender first
+    /// keeps the teardown's reject from racing the typed completion.
+    pub(crate) fn retire_for_ignored_interrupt(&self, execution: &Arc<ActiveExecution>) {
+        // Claim ATOMICALLY, under the settle path's lock order (the
+        // execution's buffers, then the manager guard): only the still
+        // active, unsettled captured execution may retire the kernel. A
+        // `done` that lands in any gap settles and clears the slot before
+        // a new admission can start, and the Shutdown state this claim
+        // sets blocks admission outright — so a stale watcher can never
+        // kill a replacement cell's kernel.
+        let claimed = {
+            let buffers = lock(&execution.buffers);
+            let mut g = lock(&self.guarded);
+            let is_active = matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, execution));
+            if !is_active || buffers.settled {
+                false
+            } else {
+                g.lifecycle.transition(Lifecycle::Defunct);
+                true
+            }
+        };
+        if !claimed {
+            return;
+        }
+        self.retired_for_ignored_interrupt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        live_kernels::remove(self);
+        let sender = lock(&execution.result_tx).take();
+        self.cleanup_resources(Signal::Kill);
+        // The captured execution ends here: its watchers exit.
+        execution.notify_terminated();
+        if let Some(sender) = sender {
+            let _ = sender.send(Ok(InternalExecuteResult::forced_stop(execution)));
+        }
+    }
+
+    /// Wait until no execution is active, bounded by the busy-reuse window.
+    /// A busy cell is interrupted while it waits — except a detached
+    /// (backgrounded) one: nobody awaits that work any more, so it is never
+    /// signalled, and the wait answers the background-cell message instead.
     pub(crate) async fn wait_for_active_execution_to_clear_for_reuse(
         self: &Arc<Self>,
         signal: Option<&AbortSignal>,
@@ -60,15 +118,18 @@ impl Inner {
         let started = Instant::now();
         loop {
             let notified = self.busy_notify.notified();
-            {
+            let active_detached = {
                 let g = lock(&self.guarded);
-                if g.active_execution.is_none() {
-                    return Ok(());
+                match &g.active_execution {
+                    Some(active) => {
+                        if g.lifecycle.is_shut_down() {
+                            return Err(anyhow!("Kernel has been shut down"));
+                        }
+                        active.detached.load(Ordering::SeqCst)
+                    }
+                    None => return Ok(()),
                 }
-                if g.lifecycle.is_shut_down() {
-                    return Err(anyhow!("Kernel has been shut down"));
-                }
-            }
+            };
             let elapsed = started.elapsed();
             if elapsed >= Duration::from_millis(KERNEL_BUSY_REUSE_WAIT_MS) {
                 break;
@@ -76,15 +137,17 @@ impl Inner {
             let wait_ms = (KERNEL_BUSY_REUSE_WAIT_MS - elapsed.as_millis() as u64)
                 .min(KERNEL_BUSY_INTERRUPT_INTERVAL_MS);
             let wait = tokio::time::sleep(Duration::from_millis(wait_ms.max(1)));
-            let active_id = lock(&self.guarded)
-                .active_execution
-                .as_ref()
-                .map(|a| a.request_id.clone());
-            let interrupt = {
+            let interrupt = if active_detached {
+                None
+            } else {
+                let active_id = lock(&self.guarded)
+                    .active_execution
+                    .as_ref()
+                    .map(|a| a.request_id.clone());
                 let inner = Arc::clone(self);
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     let _ = inner.interrupt(active_id.as_deref()).await;
-                })
+                }))
             };
             tokio::select! {
                 () = notified => {}
@@ -95,13 +158,19 @@ impl Inner {
                         None => std::future::pending().await,
                     }
                 } => {
-                    interrupt.abort();
+                    if let Some(interrupt) = interrupt {
+                        interrupt.abort();
+                    }
                     return Ok(());
                 }
             }
         }
-        if lock(&self.guarded).active_execution.is_some() {
-            return Err(anyhow!("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}"));
+        if let Some(active) = lock(&self.guarded).active_execution.clone() {
+            return Err(if active.detached.load(Ordering::SeqCst) {
+                anyhow!("{KERNEL_BUSY_BACKGROUND_CELL_MESSAGE}")
+            } else {
+                anyhow!("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}")
+            });
         }
         Ok(())
     }
@@ -119,6 +188,8 @@ impl Inner {
             if let Some(tx) = lock(&execution.result_tx).take() {
                 let _ = tx.send(Err(anyhow!("{message}")));
             }
+            // The teardown rejected the execution: its watchers exit.
+            execution.notify_terminated();
             self.notify_active_execution_idle();
         }
     }
@@ -149,6 +220,9 @@ impl Inner {
         let mut buffers = lock(&execution.buffers);
         if !buffers.settled {
             buffers.settled = true;
+            // The execution settled: its watchers exit rather than await a
+            // stop signal that will never fire.
+            execution.notify_terminated();
             {
                 let mut g = lock(&self.guarded);
                 g.completed_executions += 1;
@@ -182,19 +256,12 @@ impl Inner {
                     result = Some(clipped);
                 }
             }
-            let user_aborted = execution
-                .opts
-                .signal
-                .as_ref()
-                .is_some_and(AbortSignal::is_aborted);
-            if user_aborted {
+            // The out-of-band stop: a stopped cell reports the abort, even
+            // one that settled cooperatively on its interrupt. A cell whose
+            // `done` settled before any stop fired keeps its own outcome.
+            if execution.stop_signal.is_aborted() {
                 status = ExecuteStatus::Aborted;
             }
-            // A user abort wins over the limit (plain Ctrl+C: no timeout text, no
-            // kill), and a cell that completed ok as its limit fired keeps its ok outcome.
-            let timed_out_after_ms = buffers
-                .timed_out_after_ms
-                .filter(|_| !user_aborted && status != ExecuteStatus::Ok);
 
             let mut background_output = std::mem::take(&mut buffers.background_output);
             buffers.background_output_chars = 0;
@@ -223,7 +290,9 @@ impl Inner {
                 status,
                 error: buffers.error.take(),
                 duration_ms: execution.started.elapsed().as_millis() as u64,
-                timed_out_after_ms,
+                // A detached execution's marker is stamped on the outcome by
+                // its continuation; a settled call waits, so it never detaches.
+                detached: None,
             };
             drop(buffers);
             if let Some(tx) = lock(&execution.result_tx).take() {
