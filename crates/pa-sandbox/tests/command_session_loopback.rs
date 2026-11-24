@@ -121,7 +121,7 @@ fn auth(gateway_url: String, token: &str) -> GatewayAuth {
     GatewayAuth {
         sandbox_id: "sb-1".to_string(),
         gateway_url,
-        user_namespace: "ns_user1".to_string(),
+        namespace: "ns_user1".to_string(),
         job_id: "job_abc".to_string(),
         token: token.to_string(),
         expires_at: "2026-09-16T01:00:00Z".to_string(),

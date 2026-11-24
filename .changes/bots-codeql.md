@@ -1,0 +1,1 @@
+- Bots keep exec session ids out of logs, and name provider key secrets with a keyed fingerprint.

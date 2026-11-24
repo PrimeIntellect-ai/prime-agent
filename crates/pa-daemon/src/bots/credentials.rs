@@ -13,11 +13,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
+use hmac::{Hmac, KeyInit, Mac};
 use pa_core::auth::{
     AuthCredential, AuthStorage, PrimeTeamCredential, StoredPrimeTeam, PRIME_INFERENCE_PROVIDER_ID,
 };
 use pa_sandbox::transport::ReqwestSandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
+use sha2::Sha256;
 
 /// The API key the guest holds. The platform replaces the auth header it
 /// rides in with the real key, outside the sandbox.
@@ -63,6 +65,21 @@ fn secret_name(provider: &str) -> String {
         })
         .collect();
     format!("PRIME_AGENT_{id}_KEY")
+}
+
+/// A short id of `key` for its secret name: a rotated key gets a new
+/// secret. The key is the MAC key over a fixed label, never hashed data.
+fn key_fingerprint(key: &str) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC takes any key length");
+    mac.update(b"prime-agent bot credential");
+    mac.finalize().into_bytes()[..6]
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write;
+            write!(hex, "{byte:02X}").expect("write to String");
+            hex
+        })
 }
 
 /// The auth header pa-ai's request builder sets for `provider` over
@@ -144,7 +161,7 @@ fn injections(auth: &mut AuthStorage, required: &str) -> Vec<Injection> {
         let Some(key) = auth.get_api_key(&provider).filter(|key| !key.is_empty()) else {
             continue;
         };
-        let fingerprint = super::sha256_hex(key.as_bytes())[..12].to_ascii_uppercase();
+        let fingerprint = key_fingerprint(&key);
         let secret = format!("{}_{fingerprint}", secret_name(&provider));
         let mut rules = provider_rules(&provider, &secret);
         rules.retain(|host, _| hosts.len() < MAX_RULE_HOSTS && hosts.insert(host.clone()));
