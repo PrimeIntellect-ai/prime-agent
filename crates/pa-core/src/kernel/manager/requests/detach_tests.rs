@@ -438,7 +438,10 @@ async fn the_wait_budget_backgrounds_instead_of_interrupting() {
     let runner = manager.clone();
     let drained = tokio::time::timeout(
         Duration::from_secs(6),
-        runner.wait_for_active_execution_to_clear_for_reuse(None),
+        runner.wait_for_active_execution_to_clear_for_reuse(
+            crate::kernel::manager::Admission::Exclusive,
+            None,
+        ),
     )
     .await
     .expect("the reuse wait settles");
@@ -589,18 +592,22 @@ async fn a_user_cancel_force_aborts_an_attached_ignoring_cell_and_keeps_the_kern
 
 /// `rlm.end_turn()` from a cell that already backgrounded answers an
 /// error: the cell's turn returned at the detach, so a success answer
-/// would claim a turn end that never happens.
+/// would claim a turn end that never happens. The request names its cell,
+/// so a newer foreground cell running beside it keeps its turn.
 #[tokio::test]
 async fn end_turn_in_a_backgrounded_cell_answers_an_error() {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let python = dir.path().join("end-turn-kernel");
+    // The first cell stays silent until the second cell arrives; then it
+    // calls rlm.end_turn() while the second cell runs.
     std::fs::write(
         &python,
         r#"#!/usr/bin/env python3
-import json, sys, time
+import json, sys
 print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+first = None
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -608,12 +615,14 @@ while True:
     req = json.loads(line)
     if req.get("type") != "execute":
         continue
-    rid = req.get("id")
-    time.sleep(0.6)
-    print(json.dumps({"event": "host_request", "id": "end-1", "data": {"type": "rlm.end_turn"}}), flush=True)
+    if first is None:
+        first = req["id"]
+        continue
+    print(json.dumps({"event": "host_request", "id": "end-1", "data": {"type": "rlm.end_turn", "cell": first}}), flush=True)
     reply = json.loads(sys.stdin.readline())
-    print(json.dumps({"event": "stdout", "id": rid, "text": json.dumps(reply["data"])}), flush=True)
-    print(json.dumps({"event": "done", "id": rid, "status": "ok"}), flush=True)
+    print(json.dumps({"event": "stdout", "id": first, "text": json.dumps(reply["data"])}), flush=True)
+    print(json.dumps({"event": "done", "id": first, "status": "ok"}), flush=True)
+    print(json.dumps({"event": "done", "id": req["id"], "status": "ok"}), flush=True)
 "#,
     )
     .expect("write fake kernel");
@@ -628,7 +637,7 @@ while True:
         .await
         .expect("ready handshake");
     let (outcomes, callback) = background_cell_outcomes();
-    let result = manager
+    let backgrounded = manager
         .execute(
             "await rlm.end_turn()",
             ExecuteOptions {
@@ -639,7 +648,12 @@ while True:
         )
         .await
         .expect("the bounded call detaches");
-    assert!(result.detached.is_some(), "{result:?}");
+    assert!(backgrounded.detached.is_some(), "{backgrounded:?}");
+    let foreground = manager
+        .execute("x = 1", ExecuteOptions::default())
+        .await
+        .expect("the foreground cell runs beside the backgrounded one");
+    assert!(!foreground.ended_turn, "{foreground:?}");
     wait_until(
         Duration::from_secs(5),
         "the backgrounded cell never completed",
@@ -728,21 +742,40 @@ async fn the_scoped_cancel_skips_an_attached_cell() {
         .start(KernelStartOptions::default())
         .await
         .expect("ready handshake");
-    let attached = manager
-        .execute(
-            "cell",
-            ExecuteOptions {
-                on_background_cell: Some(background_cell_outcomes().1),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("the attached call waits for its cell");
-    assert!(attached.detached.is_none());
+    let call = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            manager
+                .execute(
+                    "cell",
+                    ExecuteOptions {
+                        on_background_cell: Some(background_cell_outcomes().1),
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
+    };
+    // The cancel lands while the attached cell runs (the fake cell sleeps
+    // a second), so a cancel that reached attached cells would signal it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lock(&manager.inner.guarded).active_executions.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the cell's execution never became active"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert!(
         !manager.abort_detached_execution(),
         "no detached execution is running"
     );
+    let attached = call
+        .await
+        .expect("the call task joins")
+        .expect("the attached call waits for its cell");
+    assert!(attached.detached.is_none());
+    assert_eq!(attached.status, ExecuteStatus::Ok);
     assert!(
         !python.with_extension("interrupts").exists(),
         "the scoped cancel never signalled the attached cell"
@@ -1010,7 +1043,10 @@ async fn a_stale_retirement_never_touches_the_replacement_cell() {
         })
     };
     let stale = loop {
-        let active = lock(&manager.inner.guarded).active_execution.clone();
+        let active = lock(&manager.inner.guarded)
+            .active_executions
+            .last()
+            .cloned();
         if let Some(active) = active {
             break active;
         }
@@ -1038,7 +1074,10 @@ async fn a_stale_retirement_never_touches_the_replacement_cell() {
     // Wait for the replacement's admission INSIDE the stale watcher's
     // grace window (the watcher is still running out its 1s).
     loop {
-        let active = lock(&manager.inner.guarded).active_execution.clone();
+        let active = lock(&manager.inner.guarded)
+            .active_executions
+            .last()
+            .cloned();
         // The first cell's execution may still be draining; the
         // replacement is the fresh one that follows it.
         if active.is_some_and(|active| !std::sync::Arc::ptr_eq(&active, &stale)) {
@@ -1303,14 +1342,21 @@ async fn a_settled_execution_releases_its_stop_watcher() {
     };
     // Capture the running execution: its watcher holds a terminal-watch
     // receiver while the cell runs.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let execution = loop {
-        let active = lock(&manager.inner.guarded).active_execution.clone();
+        let active = lock(&manager.inner.guarded)
+            .active_executions
+            .last()
+            .cloned();
         if let Some(active) = active {
             break active;
         }
+        assert!(
+            Instant::now() < deadline,
+            "the cell's execution never became active"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if execution.settled_tx.receiver_count() > 0 {
             break;

@@ -320,8 +320,9 @@ pub fn settled_cell_details(details: &mut serde_json::Value, result: &ExecuteRes
 
 /// The model-facing note for a call that returned early while its cell keeps
 /// running (the auto-background): names the cause, the cell, and the
-/// completion contract — another cell cannot start until the cell settles,
-/// the completion arrives as a notice, and backgrounded work is stoppable.
+/// completion contract — a new cell can run while it waits at an await
+/// point, the completion arrives as a notice, and backgrounded work is
+/// stoppable.
 fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> String {
     use crate::kernel::shared::DetachReason;
     let cause = match detached.reason {
@@ -335,9 +336,9 @@ fn background_cell_message(detached: &crate::kernel::shared::DetachedCell) -> St
     };
     format!(
         "{cause}; the cell was auto-backgrounded (cell {}) and keeps running — nothing was killed. \
-No other cell can start until it settles, so do not call python_repl again: answer the incoming \
-message or end the turn, and read the cell's state only after its completion notice arrives (the \
-inbox carries it, or a full session row when it carries rich output). The user can cancel \
+Answer the incoming message or continue the turn: a new cell can run while it waits at an await \
+point, but not while it runs synchronous code. Read the cell's results only after its completion notice arrives (the inbox carries it, or a full \
+session row when it carries rich output). The user can cancel \
 backgrounded work; a cell that ignores the cancel's interrupt has its kernel retired, which may \
 lose unsnapshotted state.",
         detached.cell_id
