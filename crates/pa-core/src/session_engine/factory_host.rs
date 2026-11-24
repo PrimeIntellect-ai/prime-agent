@@ -466,35 +466,123 @@ impl FactoryActivityRequest {
     }
 }
 
-/// The kernel host request that loads and compiles a machine directory.
+/// The kernel host request that loads a library machine (by `name`) or a
+/// machine directory (by `path`) and answers its run spec.
 pub const FACTORY_COMPILE_REQUEST_TYPE: &str = "factory.compile";
 
-/// Register `factory.compile`, the shared loader used by CLI and sessions.
-pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers) {
+/// The kernel host request that checks a stored spec's numeric limits
+/// before a run starts (the limits live only in `pa_factory::limits`).
+pub const FACTORY_LIMITS_REQUEST_TYPE: &str = "factory.limits";
+
+/// The machine library's levels in search order: the bundled library
+/// (`PRIME_AGENT_MACHINES_DIR`, else the runtime's `src/rlm/machines`, which
+/// the kernel venv installs), then `<agent dir>/machines`.
+#[must_use]
+pub fn machine_library_levels(agent_dir: &Path) -> Vec<pa_factory::Level> {
+    let bundled = std::env::var("PRIME_AGENT_MACHINES_DIR")
+        .ok()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(|dir| crate::kernel::bootstrap::venv::expand_home(dir.trim()))
+        .or_else(crate::kernel::bootstrap::venv::bundled_machines_dir);
+    let mut levels = Vec::new();
+    if let Some(dir) = bundled {
+        levels.push(pa_factory::Level {
+            source: "repo".to_string(),
+            dir,
+        });
+    }
+    levels.push(pa_factory::Level {
+        source: "user".to_string(),
+        dir: agent_dir.join("machines"),
+    });
+    levels
+}
+
+/// Scan the machine library once (`factory list`, the machines page, run by
+/// name). Reads files only; no kernel.
+#[must_use]
+pub fn machine_library(agent_dir: &Path) -> pa_factory::Library {
+    pa_factory::scan_library(&machine_library_levels(agent_dir))
+}
+
+/// Register `factory.compile` and `factory.limits`, the loaders a session's
+/// kernel uses to run library machines and check stored specs.
+pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers, agent_dir: &Path) {
+    let agent_dir = agent_dir.to_path_buf();
     handlers.register(
         FACTORY_COMPILE_REQUEST_TYPE,
+        host_handler(move |payload| {
+            let agent_dir = agent_dir.clone();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    compile_machine(&payload.data, &machine_library_levels(&agent_dir))
+                })
+                .await
+                .map_err(|error| anyhow!("factory.compile stopped: {error}"))?
+            })
+        }),
+    );
+    handlers.register(
+        FACTORY_LIMITS_REQUEST_TYPE,
         host_handler(|payload| {
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || compile_machine_dir(&payload.data))
-                    .await
-                    .map_err(|error| anyhow!("factory.compile stopped: {error}"))?
+                let errors = pa_factory::limits::check_spec_limits(
+                    payload.data.get("spec").unwrap_or(&Value::Null),
+                );
+                if errors.is_empty() {
+                    Ok(json!({}))
+                } else {
+                    Err(anyhow!(errors.join("; ")))
+                }
             })
         }),
     );
 }
 
-fn compile_machine_dir(data: &Value) -> anyhow::Result<Value> {
-    let path = data
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.trim().is_empty())
-        .ok_or_else(|| anyhow!("factory.compile requires a machine directory path"))?;
+/// `factory.compile`: `{name}` resolves through the library scan, `{path}`
+/// names a machine directory. A directory compiles with `params` bound; a
+/// `MACHINE.md` answers its spec as written and takes no params.
+fn compile_machine(data: &Value, levels: &[pa_factory::Level]) -> anyhow::Result<Value> {
     let params = match data.get("params") {
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(params)) => params.clone(),
         Some(_) => return Err(anyhow!("factory.compile params must be an object")),
     };
-    let dir = PathBuf::from(path);
+    let text = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+    };
+    let (dir, kind) = match (text("path"), text("name")) {
+        (Some(path), _) => (PathBuf::from(path), pa_factory::MachineKind::Directory),
+        (None, Some(name)) => {
+            let library = pa_factory::scan_library(levels);
+            let machine = library.resolve(name).map_err(|error| anyhow!(error))?;
+            (machine.path.clone(), machine.kind)
+        }
+        (None, None) => {
+            return Err(anyhow!(
+                "factory.compile requires a library machine name or a machine directory path"
+            ))
+        }
+    };
+    if kind == pa_factory::MachineKind::File {
+        if !params.is_empty() {
+            return Err(anyhow!(
+                "params apply to machine directories (machine.toml); {} is a MACHINE.md machine, which takes none",
+                dir.display()
+            ));
+        }
+        let machine = pa_factory::read_machine_md(&dir).map_err(|error| anyhow!(error))?;
+        return Ok(json!({
+            "name": machine.name,
+            "version": machine.version,
+            "description": machine.description,
+            "author": machine.author,
+            "spec": machine.spec,
+            "path": dir.display().to_string(),
+        }));
+    }
     let joined = |problems: Vec<pa_factory::Diagnostic>| {
         let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
         anyhow!("{}: {}", dir.display(), lines.join("; "))
@@ -507,6 +595,7 @@ fn compile_machine_dir(data: &Value) -> anyhow::Result<Value> {
         "description": machine.description,
         "author": machine.author,
         "spec": spec,
+        "path": dir.display().to_string(),
     }))
 }
 
