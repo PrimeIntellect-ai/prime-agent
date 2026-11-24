@@ -887,7 +887,8 @@ pub(crate) fn deliver_inbox_arrival_row_locked(
 ) {
     core_guard.inbox_wake_due = None;
     let mut batch = arrivals.lock().unwrap();
-    batch.retain(|message| inbox.is_waiting(&message.id));
+    let waiting = inbox.waiting_ids();
+    batch.retain(|message| waiting.contains(&message.id));
     if batch.is_empty() {
         return;
     }
@@ -895,7 +896,7 @@ pub(crate) fn deliver_inbox_arrival_row_locked(
         .into_iter()
         .map(|message| message.id.clone())
         .collect();
-    let (preview, text) = delivered_notice_text(&batch, inbox.len() - shown.len());
+    let (preview, text) = delivered_notice_text(&batch, waiting.len() - shown.len());
     rerender_inbox_notice(
         item,
         &inbox.with_persistence_error_clause(text),

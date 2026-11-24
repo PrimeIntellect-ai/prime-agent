@@ -672,6 +672,17 @@ impl SessionInbox {
         self.lock().messages.values().cloned().collect()
     }
 
+    /// The waiting message ids, one snapshot (a delivery trims its batch
+    /// and counts the rest against the same set).
+    #[must_use]
+    pub fn waiting_ids(&self) -> std::collections::BTreeSet<String> {
+        self.lock()
+            .messages
+            .values()
+            .map(|message| message.id.clone())
+            .collect()
+    }
+
     /// Whether the message with this id is still waiting.
     #[must_use]
     pub fn is_waiting(&self, id: &str) -> bool {
