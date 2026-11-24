@@ -2150,9 +2150,17 @@ class ConcurrentCellTest(unittest.TestCase):
         self.addCleanup(self.repl.close)
         self.repl.ready()
 
-    def until_both_done(self) -> list[dict]:
-        events: list[dict] = []
-        pending = {"slow", "next"}
+    def until_started(self, cell: str, events: list[dict]) -> None:
+        """Read events until `cell` printed its start marker: the cell is
+        past compile and into its body."""
+        while True:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("event") == "stdout" and event.get("id") == cell and "started" in event.get("text", ""):
+                return
+
+    def until_both_done(self, events: list[dict]) -> list[dict]:
+        pending = {"slow", "next"} - {e.get("id") for e in events if e.get("event") == "done"}
         while pending:
             event = self.repl.read_event()
             events.append(event)
@@ -2161,20 +2169,22 @@ class ConcurrentCellTest(unittest.TestCase):
         return events
 
     def test_a_new_cell_runs_while_a_running_cell_awaits(self):
-        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nawait asyncio.sleep(3)\nprint('slow done')"})
-        time.sleep(0.5)
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(3)\nprint('slow done')"})
+        self.until_started("slow", events)
         self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
-        events = self.until_both_done()
+        self.until_both_done(events)
         dones = [e["id"] for e in events if e.get("event") == "done"]
         self.assertEqual(dones, ["next", "slow"])
         by_cell = {cell: "".join(e["text"] for e in events if e.get("event") == "stdout" and e.get("id") == cell) for cell in ("slow", "next")}
-        self.assertEqual(by_cell, {"slow": "slow done\n", "next": "next ran\n"})
+        self.assertEqual(by_cell, {"slow": "started\nslow done\n", "next": "next ran\n"})
 
     def test_a_new_cell_is_refused_while_a_running_cell_runs_synchronous_code(self):
-        self.repl.send({"type": "execute", "id": "slow", "code": "import time\ntime.sleep(7)"})
-        time.sleep(0.5)
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import time\nprint('started')\ntime.sleep(7)"})
+        self.until_started("slow", events)
         self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
-        events = self.until_both_done()
+        self.until_both_done(events)
         dones = [(e["id"], e["status"]) for e in events if e.get("event") == "done"]
         self.assertEqual(dones, [("next", "error"), ("slow", "ok")])
         refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
@@ -2182,12 +2192,13 @@ class ConcurrentCellTest(unittest.TestCase):
         self.assertNotIn("next ran", stream_text(events, "stdout"))
 
     def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
-        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nawait asyncio.sleep(30)"})
-        time.sleep(0.5)
-        self.repl.send({"type": "execute", "id": "next", "code": "import time\ntime.sleep(2)\nprint('next ran')"})
-        time.sleep(0.5)
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(30)"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "import time\nprint('started')\ntime.sleep(2)\nprint('next ran')"})
+        self.until_started("next", events)
         self.repl.send({"type": "interrupt", "id": "slow"})
-        events = self.until_both_done()
+        self.until_both_done(events)
         outcomes = {e["id"]: e["status"] for e in events if e.get("event") == "done"}
         self.assertEqual(outcomes, {"slow": "error", "next": "ok"})
         interrupted = next(e for e in events if e.get("event") == "error" and e.get("id") == "slow")
@@ -2196,10 +2207,11 @@ class ConcurrentCellTest(unittest.TestCase):
 
     def test_a_cells_degraded_await_writes_its_note_beside_a_newer_cell(self):
         # The note belongs to the calling cell, not the newest running one.
-        self.repl.send({"type": "execute", "id": "slow", "code": "import rlm\nrlm._set_completion_notices_wired(True)\nh = rlm.bash('sleep 3')\nawait h"})
-        time.sleep(0.3)
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import rlm\nrlm._set_completion_notices_wired(True)\nh = rlm.bash('sleep 3')\nprint('started')\nawait h"})
+        self.until_started("slow", events)
         self.repl.send({"type": "execute", "id": "next", "code": "import asyncio\nawait asyncio.sleep(2)"})
-        events = self.until_both_done()
+        self.until_both_done(events)
         notes = "".join(e["text"] for e in events if e.get("event") == "stderr" and e.get("id") == "slow")
         self.assertIn("do not await it again this turn", notes)
 
