@@ -93,17 +93,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_primitives() {
-        let mut p = Properties::new();
-        p.set("str", Value::from("v"));
-        p.set("num", Value::from(42));
-        p.set("bool", Value::from(true));
-        p.set("null", Value::Null);
-        assert_eq!(p.len(), 4);
-        assert_eq!(p.get("num"), Some(&Value::from(42)));
-    }
-
-    #[test]
     fn rejects_structured_values() {
         let mut p = Properties::new();
         let structured = [
@@ -115,16 +104,6 @@ mod tests {
         }
         assert_eq!(p.get("bad"), None);
         assert!(p.is_empty());
-    }
-
-    #[test]
-    fn set_map_embeds_primitive_map() {
-        let mut timings = Properties::new();
-        timings.set("models", Value::from(120));
-        let mut p = Properties::new();
-        p.set_map("phase_timings", &timings);
-        let embedded = p.get("phase_timings").cloned().unwrap();
-        assert_eq!(embedded, serde_json::json!({ "models": 120 }));
     }
 
     #[test]

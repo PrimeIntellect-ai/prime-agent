@@ -52,6 +52,13 @@ fn resolve_runtime_source_dir(package: &Path, checkout: Option<&Path>) -> Option
     })
 }
 
+/// The bundled machine library in the runtime sources (`src/rlm/machines`),
+/// which the kernel venv installs as package data.
+pub(crate) fn bundled_machines_dir() -> Option<PathBuf> {
+    resolve_runtime_source_dir(&package_dir(), crate::packages::source_checkout_root())
+        .map(|dir| dir.join("src").join("rlm").join("machines"))
+}
+
 pub(in crate::kernel::bootstrap) fn require_runtime_source_dir() -> anyhow::Result<PathBuf> {
     resolve_runtime_source_dir(&package_dir(), crate::packages::source_checkout_root()).context(
         "Prime Agent requires a local prime-agent-runtime directory containing its pyproject.toml and src/rlm sources; reinstall Prime Agent with the runtime beside the binary, or set PI_PACKAGE_DIR to the complete trusted package directory. The runtime will not be downloaded from a package index.",

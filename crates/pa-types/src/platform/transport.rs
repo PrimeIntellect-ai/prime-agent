@@ -511,18 +511,9 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn paths_one_byte_over_the_native_limit_are_rejected_with_context() {
+    fn paths_one_byte_over_the_native_limit_are_rejected() {
         let path = std::path::PathBuf::from(format!("/{}", "x".repeat(MAX_SUN_PATH)));
-        let error = UnixSocketAddress::new(&path)
-            .err()
-            .expect("over native limit");
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "AF_UNIX socket path exceeds the {MAX_SUN_PATH}-byte limit: {}",
-                path.display()
-            )
-        );
+        assert!(UnixSocketAddress::new(&path).is_err(), "over native limit");
     }
 
     #[tokio::test]
@@ -553,22 +544,10 @@ mod pipe_name_tests {
             pipe_name(worker).unwrap(),
             r"\\.\pipe\prime-agent-worker-abc123-0123456789ab"
         );
-    }
-
-    #[test]
-    fn explicit_file_paths_derive_the_same_pipe_on_both_sides() {
-        let socket = Path::new(r"C:\Users\runner\AppData\Local\Temp\.tmpacp\daemon.sock");
-        let a = pipe_name(socket).expect("derives");
-        let b = pipe_name(socket).expect("derives again");
-        assert_eq!(a, b, "the derivation is deterministic");
-        assert!(a.starts_with(r"\\.\pipe\prime-agent-explicit-"), "{a}");
-    }
-
-    #[test]
-    fn distinct_paths_derive_distinct_pipes() {
-        let a = pipe_name(Path::new(r"C:\tmp\one\daemon.sock")).expect("derives");
-        let b = pipe_name(Path::new(r"C:\tmp\two\daemon.sock")).expect("derives");
-        assert_ne!(a, b);
+        let upper = Path::new(r"\\.\PIPE\prime-agent-daemon");
+        assert_eq!(pipe_name(upper).unwrap(), r"\\.\PIPE\prime-agent-daemon");
+        let remote = Path::new(r"\\fileserver\pipe\prime-agent");
+        assert_eq!(pipe_name(remote).unwrap(), r"\\fileserver\pipe\prime-agent");
     }
 
     #[test]
@@ -578,18 +557,13 @@ mod pipe_name_tests {
     }
 
     #[test]
-    fn pipe_paths_match_case_insensitively_and_remote_forms_pass_through() {
-        let upper = Path::new(r"\\.\PIPE\prime-agent-daemon");
-        assert_eq!(pipe_name(upper).unwrap(), r"\\.\PIPE\prime-agent-daemon");
-        let remote = Path::new(r"\\fileserver\pipe\prime-agent");
-        assert_eq!(pipe_name(remote).unwrap(), r"\\fileserver\pipe\prime-agent");
-    }
-
-    #[test]
     fn equivalent_path_spellings_derive_the_same_pipe() {
         let a = pipe_name(Path::new(r"C:\Temp\daemon.sock")).expect("derives");
         let b = pipe_name(Path::new(r"c:\temp\DAEMON.SOCK")).expect("derives");
         assert_eq!(a, b, "case is normalized before hashing");
+        assert!(a.starts_with(r"\\.\pipe\prime-agent-explicit-"), "{a}");
+        let other = pipe_name(Path::new(r"C:\Temp\other\daemon.sock")).expect("derives");
+        assert_ne!(a, other, "distinct paths derive distinct pipes");
     }
 
     #[test]

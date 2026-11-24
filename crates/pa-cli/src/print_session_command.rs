@@ -109,6 +109,7 @@ pub(crate) async fn execute_prompt_session_command(
         let mut autonomous = autonomous.lock().await;
         let mut params = SessionCommandParams {
             model,
+            compaction_abort: None,
             api_key,
             autonomous: &mut autonomous,
         };
