@@ -773,8 +773,6 @@ impl AgentSessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
-        entry: Option<u64>,
-        instance: Option<u64>,
     ) -> anyhow::Result<Value> {
         let engine = self
             .session
@@ -783,7 +781,7 @@ impl AgentSessionEngine {
             .clone()
             .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
         engine
-            .factory_activity(action, run_id, spec_id, timeout_ms, entry, instance)
+            .factory_activity(action, run_id, spec_id, timeout_ms)
             .await
     }
 

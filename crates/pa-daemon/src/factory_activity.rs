@@ -83,57 +83,10 @@ impl Worker {
             .and_then(Value::as_str)
             .map(str::to_string);
         let timeout_ms = payload.get("timeoutMs").and_then(Value::as_u64);
-        // The `node` action's selectors ride the flattened rest map. Validate
-        // present values before narrowing them: a malformed selector must not
-        // turn into `None` and silently select the latest entry or instance.
-        let (entry, instance) = if action == "node" {
-            match (payload.get("entry"), payload.get("instance")) {
-                (None, None) => (None, None),
-                (Some(entry), Some(instance)) => {
-                    let Some(entry) = entry.as_u64() else {
-                        return response_failure(
-                            None,
-                            "factory_activity",
-                            "factory activity node entry must be a non-negative integer",
-                            None,
-                        );
-                    };
-                    let Some(instance) = instance.as_u64() else {
-                        return response_failure(
-                            None,
-                            "factory_activity",
-                            "factory activity node instance must be a non-negative integer",
-                            None,
-                        );
-                    };
-                    (Some(entry), Some(instance))
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    return response_failure(
-                        None,
-                        "factory_activity",
-                        "factory activity node entry and instance selectors must be provided together",
-                        None,
-                    );
-                }
-            }
-        } else {
-            (
-                payload.get("entry").and_then(Value::as_u64),
-                payload.get("instance").and_then(Value::as_u64),
-            )
-        };
         let reply = match &self.agent_engine {
             Some(engine) => {
                 engine
-                    .factory_activity(
-                        &action,
-                        run_id.as_deref(),
-                        spec_id.as_deref(),
-                        timeout_ms,
-                        entry,
-                        instance,
-                    )
+                    .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
                     .await
             }
             None => Err(anyhow::anyhow!(
@@ -272,71 +225,6 @@ mod tests {
             assert_eq!(
                 slow_graph.data,
                 Some(serde_json::json!({ "runs": [], "factorySpecs": 2 }))
-            );
-        }
-        let _ = worker.dispatch("kill", &serde_json::json!({})).await;
-    }
-
-    #[tokio::test]
-    async fn malformed_explicit_node_selectors_are_rejected_before_kernel_dispatch() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let sessions = dir.path().join("sessions");
-        std::fs::create_dir_all(&sessions).expect("sessions dir");
-        let worker = Worker::new(
-            crate::worker::WorkerConfig {
-                socket_path: dir.path().join("worker.sock"),
-                supervisor_socket_path: std::path::PathBuf::new(),
-                token: "token".to_string(),
-                worker_instance_id: String::new(),
-                active_session_id: "malformed-selectors".to_string(),
-                agent_dir: dir.path().join("agent"),
-                recovery_journal_path: dir.path().join("recovery.jsonl"),
-                telemetry_disabled: Some(true),
-                script: Some(serde_json::json!({ "responses": [] })),
-            },
-            None,
-        );
-        let created = worker
-            .dispatch(
-                "create",
-                &serde_json::json!({ "cwd": "/tmp", "sessionDir": sessions }),
-            )
-            .await;
-        assert!(created.success, "{created:?}");
-
-        let cases = [
-            (
-                "null pair",
-                serde_json::json!({ "action": "node", "entry": null, "instance": null }),
-                "factory activity node entry must be a non-negative integer",
-            ),
-            (
-                "malformed entry",
-                serde_json::json!({ "action": "node", "entry": "0", "instance": 0 }),
-                "factory activity node entry must be a non-negative integer",
-            ),
-            (
-                "malformed instance",
-                serde_json::json!({ "action": "node", "entry": 0, "instance": -1 }),
-                "factory activity node instance must be a non-negative integer",
-            ),
-            (
-                "entry without instance",
-                serde_json::json!({ "action": "node", "entry": 0 }),
-                "factory activity node entry and instance selectors must be provided together",
-            ),
-            (
-                "instance without entry",
-                serde_json::json!({ "action": "node", "instance": 0 }),
-                "factory activity node entry and instance selectors must be provided together",
-            ),
-        ];
-        for (label, payload, expected_error) in cases {
-            let response = worker.dispatch("factory_activity", &payload).await;
-            assert_eq!(
-                response.error.as_deref(),
-                Some(expected_error),
-                "{label}: {response:?}"
             );
         }
         let _ = worker.dispatch("kill", &serde_json::json!({})).await;

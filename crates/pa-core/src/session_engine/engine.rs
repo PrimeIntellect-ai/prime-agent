@@ -1125,8 +1125,6 @@ impl SessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
-        entry: Option<u64>,
-        instance: Option<u64>,
     ) -> anyhow::Result<serde_json::Value> {
         let request = super::factory_host::FactoryActivityRequest::parse(
             action, run_id, spec_id, timeout_ms,
@@ -1158,8 +1156,6 @@ impl SessionEngine {
                 request.run_id.as_deref(),
                 request.spec_id.as_deref(),
                 request.timeout_ms,
-                entry,
-                instance,
             )
             .await
     }
