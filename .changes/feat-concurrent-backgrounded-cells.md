@@ -1,0 +1,1 @@
+- A backgrounded `python_repl` cell no longer locks the kernel: a new cell runs while the backgrounded cell waits at an await point, and is refused only while it runs synchronous code.

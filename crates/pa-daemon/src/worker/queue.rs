@@ -2,9 +2,8 @@
 //! and queue recovery.
 use super::inbox_router::{delivered_notice_text, notice_text, shown_items, wake_delay};
 use super::{
-    emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
-    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
-    AUTONOMOUS_QUEUE_KEY,
+    emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Result, SessionCore,
+    Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE, AUTONOMOUS_QUEUE_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,7 +430,7 @@ pub(crate) fn restore_queue_snapshot(
 pub(crate) fn admit_autonomous_follow_up(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     text: String,
 ) {
     {
@@ -467,7 +466,7 @@ pub(crate) fn admit_goal_follow_up(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     work: crate::engine::GoalTurnEndWork,
 ) {
     let (lane, follow_up) = match work {
@@ -534,15 +533,14 @@ pub(crate) fn admit_goal_follow_up(
 pub(crate) fn admit_kernel_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     notice: crate::engine::KernelNotice,
     session_is_closed: impl Fn() -> bool,
 ) {
     let crate::engine::KernelNotice { row, preview_label } = notice;
-    let content = match &row.content {
-        pa_types::ai::UserContent::Text(text) => text.clone(),
-        pa_types::ai::UserContent::Blocks(_) => String::new(),
-    };
+    // Block rows (a rich cell completion) keep a readable text preview for
+    // the queue strip while the custom row carries the actual blocks.
+    let content = row.content.text();
     // The busy sample and the push share ONE critical section: a turn starting
     // between them would queue an invisible row for a busy session.
     let mut core_guard = core.lock().unwrap();
@@ -610,7 +608,7 @@ pub(crate) const INBOX_REMINDER_QUEUE_KEY: &str = "inbox:reminder";
 pub(crate) fn admit_inbox_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     arrivals: &pa_core::session_engine::inbox::InboxArrivals,
     notice: pa_core::session_engine::inbox::InboxNotice,
@@ -713,6 +711,15 @@ pub(crate) fn admit_inbox_notice_locked(
             _ => due,
         });
         arrivals.push(message);
+        // The wake eligibility and the cell-delivery bit, derived once at
+        // the row render: only a batch that contains something besides
+        // bare cell completions can end a running cell's wait (a
+        // cell-done-only arrival waits for its own turn boundary), and a
+        // batch that contains a cell completion is that cell's pending
+        // delivery. Both bits ride the row; a later cell's wake predicate
+        // reads one, the quiescence observation reads the other.
+        let wakes_cell = batch_wakes_a_cell(&arrivals);
+        let covers_cell_done = batch_covers_cell_done(&arrivals);
         let (count, _, _) = inbox.count();
         let (preview, text) = notice_text(&arrivals, count);
         // A follow-up arrival never demotes a queued steering notice: the
@@ -737,6 +744,8 @@ pub(crate) fn admit_inbox_notice_locked(
             &text,
             pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
             arrivals.len(),
+            wakes_cell,
+            covers_cell_done,
             now,
         );
         // The replacement pattern the scheduler's queue keys use: the
@@ -816,6 +825,11 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
     } else {
         let (preview, text) = notice_text(&batch, count);
         let text = inbox.with_persistence_error_clause(text);
+        // The trimmed batch's wake eligibility and cell-delivery bit
+        // re-render with the row (a consumed message can be the batch's
+        // only wakeable input; the cell completions it leaves stay covered).
+        let wakes_cell = batch_wakes_a_cell(&batch);
+        let covers_cell_done = batch_covers_cell_done(&batch);
         let core_guard = &mut *core_guard;
         let (steering, follow_up) = (&mut core_guard.steering, &mut core_guard.follow_up);
         for item in steering
@@ -824,7 +838,7 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
         {
             if item.message != text || item.preview.as_deref() != Some(preview.as_str()) {
-                rerender_inbox_notice(item, &text, batch.len());
+                rerender_inbox_notice(item, &text, batch.len(), wakes_cell, covers_cell_done);
                 item.preview = Some(preview.clone());
                 changed = true;
             }
@@ -849,7 +863,9 @@ pub(crate) fn refresh_inbox_wake_rows_locked(
             .chain(follow_up.iter_mut())
             .filter(|item| item.queue_key.as_deref() == Some(INBOX_REMINDER_QUEUE_KEY))
         {
-            if rerender_inbox_notice(item, &reminder, count) {
+            // A reminder stays wakeable input and is nobody's pending
+            // cell delivery.
+            if rerender_inbox_notice(item, &reminder, count, true, false) {
                 changed = true;
             }
         }
@@ -887,6 +903,8 @@ pub(crate) fn deliver_inbox_arrival_row_locked(
         item,
         &inbox.with_persistence_error_clause(text),
         batch.len(),
+        batch_wakes_a_cell(&batch),
+        batch_covers_cell_done(&batch),
     );
     item.preview = Some(preview);
     core_guard.inbox_shown_unaccepted = shown;
@@ -919,25 +937,26 @@ pub(crate) fn consume_shown_inbox_items_locked(
 /// the queued one on either lane (the daemon refuses a replace of any row
 /// that carries the custom twin, so a live mutation never moves one
 /// across lanes: only a journal written before the upgrade can hold a
-/// reminder on the follow-up lane).
+/// reminder on the follow-up lane). Returns whether a reminder row was
+/// queued.
 pub(crate) fn admit_inbox_reminder(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
+    work_notify: &Arc<super::WorkNotify>,
     inbox: &std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>,
     session_is_closed: impl Fn() -> bool,
     engine: Option<&crate::agent_engine::AgentSessionEngine>,
-) {
+) -> bool {
     let mut core_guard = core.lock().unwrap();
     if session_is_closed() {
-        return;
+        return false;
     }
     // The captured store is re-checked under the slot's own mutex: a
     // replacement that installed the next session's store must never wake
     // with the retired session's count.
     if let Some(engine) = engine {
         if !engine.is_live_inbox(inbox) {
-            return;
+            return false;
         }
     }
     // The count re-samples under the core lock: a concurrent drain and
@@ -952,17 +971,21 @@ pub(crate) fn admit_inbox_reminder(
     #[cfg(test)]
     super::inbox_queue_tests::pause_inbox_reminder_after_count(core);
     if count == 0 {
-        return;
+        return false;
     }
     let now = pa_core::autonomous::now_millis();
     let message =
         inbox.with_persistence_error_clause(pa_core::session_engine::inbox::reminder_notice(count));
     // The custom twin rides the turn: the reminder delivers as the inbox
     // system's attributed custom row, its content the model-visible text.
+    // An admitted reminder stays wakeable input for a running cell; it
+    // repeats a count, so it is nobody's pending cell delivery.
     let custom_message = pa_core::session_engine::inbox::create_inbox_notice_row(
         &message,
         pa_types::inbox_notice::INBOX_NOTICE_CLASS_REMINDER,
         count,
+        true,
+        false,
         now,
     );
     let (policy, queue_visible) = if core_guard.busy {
@@ -1001,6 +1024,7 @@ pub(crate) fn admit_inbox_reminder(
         },
     );
     work_notify.notify_one();
+    true
 }
 
 /// Re-render one queued inbox notice row's text: the queue's `message`
@@ -1008,7 +1032,13 @@ pub(crate) fn admit_inbox_reminder(
 /// stale twin would deliver an old count — while the twin's sender, class,
 /// and admission timestamp keep the row's identity (the re-render only
 /// re-syncs content). Returns whether the text changed.
-fn rerender_inbox_notice(item: &mut QueuedItem, text: &str, count: usize) -> bool {
+fn rerender_inbox_notice(
+    item: &mut QueuedItem,
+    text: &str,
+    count: usize,
+    wakes_cell: bool,
+    covers_cell_done: bool,
+) -> bool {
     if item.message == text {
         return false;
     }
@@ -1016,12 +1046,36 @@ fn rerender_inbox_notice(item: &mut QueuedItem, text: &str, count: usize) -> boo
     if let Some(row) = item.custom_message.as_mut() {
         if let Some(object) = row.as_object_mut() {
             object.insert("content".to_string(), json!(text));
-        }
-        if let Some(details) = row.get_mut("details").and_then(Value::as_object_mut) {
-            details.insert("count".to_string(), json!(count));
+            // The count, the wake eligibility, and the cell-delivery bit
+            // re-render with the row: a trimmed batch can lose (or keep)
+            // its only wakeable input, and it keeps covering whatever cell
+            // completions remain.
+            if let Some(details) = object.get_mut("details").and_then(Value::as_object_mut) {
+                details.insert("count".to_string(), json!(count));
+                details.insert("wakesCell".to_string(), json!(wakes_cell));
+                details.insert("coversCellDone".to_string(), json!(covers_cell_done));
+            }
         }
     }
     true
+}
+
+/// Whether an arrivals batch contains anything besides bare cell
+/// completions: the wake eligibility of the inbox arrival row that covers
+/// it (a cell-done-only batch never ends a running cell's wait).
+fn batch_wakes_a_cell(batch: &[pa_core::session_engine::inbox::InboxMessage]) -> bool {
+    batch
+        .iter()
+        .any(|message| message.class != pa_types::inbox_notice::INBOX_CLASS_CELL_DONE)
+}
+
+/// Whether an arrivals batch contains a bare cell completion: the
+/// covered cell's pending delivery rides the inbox arrival row, so the
+/// quiescence observation counts it until the row delivers.
+fn batch_covers_cell_done(batch: &[pa_core::session_engine::inbox::InboxMessage]) -> bool {
+    batch
+        .iter()
+        .any(|message| message.class == pa_types::inbox_notice::INBOX_CLASS_CELL_DONE)
 }
 
 /// Withdraw one queued bash completion notice: the kernel read the finished
@@ -1175,6 +1229,38 @@ fn is_bash_completion_row(row: &Value) -> bool {
         == Some(pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_CUSTOM_TYPE)
 }
 
+/// Whether one queued steering row is wakeable input for a running cell:
+/// every user and agent row is; a backgrounded cell's own completion row
+/// never is (a cell still waiting when the notice lands is a different cell,
+/// one that started after the backgrounded one or beside it, so the notice
+/// does not concern it and is read after it); an inbox arrival row carries
+/// its stored eligibility bit (a restored row without the bit is
+/// conservatively wakeable — one extra detach, never a lost steer).
+pub(crate) fn row_wakes_a_cell(item: &QueuedItem) -> bool {
+    let Some(row) = item.custom_message.as_ref() else {
+        return true;
+    };
+    let custom_type = row
+        .get("customType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if custom_type
+        == pa_core::session_engine::messages::ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE
+    {
+        return false;
+    }
+    if custom_type == pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE
+        && row.pointer("/details/class").and_then(Value::as_str)
+            == Some(pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL)
+    {
+        return row
+            .pointer("/details/wakesCell")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+    }
+    true
+}
+
 /// The `[bash-done]` notices still queued for delivery across the
 /// steering and follow-up lanes: completed bash work the bash lane will
 /// still wake the session for.
@@ -1186,6 +1272,47 @@ pub(crate) fn queued_bash_completion_notices(core: &SessionCore) -> usize {
             item.custom_message
                 .as_ref()
                 .is_some_and(is_bash_completion_row)
+        })
+        .count()
+}
+
+/// Whether one queued row is a cell completion still pending delivery:
+/// a full `[cell-done]` row, or the coalesced inbox arrival row whose
+/// covered batch contains a cell completion (the stored
+/// `details.coversCellDone` bit — a restored row without the bit counts
+/// conservatively, so pending work is never hidden).
+fn is_cell_delivery_row(row: &Value) -> bool {
+    let custom_type = row
+        .get("customType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if custom_type
+        == pa_core::session_engine::messages::ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE
+    {
+        return true;
+    }
+    custom_type == pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE
+        && row.pointer("/details/class").and_then(Value::as_str)
+            == Some(pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL)
+        && row
+            .pointer("/details/coversCellDone")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+}
+
+/// The cell completions still queued for delivery across the steering and
+/// follow-up lanes: one count per pending row, never per historical
+/// unread inbox entry. The quiescence observation reads it, so a
+/// backgrounded cell's terminal notice reports as outstanding work until
+/// its row actually delivers.
+pub(crate) fn queued_cell_completion_deliveries(core: &SessionCore) -> usize {
+    core.steering
+        .iter()
+        .chain(core.follow_up.iter())
+        .filter(|item| {
+            item.custom_message
+                .as_ref()
+                .is_some_and(is_cell_delivery_row)
         })
         .count()
 }

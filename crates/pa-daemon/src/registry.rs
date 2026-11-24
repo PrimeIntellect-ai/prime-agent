@@ -191,6 +191,11 @@ pub(crate) struct ResidentWorker {
     pub(crate) monitor_epoch: AtomicU64,
     /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
+    /// The worker advertised `background_cell_abort` in its `worker_auth`
+    /// response: only a worker that reads the scoped abort's scope may
+    /// receive one (an older adopted worker would treat it as the full
+    /// queue-suspending abort).
+    pub(crate) background_cell_abort_capable: AtomicBool,
     /// The last-good heartbeats catalog answer, tagged with its generation: served when the worker
     /// is too busy for a fresh list (fresh only while current).
     pub(crate) heartbeat_snapshot: Mutex<Option<WorkerHeartbeatSnapshot>>,
@@ -267,6 +272,7 @@ impl ResidentWorker {
             spawned_at_ms: AtomicU64::new(0),
             monitor_epoch: AtomicU64::new(0),
             peer_transport_capable: AtomicBool::new(false),
+            background_cell_abort_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
             cron_snapshot: Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),

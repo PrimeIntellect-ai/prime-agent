@@ -32,15 +32,19 @@ pub(crate) use queue::{
     admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
     consume_shown_inbox_items_locked, deliver_inbox_arrival_row_locked, enqueue_priority,
     gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
-    queued_bash_completion_notices, refresh_inbox_wake_rows_locked, restore_queue_snapshot,
-    restored_turn_policy, withdraw_bash_completion_notice, withdraw_drained_inbox_notice,
-    QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY,
-    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    queued_bash_completion_notices, queued_cell_completion_deliveries,
+    refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy, row_wakes_a_cell,
+    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
 mod turn;
+mod work_notify;
+
+pub(crate) use work_notify::WorkNotify;
 
 use create::{active_session_id_of, worker_server_capabilities};
 // session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
@@ -141,7 +145,7 @@ pub struct Worker {
     /// authoritative pulls embed: a push can race a fresher pull, so the
     /// supervisor's gate drops the stale snapshot.
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) work_notify: Arc<Notify>,
+    pub(crate) work_notify: Arc<WorkNotify>,
     pub(crate) idle_notify: Arc<Notify>,
     /// The per-connection session-attach registry (the fresh bots'
     /// release findings): connection tokens -> the client ids their
@@ -361,7 +365,24 @@ impl Worker {
         // Shared worker recovery journal: the turn runner persists queue
         // snapshots, `serve` opens the file, commands record busy state.
         let recovery = Arc::new(Mutex::new(None));
-        let work_notify = Arc::new(Notify::new());
+        // The worker's queue-backed cell wake: the pending predicate
+        // reads the live steering lane (wakeable rows only — a cell-done
+        // row never detaches a later cell), so an arrival that lands while
+        // the model is still streaming the tool call ends the cell's wait
+        // at once instead of waiting out the budget. Every work wake
+        // requests it; the agent engine installs it before it is shared.
+        let wake_core = Arc::clone(&core);
+        let cell_wake_pending: pa_core::kernel::cell_wake::CellWakePending =
+            std::sync::Arc::new(move || {
+                let core = wake_core
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                core.steering.iter().any(row_wakes_a_cell)
+            });
+        let worker_cell_wake = std::sync::Arc::new(
+            pa_core::kernel::cell_wake::CellWake::with_pending(cell_wake_pending),
+        );
+        let work_notify = Arc::new(WorkNotify::new(std::sync::Arc::clone(&worker_cell_wake)));
         let idle_notify = Arc::new(Notify::new());
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner and the command arms
@@ -458,7 +479,11 @@ impl Worker {
                         cron_store: Some(kernel_cron_wiring(&scheduled)),
                         queued_steering_probe: queued_steering_probe.clone(),
                     }) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
+                            // The queue-backed wake installs before the
+                            // engine is shared: its session builds then
+                            // hand the same wake to every provisioner.
+                            engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));
                             let concrete = std::sync::Arc::new(engine);
                             agent_engine = Some(std::sync::Arc::clone(&concrete));
                             concrete
@@ -488,7 +513,8 @@ impl Worker {
                         cron_store: Some(kernel_cron_wiring(&scheduled)),
                         queued_steering_probe: queued_steering_probe.clone(),
                     }) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
+                            engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));
                             let concrete = std::sync::Arc::new(engine);
                             agent_engine = Some(std::sync::Arc::clone(&concrete));
                             concrete
@@ -1365,6 +1391,8 @@ mod agent_message_tests;
 #[cfg(test)]
 mod prompt_image_tests;
 
+#[cfg(test)]
+mod abort_scope_tests;
 #[cfg(test)]
 mod compaction_admission_tests;
 #[cfg(test)]
