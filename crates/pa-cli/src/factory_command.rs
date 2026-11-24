@@ -312,7 +312,9 @@ fn export_machine(name: &str, out: &Path) -> Result<Value, String> {
     let bytes = std::fs::read(&machine.path)
         .map_err(|error| format!("cannot read {}: {error}", machine.path.display()))?;
     write_new_file(out, &bytes)?;
-    Ok(json!({"ok": true, "name": machine.name, "path": out.display().to_string(), "source": "library"}))
+    Ok(
+        json!({"ok": true, "name": machine.name, "path": out.display().to_string(), "source": "library"}),
+    )
 }
 
 fn run_export(name: &str, out: &str, json: bool) -> i32 {
@@ -343,7 +345,9 @@ fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
     }
     let bytes = std::fs::read(source)
         .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-    let destination = user_dir.join(&machine.name).join(pa_factory::MACHINE_MD_FILE);
+    let destination = user_dir
+        .join(&machine.name)
+        .join(pa_factory::MACHINE_MD_FILE);
     let created = !destination.exists();
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)
@@ -351,7 +355,9 @@ fn import_machine(source: &Path, user_dir: &Path) -> Result<Value, String> {
     }
     std::fs::write(&destination, bytes)
         .map_err(|error| format!("cannot write {}: {error}", destination.display()))?;
-    Ok(json!({"ok": true, "name": machine.name, "path": destination.display().to_string(), "created": created}))
+    Ok(
+        json!({"ok": true, "name": machine.name, "path": destination.display().to_string(), "created": created}),
+    )
 }
 
 fn run_import(path: &str, json: bool) -> i32 {
@@ -576,7 +582,10 @@ mod tests {
             path: PathBuf::from("/machines/sweep/MACHINE.md"),
             kind: pa_factory::MachineKind::File,
         };
-        assert_eq!(listing_row(&machine, 5), "sweep  repo  A machine that sweeps.");
+        assert_eq!(
+            listing_row(&machine, 5),
+            "sweep  repo  A machine that sweeps."
+        );
     }
 
     #[test]

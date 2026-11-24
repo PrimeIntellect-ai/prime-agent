@@ -108,10 +108,17 @@ impl Library {
                 "the library machine {name:?} exists but is broken ({error})"
             )),
             None => {
-                let names: Vec<&str> = self.machines().map(|machine| machine.name.as_str()).collect();
+                let names: Vec<&str> = self
+                    .machines()
+                    .map(|machine| machine.name.as_str())
+                    .collect();
                 Err(format!(
                     "no library machine named {name:?} (machines: {})",
-                    if names.is_empty() { "none".to_string() } else { names.join(", ") }
+                    if names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        names.join(", ")
+                    }
                 ))
             }
         }
@@ -149,7 +156,10 @@ pub fn scan_library(levels: &[Level]) -> Library {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
-        for folder in folders.iter().filter(|folder| folder.join(MACHINE_FILE).is_file()) {
+        for folder in folders
+            .iter()
+            .filter(|folder| folder.join(MACHINE_FILE).is_file())
+        {
             let name = folder_name(folder);
             let claim = match load_machine_dir(folder) {
                 Ok(machine) if machine.name == name => Ok(LibraryMachine {
@@ -172,7 +182,9 @@ pub fn scan_library(levels: &[Level]) -> Library {
                     .join("; ")),
             };
             if let Err(error) = &claim {
-                library.warnings.push(format!("{}: {error}", folder.display()));
+                library
+                    .warnings
+                    .push(format!("{}: {error}", folder.display()));
             }
             library.claim(name, claim);
         }
@@ -209,11 +221,12 @@ pub fn scan_library(levels: &[Level]) -> Library {
 /// `<path>: <errors>` when the file cannot be read, does not parse, or its
 /// spec breaks a limit.
 pub fn read_machine_md(path: &Path) -> Result<MachineMd, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: unreadable ({error})", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("{}: unreadable ({error})", path.display()))?;
     let text = String::from_utf8(bytes)
         .map_err(|error| format!("{}: not valid UTF-8 ({error})", path.display()))?;
-    let machine = parse_machine_md(&text, &path.display().to_string())
-        .map_err(|errors| errors.join("; "))?;
+    let machine =
+        parse_machine_md(&text, &path.display().to_string()).map_err(|errors| errors.join("; "))?;
     let limits = check_spec_limits(&machine.spec);
     if !limits.is_empty() {
         return Err(format!("{}: {}", path.display(), limits.join("; ")));
@@ -287,7 +300,11 @@ pub fn parse_machine_md(text: &str, source: &str) -> Result<MachineMd, Vec<Strin
     }
     let mut fields: BTreeMap<&str, String> = BTreeMap::new();
     let mut errors = Vec::new();
-    let Some(close) = lines.iter().skip(1).position(|line| line.trim_end() == "---").map(|at| at + 1)
+    let Some(close) = lines
+        .iter()
+        .skip(1)
+        .position(|line| line.trim_end() == "---")
+        .map(|at| at + 1)
     else {
         return Err(vec![format!(
             "{source}: frontmatter is not closed (end it with a `---` line)"
@@ -303,7 +320,9 @@ pub fn parse_machine_md(text: &str, source: &str) -> Result<MachineMd, Vec<Strin
             continue;
         }
         let Some((key, raw)) = line.split_once(':') else {
-            errors.push(format!("{source}: frontmatter line {number} must be `key: value`"));
+            errors.push(format!(
+                "{source}: frontmatter line {number} must be `key: value`"
+            ));
             continue;
         };
         let key = key.trim();
@@ -321,7 +340,9 @@ pub fn parse_machine_md(text: &str, source: &str) -> Result<MachineMd, Vec<Strin
             continue;
         }
         if raw.trim().is_empty() {
-            errors.push(format!("{source}: frontmatter field {key:?} requires a value"));
+            errors.push(format!(
+                "{source}: frontmatter field {key:?} requires a value"
+            ));
             continue;
         }
         match unquote(raw, key) {

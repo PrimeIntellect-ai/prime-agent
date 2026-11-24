@@ -738,9 +738,15 @@ fn build_state(
     let route = raw
         .route
         .and_then(|table| build_route(&at, table, problems));
-    let max_entries = raw
-        .max_entries
-        .and_then(|value| bounded(value, 1, MAX_ENTRIES, &format!("{at}.max_entries"), problems));
+    let max_entries = raw.max_entries.and_then(|value| {
+        bounded(
+            value,
+            1,
+            MAX_ENTRIES,
+            &format!("{at}.max_entries"),
+            problems,
+        )
+    });
     let retries = raw
         .retries
         .and_then(|value| bounded(value, 0, MAX_RETRIES, &format!("{at}.retries"), problems));

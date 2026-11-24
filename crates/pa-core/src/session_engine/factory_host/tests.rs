@@ -791,8 +791,14 @@ fn factory_compile_resolves_names_through_the_library_scan() {
     )
     .unwrap();
     let levels = [
-        pa_factory::Level { source: "repo".to_string(), dir: repo.path().to_path_buf() },
-        pa_factory::Level { source: "user".to_string(), dir: user.path().to_path_buf() },
+        pa_factory::Level {
+            source: "repo".to_string(),
+            dir: repo.path().to_path_buf(),
+        },
+        pa_factory::Level {
+            source: "user".to_string(),
+            dir: user.path().to_path_buf(),
+        },
     ];
     let compiled = super::compile_machine(&json!({"name": "hello"}), &levels).unwrap();
     assert_eq!(compiled["path"], dir.display().to_string());
@@ -800,10 +806,12 @@ fn factory_compile_resolves_names_through_the_library_scan() {
     let file = super::compile_machine(&json!({"name": "sweep"}), &levels).unwrap();
     assert_eq!(file["path"], md.display().to_string());
     assert_eq!(file["spec"]["states"][0]["subagent"]["prompt"], "Go.");
-    assert!(super::compile_machine(&json!({"name": "sweep", "params": {"x": 1}}), &levels)
-        .unwrap_err()
-        .to_string()
-        .starts_with("params apply to machine directories"));
+    assert!(
+        super::compile_machine(&json!({"name": "sweep", "params": {"x": 1}}), &levels)
+            .unwrap_err()
+            .to_string()
+            .starts_with("params apply to machine directories")
+    );
     assert_eq!(
         super::compile_machine(&json!({"name": "absent"}), &levels)
             .unwrap_err()

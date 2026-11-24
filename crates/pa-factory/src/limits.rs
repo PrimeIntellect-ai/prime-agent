@@ -62,8 +62,7 @@ pub fn check_spec_limits(spec: &Value) -> Vec<String> {
                 "{noun} {id} retries must be an integer between 0 and {MAX_RETRIES}"
             ));
         }
-        if state.get("max_entries").is_some()
-            && !in_range(state.get("max_entries"), 1, MAX_ENTRIES)
+        if state.get("max_entries").is_some() && !in_range(state.get("max_entries"), 1, MAX_ENTRIES)
         {
             errors.push(format!(
                 "{noun} {id} max_entries must be an integer between 1 and {MAX_ENTRIES}"
