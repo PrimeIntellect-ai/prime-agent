@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::callback::query_param;
+
 pub(crate) const CALLBACK_HOST_ENV: &str = "PI_OAUTH_CALLBACK_HOST";
 
 /// The registered redirect port (the registration's, not a scan
@@ -273,38 +275,6 @@ async fn write_response(
     stream.flush().await
 }
 
-/// One decoded query parameter (`+` as space, percent-decoded).
-fn query_param(query: &str, name: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if percent_decode(&key.replace('+', " ")) == name {
-            return Some(percent_decode(&value.replace('+', " ")));
-        }
-    }
-    None
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                out.push(byte);
-                index += 3;
-                continue;
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
 fn escape_html(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -459,18 +429,5 @@ mod tests {
             .expect("the stored permit wakes the first poll")
             .expect("the settle settled a code");
         assert_eq!(result.code, "the-code");
-    }
-
-    /// The Anthropic callback has its own decoder, separate from the one in `callback.rs`.
-    #[test]
-    fn query_and_percent_decoding() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(
-            query_param("code=a+b&state=2", "code"),
-            Some("a b".to_string())
-        );
-        // TS `URLSearchParams` keeps the bare key with an empty value
-        // (`""` is falsy in the flow's missing-params check).
-        assert_eq!(query_param("code&state=2", "code"), Some(String::new()));
     }
 }
