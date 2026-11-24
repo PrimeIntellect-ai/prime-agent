@@ -42,6 +42,8 @@ if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
 if ! python3 -c "$BOT_CLIENT" probe; then
+  # `uv pip install <pkg>` in the bot's shell installs into its kernel venv.
+  export VIRTUAL_ENV="$HOME/.prime/agent/kernel-venv"
   nohup setsid prime-agent --mode daemon --daemon-socket "$PRIME_AGENT_DAEMON_SOCKET" \
     </dev/null >>"$HOME/.prime-agent-bot.log" 2>&1 &
   for _ in $(seq 1 150); do

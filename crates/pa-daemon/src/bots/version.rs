@@ -123,7 +123,8 @@ command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2
 /// stdin), verifies it, and installs it with the release's own `install.sh
 /// --archive`. That installer writes the managed layout the self-update reads,
 /// installs uv, and stops a daemon that runs another version. The install
-/// fails when the build has no bot guest side.
+/// fails when the build has no bot guest side. Its `guest_tool` step installs
+/// the pinned tools the bot image lacks (Node.js with npm).
 pub const INSTALL_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -163,4 +164,16 @@ if ! prime-agent relay --probe >/dev/null 2>&1; then
   echo "prime-agent ${PA_VERSION} has no bot guest support" >&2
   exit 5
 fi
+# Guest tools the bot image lacks: one pinned, checksummed tarball each,
+# unpacked to /opt/<command> with its bin/ linked onto PATH.
+guest_tool() { # guest_tool COMMAND URL SHA256
+  command -v "$1" >/dev/null 2>&1 && return 0
+  curl -fsSL --retry 3 -o "$1.tar.gz" "$2"
+  echo "$3  $1.tar.gz" | sha256sum -c - >/dev/null
+  mkdir -p "/opt/$1"
+  tar -xzf "$1.tar.gz" -C "/opt/$1" --strip-components=1 --no-same-owner
+  ln -sf "/opt/$1"/bin/* /usr/local/bin/
+}
+guest_tool node https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-x64.tar.gz \
+  c54118104acc524633b5abe106bbf44a53126ec8b4e5fa105cb92b5d7de8a1a1
 "#;

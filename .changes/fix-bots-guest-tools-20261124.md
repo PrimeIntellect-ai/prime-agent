@@ -1,0 +1,1 @@
+- A bot's sandbox now has Node.js and npm, and `uv pip install` in its shell installs into its kernel venv.

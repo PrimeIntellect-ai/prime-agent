@@ -622,7 +622,8 @@ async fn live_ask(
 }
 
 /// Live: one real bot on this build through spawn, a task and its reply,
-/// pause, a second task that resumes it in the same session, and delete.
+/// pause, a second task that resumes it in the same session, a third that
+/// runs node, npm, and `uv pip install` in its shell, and delete.
 /// Run in a linux-x64 checkout after `make bot-tarball`, with
 /// `PRIME_API_KEY` (and `PRIME_TEAM_ID`) set and
 /// `PRIME_AGENT_BOT_TARBALL=target/release/prime-agent-<version>-linux-x64.tar.gz`:
@@ -673,16 +674,21 @@ async fn live_spawn_reply_pause_resume_delete() {
         let task = "Repeat the word you replied with before, in capital letters only.";
         let second = live_ask(&manager, dir.path(), &resumed, "m2", task).await?;
         step("second reply");
-        anyhow::Ok((spawned, first, paused, resumed, second))
+        let task = "Run each shell command with bash() and await it: `node --version`, \
+                    `npm --version`, `uv pip install six`. Reply with one line only: \
+                    NODE=<node output> NPM=<npm output> UV=<uv pip exit code>";
+        let tools = live_ask(&manager, dir.path(), &resumed, "m3", task).await?;
+        step("tools reply");
+        anyhow::Ok((spawned, first, paused, resumed, second, tools))
     }
     .await;
     manager.delete(&bot_id).await.unwrap();
     step("deleted");
-    let (spawned, first, paused, resumed, second) = run.unwrap();
+    let (spawned, first, paused, resumed, second, tools) = run.unwrap();
     let left = platform.list(&bot_label(&bot_id)).await.unwrap();
 
     eprintln!("live: spawned={spawned:?}\npaused={paused:?}");
-    eprintln!("live: first={first:?} second={second:?} left={left:?}");
+    eprintln!("live: first={first:?} second={second:?} tools={tools:?} left={left:?}");
     assert_eq!(spawned.version, version::local_version());
     assert!(first.to_lowercase().contains("pong"), "first: {first:?}");
     assert!(matches!(
@@ -692,6 +698,8 @@ async fn live_spawn_reply_pause_resume_delete() {
     assert!(paused.checkpoint_id.is_some());
     assert_eq!(resumed.guest_session_file, spawned.guest_session_file);
     assert!(second.contains("PONG"), "second: {second:?}");
+    assert!(tools.contains("NODE=v22.23.5"), "tools: {tools:?}");
+    assert!(tools.contains("UV=0"), "tools: {tools:?}");
     assert!(left.iter().all(|sandbox| sandbox.status.is_terminal()));
     let checkpoint = paused.checkpoint_id.as_deref().unwrap();
     assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
