@@ -111,6 +111,9 @@ struct ContextNode {
     status: String,
     model: Option<(String, String)>,
     own_usage: UsageTotals,
+    /// The daemon's family total (own plus every descendant's, hidden ones
+    /// included): the grand totals read the root's.
+    total_usage: UsageTotals,
     own_usage_by_model: Vec<ModelUsage>,
     context_usage: Option<ContextUsageSnapshot>,
     /// The factory run that spawned this agent: `(run_id, spec_id)`.
@@ -156,6 +159,7 @@ fn parse_context_node(value: &Value) -> ContextNode {
             Some((provider.to_string(), id.to_string()))
         }),
         own_usage: value.get("ownUsage").map(usage_from).unwrap_or_default(),
+        total_usage: value.get("totalUsage").map(usage_from).unwrap_or_default(),
         own_usage_by_model: value
             .get("ownUsageByModel")
             .and_then(Value::as_array)
@@ -512,17 +516,6 @@ fn count_nodes(node: &ContextNode) -> usize {
     1 + node.children.iter().map(count_nodes).sum::<usize>()
 }
 
-fn sum_own_usage(node: &ContextNode, total: &mut UsageTotals) {
-    total.input += node.own_usage.input;
-    total.output += node.own_usage.output;
-    total.cache_read += node.own_usage.cache_read;
-    total.cache_write += node.own_usage.cache_write;
-    total.cost_total += node.own_usage.cost_total;
-    for child in &node.children {
-        sum_own_usage(child, total);
-    }
-}
-
 /// The whole tree's own usage summed per model (the `/context` Cost
 /// section's breakdown), so a mid-conversation model switch shows each
 /// model's share. A deleted row captured before deletes recorded a split
@@ -806,8 +799,7 @@ pub fn context_tree_rows(
         lines.push(vec![dim("Use /context all to show every agent.")]);
     }
 
-    let mut totals = UsageTotals::default();
-    sum_own_usage(&root, &mut totals);
+    let totals = root.total_usage;
     let agent_count = count_nodes(&root);
     let mut total_line = vec![
         dim("Total:"),
