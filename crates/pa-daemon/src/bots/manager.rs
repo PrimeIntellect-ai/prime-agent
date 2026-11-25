@@ -741,6 +741,11 @@ impl BotManager {
             .collect();
         let label = owner_label(owner_session_id);
         for sandbox in retry(|| self.platform.list(&label)).await? {
+            // A terminated sandbox is a deleted bot: it must not keep
+            // counting against the owner's bots.maxBots cap.
+            if sandbox.status.is_terminal() {
+                continue;
+            }
             if let Some(bot_id) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
                 bot_ids.insert(bot_id);
             }
@@ -1426,9 +1431,11 @@ impl BotManager {
                 }
                 Some(guest)
             }
-            // Best effort: the sandbox's rules are already set.
+            // Best effort: the sandbox's rules are already set. The bot's
+            // own GitHub flag decides its rules, so a reused bot's nested
+            // context keeps the GitHub rules its children inherit.
             None => self
-                .guest_credentials(record, false)
+                .guest_credentials(record, record.github)
                 .await
                 .ok()
                 .map(|(credentials, _, _)| credentials),
@@ -1786,25 +1793,30 @@ impl BotManager {
     ) -> Result<GuestCredentials> {
         let auth_json = read_guest_json(&self.agent_dir, "auth.json");
         let provider = guest_provider(record);
-        let injected: Vec<&str> = auth_json
-            .as_ref()
-            .and_then(Value::as_object)
-            .map(|auth| auth.keys().map(String::as_str).collect())
-            .unwrap_or_default();
-        if !injected.contains(&provider) {
-            let known = if injected.is_empty() {
+        let mut network_rules = context.child_rules();
+        if !github {
+            // Both GitHub hosts go: the git smart-HTTP host and the REST
+            // host the `gh` CLI and API clients use.
+            network_rules.remove(super::github::GIT_HOST);
+            network_rules.remove(super::github::API_HOST);
+        }
+        // The auth record alone is not enough: the placeholder is always
+        // present for Prime Inference (it carries the billing team), so
+        // the child's provider must also have a rule the platform injects
+        // a key on. The spawn fails here, before anything is billed.
+        let hosts = super::credentials::provider_rule_hosts(provider);
+        if !hosts.iter().any(|host| network_rules.contains_key(host)) {
+            let known: Vec<&str> = network_rules.keys().map(String::as_str).collect();
+            let known = if known.is_empty() {
                 "none are".to_string()
             } else {
-                injected.join(", ")
+                known.join(", ")
             };
-            // The spawn fails here, before anything is billed: a child on a
-            // provider this bot holds no key for could not run its model.
             bail!(
                 "this bot cannot spawn a bot on {provider}: its sandbox holds no {provider} \
-                 key; the injected providers are: {known}"
+                 rule; the rules its children can inherit are: {known}"
             );
         }
-        let mut network_rules = context.child_rules();
         if !github {
             // Both GitHub hosts go: the git smart-HTTP host and the REST
             // host the `gh` CLI and API clients use.

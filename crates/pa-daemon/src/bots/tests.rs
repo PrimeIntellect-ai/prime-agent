@@ -2044,6 +2044,14 @@ fn nested_context(dir: &std::path::Path, bot_id: &str, owner: &str) {
                     headers: BTreeMap::new(),
                 },
             ),
+            // The Prime Inference model host, so a prime-inference child
+            // passes the provider-rule check.
+            (
+                "api.pinference.ai".to_string(),
+                pa_sandbox::HeaderRule {
+                    headers: BTreeMap::new(),
+                },
+            ),
         ]),
     };
     let path = super::nested::NestedContext::path_in(dir);
@@ -2182,9 +2190,7 @@ async fn a_bot_refuses_a_child_on_a_provider_it_has_no_key_for() {
     bot.model = Some("anthropic/model-x".to_string());
     let refused = manager.spawn(&bot).await.expect_err("refused");
     assert!(
-        refused
-            .to_string()
-            .contains("cannot spawn a bot on anthropic"),
+        refused.to_string().contains("no anthropic rule"),
         "{refused}"
     );
 }
@@ -2208,6 +2214,18 @@ async fn children_count_toward_the_owners_bot_list() {
             super::parent_label("bot-a"),
         ],
     );
+    assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 3);
+
+    // A terminated sandbox is a deleted bot: it stops counting.
+    let gone = platform.add_sandbox(
+        "gone",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-g"),
+            owner_label("owner-1"),
+        ],
+    );
+    platform.state().sandboxes.get_mut(&gone).unwrap().status = BotStatus::Stopped;
     assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 3);
 }
 

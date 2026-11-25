@@ -78,12 +78,20 @@ impl NestedContext {
     }
 
     /// The rules the bot's children get: its own rules minus the sandbox
-    /// API rule, so a child cannot call the platform as the owner.
+    /// API rule (so a child cannot call the platform as the owner) and
+    /// minus the parent's own relay pause rule (the pause secret is the
+    /// parent's, never a child's).
     #[must_use]
     pub fn child_rules(&self) -> BTreeMap<String, pa_sandbox::HeaderRule> {
         self.network_rules
             .iter()
-            .filter(|(host, _)| host.as_str() != super::credentials::sandbox_api_host())
+            .filter(|(host, rule)| {
+                host.as_str() != super::credentials::sandbox_api_host()
+                    && !rule
+                        .headers
+                        .values()
+                        .any(|value| value.contains(super::PAUSE_SECRET_MARK))
+            })
             .map(|(host, rule)| (host.clone(), rule.clone()))
             .collect()
     }

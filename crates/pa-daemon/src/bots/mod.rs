@@ -55,6 +55,9 @@ pub const BOT_LABEL: &str = "prime-agent-bot";
 pub const GITHUB_LABEL: &str = "prime-agent-bot-github";
 /// The label of a bot that may spawn its own bots.
 pub const BOTS_LABEL: &str = "prime-agent-bot-spawns";
+/// The prefix of a relay pause token's platform secret name: a rule that
+/// names one is a bot's own pause rule, never a child's to inherit.
+pub const PAUSE_SECRET_MARK: &str = "PRIME_AGENT_BOT_PAUSE_";
 /// The label prefix that names each owner login a bot carries.
 pub const LOGIN_LABEL_PREFIX: &str = "prime-agent-bot-login:";
 /// The guest daemon's socket.

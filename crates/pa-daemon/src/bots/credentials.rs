@@ -172,6 +172,13 @@ pub(super) fn base_url_host(base_url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+/// The API hosts `provider`'s rules would cover: the hosts a child needs
+/// to see in its inherited rules to run on `provider`.
+#[must_use]
+pub fn provider_rule_hosts(provider: &str) -> Vec<String> {
+    provider_rules(provider, "").keys().cloned().collect()
+}
+
 /// The rules that set `secret` in `provider`'s auth header on each API
 /// host its catalog models use.
 fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> {
