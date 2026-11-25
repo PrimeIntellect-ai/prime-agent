@@ -61,46 +61,85 @@ where
     }
 }
 
-/// Unpack `archive` under `dest`. Only regular files and directories with
-/// plain relative names are taken, and no existing file is replaced.
-/// Returns the written files.
-fn unpack(archive: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
-    let mut archive = tar::Archive::new(std::fs::File::open(archive)?);
-    let mut written = Vec::new();
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let name = entry.path()?.into_owned();
-        if name.as_os_str().is_empty()
-            || !name
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)))
-        {
+/// The target of one archive member under `dest`. Only plain relative
+/// names are taken, and no existing symlink on the way is followed.
+fn member_target(dest: &Path, name: &Path) -> Result<PathBuf> {
+    if name.as_os_str().is_empty()
+        || !name
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!(
+            "the bot archive has an unsafe member name: {}",
+            name.display()
+        );
+    }
+    let mut target = dest.to_path_buf();
+    for component in name.components() {
+        target.push(component);
+        let is_symlink =
+            std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
+        if is_symlink {
             bail!(
-                "the bot archive has an unsafe member name: {}",
-                name.display()
+                "{} is a symlink; a pull never writes through one",
+                target.display()
             );
         }
-        let target = dest.join(&name);
-        match entry.header().entry_type() {
-            tar::EntryType::Directory => std::fs::create_dir_all(&target)?,
+    }
+    Ok(target)
+}
+
+/// Unpack `archive` under `dest`. Only regular files and directories are
+/// taken, and no existing file is replaced. Every member is checked before
+/// the first write, so a refused archive writes nothing. Returns the
+/// written files.
+fn unpack(archive: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
+    let open = || -> Result<tar::Archive<std::fs::File>> {
+        Ok(tar::Archive::new(std::fs::File::open(archive)?))
+    };
+    for entry in open()?.entries()? {
+        let entry = entry?;
+        let name = entry.path()?.into_owned();
+        let kind = entry.header().entry_type();
+        if kind == tar::EntryType::XGlobalHeader {
+            continue;
+        }
+        let target = member_target(dest, &name)?;
+        match kind {
+            tar::EntryType::Directory => {}
             tar::EntryType::Regular | tar::EntryType::Continuous => {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
+                if std::fs::symlink_metadata(&target).is_ok() {
+                    bail!("{} exists; a pull never replaces a file", target.display());
                 }
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&target)
-                    .with_context(|| format!("cannot write {}", target.display()))?;
-                std::io::copy(&mut entry, &mut file)?;
-                written.push(target);
             }
-            tar::EntryType::XGlobalHeader => {}
             other => bail!(
                 "the bot archive member {} is a {other:?}; only files and directories are pulled",
                 name.display()
             ),
         }
+    }
+    let mut written = Vec::new();
+    for entry in open()?.entries()? {
+        let mut entry = entry?;
+        let kind = entry.header().entry_type();
+        if kind == tar::EntryType::XGlobalHeader {
+            continue;
+        }
+        let target = member_target(dest, &entry.path()?)?;
+        if kind == tar::EntryType::Directory {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .with_context(|| format!("cannot write {}", target.display()))?;
+        std::io::copy(&mut entry, &mut file)?;
+        written.push(target);
     }
     Ok(written)
 }
@@ -162,16 +201,21 @@ impl Supervisor {
         else {
             return response_failure(Some(command_id), "pull_bot_files", "invalid command", None);
         };
-        let pulled = tokio::time::timeout(
-            BOT_DEADLINE,
-            self.pull_bot_files(bot_id, owner_session_id, path, Path::new(dest)),
-        )
+        // The pull runs in its own task, so a dropped request never skips
+        // its cleanup.
+        let this = Arc::clone(self);
+        let (bot_id, owner_session_id, path, dest) = (
+            bot_id.clone(),
+            owner_session_id.clone(),
+            path.clone(),
+            PathBuf::from(dest),
+        );
+        let pulled = tokio::spawn(async move {
+            this.pull_bot_files(&bot_id, &owner_session_id, &path, &dest)
+                .await
+        })
         .await
-        .unwrap_or_else(|_| {
-            Err(anyhow::anyhow!(
-                "the pull did not finish within {BOT_DEADLINE:?}"
-            ))
-        });
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("the pull task failed: {error}")));
         match pulled {
             Ok((files, bytes)) => response_success(
                 Some(command_id),
@@ -203,31 +247,36 @@ impl Supervisor {
             .into_iter()
             .find(|bot| bot.bot_id == bot_id && bot.owner_session_id == owner_session_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown bot: {bot_id}"))?;
+        tokio::fs::create_dir_all(dest).await?;
+        let archive = dest.join(format!(".bot-pull-{}.tar", uuid::Uuid::new_v4().simple()));
         // The idle pause skips an attached bot, so it cannot cut the stream.
         let guard = manager.attach_guard(bot_id);
-        let pulled = async {
+        let archived = tokio::time::timeout(BOT_DEADLINE, async {
             let record = manager.ensure_running(&record.bot_id).await?;
-            tokio::fs::create_dir_all(dest).await?;
-            let archive = dest.join(format!(".bot-pull-{}.tar", uuid::Uuid::new_v4().simple()));
-            let archived = manager.archive_path(&record, path, &archive).await;
-            let unpacked = match archived {
-                Ok(bytes) => {
-                    let (archive, dest) = (archive.clone(), dest.to_path_buf());
-                    tokio::task::spawn_blocking(move || unpack(&archive, &dest))
-                        .await
-                        .context("the unpack task failed")?
-                        .map(|files| (files, bytes))
-                }
-                Err(error) => Err(error),
-            };
-            let _ = tokio::fs::remove_file(&archive).await;
-            unpacked
-        }
-        .await;
+            manager.archive_path(&record, path, &archive).await
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "the pull did not finish within {BOT_DEADLINE:?}"
+            ))
+        });
         drop(guard);
         // Pause the bot again once it is idle.
         self.follow_bot(bot_id);
-        pulled
+        let unpacked = match archived {
+            Ok(bytes) => {
+                let (archive, dest) = (archive.clone(), dest.to_path_buf());
+                tokio::task::spawn_blocking(move || unpack(&archive, &dest))
+                    .await
+                    .context("the unpack task failed")
+                    .and_then(|unpacked| unpacked)
+                    .map(|files| (files, bytes))
+            }
+            Err(error) => Err(error),
+        };
+        let _ = tokio::fs::remove_file(&archive).await;
+        unpacked
     }
 }
 
@@ -298,11 +347,38 @@ mod tests {
         // An existing file is never replaced.
         assert!(unpack(good.path(), dest.path()).is_err());
 
+        // A refused member fails the whole archive before any write.
         let link = archive_with(|builder| {
+            builder
+                .append_data(
+                    &mut header(tar::EntryType::Regular, 2),
+                    "first.txt",
+                    &b"hi"[..],
+                )
+                .unwrap();
             let mut link = header(tar::EntryType::Symlink, 0);
             builder.append_link(&mut link, "evil", "/etc").unwrap();
         });
         assert!(unpack(link.path(), dest.path()).is_err());
+        assert!(!dest.path().join("first.txt").exists());
+
+        // An existing symlink under `dest` is never written through.
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), dest.path().join("out")).unwrap();
+            let through = archive_with(|builder| {
+                builder
+                    .append_data(
+                        &mut header(tar::EntryType::Regular, 2),
+                        "out/x.txt",
+                        &b"hi"[..],
+                    )
+                    .unwrap();
+            });
+            assert!(unpack(through.path(), dest.path()).is_err());
+            assert!(!outside.path().join("x.txt").exists());
+        }
 
         // `..` and absolute names, written raw: the builder refuses them.
         for name in ["../escape", "/abs"] {

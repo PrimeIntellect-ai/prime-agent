@@ -875,15 +875,19 @@ fn register_pull_bot_files(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmH
                         .data
                         .get(name)
                         .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
+                        .filter(|value| !value.trim().is_empty())
                         .map(str::to_string)
                         .ok_or_else(|| {
                             anyhow::anyhow!("rlm.pull_bot_files {name} must be a non-empty string")
                         })
                 };
+                // Paths keep their exact text; only the bot selector is trimmed.
                 let files = host
-                    .pull_bot_files(field("bot")?, field("path")?, field("dest")?)
+                    .pull_bot_files(
+                        field("bot")?.trim().to_string(),
+                        field("path")?,
+                        field("dest")?,
+                    )
                     .await?;
                 Ok(json!({ "files": files }))
             })

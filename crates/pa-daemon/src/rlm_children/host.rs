@@ -1255,7 +1255,8 @@ async fn pull_bot_files(
         .collect())
 }
 
-/// `dest` against `cwd`, with `.` and `..` folded; refused outside `cwd`.
+/// `dest` against `cwd`, with `.` and `..` folded; refused outside `cwd`,
+/// also through a symlink in an existing part of it.
 fn pull_destination(cwd: &Path, dest: &str) -> Result<std::path::PathBuf> {
     let mut resolved = std::path::PathBuf::new();
     for component in cwd.join(dest).components() {
@@ -1267,7 +1268,13 @@ fn pull_destination(cwd: &Path, dest: &str) -> Result<std::path::PathBuf> {
             other => resolved.push(other),
         }
     }
-    if !resolved.starts_with(cwd) {
+    let existing = resolved
+        .ancestors()
+        .find(|path| path.exists())
+        .unwrap_or(cwd);
+    let inside =
+        resolved.starts_with(cwd) && existing.canonicalize()?.starts_with(cwd.canonicalize()?);
+    if !inside {
         bail!(
             "the pull destination {dest} is outside the session directory {}",
             cwd.display()
