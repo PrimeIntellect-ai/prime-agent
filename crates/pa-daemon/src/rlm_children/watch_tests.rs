@@ -596,14 +596,15 @@ async fn an_idle_read_that_the_recheck_sees_busy_records_factory_task_busy() {
         .await
         .expect("spawn must succeed against the fake supervisor");
     let record = Arc::clone(&sessions.inner.children.lock().await[0]);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !record.lock().await.run.prompt_admitted() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the spawned task prompt must be admitted"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    assert!(
+        super::host::wait_for_prompt_state(
+            &record,
+            super::host::PromptWait::Admission,
+            Some(Instant::now() + Duration::from_secs(10)),
+        )
+        .await,
+        "the spawned task prompt must be admitted"
+    );
     child_state.scripted_states.lock().unwrap().extend([
         json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } }),
         json!({ "isStreaming": true, "sessionActions": { "queuedCount": 0 } }),
