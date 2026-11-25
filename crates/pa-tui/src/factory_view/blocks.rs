@@ -745,11 +745,18 @@ pub(crate) fn block_diagram(
                 canvas.put(x[item] + width[item] - 1, line_y, &side.to_string(), role);
             }
             if !self_loops[item].is_empty() {
+                // A self-loop in the last-fired window lights like any
+                // fired edge.
+                let role = if fired_pairs.contains(&(item, item)) {
+                    Role::Fired
+                } else {
+                    Role::Label
+                };
                 canvas.put(
                     x[item] + width[item] + 1,
                     top + 2,
                     &format!("↺ {}", self_loops[item].join(", ")),
-                    Role::Label,
+                    role,
                 );
             }
         }

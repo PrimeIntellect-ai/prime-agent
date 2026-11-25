@@ -959,6 +959,97 @@ mod backfill_tests {
         (session, server)
     }
 
+    /// A drill-in reply that lands after a run page opened over the machines page drops: Esc
+    /// from the run page returns to the list as it was left, not to a drill-in.
+    #[tokio::test]
+    async fn a_drill_in_reply_behind_the_run_page_drops() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("drill.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            let page = crate::factory_view::LibraryView::new(Vec::new(), Vec::new(), 20);
+            view.overlay = Some(Overlay::Factory {
+                run: crate::factory_view::FactoryView::from_reply(&json!({ "runs": [] }), 12),
+                page: Some(Box::new(page)),
+            });
+            let graph = json!({
+                "runId": null, "specId": "rsi", "state": null,
+                "machine": {"states": [{"id": "plan", "entry": true}], "transitions": [], "order": ["plan"]},
+                "nodes": [],
+            });
+            session.apply_library_update(
+                crate::session_ui::LibraryUpdate::Detail {
+                    session: session.active_session_id.clone(),
+                    epoch: session.library_detail_epoch,
+                    name: "rsi".to_string(),
+                    result: Ok(graph),
+                },
+                &mut view,
+            );
+            let page = view.machines_page().expect("the machines page stays under the run page");
+            let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+            let text: String = page
+                .render(&theme, 80, &crate::keybindings::KeybindingsManager::new())
+                .iter()
+                .flatten()
+                .map(|span| span.content.as_str())
+                .collect();
+            assert!(!text.contains("machine: rsi"), "the hidden page stays on its list: {text}");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and fold complete within ten seconds");
+    }
+
+    /// A node view remounted on a cold run cache (the run is not listed yet) keeps its template
+    /// files unloaded, so a later refresh still fetches them; it never settles them as empty.
+    #[tokio::test]
+    async fn a_cold_cache_node_mount_keeps_its_files_fetch_pending() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("cold.sock");
+            let (mut session, server) = mock_session_with_capabilities(
+                &socket,
+                mpsc::unbounded_channel().0,
+                &["factory_activity"],
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::FactoryRuns {
+                    row: Some(crate::factory_view::FactoryRow::header("run-1")),
+                    node: Some(crate::factory_view::node::NodeTarget {
+                        run_id: "run-1".to_string(),
+                        state_id: "worker".to_string(),
+                        instance: None,
+                    }),
+                },
+                true,
+                &mut view,
+            );
+            let node = view
+                .run_page()
+                .and_then(|factory_view| factory_view.node.as_ref())
+                .expect("the node view mounts");
+            assert!(
+                node.files.is_none(),
+                "the files stay unloaded on a cold cache"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and node mount complete within ten seconds");
+    }
+
     /// A same-session rebind re-requests the instance the node view asked for. A view that came
     /// back from a child session is still loading that instance: it has no selection yet, only
     /// the requested selector, and the rebind's new request must keep it.

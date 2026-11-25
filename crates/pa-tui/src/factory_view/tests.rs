@@ -746,6 +746,28 @@ fn a_back_edge_label_stays_unlit_when_only_a_forward_edge_fired() {
     );
 }
 
+/// A fired self-loop's label lights like any fired edge.
+#[test]
+fn a_fired_self_loop_lights_its_label() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["lastFired"] = json!([
+        { "from": "reviewing", "to": "reviewing", "seq": 9,
+          "when": { "output": "verdict", "op": "exists" } }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let label = spans
+        .iter()
+        .flatten()
+        .find(|span| span.content.contains("↺ verdict exists"))
+        .expect("the self-loop label renders");
+    assert_eq!(
+        label.style, success,
+        "the fired self-loop's label paints success"
+    );
+}
+
 /// The empty state and the key hint.
 #[test]
 fn the_empty_state_names_the_surface() {
