@@ -2,8 +2,8 @@
 //! selection/auto-scroll, and the input-state seams.
 use super::{
     key_event_to_id, AgentView, ChatEntry, ChoicePickerAction, ChoicePurpose, DaemonCommand,
-    DockFocusSource, Duration, Instant, InterruptOrigin, KeyEvent, Map, Overlay,
-    QueueBrowseDirection, QueueLane, Result, SessionUi, StatusKind, SubmitBehavior,
+    DockFocusSource, Duration, Instant, KeyEvent, Map, Overlay, QueueBrowseDirection, QueueLane,
+    Result, SessionUi, StatusKind, SubmitBehavior,
 };
 
 /// How long the Ctrl+C exit hint arms the second-press exit.
@@ -522,17 +522,15 @@ impl SessionUi {
                 "clear"
             };
             if action == "tree" && self.escape_tree_shortcut_spent {
-                // The gesture already fired: this press interrupts like every
-                // Escape but arms no reopen — the one bare press the idle
-                // backgrounded-cell cancel may ride.
-                self.interrupt_running_work(view, InterruptOrigin::Bare);
+                // The gesture already fired: this press interrupts like every Escape
+                // but arms no reopen.
+                self.interrupt_running_work(view);
                 return Ok(());
             }
             self.arm_escape_repeat(action);
-            // The repeat arms, then the same abort ladder as the Ctrl+C
-            // interrupt runs, minus the exit hint. The press ARMS the
-            // clear/tree repeat, so the idle scoped cancel never rides it.
-            self.interrupt_running_work(view, InterruptOrigin::Arming);
+            // The repeat arms, then the same abort ladder as the Ctrl+C interrupt
+            // runs, minus the exit hint.
+            self.interrupt_running_work(view);
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.exit") && view.editor.get_text().is_empty() {
@@ -576,9 +574,7 @@ impl SessionUi {
                     }
                 });
             }
-            // The press ARMS the Ctrl+C exit pair, so the idle scoped
-            // cancel never rides it.
-            self.interrupt_running_work(view, InterruptOrigin::Arming);
+            self.interrupt_running_work(view);
             self.show_ctrl_c_hint();
             self.dirty = true;
             return Ok(());

@@ -51,21 +51,6 @@ pub(crate) fn start(worker: Arc<Worker>) {
     });
 }
 
-/// The orphan-exit hold decision once the absence window elapsed: TS
-/// session work (an active run, a running user bash) holds as before,
-/// and a parked backgrounded cell holds within its own bound — one more
-/// lost window — so a never-ending detached cell cannot keep an
-/// orphaned worker (no supervisor, no client to cancel it) alive
-/// forever; the hold's end lets the exit's kernel dispose end the cell.
-fn holds_past_exit(
-    ongoing: bool,
-    parked: bool,
-    parked_held: Option<Duration>,
-    window: Duration,
-) -> bool {
-    ongoing || (parked && parked_held.is_none_or(|held| held < window))
-}
-
 /// The availability-check loop (TS `checkSupervisorAvailability` guard order): a shutdown
 /// in flight or a live supervisor connection disarms, a reachable socket resets the
 /// absence timer, and a socket unreachable for the whole window with no session work
@@ -73,9 +58,6 @@ fn holds_past_exit(
 async fn monitor(worker: Arc<Worker>) {
     let window = Duration::from_millis(lost_exit_ms());
     let mut absent_since: Option<tokio::time::Instant> = None;
-    // When the parked-cell hold window started: reset with the absence
-    // episode and whenever no parked cell is live.
-    let mut parked_hold_since: Option<tokio::time::Instant> = None;
     let mut delay = FIRST_CHECK;
     loop {
         tokio::time::sleep(delay).await;
@@ -84,42 +66,28 @@ async fn monitor(worker: Arc<Worker>) {
             || worker.supervisor_claims.load(Ordering::SeqCst) > 0
         {
             absent_since = None;
-            parked_hold_since = None;
             continue;
         }
         if supervisor_reachable(&worker.config.supervisor_socket_path).await {
             absent_since = None;
-            parked_hold_since = None;
             continue;
         }
         let since = *absent_since.get_or_insert_with(tokio::time::Instant::now);
         if since.elapsed() < window {
             continue;
         }
-        let ongoing =
-            worker.core.lock().unwrap().has_ongoing_work() || worker.user_bash.is_running();
-        let parked = worker
-            .agent_engine
-            .as_ref()
-            .is_some_and(|engine| engine.background_work_count() > 0);
-        if !parked {
-            // A parked-cell episode ended: a later detach starts a fresh
-            // hold window.
-            parked_hold_since = None;
-        }
-        let parked_held = parked.then(|| {
-            parked_hold_since
-                .get_or_insert_with(tokio::time::Instant::now)
-                .elapsed()
-        });
-        if holds_past_exit(ongoing, parked, parked_held, window) {
+        if worker.core.lock().unwrap().has_ongoing_work() || worker.user_bash.is_running() {
             // TS `hasOngoingSessionWork` (`isSessionActive`, which counts
-            // `isBashRunning`): an active run or a running user bash owns
-            // the worker as before, and a parked backgrounded cell holds
-            // within its own bound — one more lost window — so its end
-            // lets the next check reconsider while a never-ending cell
-            // cannot keep the orphan alive forever (the exit's kernel
-            // dispose ends it; its notice rides the unsettled-exit path).
+            // `isBashRunning`): an active run or a running user bash owns the
+            // worker a little longer; its end lets the next check reconsider.
+            continue;
+        }
+        if worker.pending_detached_completions() > 0 {
+            // A backgrounded cell must not outlive the supervisor: no client
+            // is left to see or stop it. The scoped idle cancel stops it, and
+            // the exit waits until its notice is admitted; the stop's grace
+            // and kernel retirement bound the wait.
+            worker.engine.abort_background_cell();
             continue;
         }
         exit_orphaned(&worker, since).await;
@@ -191,32 +159,5 @@ mod tests {
         raw.and_then(|raw| raw.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
             .map_or(DEFAULT_LOST_EXIT_MS, |value| value as u64)
-    }
-
-    /// The parked-cell hold is bounded to one lost window past the
-    /// absence window: a never-ending detached cell must not keep an
-    /// orphaned worker alive forever (no supervisor, no client to cancel
-    /// it). The revert — the unconditional parked hold — fails the
-    /// beyond-the-window rows.
-    #[test]
-    fn a_parked_cell_holds_the_orphan_only_within_one_lost_window() {
-        let window = Duration::from_secs(300);
-        // TS session work holds unconditionally.
-        assert!(holds_past_exit(true, true, Some(window * 2), window));
-        assert!(holds_past_exit(true, false, None, window));
-        // No work at all: the orphan exits.
-        assert!(!holds_past_exit(false, false, None, window));
-        // A parked cell holds from its first sighting...
-        assert!(holds_past_exit(false, true, None, window));
-        // ...within the window...
-        assert!(holds_past_exit(
-            false,
-            true,
-            Some(window.saturating_sub(Duration::from_millis(1))),
-            window
-        ));
-        // ...and no further: the exit's kernel dispose ends the cell.
-        assert!(!holds_past_exit(false, true, Some(window), window));
-        assert!(!holds_past_exit(false, true, Some(window * 10), window));
     }
 }
