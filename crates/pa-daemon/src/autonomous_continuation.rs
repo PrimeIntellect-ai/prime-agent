@@ -97,14 +97,16 @@ impl AgentSessionEngine {
         if self.requested_compaction_scheduled().await {
             return Vec::new();
         }
-        // Unsettled RLM work or a live background bash handle holds the continuation.
-        if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+        // Unsettled RLM work or live background work (a detached cell
+        // awaiting its completion notice, or a live bash handle) holds the
+        // continuation.
+        if self.has_unsettled_rlm_work().await || self.background_work_count() > 0 {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            // A handle that settles between the probe above and this store
+            // Work that settles between the probe above and this store
             // raced the callback out of its retry: the owed turn would wait
             // for a wake that already fired - re-arm the retry once.
-            if !self.has_live_background_bash_handles() && !self.has_unsettled_rlm_work().await {
+            if self.background_work_count() == 0 && !self.has_unsettled_rlm_work().await {
                 self.retry_owed_autonomous_continuation();
             }
             return Vec::new();
@@ -226,11 +228,12 @@ impl AgentSessionEngine {
         {
             return;
         }
-        // Keep the deferral while descendant work stays unsettled, a
-        // background bash handle runs, or queued input owns the boundary.
+        // Keep the deferral while descendant work stays unsettled, live
+        // background work runs (a detached cell or a bash handle), or
+        // queued input owns the boundary.
         if self.has_unsettled_rlm_work().await
             || self.session_input_queued()
-            || self.has_live_background_bash_handles()
+            || self.background_work_count() > 0
         {
             self.autonomous_awaits_rlm_work
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -238,7 +241,7 @@ impl AgentSessionEngine {
             // that would deliver the owed turn: with every blocker gone the
             // deferral has no wake left - re-arm. Only the fully-cleared
             // deferral re-arms, so the loop cannot spin.
-            if !self.has_live_background_bash_handles()
+            if self.background_work_count() == 0
                 && !self.has_unsettled_rlm_work().await
                 && !self.session_input_queued()
             {
@@ -336,12 +339,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings, FAUX_TEST_LOCK};
     use crate::engine::EngineEvent;
 
-    /// Inject the engine's background-bash liveness probe (a `1` probe
-    /// = a live background `bash()` handle).
-    fn set_background_bash_probe(
+    /// Inject the engine's background-work probe (a `1` probe
+    /// = a detached cell awaiting its completion, or a live background
+    /// `bash()` handle): the count the continuation gates read.
+    fn set_background_work_probe(
         engine: &Arc<AgentSessionEngine>,
         probe: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
     ) {
@@ -366,7 +370,7 @@ mod tests {
         // later read is settled — the settle tail of the raced window.
         let flip = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let flip_read = std::sync::Arc::clone(&flip);
-        set_background_bash_probe(
+        set_background_work_probe(
             &engine,
             Arc::new(move || flip_read.swap(0, std::sync::atomic::Ordering::SeqCst)),
         );
@@ -394,7 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn live_background_bash_holds_the_autonomous_continuation_until_it_settles() {
+    fn live_background_work_holds_the_autonomous_continuation_until_it_settles() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
@@ -410,7 +417,7 @@ mod tests {
         // The first prompt builds the session; the probe injected after stands in for a live
         // handle.
         admit(&engine, "warm".to_string(), &mut events);
-        set_background_bash_probe(&engine, Arc::new(|| 1));
+        set_background_work_probe(&engine, Arc::new(|| 1));
         admit(
             &engine,
             "/autonomous on --max-continuations 1 --max-turns 5".to_string(),
@@ -436,7 +443,7 @@ mod tests {
         );
         assert!(admitted.lock().unwrap().is_empty());
         assert_eq!(engine.autonomous.blocking_lock().continuations_used, 0);
-        set_background_bash_probe(&engine, Arc::new(|| 0));
+        set_background_work_probe(&engine, Arc::new(|| 0));
         engine
             .runtime
             .block_on(async { engine.autonomous_children_settled().await });

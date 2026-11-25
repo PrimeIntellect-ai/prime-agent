@@ -129,7 +129,8 @@ pub fn session_command_failure_row(command: &SessionSlashCommand, error: &str) -
 }
 
 /// The durable result row (`session_slash_command_result`).
-fn slash_command_result(
+#[must_use]
+pub fn slash_command_result(
     command: &SessionSlashCommand,
     content: String,
     success: bool,

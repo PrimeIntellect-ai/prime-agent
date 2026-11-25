@@ -457,7 +457,9 @@ pub(crate) async fn restore_pass(
             .await
         {
             Some(resident) => Ok(resident),
-            None => restore_session(supervisor, row, legacy.then_some(&restored_ids)).await,
+            None => {
+                restore_session(supervisor, &roster, row, legacy.then_some(&restored_ids)).await
+            }
         };
         let restored = match restored {
             Ok(resident) if legacy => {
@@ -682,22 +684,11 @@ where
 /// `runtime_config`): the supervisor's own create path, under the restore client id.
 async fn restore_session(
     supervisor: &std::sync::Arc<Supervisor>,
+    roster: &UpdateRoster,
     row: &UpdateRosterSession,
     restored_ids: Option<&BTreeMap<String, String>>,
 ) -> Result<std::sync::Arc<ResidentWorker>> {
-    let durable = row
-        .runtime_config
-        .get("create")
-        .cloned()
-        .context("the roster row carries no create command")?;
-    let durable: pa_types::daemon::DurableDaemonCreateCommand =
-        serde_json::from_value(durable).context("parse the roster row's create command")?;
-    let mut payload = crate::descriptor::create_command_payload(&durable);
-    if let Some(restored_ids) = restored_ids {
-        remap_legacy_parent(&mut payload, restored_ids);
-    }
-    let command: DaemonCommand =
-        serde_json::from_value(payload).context("rebuild the create command")?;
+    let command = restore_create_command(roster, row, restored_ids)?;
     let summary = supervisor
         .handle_create(&command, UPDATE_RESTORE_CLIENT_ID.to_string())
         .await?;
@@ -710,6 +701,38 @@ async fn restore_session(
         .find_by_session_file(&row.session_file)
         .await
         .context("the restored session did not register")
+}
+
+/// The roster row's create command. The durable create does not carry the telemetry
+/// opt-out; the row's worker launch env does, and a telemetry-disabled client can only
+/// reattach to a worker that kept it.
+fn restore_create_command(
+    roster: &UpdateRoster,
+    row: &UpdateRosterSession,
+    restored_ids: Option<&BTreeMap<String, String>>,
+) -> Result<DaemonCommand> {
+    let durable = row
+        .runtime_config
+        .get("create")
+        .cloned()
+        .context("the roster row carries no create command")?;
+    let durable: pa_types::daemon::DurableDaemonCreateCommand =
+        serde_json::from_value(durable).context("parse the roster row's create command")?;
+    let mut payload = crate::descriptor::create_command_payload(&durable);
+    if let Some(restored_ids) = restored_ids {
+        remap_legacy_parent(&mut payload, restored_ids);
+    }
+    let telemetry_disabled = roster.workers.iter().any(|worker| {
+        worker.sessions.contains(&row.session_id)
+            && worker
+                .launch_env
+                .get(crate::worker::WORKER_TELEMETRY_DISABLED_ENV)
+                .is_some_and(|value| value == "1")
+    });
+    if telemetry_disabled {
+        payload["telemetryDisabled"] = json!(true);
+    }
+    serde_json::from_value(payload).context("rebuild the create command")
 }
 
 /// TS restores parent sessions first and substitutes their new active handles;
@@ -903,6 +926,29 @@ mod tests {
             ],
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_restored_session_keeps_its_workers_telemetry_opt_out() {
+        let mut roster = two_row_roster();
+        for row in &mut roster.sessions {
+            row.runtime_config = json!({ "create": { "cwd": "/w" } });
+        }
+        roster.workers = serde_json::from_value(json!([{
+            "worker_id": "active-a",
+            "sessions": ["a-1"],
+            "launch_env": { (crate::worker::WORKER_TELEMETRY_DISABLED_ENV): "1" }
+        }]))
+        .unwrap();
+        let telemetry_disabled =
+            |row: &UpdateRosterSession| match restore_create_command(&roster, row, None).unwrap() {
+                DaemonCommand::Create {
+                    telemetry_disabled, ..
+                } => telemetry_disabled,
+                other => panic!("not a create: {other:?}"),
+            };
+        assert_eq!(telemetry_disabled(&roster.sessions[0]), Some(true));
+        assert_eq!(telemetry_disabled(&roster.sessions[1]), None);
     }
 
     #[tokio::test]

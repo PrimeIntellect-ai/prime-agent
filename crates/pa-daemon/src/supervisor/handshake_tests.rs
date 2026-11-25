@@ -148,6 +148,109 @@ async fn handshake_channel_stays_private_until_auth_answers() {
         resident.cmd_tx.lock().await.is_some(),
         "the answered handshake installs the channel for routing"
     );
+    // The old-worker shape: the answer advertised no scoped-abort
+    // capability, so the resident must not accept scoped aborts (an
+    // adopted older worker would treat one as the full queue-suspending
+    // abort).
+    assert!(
+        !resident
+            .background_cell_abort_capable
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the resident reads the scoped-abort capability off the worker's own answer"
+    );
+}
+
+/// The worker's `worker_auth` answer — not the supervisor's own hello —
+/// gates the scoped abort: a worker that advertises
+/// `background_cell_abort` flips the resident's flag, so the routing
+/// boundary can refuse scoped aborts for every worker that did not.
+#[tokio::test]
+async fn the_scoped_abort_gate_reads_the_workers_own_advertisement() {
+    let dir = std::env::temp_dir().join(format!("pa-handshake-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("worker.sock");
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-scoped-abort",
+        "pid": 4343,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "handshake-token",
+        "rootActiveSessionId": "none",
+        "createdAt": "2026-09-23T00:00:00Z",
+        "updatedAt": "2026-09-23T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-scoped-abort".to_string(),
+        descriptor,
+        dir.join("w-scoped-abort.json"),
+    );
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let listener = bind_fake_worker(&socket_path).await;
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    let request_id = frame
+        .header
+        .get("requestId")
+        .and_then(Value::as_str)
+        .expect("request id")
+        .to_string();
+    // The new-worker answer: the scoped-abort capability is present.
+    let payload = crate::protocol::response_line_bytes(&DaemonResponse {
+        id: None,
+        command: "worker_auth".to_string(),
+        success: true,
+        data: Some(json!({
+            "capabilities": ["agent_roster", "background_cell_abort"]
+        })),
+        error: None,
+        error_info: None,
+    });
+    write_frame(
+        &mut fake.write_half,
+        &json!({
+            "kind": "outbound",
+            "requestId": request_id,
+            "outboundType": "response",
+        }),
+        &payload,
+        DEFAULT_PRIVATE_FRAME_LIMITS,
+    )
+    .await
+    .expect("write the auth answer");
+    connect
+        .await
+        .expect("the connect task lives")
+        .expect("the handshake completes");
+    assert!(
+        resident
+            .background_cell_abort_capable
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the advertising worker may receive scoped aborts"
+    );
 }
 
 /// A tombstoned stop's entire silent-peer authentication uses the strict
