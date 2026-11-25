@@ -11,14 +11,15 @@ use std::sync::Arc;
 pub type RefineChildReplyPark<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + 'a>>;
 
-/// One parked refine reply's idle-boundary apply outcome (`None` when the
-/// engine has nothing parked).
+/// One parked refine reply's idle-boundary apply outcome, with who
+/// triggered the refinement (`None` when the engine has nothing parked).
 pub type PendingRefineApply<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Option<
+                Output = Option<(
+                    pa_core::session_engine::refine::RefinementSource,
                     anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
-                >,
+                )>,
             > + Send
             + 'a,
     >,

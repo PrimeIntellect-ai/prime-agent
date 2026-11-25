@@ -4,6 +4,7 @@ use super::{
     emit_refinement_event_for_generation, emit_refinement_row_for_generation,
     refine_complete_event, EventPump, SessionCore,
 };
+use pa_core::session_engine::refine::RefinementSource;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +13,7 @@ pub(super) fn completion_sink(
     events: Arc<EventPump>,
 ) -> crate::agent_engine::RefinementCompletionSink {
     let runtime = tokio::runtime::Handle::current();
-    Arc::new(move |pending| {
+    Arc::new(move |pending, source| {
         let origin = {
             let core = core.lock().unwrap();
             core.store
@@ -28,18 +29,20 @@ pub(super) fn completion_sink(
             let Some((session_id, generation)) = origin else {
                 return;
             };
-            emit_refinement_outcome(&core, &events, &session_id, &generation, result);
+            emit_refinement_outcome(&core, &events, &session_id, &generation, source, result);
         });
     })
 }
 
 /// Emit one finished refinement: its durable rows and `refine_complete`, or
-/// `refine_failed`.
+/// `refine_failed` naming who triggered it (print mode fails its run on a
+/// `/refine` command's failure only).
 pub(super) fn emit_refinement_outcome(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     session_id: &str,
     generation: &str,
+    source: RefinementSource,
     result: anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
 ) {
     match result {
@@ -71,7 +74,11 @@ pub(super) fn emit_refinement_outcome(
                 events,
                 session_id,
                 Some(generation),
-                json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+                json!({
+                    "type": "refine_failed",
+                    "error": format!("{error:#}"),
+                    "source": source.as_str(),
+                }),
             );
         }
     }

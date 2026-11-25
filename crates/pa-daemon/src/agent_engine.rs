@@ -119,6 +119,7 @@ pub(crate) type RefinementCompletionSink = std::sync::Arc<
             tokio::task::JoinHandle<
                 anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
             >,
+            pa_core::session_engine::refine::RefinementSource,
         ) + Send
         + Sync,
 >;

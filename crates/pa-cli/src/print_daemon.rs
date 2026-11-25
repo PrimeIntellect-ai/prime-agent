@@ -350,11 +350,13 @@ pub(crate) fn live_session_refusal(
 
 /// Await one request while relaying the session's streamed events: json
 /// mode prints each one (TS writes every `session_event`), text mode
-/// drops them but reports a failed refinement. A `refine_failed` sets
-/// `refine_failed`, which fails the run like the daemonless run. The worker
-/// flushes a turn's events before its response, and the RLM quiescence
-/// barrier holds for the refinement child, so every event the request
-/// produced is relayed when it returns.
+/// drops them but reports a failed refinement. A `/refine` command's
+/// `refine_failed` (source `user`) sets `refine_failed`, which fails the run
+/// like the daemonless run; a model-requested or compaction-triggered
+/// refinement's failure is only reported. The worker flushes a turn's
+/// events before its response, and the RLM quiescence barrier holds for
+/// the refinement child, so every event the request produced is relayed
+/// when it returns.
 async fn relay_events_until<T>(
     request: impl std::future::Future<Output = T>,
     events: &mut UnboundedReceiver<DaemonClientEvent>,
@@ -377,12 +379,13 @@ async fn relay_events_until<T>(
                     println!("{event}");
                 }
                 if event["type"] == "refine_failed" {
-                    *refine_failed = true;
                     if !json_mode {
                         crate::print_runtime::emit_refinement_failure(
                             event["error"].as_str().unwrap_or_default(),
                         );
                     }
+                    *refine_failed |=
+                        event["source"] == pa_core::session_engine::refine::RefinementSource::User.as_str();
                 }
             }
             result = &mut request => return result,
