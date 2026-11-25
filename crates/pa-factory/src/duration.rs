@@ -13,7 +13,7 @@ const UNITS: [(char, u64); 4] = [
 ///
 /// # Errors
 /// Returns the reason the text is not a positive duration.
-pub fn parse_duration_ms(text: &str) -> Result<u64, String> {
+pub(crate) fn parse_duration_ms(text: &str) -> Result<u64, String> {
     let invalid = || format!("{text:?} is not a duration: write it like 90s, 30m, 6h, 1d or 1h30m");
     let mut total: u64 = 0;
     let mut digits = String::new();

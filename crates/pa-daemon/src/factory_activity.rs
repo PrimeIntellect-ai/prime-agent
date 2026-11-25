@@ -82,6 +82,16 @@ impl Worker {
         // The machines page's list reads the library from disk (the one Rust
         // scan): no kernel, no core session.
         if action == "library" && spec_id.is_none() {
+            // The kernel's factory gate never sees this read, so it refuses
+            // here the same way while the factory is disabled.
+            if !factory_lane_enabled(&self.config.agent_dir) {
+                return response_failure(
+                    None,
+                    "factory_activity",
+                    pa_core::refinement::FACTORY_DISABLED_MESSAGE,
+                    None,
+                );
+            }
             let agent_dir = self.config.agent_dir.clone();
             let listed = tokio::task::spawn_blocking(move || {
                 pa_core::session_engine::factory_host::machine_library(&agent_dir).to_json()
@@ -252,7 +262,8 @@ mod tests {
     }
 
     /// The machines page's list reads the library from disk: a session with
-    /// no kernel lists the user level's machine with its source.
+    /// no kernel lists the user level's machine with its source, and the list
+    /// refuses while the factory is disabled.
     #[tokio::test]
     async fn the_library_list_answers_without_a_kernel() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -274,7 +285,7 @@ mod tests {
                 token: "token".to_string(),
                 worker_instance_id: String::new(),
                 active_session_id: "library-list".to_string(),
-                agent_dir,
+                agent_dir: agent_dir.clone(),
                 recovery_journal_path: dir.path().join("recovery.jsonl"),
                 telemetry_disabled: Some(true),
                 script: Some(serde_json::json!({ "responses": [] })),
@@ -288,12 +299,25 @@ mod tests {
             )
             .await;
         assert!(created.success, "{created:?}");
-        let listed = worker
-            .dispatch(
+        let list = || {
+            worker.dispatch(
                 "factory_activity",
                 &serde_json::json!({ "action": "library" }),
             )
-            .await;
+        };
+        // The factory is off by default: the list refuses like the kernel.
+        let refused = list().await;
+        assert_eq!(
+            refused.error.as_deref(),
+            Some(pa_core::refinement::FACTORY_DISABLED_MESSAGE),
+            "{refused:?}"
+        );
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"factory": {"enabled": true}}"#,
+        )
+        .expect("write settings");
+        let listed = list().await;
         assert!(listed.success, "{listed:?}");
         let data = listed.data.expect("list data");
         let row = data["machines"]

@@ -720,6 +720,32 @@ fn a_selected_run_missing_from_the_batch_shows_loading() {
     assert!(joined.contains("Loading run run-not-listed…"), "{joined}");
 }
 
+/// A back edge's label lights only when that back edge fired, not when a
+/// forward edge into the same state did.
+#[test]
+fn a_back_edge_label_stays_unlit_when_only_a_forward_edge_fired() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"] = json!([
+        { "from": "collect", "to": "reviewing", "on": "settled" },
+        { "from": "reviewing", "to": "fixing", "on": "settled" },
+        { "from": "fixing", "to": "reviewing", "on": "settled",
+          "when": { "output": "verdict", "op": "eq", "value": "loopback" } }
+    ]);
+    snapshot["lastFired"] = json!([{ "from": "collect", "to": "reviewing", "seq": 7 }]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let label = spans
+        .iter()
+        .flatten()
+        .find(|span| span.content.contains("loopback"))
+        .expect("the back edge's label renders");
+    assert_ne!(
+        label.style, success,
+        "the unfired back edge's label stays unlit"
+    );
+}
+
 /// The empty state and the key hint.
 #[test]
 fn the_empty_state_names_the_surface() {

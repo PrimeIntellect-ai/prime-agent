@@ -773,7 +773,8 @@ fn strip_matching_quotes(value: &str) -> &str {
 }
 
 /// ISO-8601 parse to epoch millis (RFC 3339 subset).
-pub(crate) fn parse_iso_millis(text: &str) -> Option<u64> {
+#[must_use]
+pub fn parse_iso_millis(text: &str) -> Option<u64> {
     let text = text.trim();
     let (date, time) = text.split_once('T')?;
     let date_parts: Vec<&str> = date.split('-').collect();

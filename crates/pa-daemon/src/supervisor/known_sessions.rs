@@ -1,10 +1,9 @@
 //! Every session the daemon knows, from one set of rules: the saved
-//! catalog of a sessions directory, the file-backed residents, the
-//! roster-known top-level sessions outside the default directory (a
-//! passivated owner opened from a custom `sessionDir`; default listing
-//! only), and the passive
-//! RLM children of all of them. `list` with `all` and the factory overview
-//! both read it.
+//! catalog of a sessions directory, the file-backed residents, optionally
+//! the roster-known top-level sessions outside the default directory (a
+//! passivated owner opened from a custom `sessionDir`; the overview asks for
+//! them), and the passive RLM children of all of them. `list` with `all`
+//! and the factory overview both read it.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -50,11 +49,13 @@ pub(super) struct KnownSessions {
 
 impl Supervisor {
     /// Gather the catalog's inputs for `catalog_dir` (the default sessions
-    /// directory unless a command names another).
+    /// directory unless a command names another). `roster_roots` adds the
+    /// roster-known top-level sessions of other folders (the overview).
     pub(super) async fn known_session_roots(
         self: &Arc<Self>,
         catalog_dir: PathBuf,
         residents: Vec<ResidentFile>,
+        roster_roots: bool,
     ) -> Result<KnownSessionRoots> {
         let default_dir = paths::sessions_dir(&self.options.agent_dir)?;
         let resident_files: HashSet<PathBuf> = residents
@@ -62,9 +63,7 @@ impl Supervisor {
             .map(|resident| canonical_session_path(&resident.session_file))
             .collect();
         let mut roster_files = Vec::new();
-        // Roster-known sessions of other folders join only the default
-        // listing: a command that names a folder lists that folder.
-        if catalog_dir == default_dir {
+        if roster_roots {
             let roster = self.roster.lock().unwrap();
             let mut seen = HashSet::new();
             for entry in roster.entries() {

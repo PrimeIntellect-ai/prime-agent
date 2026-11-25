@@ -7,6 +7,21 @@ use super::{
 };
 use crate::interactive::reconnect::{ConnectionEffect, ConnectionEvent};
 
+/// Which press fired the shared interrupt ladder: the idle
+/// backgrounded-cell cancel rides only a BARE press (one that arms no
+/// other action); an ARMING press (the Escape clear/tree repeat, the
+/// Ctrl+C exit pair) never stops backgrounded work as a side effect of
+/// arming something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InterruptOrigin {
+    /// The press also arms another action (an Escape repeat, the Ctrl+C
+    /// exit pair): the scoped cancel never rides it.
+    Arming,
+    /// The press arms nothing else: the only gesture that may stop the
+    /// session's parked backgrounded cell.
+    Bare,
+}
+
 /// One backgrounded compaction-abort outcome: a failed abort surfaces as
 /// the transcript note and clears the stuck compaction loader locally.
 pub(crate) struct CompactionAbortNote {
@@ -73,6 +88,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::Abort {
                         id: None,
                         active_session_id: active_session_id.clone(),
+                        scope: None,
                         rest: Map::default(),
                     })
                     .await
@@ -84,6 +100,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::Abort {
                         id: None,
                         active_session_id,
+                        scope: None,
                         rest: Map::default(),
                     })
                     .await;
@@ -791,9 +808,11 @@ impl SessionUi {
     }
 
     /// The abort ladder shared by the Ctrl+C and Escape interrupts: a compacting session aborts the
-    /// compaction run, a streaming turn aborts through `abort_and_send_queued`, and a running user
-    /// bash aborts alongside. The side-question abort stays at the call sites.
-    pub(super) fn interrupt_running_work(&self, view: &AgentView) {
+    /// compaction run, a streaming turn aborts through `abort_and_send_queued`, an idle session's
+    /// BARE press (one that arms no other action) stops a parked backgrounded cell through the
+    /// scoped abort, and a running user bash aborts alongside. The side-question abort stays at the
+    /// call sites.
+    pub(super) fn interrupt_running_work(&self, view: &AgentView, origin: InterruptOrigin) {
         // Abort the trace upload sweep first.
         if let Some(run) = &self.trace_upload {
             run.cancel.cancel();
@@ -806,12 +825,68 @@ impl SessionUi {
             // No transient abort hint: the aborted turn's own assistant row carries
             // the interrupt, so nothing is noted here.
             self.abort_turn();
+        } else if origin == InterruptOrigin::Bare
+            && self
+                .client
+                .supports_session_server_capability("background_cell_abort")
+        {
+            // The idle arm rides only a press that arms nothing else (an
+            // Escape with the tree shortcut already spent): the first
+            // Escape arms the clear/tree repeat and the first Ctrl+C arms
+            // the exit pair, so stopping backgrounded work must not be
+            // their side effect. The scoped abort touches nothing else —
+            // a session without a parked cell is a reported no-op, and a
+            // peer without the capability keeps the old no-op behavior.
+            self.abort_background_cell();
         }
         // A running user-bash command aborts the same way; the settled run
         // reports cancelled through its bash_end.
         if self.user_bash_running {
             self.abort_user_bash();
         }
+    }
+
+    /// The idle scoped abort (`abort` with scope `background_cell`): stop
+    /// only the session's parked backgrounded cell, never the queues, and
+    /// report whether one was stopped.
+    fn abort_background_cell(&self) {
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let notes = self.notes.clone();
+        tokio::spawn(async move {
+            let command = DaemonCommand::Abort {
+                id: None,
+                active_session_id,
+                scope: Some("background_cell".to_string()),
+                rest: Map::default(),
+            };
+            match client.request(command).await {
+                Ok(response) if response.success => {
+                    let stopped = response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("stoppedBackgroundCell"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let _ = notes.send(if stopped {
+                        "the backgrounded cell was stopped".to_string()
+                    } else {
+                        "no backgrounded cell is running".to_string()
+                    });
+                }
+                Ok(response) => {
+                    let _ = notes.send(format!(
+                        "the background-cell cancel failed: {}",
+                        response
+                            .error
+                            .unwrap_or_else(|| "unknown error".to_string())
+                    ));
+                }
+                Err(error) => {
+                    let _ = notes.send(format!("the background-cell cancel failed: {error:#}"));
+                }
+            }
+        });
     }
 
     /// Apply an assistant message frame: an open streaming message is updated in place; otherwise

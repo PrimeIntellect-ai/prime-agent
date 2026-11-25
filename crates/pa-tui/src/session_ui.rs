@@ -25,6 +25,7 @@ mod window;
 pub(crate) use window::TranscriptPageNote;
 
 pub(crate) use apply::CompactionAbortNote;
+pub(crate) use apply::InterruptOrigin;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
 pub(crate) use bash::BashActivityUpdate;
 use bash::{ResyncBash, SideBashRun};

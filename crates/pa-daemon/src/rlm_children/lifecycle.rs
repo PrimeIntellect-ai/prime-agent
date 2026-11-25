@@ -1,6 +1,7 @@
 //! The child-lifecycle concern: session creation (create/launch), the
 //! prompt/kill/close routing, settle watching with its notices, and the
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
+use pa_core::session_engine::rlm_host::RlmSpawnKind;
 use pa_core::session_engine::semantic_edges::ChildCancelledReason;
 
 use super::run_state::{RunEvent, RunVerdict};
@@ -75,7 +76,7 @@ impl SupervisorChildSessionsInner {
         depth: u32,
         model: &str,
         thinking: Option<&str>,
-        decision_child: bool,
+        kind: RlmSpawnKind,
         cwd: &str,
         session_dir: &Path,
         // The parent's in-flight turn request the child anchors to (TS
@@ -93,9 +94,12 @@ impl SupervisorChildSessionsInner {
             "rlmMaxDepth": identity.rlm_max_depth,
         });
         // The create key: descriptor.rs derives the worker's launch env
-        // from it, and the admission projects it onto the ledger edge.
-        if decision_child {
-            config["decisionChild"] = json!(true);
+        // from it, and the admission projects `decisionChild` onto the
+        // ledger edge.
+        match kind {
+            RlmSpawnKind::Subagent => {}
+            RlmSpawnKind::Decision => config["decisionChild"] = json!(true),
+            RlmSpawnKind::Refine => config["refineChild"] = json!(true),
         }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
@@ -188,7 +192,7 @@ impl SupervisorChildSessionsInner {
                 depth,
                 model,
                 thinking,
-                /*decision_child*/ false,
+                RlmSpawnKind::Subagent,
                 cwd,
                 session_dir,
                 /*spawned_by_request_id*/ None,
@@ -656,6 +660,9 @@ impl SupervisorChildSessionsInner {
                 // refused abort can roll a cancelled run back to running
                 // inside this tail: the live run keeps its watcher.
                 if self.fire_settle_hook(record).await {
+                    // The one-shot refinement child retires at its settle —
+                    // the registry observed it, so it owns the teardown.
+                    self.retire_refine_child_record(record).await;
                     return;
                 }
                 continue;
@@ -880,6 +887,7 @@ impl SupervisorChildSessionsInner {
         self.record_child_return(record).await;
         self.deliver_terminal_notice(record, message).await;
         self.fire_settle_hook(record).await;
+        self.retire_refine_child_record(record).await;
         true
     }
 
@@ -1043,7 +1051,11 @@ pub(super) fn final_turn_error_from_file(session_file: &str) -> Option<String> {
 }
 
 /// The busy flags of one child `get_state` summary (streaming, its own
-/// descendants, or queued work in flight).
+/// descendants, queued work in flight, or owed background completions — a
+/// detached kernel cell and a queued completion both mean the child has
+/// work that will still land, so an ordinary child must not settle while the
+/// count is non-zero; the child's `waitForRlmQuiescence` wait holds on the
+/// same count).
 fn child_busy_flags(state: &Value) -> bool {
     let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
     flag("isStreaming")
@@ -1054,6 +1066,32 @@ fn child_busy_flags(state: &Value) -> bool {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             > 0
+        || state
+            .get("pendingBackgroundCompletions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+}
+
+#[cfg(test)]
+mod background_busy_tests {
+    use super::*;
+
+    /// A detached cell (or a queued completion) keeps an ordinary child
+    /// unsettled: the count is the only evidence that work will still land,
+    /// and a child that settles without it reports done/no-reply while its
+    /// cell still runs.
+    #[test]
+    fn a_child_with_owed_background_completions_is_not_idle() {
+        assert!(child_busy_flags(
+            &json!({ "pendingBackgroundCompletions": 1 })
+        ));
+        assert!(!child_busy_flags(
+            &json!({ "pendingBackgroundCompletions": 0 })
+        ));
+        // A summary that predates the field keeps the old rules only.
+        assert!(!child_busy_flags(&json!({})));
+    }
 }
 
 /// Factory task observers require the opt-in field; absence cannot prove the
