@@ -519,6 +519,107 @@ async fn a_session_opened_over_waiting_mail_gets_one_notice() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A worker hosting a fresh session file under `dir/sessions` (created
+/// through the real `create`), plus that file's path.
+async fn worker_on_session_file(dir: &std::path::Path) -> (Arc<Worker>, PathBuf) {
+    let path = written_session(dir);
+    let worker = faux_worker_in(dir);
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "cwd": "/tmp", "sessionPath": path.display().to_string() }),
+        )
+        .await;
+    assert!(created.success, "{created:?}");
+    (worker, path)
+}
+
+fn written_session(dir: &std::path::Path) -> PathBuf {
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut store = SessionFile::create("/tmp", None, 0);
+    let path = sessions.join(session_file_name(store.session_id()));
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    path
+}
+
+/// The waiting classes of one session file's inbox journal.
+fn journal_classes(session: &std::path::Path) -> Vec<String> {
+    SessionInbox::open(
+        pa_core::session_engine::harness_digest::session_artifact_dir_for_log(session).as_deref(),
+    )
+    .waiting_messages()
+    .into_iter()
+    .map(|message| message.class)
+    .collect()
+}
+
+/// The current session's inbox classes and the ids its queued arrival row
+/// covers.
+fn live_inbox(worker: &Worker) -> (Vec<String>, Vec<String>) {
+    let inbox = worker.agent_engine.as_ref().unwrap().inbox().unwrap();
+    let classes = inbox
+        .waiting_messages()
+        .into_iter()
+        .map(|message| message.class)
+        .collect();
+    (classes, queued_arrival_covers(&worker.core.lock().unwrap()))
+}
+
+/// `new_session` moves the waiting agent messages to the new session,
+/// which announces them; the outgoing session keeps every other class.
+#[tokio::test]
+async fn a_new_session_takes_only_the_waiting_agent_messages() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-inbox-new-{}", uuid::Uuid::new_v4()));
+    let (worker, old) = worker_on_session_file(&dir).await;
+    assert!(deliver_agent_message(&worker, "carry on").await.success);
+    let router = worker.inbox_router.as_ref().unwrap();
+    router.route(bash_done(7, "make"), Lane::Steering).unwrap();
+    // Park the runner: the announced row stays queued for the check.
+    worker.core.lock().unwrap().queued_input_suspended = true;
+    let replaced = worker.dispatch("new_session", &json!({})).await;
+    assert!(replaced.success, "{replaced:?}");
+    let (classes, covers) = live_inbox(&worker);
+    assert_eq!(classes, [INBOX_CLASS_AGENT_MESSAGE]);
+    assert_eq!(
+        covers.len(),
+        1,
+        "the new session announces the moved message"
+    );
+    assert_eq!(journal_classes(&old), [INBOX_CLASS_BASH_DONE]);
+    let _ = worker.dispatch("kill", &json!({})).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A switch to a saved session moves nothing: the waiting agent message
+/// stays in its session's inbox and is announced when that session opens
+/// again.
+#[tokio::test]
+async fn a_switch_leaves_the_mail_with_its_session_until_it_reopens() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-inbox-switch-{}", uuid::Uuid::new_v4()));
+    let (worker, first) = worker_on_session_file(&dir).await;
+    let second = written_session(&dir);
+    assert!(
+        deliver_agent_message(&worker, "for the first")
+            .await
+            .success
+    );
+    worker.core.lock().unwrap().queued_input_suspended = true;
+    let switch_to = |path: &std::path::Path| json!({ "sessionPath": path.display().to_string(), "cwdOverride": "/tmp" });
+    let switched = worker.dispatch("switch_session", &switch_to(&second)).await;
+    assert!(switched.success, "{switched:?}");
+    assert_eq!(live_inbox(&worker), (Vec::new(), Vec::new()));
+    assert_eq!(journal_classes(&first), [INBOX_CLASS_AGENT_MESSAGE]);
+    let back = worker.dispatch("switch_session", &switch_to(&first)).await;
+    assert!(back.success, "{back:?}");
+    let (classes, covers) = live_inbox(&worker);
+    assert_eq!(classes, [INBOX_CLASS_AGENT_MESSAGE]);
+    assert_eq!(covers.len(), 1, "the reopened session announces it");
+    let _ = worker.dispatch("kill", &json!({})).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The covers ride the journaled row: a restored arrival row still knows
 /// its batch, so a clear after a restart takes exactly the unannounced
 /// agent messages, a pause takes none, and announced mail stays readable.
@@ -689,7 +790,7 @@ async fn a_message_sent_during_a_replacement_reaches_the_new_session() {
     let fx = fixture();
     let successor = fx.dir.join("sessions").join("successor.jsonl");
     fx.worker
-        .teardown_for_replacement(&successor)
+        .teardown_for_replacement(&successor, true)
         .await
         .expect("the teardown");
     let delivered = deliver_agent_message(&fx.worker, "mid-replacement").await;
@@ -724,7 +825,7 @@ async fn mail_waiting_at_a_replacement_moves_to_the_new_session() {
     let arrived_at = fx.inbox.waiting_messages()[0].arrived_at_ms;
     let successor = fx.dir.join("sessions").join("successor.jsonl");
     fx.worker
-        .teardown_for_replacement(&successor)
+        .teardown_for_replacement(&successor, true)
         .await
         .expect("the teardown");
     assert_eq!(fx.inbox.count().0, 0, "the outgoing inbox gave it up");
@@ -748,7 +849,7 @@ async fn a_build_during_a_replacement_keeps_the_new_sessions_inbox() {
     let fx = fixture();
     let successor = fx.dir.join("sessions").join("successor.jsonl");
     fx.worker
-        .teardown_for_replacement(&successor)
+        .teardown_for_replacement(&successor, true)
         .await
         .expect("the teardown");
     let model = fx.engine().resolve_model().expect("the faux model");
@@ -782,7 +883,7 @@ async fn a_turn_running_at_a_replacement_accepts_no_row_after_the_mail_moves() {
         core.busy = true;
     }
     let successor = fx.dir.join("sessions").join("successor.jsonl");
-    fx.worker.retire_for_replacement(&successor);
+    fx.worker.retire_for_replacement(&successor, true);
     assert_eq!(fx.inbox.count().0, 0, "the mail moved");
     assert!(
         fx.worker.core.lock().unwrap().abort_requested,

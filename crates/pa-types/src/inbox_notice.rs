@@ -21,16 +21,6 @@ pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
 /// The cell-done class label: one auto-backgrounded cell's completion
 /// (the `[cell-done ...]` row) routed into the inbox.
 pub const INBOX_CLASS_CELL_DONE: &str = "cell-done";
-/// Every inbox message class.
-pub const INBOX_CLASSES: [&str; 7] = [
-    INBOX_CLASS_BASH_DONE,
-    INBOX_CLASS_FACTORY_PROGRESS,
-    INBOX_CLASS_AGENT_MESSAGE,
-    INBOX_CLASS_CHILD_EXITED,
-    INBOX_CLASS_CHILD_FAILED,
-    INBOX_CLASS_HEARTBEAT,
-    INBOX_CLASS_CELL_DONE,
-];
 
 /// The `customType` of the inbox notice rows (`arrival` and `reminder`).
 pub const INBOX_NOTICE_CUSTOM_TYPE: &str = "inbox_notice";

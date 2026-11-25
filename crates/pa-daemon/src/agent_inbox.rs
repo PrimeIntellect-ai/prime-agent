@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
 use pa_core::session_engine::inbox::{InboxNotice, SessionInbox};
+use pa_types::inbox_notice::INBOX_CLASS_AGENT_MESSAGE;
 
 use crate::agent_engine::AgentSessionEngine;
 use crate::journal::WorkerRecoveryJournal;
@@ -242,13 +243,15 @@ impl InboxRouter {
     }
 }
 
-/// Move every waiting message from the outgoing session's inbox into the
-/// successor's (a replacement: the outgoing session never reopens through
-/// this worker). The successor's copies are written first and the
-/// outgoing records removed after (only once the copies are durable), so
-/// a crash leaves a message in both inboxes, never in neither. Each copy keeps its arrival time
-/// and carries `meta.movedFrom` (`<session id>/<inbox id>`), so a repeated
-/// move after such a crash never adds a second copy.
+/// Move the waiting agent messages from the outgoing session's inbox into
+/// the successor's (a new session or a fork continues the conversation).
+/// Every other class stays with its session: a bash, child, heartbeat, or
+/// factory notice is about that session's own work. The successor's
+/// copies are written first and the outgoing records removed after (only
+/// once the copies are durable), so a crash leaves a message in both
+/// inboxes, never in neither. Each copy keeps its arrival time and carries
+/// `meta.movedFrom` (`<session id>/<inbox id>`), so a repeated move after
+/// such a crash never adds a second copy.
 pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from_session: &str) {
     let already_moved: Vec<String> = to
         .waiting_messages()
@@ -262,13 +265,11 @@ pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from
         })
         .collect();
     let mut moved = std::collections::BTreeSet::new();
-    for message in from.waiting_messages() {
-        let Some(class) = pa_types::inbox_notice::INBOX_CLASSES
-            .into_iter()
-            .find(|class| *class == message.class)
-        else {
-            continue;
-        };
+    for message in from
+        .waiting_messages()
+        .into_iter()
+        .filter(|message| message.class == INBOX_CLASS_AGENT_MESSAGE)
+    {
         let origin = format!("{from_session}/{}", message.id);
         if !already_moved.contains(&origin) {
             let mut meta = message.meta;
@@ -278,7 +279,7 @@ pub(crate) fn move_waiting_messages(from: &SessionInbox, to: &SessionInbox, from
             meta["movedFrom"] = serde_json::json!(origin);
             to.push(
                 InboxNotice {
-                    class,
+                    class: INBOX_CLASS_AGENT_MESSAGE,
                     sender: message.sender,
                     text: message.text,
                     meta,

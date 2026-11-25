@@ -210,11 +210,16 @@ impl Worker {
     /// swapping onto the replacement file: the queued actions cancel, the runs
     /// abort and settle, then the runtime retires and the RLM children close.
     /// Tree moves never run this (the kernel stays warm).
+    /// `moves_agent_messages` hands the outgoing session's waiting agent
+    /// messages to the successor (a new session or a fork continues the
+    /// conversation; a switch to a saved session leaves them for their
+    /// own session's next open).
     pub(crate) async fn teardown_for_replacement(
         &self,
         successor: &std::path::Path,
+        moves_agent_messages: bool,
     ) -> anyhow::Result<()> {
-        self.retire_for_replacement(successor);
+        self.retire_for_replacement(successor, moves_agent_messages);
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_replacement_settled().await;
@@ -226,16 +231,19 @@ impl Worker {
     }
 
     /// The replacement's first step, one critical section: the session
-    /// closes, its waiting mail moves to the successor's inbox, the running
-    /// turn stops accepting rows, and the queued actions cancel.
-    pub(super) fn retire_for_replacement(&self, successor: &std::path::Path) {
+    /// closes, new mail routes to the successor's inbox, the waiting agent
+    /// messages move there when `moves_agent_messages`, the running turn
+    /// stops accepting rows, and the queued actions cancel.
+    pub(super) fn retire_for_replacement(
+        &self,
+        successor: &std::path::Path,
+        moves_agent_messages: bool,
+    ) {
         let mut core = self.core.lock().unwrap();
         // Mark the session closed before the children close: the marker keeps
         // settle retries from minting continuations into the retiring session.
         // From the same critical section on, mail for this worker lands in
-        // the successor's inbox, and the mail still waiting moves there
-        // (the successor's open announces it): the outgoing session never
-        // reopens through this worker.
+        // the successor's inbox (the successor's open announces it).
         if let Some(agent_engine) = &self.agent_engine {
             agent_engine.mark_session_closed();
             let outgoing = agent_engine.inbox();
@@ -249,9 +257,9 @@ impl Worker {
                 .unwrap_or_default();
             let successor_inbox = agent_engine
                 .open_inbox_at(Some(successor).filter(|path| !path.as_os_str().is_empty()));
-            if let Some(outgoing) =
-                outgoing.filter(|outgoing| !std::sync::Arc::ptr_eq(outgoing, &successor_inbox))
-            {
+            if let Some(outgoing) = outgoing.filter(|outgoing| {
+                moves_agent_messages && !std::sync::Arc::ptr_eq(outgoing, &successor_inbox)
+            }) {
                 crate::agent_inbox::move_waiting_messages(
                     &outgoing,
                     &successor_inbox,
