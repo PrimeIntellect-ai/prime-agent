@@ -335,6 +335,13 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("node a failure_policy must be one of", errors[0])
 
+    def test_retries(self) -> None:
+        for good in (0, 5, 10):
+            self.assertEqual(validate_factory_spec({"nodes": [node("a", retries=good)]}), [])
+        for bad in (-1, 11, 1.5, "2", True):
+            errors = validate_factory_spec({"nodes": [node("a", retries=bad)]})
+            self.assertEqual(errors, ["node a retries must be an integer between 0 and 10"], bad)
+
     def test_depends_on(self) -> None:
         ok = {"nodes": [node("a"), node("b", depends_on=["a"])]}
         self.assertEqual(validate_factory_spec(ok), [])
@@ -572,6 +579,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         zero_retries = {"nodes": [node("watcher", lifecycle="resident", retries=0)]}
         self.assertEqual(validate_factory_spec(zero_retries), [])
 
+        # The type/range guard runs before the resident rule: a malformed
+        # value names the bound, not "cannot declare retries".
+        malformed_retries = {"nodes": [node("watcher", lifecycle="resident", retries="bad")]}
+        self.assertEqual(
+            validate_factory_spec(malformed_retries),
+            ["node watcher retries must be an integer between 0 and 10"],
+        )
+
         # Empty outputs list on a resident node is fine: nothing is declared.
         empty_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[])]}
         self.assertEqual(validate_factory_spec(empty_outputs), [])
@@ -709,6 +724,7 @@ class ValidateFactorySpecTest(unittest.TestCase):
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
                 "node a depends on unknown node 'ghost'",
+                "node b retries must be an integer between 0 and 10",
                 "node c failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'retry'",
             ],
         )
@@ -1376,6 +1392,15 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(declares_retries),
             ["resident state watcher cannot declare retries"],
         )
+        # Same order as the node form: the bound check reports first.
+        malformed_retries = {
+            "states": [state("watcher", entry=True, lifecycle="resident", retries="bad")],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(malformed_retries),
+            ["state watcher retries must be an integer between 0 and 10"],
+        )
         leaves_resident = {
             "states": [
                 {"id": "entry", "entry": True, "subagent": "w"},
@@ -1899,6 +1924,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(machine),
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
+                "state a retries must be an integer between 0 and 10",
                 "transitions[0] references unknown to-state 'ghost'",
             ],
         )
