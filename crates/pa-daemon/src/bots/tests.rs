@@ -2537,7 +2537,14 @@ async fn a_bot_that_spawns_bots_gets_the_sandbox_api_rule_and_context() {
         .keys()
         .filter(|name| name.starts_with("PRIME_AGENT_BOTS_KEY_"))
         .collect();
-    assert_eq!(secrets.len(), 1, "{:?}", state.secrets);
+    // Print the secret NAMES only: formatting the map would put the values in
+    // a failing test's log (CodeQL alert 337, "cleartext logging of sensitive information").
+    assert_eq!(
+        secrets.len(),
+        1,
+        "expected one sandbox key secret, got {:?}",
+        state.secrets.keys().collect::<Vec<_>>()
+    );
     let created = state.creates.clone();
     drop(state);
     // The spawns label survives a registry rebuild.

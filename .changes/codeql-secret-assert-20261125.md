@@ -1,0 +1,1 @@
+- A bot test asserts on secret names instead of printing the secret map, so a failing run cannot log key values.
