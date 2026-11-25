@@ -652,6 +652,7 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                concrete.wire_refine_child_terminal(Arc::clone(&work_notify));
                 let late_core = Arc::clone(&core);
                 let late_events = Arc::clone(&events);
                 concrete.set_late_agent_message_sink(std::sync::Arc::new(

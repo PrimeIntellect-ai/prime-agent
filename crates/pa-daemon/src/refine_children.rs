@@ -8,9 +8,12 @@
 //! reply lands as the standard child-reply notification, the delivery is
 //! answered at once (the child's send never waits on the parent's apply),
 //! and the parked reply commits at the session's idle boundary through the
-//! same `commit_refinement` the in-process pipeline uses. The child's
-//! registry record retires at its own settle, so the one-shot child never
-//! orphans in the roster.
+//! same `commit_refinement` the in-process pipeline uses. A child that ends
+//! without replying hands its end to the engine through the registry's
+//! refine terminal hook and parks a failure in the reply's place, so it
+//! fails the refinement on the same apply path. The child's registry record
+//! retires at its own settle, so the one-shot child never orphans in the
+//! roster.
 
 use std::sync::{Arc, PoisonError};
 
@@ -55,84 +58,46 @@ impl AgentSessionEngine {
         let children = self.children.as_ref().ok_or_else(|| {
             anyhow!("the refine command requires a daemon-backed session: this session has no RLM child runtime")
         })?;
-        self.release_dead_refine_child_rounds().await;
         self.admit_refine_child(children, options, source).await
     }
 
-    /// Release the flights of refinement children that died without
-    /// replying, and the compact rounds they carried, so the cadence never
-    /// wedges behind the round's in-flight guard (the registry retires the
-    /// record at the settle it observed, whichever way the child ended).
-    pub(crate) async fn release_dead_refine_child_rounds(&self) {
-        let Some(children) = self.children.clone() else {
-            return;
-        };
-        let candidates: Vec<(String, String)> = self
-            .refine_flights
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .map(|(active_session_id, flight)| {
-                (active_session_id.clone(), flight.rlm_child_id.clone())
-            })
-            .collect();
-        for (active_session_id, rlm_child_id) in candidates {
-            // Only a present, still-running record can still reply.
-            if children.child_live(&rlm_child_id).await {
-                continue;
-            }
-            let released = self
-                .refine_flights
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&active_session_id);
-            if released.is_some_and(|flight| flight.source == RefinementSource::Auto) {
-                if let Some(core) = self.session.lock().await.as_deref() {
-                    core.session.finish_compact_auto_refine_round();
-                }
-            }
-        }
-    }
-
     /// A branch move or a replacement teardown abandons the conversation
-    /// the refinement children plan on: the children are cancelled first,
-    /// then their flights and parked replies drop, so no proposal applies to
-    /// the moved-to conversation. The cancel cannot recall a reply that is
-    /// already in delivery: each abandoned child's id is recorded until that
-    /// late reply arrives, so the park drops it and it never lands as an
-    /// agent message.
+    /// the refinement children plan on: their flights and parked replies
+    /// drop, then the children are cancelled, so no proposal applies to the
+    /// moved-to conversation and a cancelled child has no flight left to
+    /// fail. The cancel cannot recall a reply that is already in delivery:
+    /// each abandoned child's id is recorded until that late reply arrives,
+    /// so the park drops it and it never lands as an agent message.
     pub(crate) async fn abandon_refine_children(&self) {
         // Under the spawn lock, no admission sits between its prepare and
         // its flight's record, so every live child is in the map.
         let _spawn = self.refine_spawn_lock.lock().await;
-        let running: Vec<String> = self
-            .refine_flights
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .map(|flight| flight.rlm_child_id.clone())
-            .collect();
+        let running: Vec<String> = {
+            let mut flights = self
+                .refine_flights
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut abandoned = self
+                .abandoned_refine_children
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.pending_refine_replies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+            flights
+                .drain()
+                .map(|(active_session_id, flight)| {
+                    abandoned.insert(active_session_id);
+                    flight.rlm_child_id
+                })
+                .collect()
+        };
         if let Some(children) = self.children.as_ref() {
             for rlm_child_id in &running {
                 children.cancel_child_run(rlm_child_id).await;
             }
         }
-        let mut flights = self
-            .refine_flights
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.abandoned_refine_children
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend(
-                flights
-                    .drain()
-                    .map(|(active_session_id, _)| active_session_id),
-            );
-        self.pending_refine_replies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
     }
 
     /// Prepare the planning request, admit the refinement child, and record
@@ -199,8 +164,9 @@ impl AgentSessionEngine {
 
     /// The wake's first half: park a refinement child's reply for the
     /// idle-boundary apply; the delivery is answered at once. The late reply
-    /// of a child that a branch move or a replacement abandoned is consumed
-    /// and dropped. `None` for any other sender.
+    /// of a child that a branch move or a replacement abandoned, or whose
+    /// refinement already failed, is consumed and dropped. `None` for any
+    /// other sender.
     pub(crate) fn park_refine_child_reply(
         &self,
         sender_active_session_id: &str,
@@ -230,6 +196,71 @@ impl AgentSessionEngine {
                 reply: message.to_string(),
             });
         Some(())
+    }
+
+    /// Route the registry's refinement-child terminal outcomes here: a
+    /// child that ends without replying parks its refinement's failure, and
+    /// the runner wakes for the idle-boundary apply, as a parked reply
+    /// wakes it.
+    pub(crate) fn wire_refine_child_terminal(
+        self: &Arc<Self>,
+        work_notify: Arc<crate::worker::WorkNotify>,
+    ) {
+        let Some(children) = self.children.as_ref() else {
+            return;
+        };
+        let weak = Arc::downgrade(self);
+        children.set_refine_terminal_hook(Arc::new(move |active_session_id, error| {
+            if weak
+                .upgrade()
+                .is_some_and(|engine| engine.park_refine_child_failure(active_session_id, error))
+            {
+                work_notify.notify_one();
+            }
+        }));
+    }
+
+    /// A refinement child ended (its worker died or became unreachable, its
+    /// run failed or ended, a delete cancelled it): when its flight is still
+    /// open, the child never replied, so its failure parks in the reply's
+    /// place — the idle-boundary apply fails the refinement and finishes the
+    /// compact round it carried, and a late reply from the child is
+    /// dropped. `false` when no flight is open (the child replied, or a
+    /// branch move abandoned it): nothing is owed.
+    pub(crate) fn park_refine_child_failure(
+        &self,
+        active_session_id: &str,
+        error: Option<&str>,
+    ) -> bool {
+        let mut flights = self
+            .refine_flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(flight) = flights.remove(active_session_id) else {
+            return false;
+        };
+        // A cancelled child's planning call can still finish and send its
+        // reply: the park drops it like an abandoned child's late reply.
+        self.abandoned_refine_children
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(active_session_id.to_string());
+        let error = match error {
+            Some(error) => format!("the refinement child ended before replying: {error}"),
+            None => "the refinement child ended without replying".to_string(),
+        };
+        self.pending_refine_replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(PendingRefineReply {
+                flight,
+                reply: serde_json::json!({
+                    "type": crate::refine_engine::REFINEMENT_ERROR_REPLY_TYPE,
+                    "error": error,
+                })
+                .to_string(),
+            });
+        true
     }
 
     /// The wake's second half: apply the oldest parked reply at the
@@ -516,6 +547,52 @@ mod tests {
         assert!(apply().is_some(), "the second parked reply applies too");
         assert_eq!(pending_count(&engine), 0, "the parked queue drained");
         assert!(apply().is_none(), "each reply applies once");
+    }
+
+    /// A child that ends without replying fails its refinement on the reply
+    /// path: its failure parks in the flight's place and the idle apply
+    /// answers the failure with the child's reason; a child with no open
+    /// flight (it replied) owes nothing, and a late reply is dropped. Red
+    /// when the failure is dropped, the flight survives the child's end, or
+    /// the late reply parks.
+    #[test]
+    fn a_child_that_ends_without_replying_fails_its_refinement() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, dir) = park_engine();
+        park_flight(&engine, "active-1");
+        assert!(engine.park_refine_child_failure("active-1", Some("Child worker unreachable")));
+        assert_eq!(
+            flight_count(&engine),
+            0,
+            "the child's end released its flight"
+        );
+        assert!(
+            !engine.park_refine_child_failure("active-1", None),
+            "a child without an open flight owes nothing"
+        );
+        assert_eq!(
+            engine.park_refine_child_reply("active-1", &proposal_reply()),
+            Some(()),
+            "the failed child's late reply is consumed, not delivered as an agent message"
+        );
+        assert_eq!(pending_count(&engine), 1, "only the failure is parked");
+        let error = engine
+            .runtime
+            .block_on(async { engine.apply_pending_refine_reply().await })
+            .expect("the parked failure applies")
+            .expect_err("the refinement fails");
+        assert!(
+            error.to_string().contains("Child worker unreachable"),
+            "the failure names the child's reason: {error}"
+        );
+        assert_eq!(pending_count(&engine), 0);
+        assert_eq!(
+            local_harness_state(dir.path()),
+            serde_json::Value::Null,
+            "nothing reached the harness store"
+        );
     }
 
     /// A branch move and a replacement teardown abandon the conversation
