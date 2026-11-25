@@ -5147,18 +5147,19 @@ class FactoryExecutor:
 
             try:
                 await host_request("factory.check", {"contract": state.spec["emit"], "outputs": outputs})
+                check_error = None
             except RuntimeError as error:
-                if entry.status != "running":
-                    # A stop claimed the entry during the check; the
-                    # instance it could not reach (no process) settles too.
-                    instance.status = "cancelled"
-                    return
-                await self._apply_instance_failure(
-                    run, state, entry, instance, f"python state output: {error}", retry=True
-                )
-                return
+                check_error = str(error)
             if entry.status != "running":
+                # A stop claimed the entry during the check; the instance it
+                # could not reach (its process was already claimed) settles too.
                 instance.status = "cancelled"
+                self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
+                return
+            if check_error is not None:
+                await self._apply_instance_failure(
+                    run, state, entry, instance, f"python state output: {check_error}", retry=True
+                )
                 return
         instance.status = "done"
         instance.answer = json.dumps(outputs, separators=(",", ":"))[:ANSWER_BINDING_CAP]
