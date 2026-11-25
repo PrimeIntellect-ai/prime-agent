@@ -72,6 +72,7 @@ impl Supervisor {
                         wake_source
                             .as_ref()
                             .map(|(resident, summary)| (resident, summary)),
+                        None,
                     )
                     .await
                 {
@@ -179,6 +180,7 @@ impl Supervisor {
         resolve_error: &anyhow::Error,
         selector: &str,
         source: Option<(&Arc<ResidentWorker>, &Value)>,
+        telemetry_disabled: Option<bool>,
     ) -> WakeOutcome {
         let rendered = resolve_error.to_string();
         if !rendered.starts_with("Unknown active session:") {
@@ -260,9 +262,9 @@ impl Supervisor {
             no_session: None,
             name: None,
             config: Some(json!({ "cwd": info.cwd, "rlmDepth": info.rlm_depth })),
-            // Telemetry opt-out only ever rides an explicit user create;
-            // the wake create inherits the daemon default (absent).
-            telemetry_disabled: None,
+            // The opt-out rides only from a user's own request (an attaching
+            // client's); an agent-origin wake inherits the daemon default.
+            telemetry_disabled,
             runtime_metadata: None,
             lifecycle: None,
             env: None,

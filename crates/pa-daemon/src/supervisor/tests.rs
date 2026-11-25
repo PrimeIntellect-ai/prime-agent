@@ -2067,7 +2067,9 @@ async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
     let before = supervisor.registry.list().await.len();
     // The wake: the roster row resolves, the reuse arm finds the hosting
     // resident, and NO second launch runs.
-    let route = supervisor.wake_saved_session("passive-routing-1").await;
+    let route = supervisor
+        .wake_saved_session("passive-routing-1", None)
+        .await;
     match route {
         super::routing::WakeRoute::Woken(woken) => {
             assert!(
@@ -2120,7 +2122,9 @@ async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch()
     // The launch gate: any launch is refused (a deterministic stand-in
     // for the race's losing launch).
     supervisor.shutting_down.store(true, Ordering::SeqCst);
-    let route = supervisor.wake_saved_session("passive-routing-2").await;
+    let route = supervisor
+        .wake_saved_session("passive-routing-2", None)
+        .await;
     match route {
         super::routing::WakeRoute::Fallthrough(message) => {
             assert!(
@@ -2570,7 +2574,7 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
     let before = supervisor.registry.list().await.len();
     // The wake by the child's NAME: the catalog misses (the artifacts tree), the ledger
     // matches, and the REUSE arm joins — no second launch.
-    let route = supervisor.wake_saved_session("kid-1").await;
+    let route = supervisor.wake_saved_session("kid-1", None).await;
     match route {
         super::routing::WakeRoute::Woken(woken) => {
             assert!(
