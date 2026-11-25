@@ -94,6 +94,7 @@ impl MockSupervisor {
         // A page stop also stops the mock's session: the daemon's `session_closed` follows the
         // stop's reply, and the closed session's graph lane answers a refusal from then on.
         let mut session_closed = false;
+        let mut node_requests = 0;
         serve_connection(
             stream,
             &capabilities,
@@ -200,6 +201,37 @@ impl MockSupervisor {
                                     })
                                     .unwrap_or_default();
                                 json!({ "runs": owned, "warnings": [] })
+                            }
+                            // The node view's lane: the fixture answers the requested
+                            // entry and instance; a refresh answers the updated document.
+                            (_, Some("node")) => {
+                                node_requests += 1;
+                                let entry =
+                                    command.get("entry").and_then(Value::as_u64).unwrap_or(1);
+                                let index =
+                                    command.get("instance").and_then(Value::as_u64).unwrap_or(1);
+                                json!({
+                                    "name": "node-run",
+                                    "specId": "sw",
+                                    "state": {
+                                        "id": "worker",
+                                        "status": "running",
+                                        "instances": [
+                                            {"index": 0, "entry": 0, "status": "done", "child": "child-0"},
+                                            {"index": 1, "entry": 1, "status": "running", "child": "child-1"},
+                                        ],
+                                    },
+                                    "entry": {"index": entry, "status": "running"},
+                                    "instance": {
+                                        "index": index,
+                                        "entry": entry,
+                                        "status": "running",
+                                        "child": format!("child-{index}"),
+                                        "prompt": if index == 0 { "Earlier node prompt" } else if node_requests > 1 { "Updated node prompt" } else { "Node prompt fixture" },
+                                        "inputs": "{}",
+                                        "answer": if node_requests > 1 { "Updated node answer" } else { "Node answer fixture" },
+                                    },
+                                })
                             }
                             // The factory page's machine list: an empty library.
                             (_, Some("library")) => json!({"machines": [], "warnings": []}),
@@ -736,6 +768,27 @@ fn factory_page_run(id: &str, name: &str) -> Value {
     })
 }
 
+/// One live run whose single state has a running instance: the node view battery's run.
+fn factory_node_run() -> Value {
+    json!({
+        "runId": "node-run",
+        "specId": "sw",
+        "name": "node-run",
+        "state": "running",
+        "elapsedMs": 100,
+        "machine": {
+            "states": [{"id": "worker", "entry": true, "subagent": "worker"}],
+            "transitions": [],
+        },
+        "nodes": [{
+            "id": "worker",
+            "status": "running",
+            "instances": [{"index": 0, "entry": 0, "status": "running", "child": "child-1"}],
+        }],
+        "usage": { "running": 1 },
+    })
+}
+
 /// One alt+a key event (the dock's focus hand-off).
 fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
@@ -946,4 +999,66 @@ fn a_closed_session_clears_the_run_cards_and_the_run_page() {
         last.contains("No live factory runs.") && !last.contains("only-run"),
         "the closed session's page drops its run cards:\n{last}"
     );
+}
+
+/// The node view battery's opening: the machines page row, its run page, then Enter on the
+/// run's one state opens the node view.
+fn open_node_steps() -> Vec<HeadlessStep> {
+    vec![
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "\u{21b3} node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "run: node-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Node prompt fixture".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]
+}
+
+/// Moving the instance walk fetches the selected entry and instance once.
+#[test]
+fn factory_node_navigation_fetches_the_selected_entry_and_instance() {
+    let mut steps = open_node_steps();
+    steps.extend([
+        HeadlessStep::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        HeadlessStep::WaitRender {
+            needle: "Earlier node prompt".to_string(),
+            timeout_ms: 5_000,
+        },
+    ]);
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Earlier node prompt"));
+}
+
+/// The mounted node view refreshes with the run's graph refresh.
+#[test]
+fn factory_node_refreshes_the_mounted_document() {
+    let mut steps = open_node_steps();
+    steps.push(HeadlessStep::WaitRender {
+        needle: "Updated node prompt".to_string(),
+        timeout_ms: 5_000,
+    });
+    let frames = run_plan_config(
+        vec!["factory_activity".to_string()],
+        Some(json!({"runs": [factory_node_run()]})),
+        steps,
+    );
+    assert!(flat_text(&frames).contains("Updated node prompt"));
 }

@@ -423,6 +423,7 @@ pub enum FactoryViewAction {
     OpenNode {
         run_id: String,
         state_id: String,
+        selector: Option<(u64, u64)>,
     },
     /// Stop the selected run (a confirmed stop on its header).
     Stop {
@@ -650,9 +651,9 @@ impl FactoryView {
     }
 
     /// One key press. Navigation never acts on a run: the arrows (the
-    /// `tui.select.up`/`down` bindings) walk the rows, Enter/→ open the
-    /// selected state's session (inert on a header), ←/Esc/ctrl+c close
-    /// the page. The stop rides the agents view's two-press grammar on
+    /// `tui.select.up`/`down` bindings) walk the rows. Enter inspects the
+    /// selected state; →/o open its session (inert on a header). ←/Esc/ctrl+c
+    /// close the page. The stop rides the agents view's two-press grammar on
     /// `app.agents.delete`: the first press arms the selected row, a
     /// second press on it stops (the run on a header, the child on a
     /// state), and any other key only disarms. `r` resumes a paused run.
@@ -661,7 +662,7 @@ impl FactoryView {
         // The open node view owns the keys first: the instance walk and
         // the scroll ride it; `o` jumps into the selected instance's
         // child session; Esc steps back to the diagram.
-        if let Some(node_view) = self.node.as_mut() {
+        if let Some(node) = self.node.as_mut() {
             // Esc steps back through the node view's own ladder: the
             // files document closes first, then the view itself (back
             // to the diagram); ctrl+c leaves the node view outright.
@@ -670,22 +671,41 @@ impl FactoryView {
                 return FactoryViewAction::None;
             }
             if kb.matches(key, "tui.select.cancel") {
-                if !node_view.step_back() {
+                if !node.step_back() {
                     self.node = None;
                 }
                 return FactoryViewAction::None;
             }
-            if key == "o" {
-                return node_view
+            let viewport_rows = self
+                .viewport_rows
+                .saturating_sub(usize::from(self.error.is_some()));
+            let previous_selector = node.selected_selector();
+            if node.handle_key(key, kb, viewport_rows) {
+                let selected = node.selected_selector();
+                let fetched = node.document_selector();
+                if selected.is_some() && selected != previous_selector && selected != fetched {
+                    return FactoryViewAction::OpenNode {
+                        run_id: node.run_id.clone(),
+                        state_id: node.state_id.clone(),
+                        selector: selected,
+                    };
+                }
+                return FactoryViewAction::None;
+            }
+            if key == "left" {
+                if !node.step_back() {
+                    self.node = None;
+                }
+                return FactoryViewAction::None;
+            }
+            if key == "o" || key == "right" {
+                return node
                     .selected_child()
                     .map_or(FactoryViewAction::None, |child_id| {
                         FactoryViewAction::Open {
                             child_id: child_id.to_string(),
                         }
                     });
-            }
-            if node_view.handle_key(key, kb, self.viewport_rows) {
-                return FactoryViewAction::None;
             }
             return FactoryViewAction::None;
         }
@@ -768,6 +788,7 @@ impl FactoryView {
         FactoryViewAction::OpenNode {
             run_id: row.run_id.clone(),
             state_id,
+            selector: None,
         }
     }
 
@@ -830,8 +851,28 @@ impl FactoryView {
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         // The open node view IS the page (the diagram stays mounted
         // under it; Esc returns).
-        if let Some(node_view) = &self.node {
-            return node_view.render(theme, width, kb, self.viewport_rows);
+        if let Some(node) = &self.node {
+            let viewport_rows = self
+                .viewport_rows
+                .saturating_sub(usize::from(self.error.is_some()));
+            let mut rows = node.render(theme, width, kb, viewport_rows);
+            if let Some(error) = &self.error {
+                rows.insert(
+                    rows.len().saturating_sub(2),
+                    truncate_line(
+                        &vec![
+                            Span::raw("  "),
+                            theme.fg_span(ThemeColor::Error, format!("Error: {error}")),
+                        ],
+                        width,
+                        "",
+                    ),
+                );
+            }
+            if rows.len() > self.viewport_rows {
+                rows.drain(..rows.len() - self.viewport_rows);
+            }
+            return rows;
         }
         // The panel area: one panel per run; the selected row's line (and
         // its panel's start) is recorded for the budget window below.

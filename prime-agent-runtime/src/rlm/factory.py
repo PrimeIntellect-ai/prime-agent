@@ -3611,6 +3611,7 @@ class FactoryExecutor:
             "entry": {
                 "index": entry.index,
                 "status": entry.status,
+                "error": entry.error,
                 "outputs": outputs_text,
                 "outputs_truncated": outputs_truncated,
                 "output_errors": entry.output_errors,

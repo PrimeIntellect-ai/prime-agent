@@ -850,6 +850,7 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     let open_node = |state: &str| FactoryViewAction::OpenNode {
         run_id: "run-abc12345".to_string(),
         state_id: state.to_string(),
+        selector: None,
     };
     assert_eq!(view.handle_key("enter", &kb()), open_node("collect"));
     // The session UI mounts the node view on OpenNode; once mounted, it
@@ -865,6 +866,36 @@ fn enter_opens_the_node_view_and_o_opens_the_latest_child() {
     // A state without a child still opens its node view.
     let _ = view.handle_key("down", &kb());
     assert_eq!(view.handle_key("enter", &kb()), open_node("fixing"));
+}
+
+#[test]
+fn node_errors_keep_the_footer_within_short_viewports() {
+    let mut view = FactoryView::new(Vec::new(), 20);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child open failed".to_string()));
+    let full = view.render(&theme(), 110, &kb());
+    let footer = full.last().unwrap().clone();
+    for budget in 0..=6 {
+        view.viewport_rows = budget;
+        let rows = view.render(&theme(), 110, &kb());
+        assert!(rows.len() <= budget, "budget {budget}: {rows:?}");
+        if budget > 0 {
+            assert_eq!(rows.last(), Some(&footer), "budget {budget}");
+        }
+    }
+}
+
+#[test]
+fn the_node_view_honors_rebound_confirm_before_literal_shortcuts() {
+    for key in ["right", "left", "o"] {
+        let rebound = KeybindingsManager::with_user_bindings(
+            serde_json::from_value(json!({"tui.select.confirm": [key]})).unwrap(),
+        );
+        let mut view = FactoryView::new(Vec::new(), 40);
+        view.node = Some(node::NodeView::loading("run", "worker"));
+        assert_eq!(view.handle_key(key, &rebound), FactoryViewAction::None);
+        assert!(view.node.as_mut().unwrap().step_back(), "{key} opens files");
+    }
 }
 
 /// The accident this page had: on a live run, repeated navigation —
@@ -2018,6 +2049,23 @@ fn rapid_churn_keeps_the_folded_page_coherent() {
     );
 }
 
+#[test]
+fn node_panels_show_factory_errors_in_documents_and_files() {
+    let mut view = FactoryView::new(Vec::new(), 12);
+    view.node = Some(node::NodeView::loading("run", "worker"));
+    view.set_error(Some("child session not found".to_string()));
+    for files_open in [false, true] {
+        if files_open {
+            assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+        }
+        let rows = frame_text(&mut view);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("child session not found")));
+        assert!(rows.len() <= 12);
+    }
+}
+
 /// The dock's expanded items list the live runs, paused first, beside
 /// a count of the running runs only.
 #[test]
@@ -2435,7 +2483,7 @@ fn a_late_node_reply_does_not_replace_the_newer_instance_document() {
         })
     };
     let mut view = node::NodeView::loading("run-abc12345", "reviewing");
-    view.set_request_epoch(2);
+    view.set_request_epoch(2, None);
     assert!(view.apply_request_result(2, Ok(reply("newer"))));
     assert!(!view.apply_request_result(1, Ok(reply("older"))));
     assert!(!view.apply_request_result(1, Err("old timeout".to_string())));
@@ -2443,7 +2491,9 @@ fn a_late_node_reply_does_not_replace_the_newer_instance_document() {
         view.error, None,
         "a stale error leaves the newer reply alone"
     );
-    assert!(view.apply_request_result(2, Err("current timeout".to_string())));
+    // A delivery retires its request; the next fetch carries a new epoch.
+    view.set_request_epoch(3, None);
+    assert!(view.apply_request_result(3, Err("current timeout".to_string())));
     assert_eq!(view.error.as_deref(), Some("current timeout"));
     assert_eq!(
         view.document
@@ -2511,50 +2561,6 @@ fn narrow_node_markdown_wrap_and_scroll_preserve_the_full_paragraph() {
         last_page.contains("word-239"),
         "scroll measurement reached the final paragraph row: {last_page}"
     );
-}
-
-/// The key loop scrolls by the window render draws: while an error row shows, the window is
-/// one row shorter, and paging down still reaches the document's last row.
-#[test]
-fn paging_reaches_the_last_row_while_an_error_shows() {
-    let prompt = (0..80)
-        .map(|index| format!("line-{index:02}"))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let data = json!({
-        "state": {"id": "reviewing", "instances": [
-            {"index": 0, "entry": 0, "status": "done"}
-        ]},
-        "entry": {"index": 0, "status": "done", "outputs": null, "outputErrors": {}},
-        "instance": {"index": 0, "entry": 0, "status": "done", "prompt": prompt}
-    });
-    let mut view =
-        node::NodeView::parse_reply("run-abc12345", "reviewing", &data).expect("the reply parses");
-    view.set_error("the node request timed out".to_string());
-    let theme = theme();
-    let kb = kb();
-    let page_down = kb
-        .first_key("tui.select.pageDown")
-        .expect("the page-down binding");
-    let _ = view.render(&theme, 80, &kb, 12);
-    for _ in 0..60 {
-        assert!(view.handle_key(&page_down, &kb, 12));
-    }
-    let last_page = view
-        .render(&theme, 80, &kb, 12)
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|span| span.content.as_str())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        last_page.contains("Error: the node request timed out"),
-        "{last_page}"
-    );
-    assert!(last_page.contains("line-79"), "{last_page}");
 }
 
 #[test]
@@ -2723,8 +2729,8 @@ fn node_and_files_errors_clear_only_with_their_matching_success() {
     });
     let mut view = node::NodeView::parse_reply("run-abc12345", "reviewing", &initial)
         .expect("the node reply parses");
-    view.set_request_epoch(1);
-    view.set_error("node request failed".to_string());
+    view.set_request_epoch(1, None);
+    view.set_error("node request failed");
     view.set_files_error("library request failed");
     let next = json!({
         "state": {"id": "reviewing", "instances": [
@@ -2789,7 +2795,7 @@ fn node_and_files_errors_clear_only_with_their_matching_success() {
     );
 
     assert!(view.step_back());
-    view.set_error("node request failed".to_string());
+    view.set_error("node request failed");
     view.set_files(node::NodeFiles::default());
     let document_text = view
         .render(&theme, 80, &kb, 30)
@@ -2903,4 +2909,29 @@ fn compound_flowchart_shapes_keep_only_their_label() {
             ("f", Some("flag")),
         ]
     );
+}
+
+/// A run too large to draw keeps its size notice while a state is
+/// selected: the selection resolves to the notice row, never past it.
+#[test]
+fn an_oversized_run_keeps_its_notice_with_a_state_selected() {
+    let mut snapshot = scripted_snapshot();
+    let ids: Vec<String> = (0..40).map(|index| format!("s{index}")).collect();
+    snapshot["machine"]["states"] = json!(ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| json!({"id": id, "entry": index == 0}))
+        .collect::<Vec<_>>());
+    snapshot["machine"]["transitions"] = json!((0..ids.len())
+        .flat_map(|from| (from + 1..ids.len()).map(move |to| (from, to)))
+        .map(|(from, to)| json!({"from": ids[from], "to": ids[to]}))
+        .collect::<Vec<_>>());
+    snapshot["machine"]["order"] = json!(ids);
+    snapshot["nodes"] = json!([]);
+    snapshot["activeNodes"] = json!([]);
+    snapshot["lastFired"] = json!([]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let _ = view.handle_key("down", &kb());
+    let text = frame_text(&mut view).join("\n");
+    assert!(text.contains("diagram too large to render"), "{text}");
 }

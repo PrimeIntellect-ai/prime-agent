@@ -6714,6 +6714,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
             dep["entries"][0]["error"],
         )
         self.assertEqual(self.host.spawn_calls("dep"), [])
+        node = await self.executor.activity(
+            {"action": "node", "runId": result["run_id"], "specId": "dep"}
+        )
+        self.assertEqual(node["entry"]["error"], dep["entries"][0]["error"])
 
     @async_test
     async def test_machine_optional_input_over_a_settled_source_with_no_captured_value_binds_the_null_sentinel(self) -> None:
