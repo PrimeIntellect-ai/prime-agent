@@ -81,13 +81,19 @@ impl GuestCommands for FakeGuest {
 async fn sync(agent_dir: &std::path::Path, guest: &mut FakeGuest) -> Vec<String> {
     let ledger = BotLedger::new(agent_dir, "bot-1");
     let delivered = Arc::new(Mutex::new(Vec::new()));
-    sync_deliveries(guest, &ledger, "guest-session", |text| {
-        let delivered = Arc::clone(&delivered);
-        async move {
-            delivered.lock().unwrap().push(text);
-            Ok(())
-        }
-    })
+    sync_deliveries(
+        guest,
+        &ledger,
+        "guest-session",
+        || None,
+        |text| {
+            let delivered = Arc::clone(&delivered);
+            async move {
+                delivered.lock().unwrap().push(text);
+                Ok(())
+            }
+        },
+    )
     .await
     .unwrap();
     let delivered = delivered.lock().unwrap().clone();

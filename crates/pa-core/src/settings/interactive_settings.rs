@@ -452,6 +452,36 @@ impl SettingsManager {
             .filter(|identity| !identity.name.is_empty() && !identity.email.is_empty())
     }
 
+    /// `bots.inject.<name>`: whether bots get the credential `name` (an
+    /// auth storage id). On unless the global settings set it to `false`.
+    #[must_use]
+    pub fn get_bots_inject(&self, name: &str) -> bool {
+        self.global_raw()
+            .and_then(|document| document.get("bots")?.get("inject")?.get(name)?.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// `bots.inject.<name>` setter, in the global scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_bots_inject(&mut self, name: &str, inject: bool) -> Result<()> {
+        self.global_mut()
+            .bots
+            .get_or_insert_with(Default::default)
+            .inject
+            .get_or_insert_with(Default::default)
+            .insert(name.to_string(), inject);
+        self.save_global_scope(&["bots.inject"])?;
+        if let Some(message) = self.global_load_error() {
+            return Err(anyhow!(
+                "bots.inject not saved: the global settings file could not be read: {message}"
+            ));
+        }
+        Ok(())
+    }
+
     /// `bots.enabled` setter: persists the opt-in gate to the global
     /// scope (the same shared settings key the daemon's
     /// sandbox-admission gate reads).

@@ -94,6 +94,10 @@ pub struct BotRecord {
     /// The git author the bot commits as.
     #[serde(default)]
     pub git_identity: Option<pa_core::settings::BotGitIdentity>,
+    /// The owner's subscription logins the bot's rules inject; the
+    /// refresher keeps them fresh while the bot runs.
+    #[serde(default)]
+    pub logins: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

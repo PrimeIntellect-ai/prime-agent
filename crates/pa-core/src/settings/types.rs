@@ -280,7 +280,9 @@ pub struct FactorySettings {
 /// it. The daemon's sandbox-admission gate reads the same shared
 /// settings key before any provisioning. `bots.github` (default on)
 /// gives new bots GitHub access, and `bots.gitIdentity` overrides the
-/// git author the bots commit as.
+/// git author the bots commit as. `bots.inject.<name>` (default on)
+/// turns off one credential's injection into new bots; `<name>` is its
+/// auth storage id (a provider id or `mcp:<server>`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotsSettings {
@@ -289,6 +291,7 @@ pub struct BotsSettings {
     /// A [`BotGitIdentity`]; kept raw so a malformed value never fails
     /// the whole settings file.
     pub git_identity: Option<serde_json::Value>,
+    pub inject: Option<std::collections::BTreeMap<String, bool>>,
 }
 
 /// `bots.gitIdentity`: the git author name and email of every bot.

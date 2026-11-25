@@ -14,6 +14,7 @@ pub mod github;
 pub mod guest;
 pub mod ledger;
 pub mod link;
+pub mod logins;
 pub mod manager;
 pub mod platform;
 pub mod registry;
@@ -48,6 +49,8 @@ pub const BOT_IMAGE_ENV: &str = "PRIME_AGENT_BOT_IMAGE";
 pub const BOT_LABEL: &str = "prime-agent-bot";
 /// The label of a bot with GitHub access.
 pub const GITHUB_LABEL: &str = "prime-agent-bot-github";
+/// The label prefix that names each owner login a bot carries.
+pub const LOGIN_LABEL_PREFIX: &str = "prime-agent-bot-login:";
 /// The guest daemon's socket.
 pub const GUEST_DAEMON_SOCKET: &str = "/root/.prime/agent/bot-daemon.sock";
 
@@ -61,6 +64,12 @@ pub fn bot_label(bot_id: &str) -> String {
 #[must_use]
 pub fn owner_label(owner_session_id: &str) -> String {
     format!("{BOT_LABEL}-owner:{owner_session_id}")
+}
+
+/// The label that names one owner login a bot carries.
+#[must_use]
+pub fn login_label(provider: &str) -> String {
+    format!("{LOGIN_LABEL_PREFIX}{provider}")
 }
 
 /// What a new bot needs.

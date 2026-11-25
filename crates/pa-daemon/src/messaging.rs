@@ -201,6 +201,9 @@ impl Supervisor {
                 let record = manager.ensure_running(&bot.bot_id).await.map_err(|error| {
                     SendError::NotDelivered(error.context("the bot could not start"))
                 })?;
+                if let Some(expired) = manager.login_expired(&record) {
+                    return Err(SendError::NotDelivered(anyhow!(expired)));
+                }
                 let mut client = crate::bots::guest::GuestClient::connect(&manager, &record)
                     .await
                     .map_err(|error| {

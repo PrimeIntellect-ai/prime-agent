@@ -15,14 +15,15 @@ use pa_core::auth::PRIME_INFERENCE_PROVIDER_ID;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
+use super::logins::{Logins, REFRESH_TICK};
 use super::platform::{
-    BotCreate, BotPlatform, BotSandbox, ExecOutput, PlatformError, PlatformResult,
+    BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError, PlatformResult,
 };
 use super::registry::{BotRecord, BotRegistry, BotStatus};
 use super::version::{self, Install, ReleaseSource};
 use super::{
-    bot_label, owner_label, sha256_hex, BotSpec, BOT_IMAGE_ENV, BOT_LABEL, DEFAULT_BOT_IMAGE,
-    GITHUB_LABEL,
+    bot_label, login_label, owner_label, sha256_hex, BotSpec, BOT_IMAGE_ENV, BOT_LABEL,
+    DEFAULT_BOT_IMAGE, GITHUB_LABEL, LOGIN_LABEL_PREFIX,
 };
 
 /// The budget for one wake, create, or pause.
@@ -149,7 +150,9 @@ impl Drop for AttachGuard {
 /// The bot lifecycle for one Prime account. Lives in the supervisor process.
 pub struct BotManager {
     pub(super) platform: Arc<dyn BotPlatform>,
-    registry: Mutex<BotRegistry>,
+    registry: Arc<Mutex<BotRegistry>>,
+    /// The owner's subscription logins in the bots, and their refresher.
+    pub(super) logins: Arc<Logins>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     attached: Arc<Mutex<HashMap<String, usize>>>,
     /// The guest auth for a sandbox created with matching header rules,
@@ -167,9 +170,23 @@ impl BotManager {
     /// # Errors
     /// Returns an error when the registry file exists but cannot be read.
     pub fn new(agent_dir: &Path, platform: Arc<dyn BotPlatform>) -> Result<Self> {
+        let logins = Logins::new(Arc::clone(&platform), agent_dir);
+        Self::with_logins(agent_dir, platform, logins)
+    }
+
+    /// A manager whose logins come from `logins`.
+    ///
+    /// # Errors
+    /// Returns an error when the registry file exists but cannot be read.
+    pub fn with_logins(
+        agent_dir: &Path,
+        platform: Arc<dyn BotPlatform>,
+        logins: Logins,
+    ) -> Result<Self> {
         Ok(Self {
             platform,
-            registry: Mutex::new(BotRegistry::load(agent_dir)?),
+            registry: Arc::new(Mutex::new(BotRegistry::load(agent_dir)?)),
+            logins: Arc::new(logins),
             locks: Mutex::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
             guest_auth: Mutex::new(HashMap::new()),
@@ -208,6 +225,62 @@ impl BotManager {
     #[must_use]
     pub fn attached(&self, bot_id: &str) -> bool {
         lock(&self.attached).contains_key(bot_id)
+    }
+
+    /// The bot's logins whose refresh failed or that expired.
+    #[must_use]
+    pub fn login_stale(&self, record: &BotRecord) -> Vec<String> {
+        self.logins.stale(&record.logins)
+    }
+
+    /// The error for a bot whose model runs on an expired owner login.
+    #[must_use]
+    pub fn login_expired(&self, record: &BotRecord) -> Option<String> {
+        let provider = guest_provider(record);
+        record
+            .logins
+            .iter()
+            .any(|login| login == provider)
+            .then(|| self.logins.expired(provider))
+            .flatten()
+    }
+
+    /// Refresh the bot's logins that are due, and update their secrets.
+    pub async fn refresh_logins(&self, record: &BotRecord) {
+        self.logins
+            .tick(&record.logins.iter().cloned().collect())
+            .await;
+    }
+
+    /// Start the login refresher unless it runs. It refreshes the logins
+    /// of running bots and stops once no running bot uses a login.
+    fn watch_logins(&self) {
+        let mut running = lock(&self.logins.refresher);
+        if *running {
+            return;
+        }
+        *running = true;
+        let (logins, registry) = (Arc::clone(&self.logins), Arc::clone(&self.registry));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REFRESH_TICK).await;
+                let in_use = {
+                    let mut running = lock(&logins.refresher);
+                    let in_use: BTreeSet<String> = lock(&registry)
+                        .all()
+                        .into_iter()
+                        .filter(|record| record.status == BotStatus::Running)
+                        .flat_map(|record| record.logins)
+                        .collect();
+                    if in_use.is_empty() {
+                        *running = false;
+                        return;
+                    }
+                    in_use
+                };
+                logins.tick(&in_use).await;
+            }
+        });
     }
 
     /// Record a settled guest turn.
@@ -263,6 +336,7 @@ impl BotManager {
             generation: 0,
             github: spec.github,
             git_identity: spec.git_identity.clone(),
+            logins: Vec::new(),
         })?;
         match self.ensure_running_locked(&spec.bot_id).await {
             Ok(record) => Ok(record),
@@ -459,6 +533,11 @@ impl BotManager {
         record.sandbox_id = Some(sandbox.id.clone());
         record.status = BotStatus::Running;
         self.save(record.clone())?;
+        if !record.logins.is_empty() {
+            // A resumed bot gets a fresh token before its first request.
+            self.refresh_logins(&record).await;
+            self.watch_logins();
+        }
         self.install_and_bootstrap(&mut record, deadline).await?;
         self.save(record.clone())?;
         Ok(record)
@@ -642,8 +721,8 @@ impl BotManager {
             Some(checkpoint) => format!("ckpt:disk:{checkpoint}"),
             None => format!("img:{}", self.image),
         };
-        let provider = guest_provider(record);
-        let credentials = retry(|| self.platform.credentials(provider, record.github)).await?;
+        let (credentials, logins) = self.guest_credentials(record, record.github).await?;
+        record.logins = logins;
         let mut labels = vec![
             BOT_LABEL.to_string(),
             bot_label(&record.bot_id),
@@ -652,6 +731,7 @@ impl BotManager {
         if record.github {
             labels.push(GITHUB_LABEL.to_string());
         }
+        labels.extend(record.logins.iter().map(|provider| login_label(provider)));
         let request = BotCreate {
             name: record.name.clone(),
             image: self.image.clone(),
@@ -739,11 +819,10 @@ impl BotManager {
             }
             // Best effort: the sandbox's rules are already set.
             None => self
-                .platform
-                .credentials(guest_provider(record), false)
+                .guest_credentials(record, false)
                 .await
                 .ok()
-                .and_then(|credentials| credentials.auth_json),
+                .and_then(|(credentials, _)| credentials.auth_json),
         };
         if let Some(auth) = auth {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
@@ -765,6 +844,37 @@ impl BotManager {
             .to_string();
         record.guest_session_file = ids["sessionFile"].as_str().map(str::to_string);
         Ok(())
+    }
+
+    /// The header rules and guest auth for a new sandbox of `record`: its
+    /// API keys, its GitHub access, and the owner's logins. Also returns
+    /// the logins it carries.
+    async fn guest_credentials(
+        &self,
+        record: &BotRecord,
+        github: bool,
+    ) -> Result<(GuestCredentials, Vec<String>)> {
+        let provider = guest_provider(record);
+        let logins = self.logins.prepare(provider).await?;
+        let key_provider =
+            (!logins.providers.iter().any(|login| login == provider)).then_some(provider);
+        let mut credentials = retry(|| {
+            self.platform
+                .credentials(key_provider, github, logins.rules.len())
+        })
+        .await?;
+        credentials.network_rules.extend(logins.rules);
+        if !logins.guest.is_empty() {
+            let mut auth = match credentials.auth_json.take() {
+                Some(Value::Object(auth)) => auth,
+                _ => serde_json::Map::new(),
+            };
+            for (provider, record) in logins.guest {
+                auth.insert(provider, serde_json::to_value(record)?);
+            }
+            credentials.auth_json = Some(Value::Object(auth));
+        }
+        Ok((credentials, logins.providers))
     }
 
     /// Run a guest command once the sandbox gateway answers: retries
@@ -998,6 +1108,12 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         github: sandbox.labels.iter().any(|label| label == GITHUB_LABEL),
         // The guest's git config already holds it.
         git_identity: None,
+        logins: sandbox
+            .labels
+            .iter()
+            .filter_map(|label| label.strip_prefix(LOGIN_LABEL_PREFIX))
+            .map(str::to_string)
+            .collect(),
     }
 }
 

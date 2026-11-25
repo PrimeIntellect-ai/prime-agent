@@ -1074,9 +1074,13 @@ async fn spawn_bot(
             .to_string();
         let agent_dir = this.agent_dir.clone();
         let fall_back = tokio::task::spawn_blocking(move || {
+            let login_injected = crate::bots::logins::LOGIN_PROVIDERS.contains(&provider.as_str())
+                && pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir)
+                    .get_bots_inject(&provider);
             crate::bots::credentials::use_prime_inference_instead(
                 &mut pa_core::auth::AuthStorage::create(&agent_dir),
                 &provider,
+                login_injected,
             )
         })
         .await
@@ -1091,8 +1095,8 @@ async fn spawn_bot(
                 resolve_child_model_allowlisted(this, Some(&selector), "spawn", "subagent").await
             {
                 notice = Some(format!(
-                    "The bot runs on {fallback}: the inherited {model} uses a subscription \
-                     login, which a bot cannot use. Pass model= to choose another model."
+                    "The bot runs on {fallback}: the inherited {model} uses a login that \
+                     bots.inject turns off. Pass model= to choose another model."
                 ));
                 model = fallback;
             }

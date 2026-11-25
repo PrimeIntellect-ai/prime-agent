@@ -6,8 +6,8 @@
 //! auth header on the sandbox's HTTPS requests, outside the sandbox. The
 //! guest sends [`GUEST_API_KEY_PLACEHOLDER`], which the platform replaces.
 //!
-//! OAuth logins (subscription and MCP logins) are not injected: their
-//! tokens refresh, and a platform secret is static.
+//! Subscription logins are injected by [`super::logins`]. A key or login
+//! with `bots.inject.<provider>` set to `false` stays home.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -164,19 +164,27 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
 }
 
 /// The API keys the platform can inject (stored, or from the environment
-/// for `required`), `required` first, then prime-inference. OAuth logins are left out. A
+/// for `required`), `required` first, then prime-inference. OAuth logins
+/// and keys that `allowed` refuses are left out. A
 /// host an earlier provider holds (the platform never combines rules), or
 /// one past the platform's host limit, is left out.
-fn injections(auth: &mut AuthStorage, required: &str, max_hosts: usize) -> Vec<Injection> {
+fn injections(
+    auth: &mut AuthStorage,
+    required: Option<&str>,
+    max_hosts: usize,
+    allowed: impl Fn(&str) -> bool,
+) -> Vec<Injection> {
     let stored = auth.get_all();
     let mut providers = auth.list();
-    providers.retain(|provider| provider != super::github::GITHUB_AUTH_ID);
-    if !providers.iter().any(|provider| provider == required) {
-        providers.push(required.to_string());
+    providers.retain(|provider| provider != super::github::GITHUB_AUTH_ID && allowed(provider));
+    if let Some(required) = required {
+        if !providers.iter().any(|provider| provider == required) {
+            providers.push(required.to_string());
+        }
     }
     providers.sort_by_key(|provider| {
         (
-            provider != required,
+            Some(provider.as_str()) != required,
             provider != PRIME_INFERENCE_PROVIDER_ID,
             provider.clone(),
         )
@@ -222,12 +230,17 @@ fn injectable_key(
 }
 
 /// Whether a bot inheriting a `provider` model should run on the Prime
-/// Inference default model instead: `provider` holds only a subscription
-/// login, which a bot cannot use, and a Prime Inference key can be
-/// injected.
-pub fn use_prime_inference_instead(auth: &mut AuthStorage, provider: &str) -> bool {
+/// Inference default model instead: `provider` holds only an OAuth login
+/// that bots do not get (`login_injected` is false), and a Prime Inference
+/// key can be injected.
+pub fn use_prime_inference_instead(
+    auth: &mut AuthStorage,
+    provider: &str,
+    login_injected: bool,
+) -> bool {
     let stored = auth.get_all();
-    provider != PRIME_INFERENCE_PROVIDER_ID
+    !login_injected
+        && provider != PRIME_INFERENCE_PROVIDER_ID
         && matches!(
             stored.credential(provider),
             Some(AuthCredential::Oauth { .. })
@@ -252,6 +265,16 @@ impl Provisioned {
     #[must_use]
     pub fn guest_auth(&self) -> Option<serde_json::Value> {
         guest_auth_json(&self.providers, self.prime_team.as_ref())
+    }
+
+    /// The network rules for a guest whose provider is not an API key
+    /// here (a subscription login). Failed keys are logged.
+    #[must_use]
+    pub fn rules(self) -> BTreeMap<String, HeaderRule> {
+        for (failed, error) in self.failed {
+            eprintln!("bot credentials: the {failed} key is not injected: {error:#}");
+        }
+        self.rules
     }
 
     /// The network rules for a guest running `provider`. Fails when that
@@ -282,9 +305,8 @@ impl Provisioned {
             )),
             None if !self.providers.iter().any(|confirmed| confirmed == provider) => {
                 Err(anyhow::anyhow!(
-                    "A bot cannot run on {provider} without an API key for that provider: \
-                     a subscription login cannot be shared with a bot. {} \
-                     Or log in to {provider} with an API key.",
+                    "A bot on {provider} needs the owner's {provider} API key or login on the Mac, \
+                     with bots.inject.{provider} on. {}",
                     pass_another_model()
                 ))
             }
@@ -303,21 +325,28 @@ fn pass_another_model() -> String {
 
 /// Make sure the platform holds a secret for each stored provider key it
 /// can inject: list first, create the missing, once per process.
+/// `provider` is the guest's provider when it uses an API key.
 /// `reserved_hosts` rule hosts are left for other rules. The
 /// secrets live in the client's team, the scope its sandboxes bill to,
 /// which a header rule's secret must share.
 pub async fn provision(
     client: &PrimeSandboxClient<ReqwestSandboxTransport>,
     agent_dir: &Path,
-    provider: &str,
+    provider: Option<&str>,
     reserved_hosts: usize,
 ) -> Provisioned {
     // Reading the auth storage may run a `!command` key: keep it off the runtime.
-    let (agent_dir, required) = (agent_dir.to_path_buf(), provider.to_string());
+    let (agent_dir, required) = (agent_dir.to_path_buf(), provider.map(str::to_string));
     let (injections, prime_team) = match tokio::task::spawn_blocking(move || {
         let mut auth = AuthStorage::create(&agent_dir);
+        let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
         (
-            injections(&mut auth, &required, MAX_RULE_HOSTS - reserved_hosts),
+            injections(
+                &mut auth,
+                required.as_deref(),
+                MAX_RULE_HOSTS.saturating_sub(reserved_hosts),
+                |provider| settings.get_bots_inject(provider),
+            ),
             effective_prime_team(&auth),
         )
     })
@@ -542,8 +571,9 @@ mod tests {
     fn only_stored_api_keys_with_an_api_host_are_injected() {
         let injected = injections(
             &mut auth(&home_auth()),
-            PRIME_INFERENCE_PROVIDER_ID,
+            Some(PRIME_INFERENCE_PROVIDER_ID),
             MAX_RULE_HOSTS,
+            |_| true,
         );
         let summary: Vec<(&str, &str)> = injected
             .iter()
@@ -557,8 +587,9 @@ mod tests {
         assert!(injected[1].secret.starts_with("PRIME_AGENT_GOOGLE_KEY_"));
         let rotated = injections(
             &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
-            "google",
+            Some("google"),
             MAX_RULE_HOSTS,
+            |_| true,
         );
         assert_ne!(rotated[0].secret, injected[1].secret);
 
@@ -569,8 +600,9 @@ mod tests {
                 "anthropic": { "type": "api_key", "key": "sk-ant-api" },
                 "prime-inference": { "type": "api_key", "key": "" },
             })),
-            PRIME_INFERENCE_PROVIDER_ID,
+            Some(PRIME_INFERENCE_PROVIDER_ID),
             MAX_RULE_HOSTS,
+            |_| true,
         );
         let providers: Vec<&str> = keyed
             .iter()
@@ -579,21 +611,28 @@ mod tests {
         assert_eq!(providers, ["anthropic", "openai", "zai"]);
     }
 
-    /// A subscription-only provider falls back to Prime Inference when its
-    /// key can be injected; an API-key provider keeps its model.
+    /// A login that bots do not get falls back to Prime Inference when its
+    /// key can be injected; an injected login and an API-key provider keep
+    /// their model.
     #[test]
-    fn a_subscription_model_falls_back_to_prime_inference() {
+    fn a_login_bots_do_not_get_falls_back_to_prime_inference() {
         let mut home = auth(&home_auth());
-        assert!(use_prime_inference_instead(&mut home, "anthropic"));
-        assert!(!use_prime_inference_instead(&mut home, "google"));
+        assert!(use_prime_inference_instead(&mut home, "anthropic", false));
+        assert!(!use_prime_inference_instead(&mut home, "anthropic", true));
+        assert!(!use_prime_inference_instead(&mut home, "google", false));
         assert!(!use_prime_inference_instead(
             &mut home,
-            PRIME_INFERENCE_PROVIDER_ID
+            PRIME_INFERENCE_PROVIDER_ID,
+            false
         ));
         let mut no_prime = auth(&json!({
             "anthropic": { "type": "oauth", "access": "a", "refresh": "r", "expires": 1 },
         }));
-        assert!(!use_prime_inference_instead(&mut no_prime, "anthropic"));
+        assert!(!use_prime_inference_instead(
+            &mut no_prime,
+            "anthropic",
+            false
+        ));
     }
 
     #[test]

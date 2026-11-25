@@ -122,13 +122,20 @@ pub trait BotPlatform: Send + Sync {
         sandbox_id: &'a str,
         command: &'a CommandSpec,
     ) -> BoxFuture<'a, PlatformResult<ExecStreamHalves>>;
-    /// The platform secrets and guest auth for a bot that runs `provider`,
-    /// with GitHub access when `github` is set.
+    /// The API-key secrets and guest auth for a bot, with GitHub access
+    /// when `github` is set. `provider` is the bot's provider when it uses
+    /// an API key; `reserved_hosts` rule hosts are left for its logins.
     fn credentials<'a>(
         &'a self,
-        provider: &'a str,
+        provider: Option<&'a str>,
         github: bool,
+        reserved_hosts: usize,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>>;
+    /// The Prime account's fingerprint, which names its login secrets.
+    fn owner(&self) -> &str;
+    /// Make the platform secret `name` hold `value` (create or update).
+    fn put_secret<'a>(&'a self, name: &'a str, value: &'a str)
+        -> BoxFuture<'a, PlatformResult<()>>;
 }
 
 /// Map a sandbox status onto a bot status.
@@ -565,17 +572,21 @@ impl BotPlatform for PrimePlatform {
 
     fn credentials<'a>(
         &'a self,
-        provider: &'a str,
+        provider: Option<&'a str>,
         github: bool,
+        reserved_hosts: usize,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            let reserved = if github { github::RULE_HOSTS } else { 0 };
+            let reserved = reserved_hosts + if github { github::RULE_HOSTS } else { 0 };
             let provisioned =
                 credentials::provision(&self.client, &self.agent_dir, provider, reserved).await;
             let auth_json = provisioned.guest_auth();
-            let mut network_rules = provisioned
-                .rules_for(provider)
-                .map_err(|error| credential_error(&error))?;
+            let mut network_rules = match provider {
+                Some(provider) => provisioned
+                    .rules_for(provider)
+                    .map_err(|error| credential_error(&error))?,
+                None => provisioned.rules(),
+            };
             if github {
                 match github::provision(&self.client, &self.agent_dir, &self.owner)
                     .await
@@ -593,6 +604,23 @@ impl BotPlatform for PrimePlatform {
                 network_rules,
                 auth_json,
             })
+        }
+        .boxed()
+    }
+
+    fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    fn put_secret<'a>(
+        &'a self,
+        name: &'a str,
+        value: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            credentials::ensure_secret(&self.client, name, value, "Prime Agent bot login")
+                .await
+                .map_err(|error| credential_error(&error))
         }
         .boxed()
     }

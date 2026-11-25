@@ -178,12 +178,15 @@ enum Delivery {
 /// its answer; its own final answer is not delivered. Write times of
 /// delivered lines stay in the ledger, so a run that settles after its
 /// message was delivered is still attributed. A delivery that fails, or
-/// that a crash interrupted, is `uncertain` and is never retried. Returns
-/// the number of settled runs with an answer (0 or 1).
+/// that a crash interrupted, is `uncertain` and is never retried. A run
+/// with no answer text delivers what `no_answer` gives, read once the run
+/// settled (the error of an expired owner login). Returns the number of settled runs with an
+/// answer (0 or 1).
 pub(crate) async fn sync_deliveries<G, D, F>(
     guest: &mut G,
     ledger: &BotLedger,
     session: &str,
+    no_answer: impl FnOnce() -> Option<String> + Send,
     mut deliver: D,
 ) -> Result<usize>
 where
@@ -236,8 +239,13 @@ where
         // A run without answer text still moves the cursor to its last row.
         Ok(Some(run)) => {
             settled = 1;
-            let answer = (!run.replied(&outbox_times) && !run.answer.trim().is_empty())
-                .then(|| bounded_answer(&run.answer));
+            let answer = if run.replied(&outbox_times) {
+                None
+            } else if run.answer.trim().is_empty() {
+                no_answer()
+            } else {
+                Some(bounded_answer(&run.answer))
+            };
             deliveries.push((Delivery::Turn(run.row_id), answer));
         }
         Ok(None) => {}
@@ -482,10 +490,14 @@ impl Supervisor {
         let ledger = BotLedger::new(&self.options.agent_dir, bot_id);
         let mut client = GuestClient::connect(&manager, &record).await?;
         let record = &record;
+        // A turn that failed on an expired login ends with that error. The
+        // refresher keeps the login state current while the bot runs.
+        manager.refresh_logins(record).await;
         let settled = sync_deliveries(
             &mut client,
             &ledger,
             &record.guest_session_id,
+            || manager.login_expired(record),
             |text| async move { self.deliver_to_owner(record, &text).await },
         )
         .await?;
