@@ -690,8 +690,9 @@ fn a_late_unscoped_abort_stops_a_parked_backgrounded_cell() {
 
 /// The faux script for the lost-supervisor round: turn one calls a kernel
 /// cell that records its kernel and worker pids, outlives its 2s wait
-/// budget (it auto-backgrounds), catches the stop's interrupt, and keeps
-/// running. Any later turn answers with the woken marker.
+/// budget (it auto-backgrounds), shows an image (so its notice is a rich
+/// row), and records the stop's interrupt. Any later turn answers with the
+/// woken marker.
 fn faux_lost_supervisor_script(dir: &Path) -> PathBuf {
     let path = dir.join("faux-lost-supervisor.json");
     let woken = json!({"content": [{"type": "text", "text": "WOKEN AFTER THE STOP"}]});
@@ -709,7 +710,7 @@ fn faux_lost_supervisor_script(dir: &Path) -> PathBuf {
                     {"type": "text", "text": "Running the background cell."},
                     {"type": "toolCall", "name": "python_repl", "id": "toolu_lost01",
                      "arguments": {"code":
-                        "import os, time\nopen('bg-pids', 'w').write(f'{os.getpid()} {os.getppid()}')\ntry:\n    time.sleep(600)\nexcept KeyboardInterrupt:\n    open('bg-caught', 'w').write('1')\n    while True:\n        time.sleep(0.05)",
+                        "import os, time\nfrom rlm import emit\nopen('bg-pids', 'w').write(f'{os.getpid()} {os.getppid()}')\ntime.sleep(3)\nemit({'application/vnd.prime-agent.attachment+json': {'mime_type': 'image/png', 'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='}, 'text/plain': 'an image'})\ntry:\n    time.sleep(600)\nexcept KeyboardInterrupt:\n    open('bg-caught', 'w').write('1')\n    raise",
                         "timeout": 2}}
                 ]},
                 {"content": [{"type": "text", "text": "The cell runs in the background."}]},
@@ -737,11 +738,11 @@ fn process_alive(pid: u32) -> bool {
 
 /// A lost supervisor stops a parked backgrounded cell: once the worker's
 /// supervisor-lost window elapses, the scoped stop interrupts the cell
-/// (no client is left to see or stop it), a cell that ignores the
-/// interrupt has its kernel retired, and the worker then exits. The stop
-/// lands inside the second window, so the cell never runs a whole extra
-/// window unwatched. The stopped cell's notice starts no model turn: it
-/// waits in the session's durable inbox for the next open.
+/// (no client is left to see or stop it), and the worker then exits. The
+/// stop lands inside the second window, so the cell never runs a whole
+/// extra window unwatched. The stopped cell's notice, an image row, starts
+/// no model turn: its text waits in the session's durable inbox for the
+/// next open.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
@@ -838,8 +839,7 @@ fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
         "the cell stopped before the supervisor-lost window elapsed: {stopped_after:?}"
     );
 
-    // The ignored interrupt retires the kernel, its notice lands, and the
-    // orphaned worker exits.
+    // The stopped cell's notice lands and the orphaned worker exits.
     let exit_by = Instant::now() + Duration::from_secs(30);
     while process_alive(worker_pid) {
         assert!(

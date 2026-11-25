@@ -713,7 +713,7 @@ impl Worker {
                 // keeps the batch shared with the agent-message route too.
                 let arrivals_for_sink = std::sync::Arc::clone(&inbox_arrivals);
                 let arrivals_for_consumed = std::sync::Arc::clone(&arrivals_for_sink);
-                let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |notice| {
+                let notice_sink: crate::engine::KernelNoticeSink = Arc::new(move |mut notice| {
                     let Some(engine) = notice_engine.upgrade() else {
                         return;
                     };
@@ -722,7 +722,10 @@ impl Worker {
                     }
                     // An orphaned worker runs no turn nobody watches: the
                     // notice waits in the durable inbox for the next open.
+                    // The inbox holds text, so a rich notice keeps its text.
                     if notice_core.lock().unwrap().supervisor_lost {
+                        notice.row.content =
+                            pa_types::ai::UserContent::Text(notice.row.content.text());
                         if let (Some(inbox), Some(fields)) = (
                             engine.inbox(),
                             pa_core::session_engine::inbox::inbox_notice_fields(&notice),
