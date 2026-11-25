@@ -125,6 +125,29 @@ impl FakePlatform {
         }
         id
     }
+
+    /// [`Self::external_checkpoint`] with an explicit creation stamp.
+    pub fn external_checkpoint_at(
+        &self,
+        sandbox_id: &str,
+        durable: bool,
+        created_at: &str,
+    ) -> String {
+        let mut state = self.state();
+        let id = state.new_id("ckpt");
+        let version = state
+            .guest_versions
+            .get(sandbox_id)
+            .cloned()
+            .unwrap_or_default();
+        state.checkpoints.insert(id.clone(), version);
+        let origin = (sandbox_id.to_string(), created_at.to_string());
+        state.checkpoint_origins.insert(id.clone(), origin);
+        if !durable {
+            state.pending_checkpoints.insert(id.clone());
+        }
+        id
+    }
 }
 
 impl FakeState {
@@ -1420,6 +1443,83 @@ async fn a_promotion_keeps_the_older_checkpoints_until_the_next_pause() {
     assert!(
         record.older_checkpoint_ids.contains(&durable),
         "the record keeps the fallback chain"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_promotion_orders_checkpoints_chronologically() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a checkpoint half a second later, stamped
+    // with fractional seconds: a plain string comparison calls the older
+    // whole-second stamp newer ('Z' sorts after '.').
+    let stamp = platform
+        .state()
+        .checkpoint_origins
+        .get(&durable)
+        .unwrap()
+        .1
+        .clone();
+    let fractional = format!("{}.500Z", stamp.trim_end_matches('Z'));
+    let external = platform.external_checkpoint_at(&sandbox_id, true, &fractional);
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the chronologically newer checkpoint wins"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_head_still_records_an_unrecorded_durable_checkpoint() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    manager.pause("bot-a").await.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a durable checkpoint; then the daemon's own
+    // pause freezes a newer one that never finishes uploading.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform.state().pause_checkpoints_pending = true;
+    let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(external.as_str()),
+        "the unrecorded durable checkpoint is restored, not skipped"
+    );
+    let record = manager.get("bot-a").unwrap();
+    assert_eq!(
+        record.checkpoint_id.as_deref(),
+        Some(pending.as_str()),
+        "the pending head keeps its place"
+    );
+    assert!(
+        record.older_checkpoint_ids.contains(&external),
+        "the winner joins the older list behind the pending head"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&pending),
+        "the pending head is not deleted"
     );
 }
 
