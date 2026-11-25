@@ -790,7 +790,6 @@ mod detach_tests;
 mod tests {
     use super::{append_truncated, HeadTailBuffer};
 
-
     #[cfg(unix)]
     #[tokio::test]
     async fn bounded_execute_settles_when_kernel_stops_reading_stdin() {
