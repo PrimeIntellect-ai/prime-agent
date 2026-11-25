@@ -17,6 +17,9 @@ pub const REMOTE_PARENT_NAME: &str = "owner";
 /// The family member id of the remote parent inside the guest.
 pub const REMOTE_PARENT_TARGET: &str = "remote-parent";
 const OUTBOX_FILE: &str = "remote-parent.jsonl";
+/// The most lines one read answers: a backlog is read in pages, so one
+/// answer never outgrows a link frame.
+pub const READ_PAGE_LINES: usize = 64;
 
 /// The owner's name when this daemon runs inside a bot.
 #[must_use]
@@ -73,8 +76,9 @@ pub fn append(agent_dir: &Path, message: &str) -> Result<RemoteParentEntry> {
     Ok(entry)
 }
 
-/// The entries after `after_seq`. Only newline-terminated lines count, so a
-/// line torn by a crash never takes a sequence number.
+/// At most [`READ_PAGE_LINES`] entries after `after_seq`. Only
+/// newline-terminated lines count, so a line torn by a crash never takes a
+/// sequence number.
 ///
 /// # Errors
 ///
@@ -95,5 +99,6 @@ pub fn read_after(agent_dir: &Path, after_seq: u64) -> Result<Vec<RemoteParentEn
             let entry: RemoteParentEntry = serde_json::from_slice(line).ok()?;
             Some(RemoteParentEntry { seq, ..entry })
         })
+        .take(READ_PAGE_LINES)
         .collect())
 }

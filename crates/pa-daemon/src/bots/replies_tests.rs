@@ -11,6 +11,8 @@ use super::{
     follows, pause_verdict, sync_deliveries, Follow, GuestCommands, PauseVerdict, PAUSE_GRACE,
 };
 use crate::bots::ledger::{recover_all, BotLedger, DeliveryState};
+use crate::bots::remote_parent::READ_PAGE_LINES;
+use pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
 
 /// The guest's bot session: its transcript rows and its owner outbox.
 #[derive(Default)]
@@ -67,6 +69,7 @@ impl GuestCommands for FakeGuest {
                 let entries: Vec<Value> = (1u64..)
                     .zip(&self.outbox)
                     .filter(|(seq, _)| seq > after_seq)
+                    .take(READ_PAGE_LINES)
                     .map(|(seq, (message, at_ms))| json!({ "seq": seq, "id": format!("m{seq}"), "message": message, "atMs": at_ms }))
                     .collect();
                 json!({ "entries": entries })
@@ -160,6 +163,37 @@ async fn a_send_only_run_does_not_swallow_the_next_answer() {
     assert_eq!(sync(dir.path(), &mut guest).await, ["a note"]);
     guest.turn("a3", "third answer");
     assert_eq!(sync(dir.path(), &mut guest).await, ["third answer"]);
+}
+
+#[tokio::test]
+async fn long_answers_and_outbox_backlogs_arrive_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut guest = FakeGuest::default();
+    let answer: String = (0..40_000u32)
+        .map(|index| char::from(b'a' + u8::try_from(index % 26).unwrap()))
+        .collect();
+    guest.turn("a1", &answer);
+    let parts = sync(dir.path(), &mut guest).await;
+    assert_eq!(parts.len(), 3);
+    let mut joined = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        assert!(part.chars().count() <= DEFAULT_AGENT_MESSAGE_MAX_CHARS);
+        let (header, body) = part.split_once('\n').unwrap();
+        assert_eq!(header, format!("[bot answer part {}/3]", index + 1));
+        joined.push_str(body);
+    }
+    assert_eq!(joined, answer);
+
+    // A backlog longer than one read page is read page by page.
+    guest.clock += 10;
+    let clock = guest.clock;
+    let lines: Vec<String> = (0..READ_PAGE_LINES * 2 + 3)
+        .map(|index| format!("line {index}"))
+        .collect();
+    guest
+        .outbox
+        .extend(lines.iter().map(|line| (line.clone(), clock)));
+    assert_eq!(sync(dir.path(), &mut guest).await, lines);
 }
 
 #[tokio::test]

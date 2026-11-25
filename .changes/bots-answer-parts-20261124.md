@@ -1,0 +1,1 @@
+fix(bots): a bot turn answer longer than one agent message reaches the owner whole, as numbered parts, instead of cut with a note; the owner reads a bot's outbox in pages of 64 lines, so a long backlog never outgrows one link frame

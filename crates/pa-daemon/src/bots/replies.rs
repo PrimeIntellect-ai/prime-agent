@@ -20,7 +20,7 @@ use super::guest::GuestClient;
 use super::ledger::{BotLedger, DeliveryState};
 use super::platform::PlatformError;
 use super::registry::BotRegistry;
-use super::remote_parent::RemoteParentEntry;
+use super::remote_parent::{RemoteParentEntry, READ_PAGE_LINES};
 use super::{manager_for, BotManager, BotRecord, BotStatus};
 use pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
 
@@ -151,19 +151,27 @@ impl GuestCommands for GuestClient {
     }
 }
 
-/// A turn answer cut to what one agent message carries.
-fn bounded_answer(answer: &str) -> String {
-    const NOTE: &str = "\n\n[The answer was cut here. The full text is in the bot session.]";
+/// Room kept in each part for its `[bot answer part i/n]` line.
+const PART_HEADER_CHARS: usize = 40;
+
+/// A turn answer as agent messages: whole when it fits one, else split into
+/// numbered parts that each fit. The parts' bodies join to the full answer.
+fn answer_parts(answer: &str) -> Vec<String> {
     let answer = answer.trim();
     if answer.chars().count() <= DEFAULT_AGENT_MESSAGE_MAX_CHARS {
-        return answer.to_string();
+        return vec![answer.to_string()];
     }
-    let keep = DEFAULT_AGENT_MESSAGE_MAX_CHARS - NOTE.chars().count();
-    let end = answer
-        .char_indices()
-        .nth(keep)
-        .map_or(answer.len(), |(end, _)| end);
-    format!("{}{NOTE}", &answer[..end])
+    let chars: Vec<char> = answer.chars().collect();
+    let chunks: Vec<String> = chars
+        .chunks(DEFAULT_AGENT_MESSAGE_MAX_CHARS - PART_HEADER_CHARS)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    let count = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| format!("[bot answer part {}/{count}]\n{chunk}", index + 1))
+        .collect()
 }
 
 enum Delivery {
@@ -222,14 +230,29 @@ where
         }
     };
     let rows = page["messages"].as_array().cloned().unwrap_or_default();
-    let outbox = guest
-        .command(&DaemonCommand::ReadRemoteParent {
-            id: None,
-            after_seq: last_seq,
-            rest: Map::default(),
-        })
-        .await?;
-    let messages: Vec<RemoteParentEntry> = serde_json::from_value(outbox["entries"].clone())?;
+    // The guest answers one page of outbox lines per read, so a backlog
+    // never outgrows one link frame.
+    let mut messages: Vec<RemoteParentEntry> = Vec::new();
+    let mut after_seq = last_seq;
+    loop {
+        let outbox = guest
+            .command(&DaemonCommand::ReadRemoteParent {
+                id: None,
+                after_seq,
+                rest: Map::default(),
+            })
+            .await?;
+        let page: Vec<RemoteParentEntry> = serde_json::from_value(outbox["entries"].clone())?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after_seq = last.seq;
+        let full = page.len() >= READ_PAGE_LINES;
+        messages.extend(page);
+        if !full {
+            break;
+        }
+    }
     outbox_times.extend(messages.iter().map(|message| message.at_ms));
     let mut deliveries = Vec::new();
     let mut settled = 0;
@@ -242,9 +265,9 @@ where
             let answer = if run.replied(&outbox_times) {
                 None
             } else if run.answer.trim().is_empty() {
-                no_answer()
+                no_answer().map(|text| vec![text])
             } else {
-                Some(bounded_answer(&run.answer))
+                Some(answer_parts(&run.answer))
             };
             deliveries.push((Delivery::Turn(run.row_id), answer));
         }
@@ -257,15 +280,15 @@ where
     deliveries.extend(messages.into_iter().map(|entry| {
         (
             Delivery::OutboxLine(entry.seq, entry.at_ms),
-            Some(entry.message),
+            Some(vec![entry.message]),
         )
     }));
-    for (delivery, text) in deliveries {
+    for (delivery, parts) in deliveries {
         let mark = |state| match &delivery {
             Delivery::Turn(turn_id) => ledger.mark_turn(turn_id, state),
             Delivery::OutboxLine(seq, _) => ledger.mark_remote_parent(*seq, state),
         };
-        let Some(text) = text else {
+        let Some(parts) = parts else {
             mark(DeliveryState::Replied)?;
             continue;
         };
@@ -273,7 +296,14 @@ where
             Delivery::OutboxLine(seq, at_ms) => ledger.begin_remote_parent(*seq, *at_ms)?,
             Delivery::Turn(_) => mark(DeliveryState::Sending)?,
         }
-        let outcome = deliver(text).await;
+        // A part that fails leaves the turn `uncertain`: no part is resent.
+        let mut outcome = Ok(());
+        for part in parts {
+            outcome = deliver(part).await;
+            if outcome.is_err() {
+                break;
+            }
+        }
         mark(if outcome.is_ok() {
             DeliveryState::Sent
         } else {
