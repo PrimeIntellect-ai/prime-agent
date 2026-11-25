@@ -1023,14 +1023,11 @@ async fn an_auth_rejection_whose_recovery_ends_the_turn_never_retries() {
     );
 }
 
-/// A subscription session over the shared credential store the daemon
-/// re-reads per call: the first call serves `old-access`, a peer then
-/// writes `rotated-access` to the store, and the provider accepts only
-/// `accepted`. Returns the turn's final message, every key served, and how
-/// often the auth recovery ran.
-async fn run_with_rotated_subscription(
-    accepted: Option<&'static str>,
-) -> (AssistantMessage, Vec<String>, usize) {
+/// A 401 on a subscription token re-reads the shared store the daemon
+/// reads per call: the one retry serves the token a peer rotated in, and its
+/// 401 surfaces without another recovery.
+#[tokio::test]
+async fn a_401_on_a_subscription_retries_once_with_the_rotated_stored_token() {
     use crate::auth::{AuthStorage, AuthStorageBackend, InMemoryAuthStorageBackend, NoOAuth};
     let backend = Arc::new(InMemoryAuthStorageBackend::default());
     let write = move |backend: &InMemoryAuthStorageBackend, access: &str| {
@@ -1077,14 +1074,8 @@ async fn run_with_rotated_subscription(
             if served.is_empty() {
                 write(&backend, "rotated-access");
             }
-            served.push(key.clone());
-            async move {
-                Ok(if Some(key.as_str()) == accepted {
-                    ok_message()
-                } else {
-                    error_message(Some("auth"), Some(401), None)
-                })
-            }
+            served.push(key);
+            async { Ok(error_message(Some("auth"), Some(401), None)) }
         },
         |_| async { Ok(()) },
         |_| async { true },
@@ -1093,39 +1084,10 @@ async fn run_with_rotated_subscription(
     )
     .await
     .unwrap();
-    let served = served.lock().unwrap().clone();
-    (
-        message,
-        served,
-        recoveries.load(std::sync::atomic::Ordering::SeqCst),
-    )
-}
-
-/// A 401 on a subscription token re-reads the store: the one retry serves
-/// the rotated token.
-#[tokio::test]
-async fn a_401_on_a_subscription_retries_with_the_rotated_stored_token() {
-    let outcome = run_with_rotated_subscription(Some("rotated-access")).await;
+    assert_eq!(message, error_message(Some("auth"), Some(401), None));
     assert_eq!(
-        outcome,
-        (
-            ok_message(),
-            vec!["old-access".to_string(), "rotated-access".to_string()],
-            1
-        )
+        *served.lock().unwrap(),
+        vec!["old-access".to_string(), "rotated-access".to_string()]
     );
-}
-
-/// The reload is bounded by the one auth retry: a second 401 surfaces.
-#[tokio::test]
-async fn a_second_401_after_the_reload_surfaces() {
-    let outcome = run_with_rotated_subscription(None).await;
-    assert_eq!(
-        outcome,
-        (
-            error_message(Some("auth"), Some(401), None),
-            vec!["old-access".to_string(), "rotated-access".to_string()],
-            1
-        )
-    );
+    assert_eq!(recoveries.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

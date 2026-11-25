@@ -281,6 +281,51 @@ fn an_explicit_key_serves_only_the_provider_it_was_configured_for() {
     );
 }
 
+/// An explicit key without a provider binds to the model the create's
+/// selection settles on: the startup scope picks the provider.
+#[test]
+fn an_explicit_key_without_a_provider_binds_after_the_startup_scope() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir,
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .expect("engine");
+    engine.configure_create_model(EngineModelSelection {
+        api_key: Some("sk-scoped".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(engine.resolve_model().unwrap().provider, "battery");
+    let mut primary = engine.resolve_model().unwrap();
+    primary.provider = "primary".to_string();
+    engine.configure_startup_scope(
+        vec![pa_core::models::ScopedModel {
+            model: primary.clone(),
+            thinking_level: None,
+        }],
+        vec!["primary/mock-1".to_string()],
+        false,
+    );
+    assert_eq!(engine.resolve_model().unwrap().provider, "primary");
+    assert_eq!(
+        engine.resolve_request_auth(&primary).api_key.as_deref(),
+        Some("sk-scoped")
+    );
+}
+
 /// A 401 on the explicit key never switches to the stored subscription: the
 /// key keeps serving, and the turn ends on the 401 with a hint only when a
 /// subscription for the provider is stored.

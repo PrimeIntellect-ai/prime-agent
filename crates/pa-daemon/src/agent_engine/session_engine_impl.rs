@@ -602,6 +602,11 @@ impl SessionEngine for AgentSessionEngine {
             patterns,
             is_continuing,
         });
+        // The create's model selection is complete (the saved-model restore,
+        // then this scope): bind an explicit key to the model it selected.
+        if self.current_selection().api_key.is_some() {
+            self.bind_selection_api_key();
+        }
         // The scope changed the startup decisions: drop the stale level; the
         // next read re-resolves against the scope.
         *self
