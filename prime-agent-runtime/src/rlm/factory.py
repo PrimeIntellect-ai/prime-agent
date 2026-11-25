@@ -563,8 +563,8 @@ def validate_factory_machine(machine: Any) -> list[str]:
         _validate_state_fields(
             state, run_budget=run_budget, states_by_id=states_by_id, noun="state", errors=errors
         )
-        for inp in state.get("inputs") or []:
-            if isinstance(inp, dict) and inp.get("name") in param_names:
+        for inp in _port_list(state, "inputs"):
+            if isinstance(inp, dict) and isinstance(inp.get("name"), str) and inp["name"] in param_names:
                 errors.append(f"state {state_id} input {inp['name']!r} is also a param; rename the input")
         subagent = state.get("subagent")
         if isinstance(subagent, dict) and _is_nonempty_str(subagent.get("name")):
@@ -4430,14 +4430,14 @@ async def run_factory(
     if params is not None and not isinstance(params, dict):
         raise TypeError(f"params must be a dict, got {type(params).__name__}")
     executor = default_factory_executor()
-    directory = _machine_dir_argument(spec_id)
-    if directory is None and executor._resolve_harness().get("factory", spec_id) is not None:
+    if executor._resolve_harness().get("factory", spec_id) is not None:
         if params:
             raise ValueError(
                 f"params apply to machine directories (machine.toml); {spec_id!r} is a stored "
                 "factory entry, which takes none"
             )
         return await executor.run(spec_id, name=name)
+    directory = _machine_dir_argument(spec_id)
     from . import host_request
 
     target = {"path": str(directory)} if directory is not None else {"name": spec_id}

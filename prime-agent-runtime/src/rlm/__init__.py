@@ -870,7 +870,7 @@ class _RLMFactoryNamespace:
     async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
         return await watch_factory(run_id, timeout)
 
-    async def emit(self, **outputs: Any) -> dict[str, Any]:
+    async def emit(self, /, **outputs: Any) -> dict[str, Any]:
         """Hand this factory child's outputs back: ``await
         rlm.factory.emit(verdict={...})``. A wrong value raises
         ``FactoryEmitError`` naming the field; fix it and call again."""
