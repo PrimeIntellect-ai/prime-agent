@@ -647,7 +647,8 @@ fn a_state_id_that_is_not_a_file_name_is_refused_before_writing() {
 
 #[test]
 fn a_null_guard_is_an_unguarded_transition_and_two_joins_to_one_state_are_refused() {
-    let state = |id: &str, entry: bool| json!({"id": id, "entry": entry, "subagent": {"prompt": "P."}});
+    let state =
+        |id: &str, entry: bool| json!({"id": id, "entry": entry, "subagent": {"prompt": "P."}});
     let null_guard = json!({
         "states": [state("a", true), state("b", false)],
         "transitions": [{"from": "a", "to": "b", "when": null}],
