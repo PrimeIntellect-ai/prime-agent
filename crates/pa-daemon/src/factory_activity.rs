@@ -80,25 +80,25 @@ impl Worker {
             .map(str::to_string);
         let timeout_ms = payload.get("timeoutMs").and_then(Value::as_u64);
         // The machines page's list reads the library from disk (the one Rust
-        // scan): no kernel, no core session.
+        // scan): no kernel, no core session. The kernel's factory gate never
+        // sees this read, so it refuses here while the factory is disabled;
+        // the settings read and the scan both stay off the executor.
         if action == "library" && spec_id.is_none() {
-            // The kernel's factory gate never sees this read, so it refuses
-            // here the same way while the factory is disabled.
-            if !factory_lane_enabled(&self.config.agent_dir) {
-                return response_failure(
+            let agent_dir = self.config.agent_dir.clone();
+            let listed = tokio::task::spawn_blocking(move || {
+                factory_lane_enabled(&agent_dir).then(|| {
+                    pa_core::session_engine::factory_host::machine_library(&agent_dir).to_json()
+                })
+            })
+            .await;
+            return match listed {
+                Ok(Some(listed)) => response_success(None, "factory_activity", Some(listed)),
+                Ok(None) => response_failure(
                     None,
                     "factory_activity",
                     pa_core::refinement::FACTORY_DISABLED_MESSAGE,
                     None,
-                );
-            }
-            let agent_dir = self.config.agent_dir.clone();
-            let listed = tokio::task::spawn_blocking(move || {
-                pa_core::session_engine::factory_host::machine_library(&agent_dir).to_json()
-            })
-            .await;
-            return match listed {
-                Ok(listed) => response_success(None, "factory_activity", Some(listed)),
+                ),
                 Err(error) => response_failure(
                     None,
                     "factory_activity",
