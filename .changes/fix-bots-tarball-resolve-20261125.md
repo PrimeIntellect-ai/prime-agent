@@ -1,0 +1,1 @@
+- Bots: a local build's bot tarball is resolved when a bot installs, not once at daemon start. A tarball placed next to the binary (or set in `PRIME_AGENT_BOT_TARBALL`) after the daemon started is used without a restart.

@@ -690,6 +690,33 @@ async fn a_failed_install_fails_spawn_and_cleans_up() {
     }
 }
 
+/// A local tarball that appears only after the manager was created is
+/// used: the release source is resolved at install time, not cached.
+#[tokio::test(start_paused = true)]
+async fn a_tarball_placed_after_manager_creation_is_used() {
+    let (dir, platform, manager) = setup();
+    let bytes = b"not really a tarball".to_vec();
+    let tarball = dir.path().join("bot.tar.gz");
+    std::fs::write(&tarball, &bytes).unwrap();
+    let _env = crate::test_support::KernelEnvOverride::apply(&[(
+        version::TARBALL_OVERRIDE_ENV,
+        Some(tarball.display().to_string()),
+    )]);
+
+    manager.spawn(&spec("bot-tarball")).await.unwrap();
+
+    assert_eq!(platform.state().installs, 1);
+    let (_, install) = platform
+        .state()
+        .execs
+        .iter()
+        .find(|(script, _)| script.as_str() == INSTALL_SCRIPT)
+        .cloned()
+        .expect("an install ran");
+    assert_eq!(install["PA_TARBALL_BYTES"], bytes.len().to_string());
+    assert_eq!(install["PA_TARBALL_SHA256"], super::sha256_hex(&bytes));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_full_checkpoint_storage_keeps_the_bot_running() {
     let (_dir, platform, manager) = setup();
