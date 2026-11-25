@@ -67,8 +67,8 @@ impl Inner {
                 self.route_stream(id.as_deref(), StreamName::Stderr, &text);
             }
             Event::Result { id, text } => {
-                let execution = lock(&self.guarded).active_execution.clone();
-                if let Some(execution) = execution.filter(|e| e.request_id == id) {
+                let execution = lock(&self.guarded).active_execution(&id);
+                if let Some(execution) = execution {
                     lock(&execution.buffers).result = Some(text);
                 }
             }
@@ -78,8 +78,10 @@ impl Inner {
                 evalue,
                 traceback,
             } => {
-                let execution = lock(&self.guarded).active_execution.clone();
-                match (execution.filter(|e| Some(&e.request_id) == id.as_ref()), id) {
+                let execution = id
+                    .as_deref()
+                    .and_then(|id| lock(&self.guarded).active_execution(id));
+                match (execution, id) {
                     (Some(execution), _) => {
                         let mut buffers = lock(&execution.buffers);
                         buffers.error = Some(KernelError {
@@ -119,8 +121,8 @@ impl Inner {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("error");
-                let execution = lock(&self.guarded).active_execution.clone();
-                if let Some(execution) = execution.filter(|e| e.request_id == id) {
+                let execution = lock(&self.guarded).active_execution(&id);
+                if let Some(execution) = execution {
                     {
                         let mut buffers = lock(&execution.buffers);
                         buffers.done_fields = Some(fields.clone());
@@ -154,8 +156,8 @@ impl Inner {
     /// stdout/stderr events: attributed to the active execution when the id
     /// matches, otherwise buffered as background output.
     fn route_stream(&self, id: Option<&str>, stream: StreamName, text: &str) {
-        let execution = lock(&self.guarded).active_execution.clone();
-        let Some(execution) = execution.filter(|e| Some(e.request_id.as_str()) == id) else {
+        let execution = id.and_then(|id| lock(&self.guarded).active_execution(id));
+        let Some(execution) = execution else {
             // Unowned output (null id, or another cell's id): never merge it
             // into the active cell's streams; buffer it as background output.
             self.append_background_output(text);
@@ -174,18 +176,12 @@ impl Inner {
 
     /// display events: diffs, attachments, sent agent messages, late or live.
     fn dispatch_display(&self, id: Option<&str>, data: &Value) {
-        let execution = lock(&self.guarded).active_execution.clone();
-        let matching = execution
-            .as_ref()
-            .filter(|e| Some(e.request_id.as_str()) == id);
+        let execution = id.and_then(|id| lock(&self.guarded).active_execution(id));
         // A settled cell keeps receiving late agent messages via its handler.
-        if matching.is_none() {
-            if self.dispatch_late_sent_agent_message(id, data) {
-                return;
-            }
+        let Some(execution) = execution else {
+            self.dispatch_late_sent_agent_message(id, data);
             return;
-        }
-        let execution = matching.expect("filter guarantees presence").clone();
+        };
         let settled = lock(&execution.buffers).settled;
         if settled && self.dispatch_late_sent_agent_message(id, data) {
             return;
@@ -249,13 +245,13 @@ impl Inner {
         }
     }
 
-    /// Unattributed stream text: attached to the active cell's background
-    /// buffer, or held for the next cell when the kernel is idle.
+    /// Unattributed stream text: attached to the newest running cell's
+    /// background buffer, or held for the next cell when the kernel is idle.
     fn append_background_output(&self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let execution = lock(&self.guarded).active_execution.clone();
+        let execution = lock(&self.guarded).active_executions.last().cloned();
         if let Some(execution) = execution {
             let mut buffers = lock(&execution.buffers);
             if buffers.background_output_chars >= MAX_BACKGROUND_OUTPUT_CHARS {
@@ -407,8 +403,11 @@ mod tests {
             restores_namespace: false,
             buffers: std::sync::Mutex::new(ExecBuffers::default()),
             result_tx: std::sync::Mutex::new(Some(result_tx)),
+            detached: std::sync::atomic::AtomicBool::new(false),
+            stop_signal: crate::kernel::cancellation::AbortSignal::default(),
+            settled_tx: tokio::sync::watch::channel(false).0,
         });
-        lock(&manager.inner.guarded).active_execution = Some(Arc::clone(&execution));
+        lock(&manager.inner.guarded).active_executions = vec![Arc::clone(&execution)];
         let messages = [
             json!({ "id": "inbox-1", "class": "bash-done", "arrivedAtMs": 1, "text": "a", "meta": {} }),
             json!({ "id": "inbox-2", "class": "heartbeat", "arrivedAtMs": 2, "text": "b", "meta": {} }),

@@ -384,6 +384,8 @@ mod tests {
         assert_eq!(other, first);
     }
 
+    /// Mistral tool messages have no error field: the "[tool error] " prefix is how the model
+    /// learns a call failed.
     #[test]
     fn builds_tool_result_text() {
         assert_eq!(build_tool_result_text("done", false, false, false), "done");

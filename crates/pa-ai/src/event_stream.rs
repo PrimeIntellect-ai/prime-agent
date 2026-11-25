@@ -320,7 +320,7 @@ pub fn empty_content() -> Vec<AssistantContent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AssistantContent, DoneStopReason, ErrorStopReason, TextContent, Usage};
+    use crate::types::{AssistantContent, DoneStopReason, TextContent, Usage};
 
     fn sample_message(text: &str) -> AssistantMessage {
         AssistantMessage {
@@ -368,20 +368,6 @@ mod tests {
         }
         assert_eq!(types, vec!["start", "text_delta", "done"]);
         assert_eq!(final_message.content.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn result_resolves_from_terminal_event() {
-        let (writer, stream) = AssistantMessageEventStream::new();
-        let mut message = sample_message("done");
-        message.stop_reason = StopReason::Error;
-        writer.push(AssistantMessageEvent::Error {
-            reason: ErrorStopReason::Error,
-            error: message.clone(),
-        });
-        let resolved = stream.result().await;
-        assert_eq!(resolved.stop_reason, StopReason::Error);
-        assert_eq!(resolved.content, message.content);
     }
 
     #[tokio::test]

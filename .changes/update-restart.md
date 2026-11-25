@@ -1,0 +1,1 @@
+- `prime-agent update` and `/update` now restart a running daemon with the update restart instead of shutting it down, so attached windows show the update notice and resume their sessions on the new daemon. Sessions opened with telemetry disabled now reattach after an update restart too.
