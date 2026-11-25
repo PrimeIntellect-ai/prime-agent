@@ -25,7 +25,7 @@ pub const GITHUB_AUTH_ID: &str = "prime-agent-bots-github";
 /// The command that stores a token.
 pub const SET_TOKEN_COMMAND: &str = "prime-agent bots github set";
 /// The REST and GraphQL host (`gh`, the API clients).
-const API_HOST: &str = "api.github.com";
+pub(super) const API_HOST: &str = "api.github.com";
 /// The git smart-HTTP host.
 pub(super) const GIT_HOST: &str = "github.com";
 /// The platform's limit on one secret value.

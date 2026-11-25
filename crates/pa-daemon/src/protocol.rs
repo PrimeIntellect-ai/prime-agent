@@ -944,6 +944,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::Create { .. }
         | DaemonCommand::SendMessage { .. }
         | DaemonCommand::SpawnBot { .. }
+        | DaemonCommand::AllowBotSpawns { .. }
         | DaemonCommand::DeleteBot { .. }
         | DaemonCommand::PullBotFiles { .. }
         | DaemonCommand::ListBots { .. }
@@ -1017,6 +1018,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::SpawnBot { .. } => "spawn_bot",
+        DaemonCommand::AllowBotSpawns { .. } => "allow_bot_spawns",
         DaemonCommand::DeleteBot { .. } => "delete_bot",
         DaemonCommand::PullBotFiles { .. } => "pull_bot_files",
         DaemonCommand::ListBots { .. } => "list_bots",

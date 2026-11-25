@@ -253,6 +253,7 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
         for child in 0..bots.len() {
             if !placed[child]
                 && bots[child].parent_bot_id.as_deref() == Some(bots[index].bot_id.as_str())
+                && bots[child].section() == bots[index].section()
             {
                 placed[child] = true;
                 treed.push(bots[child].clone());

@@ -119,6 +119,40 @@ impl Drop for NameReservation {
     }
 }
 
+/// Owner ids with a spawn in flight. Held with [`SPAWNING`] under one
+/// lock, so the `bots.maxBots` cap counts existing bots plus creates that
+/// have not landed in the registry yet: two concurrent spawns under
+/// different names cannot both pass the cap.
+static SPAWNING_OWNERS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Reserve one in-flight create for `owner_session_id`.
+///
+/// # Errors
+///
+/// Returns an error when the owner already holds a reservation.
+fn reserve_owner_slot(owner_session_id: &str) -> Result<OwnerSlot> {
+    let mut owners = SPAWNING_OWNERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !owners.insert(owner_session_id.to_string()) {
+        bail!("this session already has a bot starting; wait for it to finish");
+    }
+    Ok(OwnerSlot(owner_session_id.to_string()))
+}
+
+/// One reserved in-flight create; dropping it frees the slot.
+struct OwnerSlot(String);
+
+impl Drop for OwnerSlot {
+    fn drop(&mut self) {
+        SPAWNING_OWNERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 /// One bot as a `list_bots` row. `login_stale` names the owner logins
 /// whose refresh failed or that expired.
 #[must_use]
@@ -267,6 +301,9 @@ impl Supervisor {
                 max_bots
             );
         }
+        // The cap also counts this owner's in-flight creates, so concurrent
+        // spawns under different names cannot both pass it.
+        let _owner_slot = reserve_owner_slot(&count_owner)?;
         let started = tokio::time::timeout(BOT_DEADLINE, async {
             let record = manager.spawn(spec).await?;
             let mut client = super::guest::GuestClient::connect(&manager, &record)
@@ -326,6 +363,61 @@ impl Supervisor {
                     "the bot did not start: {error:#}; {cleanup}"
                 ))
             }
+        }
+    }
+
+    /// `allow_bot_spawns`: give one running bot the ability to spawn bots.
+    /// The daemon owns the registry, so the grant lands in the same writer
+    /// the lifecycle uses (`prime-agent bots allow-spawns` routes here).
+    pub(crate) async fn handle_allow_bot_spawns(
+        self: &Arc<Self>,
+        command_id: &str,
+        command: &DaemonCommand,
+    ) -> DaemonResponse {
+        let DaemonCommand::AllowBotSpawns { bot, .. } = command else {
+            return response_failure(
+                Some(command_id),
+                "allow_bot_spawns",
+                "invalid command",
+                None,
+            );
+        };
+        let granted = async {
+            let manager = super::manager_for(&self.options.agent_dir)?;
+            let bot_id = manager
+                .list()
+                .into_iter()
+                .find(|record| &record.bot_id == bot)
+                .or_else(|| {
+                    let named: Vec<_> = manager
+                        .list()
+                        .into_iter()
+                        .filter(|record| &record.name == bot)
+                        .collect();
+                    (named.len() == 1).then(|| named[0].clone())
+                })
+                .map(|record| record.bot_id)
+                .ok_or_else(|| anyhow::anyhow!("No bot named {bot:?}."))?;
+            let record = tokio::time::timeout(BOT_DEADLINE, manager.allow_spawns(&bot_id))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("the bot was not granted spawns within {BOT_DEADLINE:?}")
+                })??;
+            anyhow::Ok(record)
+        }
+        .await;
+        match granted {
+            Ok(record) => response_success(
+                Some(command_id),
+                "allow_bot_spawns",
+                Some(bot_row(&record, false, &[], record.bots)),
+            ),
+            Err(error) => response_failure(
+                Some(command_id),
+                "allow_bot_spawns",
+                &format!("{error:#}"),
+                None,
+            ),
         }
     }
 

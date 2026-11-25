@@ -53,6 +53,8 @@ pub const BOT_IMAGE_ENV: &str = "PRIME_AGENT_BOT_IMAGE";
 pub const BOT_LABEL: &str = "prime-agent-bot";
 /// The label of a bot with GitHub access.
 pub const GITHUB_LABEL: &str = "prime-agent-bot-github";
+/// The label of a bot that may spawn its own bots.
+pub const BOTS_LABEL: &str = "prime-agent-bot-spawns";
 /// The label prefix that names each owner login a bot carries.
 pub const LOGIN_LABEL_PREFIX: &str = "prime-agent-bot-login:";
 /// The guest daemon's socket.

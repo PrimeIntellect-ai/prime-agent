@@ -285,6 +285,10 @@ impl BotPlatform for FakePlatform {
                 }
             } else if script == ALLOW_SPAWNS_SCRIPT {
                 // The nested-spawn settings write: it succeeds.
+            } else if script == version::TARBALL_CHECK_SCRIPT {
+                // The guest's tarball copy is present.
+            } else if script == version::TARBALL_RESTORE_SCRIPT {
+                state.installs += 1;
             } else {
                 assert!(env.contains_key("BOT_CLIENT"), "unexpected guest script");
                 let file = env
@@ -1872,13 +1876,21 @@ async fn live_ask_long(
     manager: &BotManager,
     dir: &std::path::Path,
     bot: &super::BotRecord,
+    msg_id: &str,
     task: &str,
 ) -> anyhow::Result<String> {
     let ledger = super::ledger::BotLedger::new(dir, &bot.bot_id);
     let mut guest = super::guest::GuestClient::connect(manager, bot).await?;
-    super::send::send_message(&ledger, &mut guest, &bot.guest_session_id, "m1", task, None)
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    super::send::send_message(
+        &ledger,
+        &mut guest,
+        &bot.guest_session_id,
+        msg_id,
+        task,
+        None,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut reply = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(540);
     while reply.is_empty() && tokio::time::Instant::now() < deadline {
@@ -1947,14 +1959,15 @@ async fn live_a_bot_spawns_a_bot_and_delete_cascades() {
         let parent = manager.spawn(&spec).await?;
         step("parent spawned");
         let task = "Reply with the single word pong and nothing else.";
-        let first = live_ask_long(&manager, dir.path(), &parent, task).await?;
+        let first = live_ask_long(&manager, dir.path(), &parent, "m1", task).await?;
         step("parent first reply");
-        assert!(first.to_lowercase().contains("pong"), "first: {first:?}");
+        // An error, not a panic: the cleanup delete below still runs.
+        anyhow::ensure!(first.to_lowercase().contains("pong"), "first: {first:?}");
         let task = "Start one sandbox bot: await rlm.spawn('Reply with the single word ping \
                     and nothing else.', name='child', target='sandbox'). Wait for the child's \
                     final answer, then reply with exactly that word in capital letters and \
                     nothing else.";
-        let second = live_ask_long(&manager, dir.path(), &parent, task).await?;
+        let second = live_ask_long(&manager, dir.path(), &parent, "m2", task).await?;
         step("parent second reply");
         // The child lived: its sandbox carries the parent label, and the
         // guest created it directly (this daemon has no record of it).
@@ -2080,6 +2093,12 @@ async fn a_bot_that_spawns_bots_gets_the_sandbox_api_rule_and_context() {
     assert_eq!(secrets.len(), 1, "{:?}", state.secrets);
     let created = state.creates.clone();
     drop(state);
+    // The spawns label survives a registry rebuild.
+    assert!(created
+        .last()
+        .expect("a create ran")
+        .labels
+        .contains(&super::BOTS_LABEL.to_string()));
     let rules = &created.last().unwrap().network_rules;
     let api_rule = rules
         .get(&super::credentials::sandbox_api_host())
@@ -2197,7 +2216,8 @@ async fn children_count_toward_the_owners_bot_list() {
 #[tokio::test(start_paused = true)]
 async fn merged_child_rows_upsert_and_vanished_children_go() {
     let (_dir, _platform, manager) = setup();
-    manager.spawn(&spec("bot-a")).await.unwrap();
+    let spawn_a = manager.spawn(&spec("bot-a")).await.unwrap();
+    let spawn_a_sandbox = spawn_a.sandbox_id.clone();
     let row = serde_json::json!({
         "botId": "bot-c",
         "name": "helper",
@@ -2223,6 +2243,32 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
     });
     manager.merge_children("bot-a", &[phantom]).await.unwrap();
     assert!(manager.get("bot-d").is_none(), "a phantom does not merge");
+
+    // A row cannot claim another parent, and cannot overwrite a bot this
+    // daemon owns outright: both are left alone.
+    let foreign = serde_json::json!({
+        "botId": "bot-e", "name": "foreign", "ownerSessionId": "guest-session",
+        "parentBotId": "bot-other", "sandboxId": "sbx-e", "status": "running",
+        "createdAt": 1_i64,
+    });
+    let hijack = serde_json::json!({
+        "botId": "bot-a", "name": "hijack", "ownerSessionId": "guest-session",
+        "parentBotId": "bot-a", "sandboxId": "sbx-evil", "status": "running",
+        "createdAt": 1_i64,
+    });
+    manager
+        .merge_children("bot-a", &[foreign, hijack])
+        .await
+        .unwrap();
+    assert!(
+        manager.get("bot-e").is_none(),
+        "a foreign-parent row does not merge"
+    );
+    assert_eq!(
+        manager.get("bot-a").unwrap().sandbox_id.as_deref(),
+        spawn_a_sandbox.as_deref(),
+        "an owned bot's record is not overwritten"
+    );
 
     // The row gone: the child is deleted again.
     manager.merge_children("bot-a", &[]).await.unwrap();
@@ -2268,6 +2314,10 @@ async fn allow_spawns_gives_a_running_bot_the_rule_and_context() {
     let record = manager.allow_spawns("bot-a").await.unwrap();
     assert!(record.bots);
     assert!(manager.get("bot-a").unwrap().bots);
+
+    // The durable spawns marker records the flag for a registry rebuild.
+    let marker = std::fs::read_to_string(dir.path().join("bots/spawns.json")).unwrap();
+    assert!(marker.contains("\"bot-a\""), "{marker}");
 
     // The policy replacement kept the plan's rule and added the sandbox
     // API one.

@@ -23,7 +23,7 @@ pub fn run_bots_command(args: &[String]) -> i32 {
             status(&agent_dir);
             Ok(())
         }
-        ["allow-spawns", bot] => allow_spawns(&agent_dir, bot),
+        ["allow-spawns", bot] => allow_spawns(bot),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -132,37 +132,38 @@ fn delete_platform_secrets(agent_dir: &Path) -> anyhow::Result<usize> {
 /// Give one running bot the ability to spawn bots without a respawn: the
 /// platform rule that injects the owner's sandbox API key, the guest
 /// settings and nested context, and the record flag.
-fn allow_spawns(agent_dir: &Path, bot: &str) -> Result<(), String> {
-    let manager = pa_daemon::bots::manager_for(agent_dir).map_err(|error| error.to_string())?;
-    let record = tokio::runtime::Builder::new_current_thread()
+fn allow_spawns(bot: &str) -> Result<(), String> {
+    // The daemon owns the bots registry: the grant goes through it, so it
+    // can never race a daemon write or be overwritten by one.
+    use crate::daemon_client::DaemonClient;
+    let socket = crate::config::resolve_daemon_socket_path(None);
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    runtime
         .block_on(async {
-            // The bot by id, or by name when only one carries it.
-            let found = manager
-                .list()
-                .into_iter()
-                .find(|record| record.bot_id == bot)
-                .or_else(|| {
-                    let named: Vec<_> = manager
-                        .list()
-                        .into_iter()
-                        .filter(|record| record.name == bot)
-                        .collect();
-                    (named.len() == 1).then(|| named[0].clone())
-                });
-            let Some(found) = found else {
-                return Err(anyhow::anyhow!("No bot named {bot:?}."));
-            };
-            manager
-                .allow_spawns(&found.bot_id)
-                .await
-                .map(|record| record.name)
+            let mut client = DaemonClient::connect(&socket).map_err(|error| error.to_string())?;
+            let response = client
+                .request_with_timeout(
+                    pa_types::daemon::DaemonCommand::AllowBotSpawns {
+                        id: None,
+                        bot: bot.to_string(),
+                        rest: serde_json::Map::default(),
+                    },
+                    16 * 60 * 1000,
+                )
+                .map_err(|error| error.to_string())?;
+            if !response.success {
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| "the daemon refused".to_string()));
+            }
+            Ok(())
         })
-        .map_err(|error: anyhow::Error| format!("{error:#}"))?;
+        .map_err(|error: String| error)?;
     println!(
-        "{record} may now spawn bots. With this, any code in that bot can call the whole \
+        "{bot} may now spawn bots. With this, any code in that bot can call the whole \
          Prime sandbox API as the owner; prefer a dedicated, sandbox-scoped API key."
     );
     Ok(())

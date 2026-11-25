@@ -28,6 +28,9 @@ use super::{
 
 /// The budget for one wake, create, or pause.
 const OPERATION_BUDGET: Duration = Duration::from_mins(15);
+/// Delete-cascade sweeps: a child the guest creates mid-delete is caught
+/// by the next listing; the delete ends once a sweep finds nothing left.
+const DESCENDANT_SWEEPS: usize = 3;
 /// The relay registration call's deadline.
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Attempts for one platform call that answers 409, 429, 5xx, or a network
@@ -85,14 +88,19 @@ def locked_update(path, update):
 
 
 def settings_update(settings):
-    if settings is None:
+    if not isinstance(settings, dict):
         settings = {}
     settings.setdefault("factory", {})["enabled"] = os.environ["BOT_FACTORY_ENABLED"] == "true"
     if os.environ.get("BOT_MCP_SERVERS"):
         settings.setdefault("mcpServers", {}).update(json.loads(os.environ["BOT_MCP_SERVERS"]))
     if os.environ.get("BOT_NESTED_JSON"):
-        # This bot may spawn bots: the guest spawn gate opens.
-        settings.setdefault("bots", {})["enabled"] = True
+        # This bot may spawn bots: the guest spawn gate opens. An explicit
+        # non-object "bots" value is normalized, not trusted.
+        bots = settings.get("bots")
+        if not isinstance(bots, dict):
+            bots = {}
+            settings["bots"] = bots
+        bots["enabled"] = True
     return settings
 
 
@@ -231,30 +239,74 @@ print(json.dumps({"activeSessionId": data.get("activeSessionId") or data.get("id
 pub(super) const ALLOW_SPAWNS_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 python3 - <<'PY'
-import json, os
+import json, os, time
+
+
+def locked_update(path, update):
+    """Read-modify-write under the daemon's {file}.lock protocol."""
+    lock = path + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - os.stat(lock).st_mtime > 10
+            except OSError:
+                stale = False
+            if stale:
+                try:
+                    os.rmdir(lock)
+                except OSError:
+                    pass
+            else:
+                time.sleep(0.02)
+    try:
+        try:
+            document = json.load(open(path))
+        except (OSError, ValueError):
+            document = None
+        document = update(document)
+        temp = path + ".tmp" + str(os.getpid())
+        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w") as file:
+            json.dump(document, file)
+        os.replace(temp, path)
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def settings_update(settings):
+    if not isinstance(settings, dict):
+        settings = {}
+    bots = settings.get("bots")
+    if not isinstance(bots, dict):
+        bots = {}
+        settings["bots"] = bots
+    bots["enabled"] = True
+    return settings
+
+
+def auth_update(auth):
+    if not isinstance(auth, dict):
+        auth = {}
+    auth["prime-inference"] = json.loads(os.environ["BOT_PRIME_RECORD"])
+    return auth
+
+
 home = os.environ["HOME"]
+locked_update(os.path.join(home, ".prime/agent/settings.json"), settings_update)
+locked_update(os.path.join(home, ".prime/agent/auth.json"), auth_update)
+# The nested context lands next to the guest registry, where the daemon
+# reads it fresh at every spawn.
 nested = os.path.join(home, ".prime/agent/bots/nested.json")
 os.makedirs(os.path.dirname(nested), exist_ok=True)
 with open(nested, "w") as file:
     file.write(os.environ["BOT_NESTED_JSON"])
-settings_path = os.path.join(home, ".prime/agent/settings.json")
-try:
-    settings = json.load(open(settings_path))
-except (OSError, ValueError):
-    settings = {}
-settings.setdefault("bots", {})["enabled"] = True
-with open(settings_path, "w") as file:
-    json.dump(settings, file)
-auth_path = os.path.join(home, ".prime/agent/auth.json")
-try:
-    auth = json.load(open(auth_path))
-except (OSError, ValueError):
-    auth = {}
-if not isinstance(auth, dict):
-    auth = {}
-auth["prime-inference"] = json.loads(os.environ["BOT_PRIME_RECORD"])
-with open(auth_path, "w") as file:
-    json.dump(auth, file)
 PY
 "#;
 
@@ -544,6 +596,11 @@ impl BotManager {
                 .map(|context| context.bot_id),
             pause_at: None,
         })?;
+        if spec.bots {
+            let mut spawns = read_spawns_marker(&self.agent_dir);
+            spawns.insert(spec.bot_id.clone());
+            write_spawns_marker(&self.agent_dir, &spawns)?;
+        }
         match self.ensure_running_locked(&spec.bot_id).await {
             Ok(record) => Ok(record),
             Err(error) => {
@@ -638,25 +695,33 @@ impl BotManager {
     /// settled under its own lock, so a concurrent delete of the child
     /// cannot interleave.
     async fn delete_descendants_locked(&self, bot_id: &str) -> Result<()> {
-        let mut children: Vec<String> = lock(&self.registry)
-            .all()
-            .into_iter()
-            .filter(|record| record.parent_bot_id.as_deref() == Some(bot_id))
-            .map(|record| record.bot_id)
-            .collect();
-        let parent = super::parent_label(bot_id);
-        for sandbox in retry(|| self.platform.list(&parent)).await? {
-            if let Some(child) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
-                children.push(child);
+        // The guest can create a child while this delete runs, so the
+        // sweep repeats until the parent label names nothing live: one
+        // pass can miss a create that landed after its listing.
+        for _ in 0..DESCENDANT_SWEEPS {
+            let mut children: Vec<String> = lock(&self.registry)
+                .all()
+                .into_iter()
+                .filter(|record| record.parent_bot_id.as_deref() == Some(bot_id))
+                .map(|record| record.bot_id)
+                .collect();
+            let parent = super::parent_label(bot_id);
+            for sandbox in retry(|| self.platform.list(&parent)).await? {
+                if let Some(child) = label_value(&sandbox.labels, &format!("{BOT_LABEL}:")) {
+                    children.push(child);
+                }
             }
-        }
-        children.sort();
-        children.dedup();
-        for child in children {
-            let child_lock = self.lock_for(&child);
-            let _held = child_lock.lock().await;
-            Box::pin(self.delete_descendants_locked(&child)).await?;
-            self.delete_locked(&child).await?;
+            children.sort();
+            children.dedup();
+            if children.is_empty() {
+                return Ok(());
+            }
+            for child in children {
+                let child_lock = self.lock_for(&child);
+                let _held = child_lock.lock().await;
+                Box::pin(self.delete_descendants_locked(&child)).await?;
+                self.delete_locked(&child).await?;
+            }
         }
         Ok(())
     }
@@ -692,9 +757,32 @@ impl BotManager {
     /// Returns an error when a vanished child cannot be deleted or the
     /// registry cannot be written.
     pub async fn merge_children(&self, parent_bot_id: &str, rows: &[Value]) -> Result<()> {
+        // Under the parent's lifecycle lock, in lock order with the delete
+        // cascade, and never for a parent that is already gone: a stale
+        // guest snapshot must not resurrect children the cascade removed.
+        let parent_lock = self.lock_for(parent_bot_id);
+        let _held = parent_lock.lock().await;
+        if self.get(parent_bot_id).is_none() {
+            return Ok(());
+        }
         let mut seen = BTreeSet::new();
         for row in rows {
-            let Some(record) = child_record(row, parent_bot_id, self.get_from_row(row)) else {
+            // A row names this parent's child only when it says so, and
+            // only when its bot id is not already another bot's record:
+            // the rows come from the guest, so they never get to claim a
+            // bot this daemon owns outright.
+            let claims_parent = row
+                .get("parentBotId")
+                .and_then(Value::as_str)
+                .is_none_or(|parent| parent == parent_bot_id);
+            let existing = self.get_from_row(row);
+            let foreign = existing
+                .as_ref()
+                .is_some_and(|record| record.parent_bot_id.as_deref() != Some(parent_bot_id));
+            if !claims_parent || foreign {
+                continue;
+            }
+            let Some(record) = child_record(row, parent_bot_id, existing) else {
                 continue;
             };
             seen.insert(record.bot_id.clone());
@@ -748,15 +836,34 @@ impl BotManager {
                 record.status.as_str()
             );
         }
+        if record.parent_bot_id.is_some() {
+            bail!(
+                "the bot {} is itself a bot's child; bots nest two levels deep \
+                 (owner -> bot -> bot), so it cannot be given bot spawns",
+                record.name
+            );
+        }
         record.bots = true;
+        // The platform labels are fixed at create, so the durable marker
+        // next to the registry carries the flag for a rebuild.
+        let mut spawns = read_spawns_marker(&self.agent_dir);
+        spawns.insert(bot_id.to_string());
+        write_spawns_marker(&self.agent_dir, &spawns)?;
         // The merged policy: the current plan's rules plus the sandbox API
         // rule (the plan is what every /secrets refresh would set).
-        let (credentials, _, _) = self.guest_credentials(&record, record.github).await?;
+        let (credentials, logins, _) = self.guest_credentials(&record, record.github).await?;
         retry(|| {
             self.platform
                 .set_network_rules(&sandbox_id, &credentials.network_rules)
         })
         .await?;
+        // The refresher follows the logins the new rules carry, so a newly
+        // injected login keeps refreshing (as `refresh_network_rules` does).
+        record.logins = logins;
+        if !record.logins.is_empty() {
+            self.refresh_logins(&record).await;
+            self.watch_logins();
+        }
         let agent_dir = self.agent_dir.clone();
         let max_bots = tokio::task::spawn_blocking(move || {
             pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_max_bots()
@@ -814,7 +921,8 @@ impl BotManager {
         let mut bot_ids = BTreeSet::new();
         // Inside a bot, the listing scope is this bot's children only: the
         // owner's own bots belong to another daemon's registry.
-        let scope = super::nested::NestedContext::read(&self.agent_dir).map_or_else(
+        let nested = super::nested::NestedContext::read(&self.agent_dir);
+        let scope = nested.as_ref().map_or_else(
             || BOT_LABEL.to_string(),
             |context| super::parent_label(&context.bot_id),
         );
@@ -828,10 +936,18 @@ impl BotManager {
             // A bot this registry never held is adopted only when its owner
             // label names a session of this agent dir. Another agent dir's
             // bot on the same team, or one without an owner label, is left
-            // entirely alone: never adopted, paused, or deleted.
+            // entirely alone: never adopted, paused, or deleted. Inside a
+            // bot, the nested context names the owner its children's labels
+            // carry: that match is trusted without a provable session.
             if self.get(&bot_id).is_none()
-                && !label_value(&sandbox.labels, &format!("{BOT_LABEL}-owner:"))
-                    .is_some_and(|owner| owned_sessions.contains(&owner))
+                && !label_value(&sandbox.labels, &format!("{BOT_LABEL}-owner:")).is_some_and(
+                    |owner| {
+                        nested
+                            .as_ref()
+                            .is_some_and(|context| context.owner_session_id == owner)
+                            || owned_sessions.contains(&owner)
+                    },
+                )
             {
                 continue;
             }
@@ -863,6 +979,11 @@ impl BotManager {
             let mut record = self
                 .get(&bot_id)
                 .unwrap_or_else(|| rebuilt_record(&bot_id, chosen));
+            if record.parent_bot_id.is_none()
+                && read_spawns_marker(&self.agent_dir).contains(&bot_id)
+            {
+                record.bots = true;
+            }
             record.sandbox_id = Some(chosen.id.clone());
             record.status = chosen.status;
             self.save(record)?;
@@ -1182,6 +1303,9 @@ impl BotManager {
         if let Some(context) = &nested {
             labels.push(super::parent_label(&context.bot_id));
         }
+        if record.bots {
+            labels.push(super::BOTS_LABEL.to_string());
+        }
         if record.github {
             labels.push(GITHUB_LABEL.to_string());
         }
@@ -1252,6 +1376,7 @@ impl BotManager {
             check_exit("install prime-agent in the bot", &output)?;
         }
         record.version = local.to_string();
+        let guest_already_local = guest.stdout.trim() == local;
         let agent_dir = self.agent_dir.clone();
         // A record rebuilt from labels carries no git author: fall back to
         // the owner's (`bots.gitIdentity`, else this machine's git author)
@@ -1330,8 +1455,43 @@ impl BotManager {
             }
         }
         // A local tarball install keeps its copy in the guest, so a bot
-        // that spawns bots installs the same build into its children.
-        if matches!(source, ReleaseSource::LocalTarball(_)) {
+        // that spawns bots installs the same build into its children. A
+        // wake that skipped the install (the guest already runs this
+        // version) still verifies the copy exists: a sandbox restored
+        // from an older checkpoint may have lost it.
+        if let ReleaseSource::LocalTarball(path) = &source {
+            let installed = guest_already_local;
+            let guest_path = version::guest_tarball_path(local);
+            if installed {
+                let check_env =
+                    BTreeMap::from([("PA_GUEST_TARBALL".to_string(), guest_path.clone())]);
+                let check = self
+                    .exec_ready(
+                        &sandbox_id,
+                        version::TARBALL_CHECK_SCRIPT,
+                        &check_env,
+                        None,
+                        deadline,
+                    )
+                    .await;
+                if !matches!(&check, Ok(output) if output.exit_code == 0) {
+                    let bytes = std::fs::read(path)?;
+                    let restore_env = BTreeMap::from([
+                        ("PA_GUEST_TARBALL".to_string(), guest_path.clone()),
+                        ("PA_TARBALL_BYTES".to_string(), bytes.len().to_string()),
+                    ]);
+                    let output = self
+                        .exec_ready(
+                            &sandbox_id,
+                            version::TARBALL_RESTORE_SCRIPT,
+                            &restore_env,
+                            Some(&bytes),
+                            deadline,
+                        )
+                        .await?;
+                    check_exit("restore the bot tarball in the guest", &output)?;
+                }
+            }
             env.insert(
                 version::TARBALL_OVERRIDE_ENV.to_string(),
                 version::guest_tarball_path(local),
@@ -1646,7 +1806,10 @@ impl BotManager {
         }
         let mut network_rules = context.child_rules();
         if !github {
+            // Both GitHub hosts go: the git smart-HTTP host and the REST
+            // host the `gh` CLI and API clients use.
             network_rules.remove(super::github::GIT_HOST);
+            network_rules.remove(super::github::API_HOST);
         }
         Ok(GuestCredentials {
             network_rules,
@@ -1654,7 +1817,7 @@ impl BotManager {
                 .as_ref()
                 .and_then(|settings| settings.get("mcpServers").cloned())
                 .filter(|servers| !servers.as_object().is_some_and(serde_json::Map::is_empty)),
-            mcp_connections: None,
+            mcp_connections: read_guest_json(&self.agent_dir, "mcp-connections.json"),
             auth_json,
         })
     }
@@ -1789,6 +1952,10 @@ impl BotManager {
             registry.add_orphans(&checkpoints)?;
             registry.remove(bot_id)?;
         }
+        let mut spawns = read_spawns_marker(&self.agent_dir);
+        if spawns.remove(bot_id) {
+            let _ = write_spawns_marker(&self.agent_dir, &spawns);
+        }
         self.delete_orphans(checkpoints).await
     }
 }
@@ -1796,6 +1963,28 @@ impl BotManager {
 /// One JSON file of this daemon's agent dir, when it parses.
 fn read_guest_json(agent_dir: &Path, name: &str) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(agent_dir.join(name)).ok()?).ok()
+}
+
+/// The bot ids that may spawn bots, durably recorded next to the registry:
+/// the platform labels are set at create only, so `allow_spawns` marks a
+/// running bot here, where a registry rebuild still finds the flag.
+fn spawns_marker_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("bots").join("spawns.json")
+}
+
+fn read_spawns_marker(agent_dir: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(spawns_marker_path(agent_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_spawns_marker(agent_dir: &Path, ids: &BTreeSet<String>) -> Result<()> {
+    let path = spawns_marker_path(agent_dir);
+    if let Some(dir) = path.parent() {
+        pa_core::platform::perms::create_dir_all_private(dir)?;
+    }
+    crate::descriptor::write_file_atomic(&path, &serde_json::to_string(ids)?)
 }
 
 fn is_transient(error: &anyhow::Error) -> bool {
@@ -2016,11 +2205,14 @@ fn child_record(
         github: row.get("github").and_then(Value::as_bool).unwrap_or(false),
         git_identity: existing.git_identity,
         logins: existing.logins,
-        pause_rule_host: None,
+        // Host-side fields the guest rows never carry: keep what the
+        // registry already holds, so a sync does not drop the child's
+        // relay authentication.
+        pause_rule_host: existing.pause_rule_host,
         bots: false,
         parent_bot_id: Some(parent_bot_id.to_string()),
         pause_at: field("pauseAt").as_i64(),
-        pause_token: None,
+        pause_token: existing.pause_token,
     })
 }
 
@@ -2047,6 +2239,10 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         // every generation the bot used, so no old idempotency key repeats.
         generation: u32::try_from(now_ms() / 1000).unwrap_or(u32::MAX),
         github: sandbox.labels.iter().any(|label| label == GITHUB_LABEL),
+        bots: sandbox
+            .labels
+            .iter()
+            .any(|label| label == super::BOTS_LABEL),
         // The guest's git config already holds it.
         git_identity: None,
         logins: sandbox
@@ -2058,7 +2254,6 @@ fn rebuilt_record(bot_id: &str, sandbox: &BotSandbox) -> BotRecord {
         // A rebuilt record gets a fresh one at its next wake.
         pause_token: None,
         pause_rule_host: None,
-        bots: false,
         parent_bot_id: label_value(&sandbox.labels, &format!("{BOT_LABEL}-parent:")),
         pause_at: None,
     }
