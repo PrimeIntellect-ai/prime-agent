@@ -22,6 +22,7 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names
 )]
+pub mod a2a;
 pub mod acp;
 pub mod agent_engine;
 pub mod agent_inbox;

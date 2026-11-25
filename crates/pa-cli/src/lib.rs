@@ -174,10 +174,12 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
 
     if matches!(
         parsed.mode,
-        Some(args::Mode::Rpc | args::Mode::Daemon | args::Mode::Acp)
+        Some(args::Mode::Rpc | args::Mode::Daemon | args::Mode::Acp | args::Mode::A2a)
     ) && !parsed.file_args.is_empty()
     {
-        return Err("@file arguments are not supported in RPC, daemon, or ACP mode".to_string());
+        return Err(
+            "@file arguments are not supported in RPC, daemon, ACP, or A2A mode".to_string(),
+        );
     }
 
     // Daemon worker processes start with the worker role env var set: route
@@ -257,9 +259,13 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         .or_else(|| pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_session_dir());
 
     let mut cli_messages = parsed.messages.clone();
-    // Startup branches read piped stdin for every mode but the stdio-protocol ones
-    // (rpc/acp/daemon keep stdin); the idle window keeps a silent pipe from hanging.
-    let stdin_content = if matches!(app_mode, AppMode::Rpc | AppMode::Acp | AppMode::Daemon) {
+    // Startup branches read piped stdin for every mode but the protocol ones
+    // (rpc/acp/daemon keep stdin, a2a serves HTTP); the idle window keeps a
+    // silent pipe from hanging.
+    let stdin_content = if matches!(
+        app_mode,
+        AppMode::Rpc | AppMode::Acp | AppMode::A2a | AppMode::Daemon
+    ) {
         None
     } else {
         piped_stdin::read_piped_stdin(piped_stdin::resolve_stdin_idle_timeout_ms(
@@ -316,6 +322,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         initial_images,
         file_args: parsed.file_args.clone(),
         daemon_socket: parsed.daemon_socket.clone(),
+        a2a_bind: parsed.a2a_bind.clone(),
         list_models: parsed.list_models,
         verbose: parsed.verbose,
         offline: parsed.offline,

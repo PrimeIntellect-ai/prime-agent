@@ -1,0 +1,1 @@
+- Added `--mode a2a`: Prime Agent serves the Agent2Agent (A2A) 1.0 JSON-RPC binding on `127.0.0.1:7800` with a public agent card, SSE streaming, task cancel, and a required bearer token (`PRIME_AGENT_A2A_TOKEN`, or a per-run token in an owner-only file).

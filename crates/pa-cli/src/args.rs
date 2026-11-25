@@ -37,6 +37,7 @@ pub enum Mode {
     Json,
     Rpc,
     Acp,
+    A2a,
     Daemon,
 }
 
@@ -47,6 +48,7 @@ impl Mode {
             "json" => Some(Mode::Json),
             "rpc" => Some(Mode::Rpc),
             "acp" => Some(Mode::Acp),
+            "a2a" => Some(Mode::A2a),
             "daemon" => Some(Mode::Daemon),
             _ => None,
         }
@@ -58,9 +60,18 @@ impl Mode {
             Mode::Json => "json",
             Mode::Rpc => "rpc",
             Mode::Acp => "acp",
+            Mode::A2a => "a2a",
             Mode::Daemon => "daemon",
         }
     }
+}
+
+/// The `--mode a2a` bind flags (`--a2a-host`, `--a2a-port`). The bearer
+/// token is never a flag, so it stays out of process listings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct A2aBind {
+    pub host: Option<String>,
+    pub port: Option<u16>,
 }
 
 /// A parse-time diagnostic: warnings are printed, errors also exit 1.
@@ -146,6 +157,7 @@ pub struct Args {
     pub version: bool,
     pub mode: Option<Mode>,
     pub daemon_socket: Option<String>,
+    pub a2a_bind: A2aBind,
     pub no_session: bool,
     pub fork: Option<String>,
     pub session_dir: Option<String>,
@@ -263,13 +275,20 @@ pub fn parse_args(args: &[String]) -> Args {
                     result.mode = Some(mode);
                 } else {
                     result.diagnostics.push(Diagnostic::error(format!(
-                        "Invalid --mode \"{mode}\". Valid values: text, json, rpc, acp, daemon"
+                        "Invalid --mode \"{mode}\". Valid values: text, json, rpc, acp, a2a, daemon"
                     )));
                 }
             }
             "--daemon-socket" => {
                 result.daemon_socket = Some(require_value!(arg));
             }
+            "--a2a-host" => result.a2a_bind.host = Some(require_value!(arg)),
+            "--a2a-port" => match require_value!(arg).parse::<u16>() {
+                Ok(port) => result.a2a_bind.port = Some(port),
+                Err(_) => result
+                    .diagnostics
+                    .push(Diagnostic::error("--a2a-port must be a port number")),
+            },
             "--continue" | "-c" => result.continue_ = true,
             "--resume" | "-r" => match args.get(i + 1) {
                 Some(next)

@@ -92,6 +92,16 @@ prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
 
+Prime Agent can also serve the Agent2Agent (A2A) 1.0 protocol, so any A2A client can drive it:
+
+```bash
+prime-agent --mode a2a                                    # Serve A2A on http://127.0.0.1:7800
+PRIME_AGENT_A2A_TOKEN=<secret> prime-agent --mode a2a --a2a-port 7800
+curl http://127.0.0.1:7800/.well-known/agent-card.json    # Public agent card
+```
+
+Each A2A `contextId` gets its own Prime Agent session, and its tasks run one at a time. A task is one prompt turn, plus the follow-up turns of any subagents it started; replies stream over SSE. Every route except the agent card requires `Authorization: Bearer <token>`. Without `PRIME_AGENT_A2A_TOKEN`, the mode mints a token for the run, writes it to an owner-only file in the agent dir, and prints the path. `CancelTask` stops the task's turn, its queued input, and its subagents.
+
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
 
