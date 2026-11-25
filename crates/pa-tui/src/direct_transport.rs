@@ -40,6 +40,11 @@ pub(crate) struct DirectLink {
     pub(crate) active_session_id: String,
     /// The worker socket this link is pinned to.
     pub(crate) socket_path: String,
+    /// The serving WORKER's advertised server capabilities (its hello): the
+    /// per-session peer a capability-gated session command must consult —
+    /// the supervisor's own hello can come from a different binary that
+    /// adopted this worker.
+    pub(crate) server_capabilities: Vec<String>,
     /// Private per-connection identity; a reconnect to the same session is distinct.
     pub(crate) owner: Arc<()>,
     writer: mpsc::UnboundedSender<Vec<u8>>,
@@ -297,9 +302,28 @@ pub(crate) async fn connect_direct(
             }
         });
     }
+    // The serving worker's own advertisement (a mixed-version daemon can
+    // adopt a live worker from an older binary, so the session-plane
+    // capability gate reads the worker's hello, not the supervisor's).
+    let server_capabilities = serde_json::from_slice::<Value>(&hello.payload)
+        .ok()
+        .and_then(|hello| {
+            hello
+                .get("serverCapabilities")
+                .and_then(Value::as_array)
+                .map(|capabilities| {
+                    capabilities
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<String>>()
+                })
+        })
+        .unwrap_or_default();
     Ok(DirectLink {
         active_session_id: ticket.active_session_id.clone(),
         socket_path: ticket.socket_path.clone(),
+        server_capabilities,
         owner,
         writer: frame_tx,
         alive,

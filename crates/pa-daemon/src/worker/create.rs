@@ -788,7 +788,14 @@ pub(super) fn active_session_id_of(payload: &[u8]) -> String {
 pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<String> {
     // The factory lane advertises only while its opt-in gate reads
     // enabled (`factory.enabled`, default off).
-    crate::factory_activity::advertised_server_capabilities(agent_dir)
+    let mut capabilities = crate::factory_activity::advertised_server_capabilities(agent_dir);
+    // The session-plane capability this worker's command set supports:
+    // the idle cancel's scoped abort. A client consults the SERVING
+    // worker's own advertisement, never the supervisor's — a
+    // mixed-version daemon must not route a scoped abort to a worker
+    // that would read it as the full abort.
+    capabilities.push("background_cell_abort".to_string());
+    capabilities
 }
 
 /// A factory child's output contract from its create's runtime metadata

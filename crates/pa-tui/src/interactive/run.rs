@@ -885,10 +885,13 @@ async fn run_interactive_surface(
             if let Some(UiInput::WaitIdle { timeout_ms }) = pending.front() {
                 let timeout_ms = *timeout_ms;
                 // A parked follow-up/steering message keeps the barrier waiting until the session
-                // delivers it; a submit whose round trip is still armed holds the barrier too
-                // (the async submit resolves off the render path).
+                // delivers it, and so does a picked-up message whose turn is still preparing (the
+                // daemon drops it from the lanes before the turn starts); a submit whose round
+                // trip is still armed holds the barrier too (the async submit resolves off the
+                // render path).
                 if session.turn_active
                     || !view.queued.is_empty()
+                    || view.queued.starting.is_some()
                     || session.prompt_submits_in_flight() > 0
                 {
                     if wait_idle_deadline.is_none() {
