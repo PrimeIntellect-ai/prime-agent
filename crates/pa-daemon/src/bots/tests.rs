@@ -47,6 +47,8 @@ pub(crate) struct FakeState {
     pub checkpoint_origins: HashMap<String, (String, String)>,
     /// The checkpoint list fails with a transport error.
     pub fail_checkpoint_list: bool,
+    /// A create restoring this checkpoint fails without a retry.
+    pub fail_create_from: Option<String>,
     /// The exit code of the next guest installs (0 = they succeed).
     pub install_exit_code: i32,
     /// The guest lacks the installer's tools (node, gh): the version probe
@@ -175,6 +177,11 @@ impl BotPlatform for FakePlatform {
             let existing = self.state().keys.get(&request.idempotency_key).cloned();
             if let Some(id) = existing {
                 return Ok(self.state().sandboxes[&id].clone());
+            }
+            if let Some(checkpoint) = &self.state().fail_create_from {
+                if request.checkpoint_id.as_deref() == Some(checkpoint.as_str()) {
+                    return Err(PlatformError::Other("the restore was refused".into()));
+                }
             }
             let id = self.add_sandbox(&request.name, request.labels.clone());
             let mut state = self.state();
@@ -1411,13 +1418,51 @@ async fn a_pending_head_survives_a_promotion_of_an_older_durable_checkpoint() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_promotion_keeps_the_older_checkpoints_until_the_next_pause() {
+async fn a_failed_winner_restore_falls_back_and_keeps_the_winner() {
     let (_dir, platform, manager) = setup();
     manager.spawn(&spec("bot-a")).await.unwrap();
     let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
     manager.ensure_running("bot-a").await.unwrap();
     let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
-    // An outside pause freezes a newer durable checkpoint.
+    // An outside pause freezes a newer durable checkpoint, and its
+    // restore is then refused: the wake falls back to the older one.
+    let external = platform.external_checkpoint(&sandbox_id, true);
+    platform.state().fail_create_from = Some(external.clone());
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(durable.as_str()),
+        "the fallback restores the older durable checkpoint"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&external),
+        "the refused winner is kept for the next wake"
+    );
+    let record = manager.get("bot-a").unwrap();
+    assert!(
+        record.older_checkpoint_ids.contains(&durable),
+        "the restored fallback stays recorded"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_successful_restore_prunes_what_it_supersedes() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // An outside pause freezes a newer durable checkpoint; the wake
+    // restores from it, and what it supersedes must then be deleted: a
+    // bot paused only by its guest never prunes on its own.
     let external = platform.external_checkpoint(&sandbox_id, true);
     platform
         .state()
@@ -1432,17 +1477,14 @@ async fn a_promotion_keeps_the_older_checkpoints_until_the_next_pause() {
         creates.last().unwrap().checkpoint_id.as_deref(),
         Some(external.as_str())
     );
-    // The restore may still fail and fall back to the older ones: the
-    // promotion must not prune them before it succeeds.
     assert!(
-        platform.state().checkpoints.contains_key(&durable),
-        "the older durable checkpoint stays as the restore fallback"
+        !platform.state().checkpoints.contains_key(&durable),
+        "the superseded checkpoint stops billing"
     );
     let record = manager.get("bot-a").unwrap();
-    assert_eq!(record.checkpoint_id.as_deref(), Some(external.as_str()));
     assert!(
-        record.older_checkpoint_ids.contains(&durable),
-        "the record keeps the fallback chain"
+        !record.older_checkpoint_ids.contains(&durable),
+        "the record drops what was pruned"
     );
 }
 
