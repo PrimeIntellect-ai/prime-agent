@@ -820,6 +820,11 @@ impl BotManager {
         let guest = match created_here {
             Some(guest) => {
                 env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
+                // Only a sandbox created with these header rules gets the
+                // matching MCP entries; another one keeps its old ones.
+                if let Some(servers) = &guest.mcp_servers {
+                    env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
+                }
                 Some(guest)
             }
             // Best effort: the sandbox's rules are already set.
@@ -831,9 +836,6 @@ impl BotManager {
         };
         if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
-        }
-        if let Some(servers) = guest.and_then(|guest| guest.mcp_servers) {
-            env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
         }
         let output = self
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)

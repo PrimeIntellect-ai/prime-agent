@@ -77,6 +77,12 @@ pub fn secret_name(provider: &str, owner: &str) -> String {
             }
         })
         .collect();
+    if provider.starts_with(MCP_PREFIX) {
+        // Server names that differ only in punctuation or case must not
+        // share a secret: a short hash of the exact id keeps them apart.
+        let hash = super::sha256_hex(provider.as_bytes())[..8].to_ascii_uppercase();
+        return format!("PRIME_AGENT_LOGIN_{id}_{hash}_{owner}");
+    }
     format!("PRIME_AGENT_LOGIN_{id}_{owner}")
 }
 
@@ -523,7 +529,20 @@ impl Logins {
         };
         for (login, inject) in stored {
             let required = login == provider;
-            if !inject {
+            // A user-declared MCP server with `enabled: false` stays off in the bot.
+            let disabled = login
+                .strip_prefix(MCP_PREFIX)
+                .and_then(|server| user_servers.get(server))
+                .is_some_and(|config| {
+                    matches!(
+                        config,
+                        pa_core::mcp::McpServerConfig::Http {
+                            enabled: Some(false),
+                            ..
+                        }
+                    )
+                });
+            if !inject || disabled {
                 if required {
                     bail!(
                         "a bot on {provider} needs the owner's {provider} login, \
@@ -956,11 +975,14 @@ mod tests {
             "anthropic": login("a-1", "r-1", now_ms() + 480 * MINUTE),
             "mcp:alpha": mcp_login("https://alpha.example.org/mcp", "alpha-token"),
             "mcp:beta": mcp_login("https://beta.example.org/mcp", "beta-token"),
+            "mcp:gamma": mcp_login("https://gamma.example.org/mcp", "gamma-token"),
         });
         std::fs::write(dir.path().join("auth.json"), auth.to_string()).unwrap();
         let settings = json!({ "mcpServers": { "alpha": {
             "type": "http", "url": "https://alpha.example.org/mcp", "oauth": true,
             "clientSecret": "client-secret",
+        }, "gamma": {
+            "type": "http", "url": "https://gamma.example.org/mcp", "enabled": false,
         } } });
         std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();
         let manager = BotManager::with_logins(
@@ -992,6 +1014,15 @@ mod tests {
             "https://alpha.example.org/mcp"
         );
         assert!(guest.get("mcp:beta").is_none());
+        // A server with `enabled: false` is never read for the bot.
+        assert!(!state
+            .secrets
+            .contains_key(&secret_name("mcp:gamma", "OWNER")));
+        // Names that differ only in punctuation get distinct secrets.
+        assert_ne!(
+            secret_name("mcp:foo-bar", "OWNER"),
+            secret_name("mcp:foo_bar", "OWNER")
+        );
         // The user-declared server is declared in the guest, without its client secret.
         let servers: Value = serde_json::from_str(&env["BOT_MCP_SERVERS"]).unwrap();
         assert_eq!(
