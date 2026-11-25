@@ -71,10 +71,15 @@ impl TurnRunner {
                     self.idle_notify.notify_waiters();
                     return;
                 }
+                // The batch gained a cell after the query (an admission or a
+                // recovered batch's refill): query again for it.
+                if !creating_cells(&self.inbox_arrivals.lock().unwrap()).is_subset(&queried_cells) {
+                    continue;
+                }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
                 if core.queued_input_parked(&self.input_pauses)
-                    || self.inbox_row_held(&core, &queried_cells, same_cell_work)
+                    || (same_cell_work && self.inbox_row_held(&core))
                 {
                     core.busy = false;
                     None
@@ -188,24 +193,13 @@ impl TurnRunner {
     }
 
     /// Whether the queued inbox arrival row waits while handles from its
-    /// cells still run: it covers only successful bash completions, and
-    /// `same_cell_work` answers for `queried_cells` (read before the core
-    /// lock). An arrival from another cell that joined the batch since then
-    /// holds this pass too: its admission wakes the runner, and the next
-    /// pass queries its cell. Each handle's settle wakes the runner
+    /// cells still run (the caller checks the handles): it covers only
+    /// successful bash completions. Each handle's settle wakes the runner
     /// (`on_background_work_settled`), and any other queued work takes the
     /// row with it. A held row parks like idle: the live handles already
     /// keep the kernel and the worker resident.
-    fn inbox_row_held(
-        &self,
-        core: &SessionCore,
-        queried_cells: &std::collections::BTreeSet<String>,
-        same_cell_work: bool,
-    ) -> bool {
-        let batch = self.inbox_arrivals.lock().unwrap();
-        core.inbox_row_holdable()
-            && only_successes(&batch)
-            && (same_cell_work || !creating_cells(&batch).is_subset(queried_cells))
+    fn inbox_row_held(&self, core: &SessionCore) -> bool {
+        core.inbox_row_holdable() && only_successes(&self.inbox_arrivals.lock().unwrap())
     }
 
     /// Take the next delivery from `lane` and mark the session busy with
