@@ -146,6 +146,49 @@ fn changelog_parses_and_orders_newest_first() {
     );
 }
 
+/// The grand totals bill the daemon's family total, which includes spend
+/// of descendants that render no row (a retired refine child); that spend
+/// joins the unknown-model line so the cost breakdown still adds up.
+#[test]
+fn context_tree_totals_bill_the_root_family_total() {
+    let tree = json(
+        r#"{
+                "id": "root", "label": "main agent", "status": "active",
+                "ownUsage": {"input": 900, "output": 90, "cacheRead": 0,
+                             "cacheWrite": 10, "cost": {"total": 0.03}},
+                "ownUsageByModel": [
+                    {"provider": "anthropic", "id": "claude-opus-4-6",
+                     "ownUsage": {"input": 900, "output": 90, "cacheRead": 0,
+                                  "cacheWrite": 10, "cost": {"total": 0.03}}}
+                ],
+                "totalUsage": {"input": 1900, "output": 190, "cacheRead": 0,
+                               "cacheWrite": 10, "cost": {"total": 0.05}},
+                "children": []
+            }"#,
+    );
+    let rows = plain(&context_tree_rows(
+        &tree,
+        120,
+        ContextTreeScope::Collapsed,
+        &[],
+    ));
+    assert!(
+        rows.contains(&"Total: 2.1k tokens \u{b7} $0.05".to_string()),
+        "{rows:#?}"
+    );
+    let cost = &rows[rows.iter().position(|row| row == "Cost").unwrap()..];
+    assert_eq!(
+        cost[..4],
+        [
+            "Cost",
+            "Total: $0.0500",
+            "anthropic/claude-opus-4-6: $0.0300",
+            "unknown model (deleted agents): $0.0200",
+        ],
+        "{rows:#?}"
+    );
+}
+
 #[test]
 fn context_tree_root_only_matches_ts() {
     let tree = json(
@@ -193,8 +236,8 @@ fn context_tree_full_shape_matches_ts() {
                 "model": {"provider": "prime-inference", "id": "z-ai/glm-5.3"},
                 "ownUsage": {"input": 1234567, "output": 2345, "cacheRead": 12345,
                              "cacheWrite": 678, "cost": {"total": 1.2345}},
-                "totalUsage": {"input": 1234567, "output": 2345, "cacheRead": 12345,
-                               "cacheWrite": 678, "cost": {"total": 1.2345}},
+                "totalUsage": {"input": 1236272, "output": 2711, "cacheRead": 12345,
+                               "cacheWrite": 778, "cost": {"total": 1.2636}},
                 "contextUsage": {"tokens": 1250000, "contextWindow": 131072,
                                  "percent": 95.42},
                 "ownUsageByModel": [
@@ -282,6 +325,8 @@ fn context_tree_shows_per_model_costs_across_a_switch() {
                 "ownUsage": {"input": 105500, "output": 3800, "cacheRead": 110000,
                              "cacheWrite": 104000, "totalTokens": 221700,
                              "cost": {"total": 1.2175}},
+                "totalUsage": {"input": 106500, "output": 4200, "cacheRead": 110000,
+                               "cacheWrite": 104000, "cost": {"total": 1.2405}},
                 "ownUsageByModel": [
                     {"provider": "openai", "id": "gpt-5.6-sol",
                      "ownUsage": {"input": 100000, "output": 2000, "cacheRead": 0,
@@ -870,6 +915,7 @@ fn context_tree_groups_factory_runs_and_deleted_agents() {
     let mut tree = child("root", "active", 1000, 0.1);
     tree["label"] = serde_json::json!("main agent");
     tree["children"] = serde_json::json!([child("worker-a", "done", 2000, 0.02), f1, f2, d1, d2]);
+    tree["totalUsage"] = usage(11500, 0.206);
     let normalized = |rows: Vec<ClientLine>| -> Vec<String> {
         plain(&rows)
             .iter()
@@ -999,6 +1045,7 @@ fn context_tree_groups_factory_runs_and_deleted_agents() {
     let mut legacy = child("old", "deleted", 500, 0.05);
     legacy["deleted"] = serde_json::json!(true);
     split_tree["children"] = serde_json::json!([legacy]);
+    split_tree["totalUsage"] = usage(1500, 0.15);
     let split = normalized(context_tree_rows(
         &split_tree,
         120,

@@ -1744,7 +1744,6 @@ async fn a_decision_child_keeps_its_display_running_through_the_watcher_settle()
         factory_task_busy: None,
         refine_child: false,
         retirement: Retirement::live(),
-        usage_registration_forgotten: false,
         session_file: Some(
             display_dir
                 .path()
@@ -1752,11 +1751,6 @@ async fn a_decision_child_keeps_its_display_running_through_the_watcher_settle()
                 .display()
                 .to_string(),
         ),
-        attributed_rows: Some(0),
-        pending_usage_report: None,
-        usage_watch_live: false,
-        usage_rearm: false,
-        emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     }));
@@ -3578,13 +3572,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         factory_task_busy: None,
         refine_child: false,
         retirement: Retirement::live(),
-        usage_registration_forgotten: false,
         session_file: None,
-        attributed_rows: Some(0),
-        pending_usage_report: None,
-        usage_watch_live: false,
-        usage_rearm: false,
-        emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
@@ -3652,7 +3640,6 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         factory_task_busy: None,
         refine_child: false,
         retirement: Retirement::live(),
-        usage_registration_forgotten: false,
         session_file: Some(
             std::env::temp_dir()
                 .join(format!(
@@ -3662,11 +3649,6 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
                 .to_string_lossy()
                 .to_string(),
         ),
-        attributed_rows: Some(0),
-        pending_usage_report: None,
-        usage_watch_live: false,
-        usage_rearm: false,
-        emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     }));

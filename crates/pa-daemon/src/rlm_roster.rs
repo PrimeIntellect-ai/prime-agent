@@ -214,11 +214,6 @@ pub fn passive_child_summary(child: &PassiveRlmChild) -> Value {
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
     }
-    // The saved session's own-usage summary rides the row too, so
-    // passivated children never read as zero.
-    if let Some(usage) = &info.usage {
-        object.insert("usage".to_string(), json!(usage));
-    }
     row
 }
 
@@ -267,9 +262,9 @@ mod tests {
                 name: "worker-a".to_string(),
                 deleted: None,
                 deleted_usage: None,
-                deleted_usage_by_model: None,
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             },
             info,
             metadata: RlmChildMetadata::default(),
@@ -291,9 +286,9 @@ mod tests {
                 name: "worker-b".to_string(),
                 deleted: None,
                 deleted_usage: None,
-                deleted_usage_by_model: None,
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             },
             info: plain_info,
             metadata: RlmChildMetadata::default(),
@@ -302,45 +297,6 @@ mod tests {
         assert!(passive_child_summary(&plain_row)
             .get("thinkingLevel")
             .is_none());
-    }
-
-    #[test]
-    fn passive_child_summary_carries_the_saved_usage_summary() {
-        let dir = temp_dir("usage");
-        let child = dir.join("sub-usage.jsonl");
-        fs::write(
-            &child,
-            concat!(
-                r#"{"type":"session","version":3,"id":"sub-usage","timestamp":"t","cwd":"/x"}"#,
-                "\n",
-                r#"{"type":"message","id":"m1","timestamp":"t","message":{"role":"assistant","content":"ok","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,"cost":{"input":0.0,"output":0.2,"cacheRead":0.0,"cacheWrite":0.0,"total":0.2}}}}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        let info = read_session_info(&child).expect("child info");
-        let child_row = PassiveRlmChild {
-            edge: RlmLedgerEdge {
-                child_id: "sub-usage".to_string(),
-                parent: "/live/root.jsonl".to_string(),
-                child: child.to_string_lossy().to_string(),
-                depth: 1,
-                name: "worker-c".to_string(),
-                deleted: None,
-                deleted_usage: None,
-                deleted_usage_by_model: None,
-                factory: None,
-                decision_child: false,
-            },
-            info,
-            metadata: RlmChildMetadata::default(),
-            parent_active_session_id: None,
-        };
-        let summary = passive_child_summary(&child_row);
-        assert_eq!(
-            summary["usage"],
-            json!({ "inputTokens": 10, "outputTokens": 2, "cost": 0.2 })
-        );
     }
 
     fn write_session(path: &std::path::Path, id: &str, messages: usize) {
@@ -379,6 +335,7 @@ mod tests {
                 name: "w1".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         ledger
@@ -390,6 +347,7 @@ mod tests {
                 name: "w2".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         ledger
@@ -401,6 +359,7 @@ mod tests {
                 name: "gone".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         // A deleted child tombstones out of the walk.
@@ -476,6 +435,7 @@ mod tests {
                 name: "worker".into(),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .unwrap();
         let walked = walk_passive_rlm_children(

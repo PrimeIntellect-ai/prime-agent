@@ -229,7 +229,7 @@ pub async fn run_side_question(
                         .and_then(serde_json::from_value::<pa_types::ai::Usage>)
                     {
                         let mut billed = billed.lock().expect("side question usage lock");
-                        super::rlm_usage::add_assistant_usage(&mut billed, &usage);
+                        super::compaction_exec::add_assistant_usage(&mut billed, &usage);
                     }
                 }
                 let message = match &event {
