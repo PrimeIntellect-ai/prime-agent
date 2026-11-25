@@ -143,6 +143,10 @@ pub enum RlmSpawnKind {
     /// `decisionModel` serves it, and its intake answers every message
     /// with one decision.
     Decision,
+    /// The refinement child: the daemon's refine command spawns it to
+    /// run one planning pass instead of the agent engine. The kernel
+    /// surface never selects it.
+    Refine,
 }
 
 /// Validated `rlm.spawn` request handed to the child-session host.
@@ -156,9 +160,7 @@ pub struct RlmSpawnRequest {
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
     /// The child kind the spawn selects: the default subagent or a
-    /// dedicated child engine. One enum field, not a bool per kind —
-    /// the `kind` kwarg parses into it, and a future kind (#3831's
-    /// `refine`) extends the enum instead of growing another flag.
+    /// dedicated child engine. One enum field, not a bool per kind.
     pub kind: RlmSpawnKind,
     /// Working directory; the host resolves relative paths against the session cwd.
     pub cwd: Option<String>,
