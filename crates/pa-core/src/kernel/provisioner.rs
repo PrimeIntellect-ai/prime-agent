@@ -139,8 +139,8 @@ pub struct IpythonKernelProvisionerOptions {
     pub ready_gate: Option<KernelReadyGate>,
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
-    /// Fires when the kernel's last live background `bash()` handle
-    /// settles, so owed continuations can resume.
+    /// Fires when a live background `bash()` handle settles, so owed
+    /// continuations can resume.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     /// Fires once per kernel start when installed Python skills failed to import into the kernel,
     /// so the session can tell the model before it wastes turns calling them.

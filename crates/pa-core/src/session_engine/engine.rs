@@ -89,8 +89,8 @@ pub struct SessionEngineConfig {
     /// The kernel restores its snapshot only after this resolves: a replaced engine
     /// sharing the session's artifact dir flushes its final snapshot first.
     pub kernel_ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
-    /// Fires when the kernel's last live background `bash()` handle
-    /// settles; `None` installs nothing.
+    /// Fires when a live background `bash()` handle settles; `None`
+    /// installs nothing.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     /// The session's shared cell wake: the embedding fires it to end a
     /// running cell's wait early when a user message or inbox arrival must

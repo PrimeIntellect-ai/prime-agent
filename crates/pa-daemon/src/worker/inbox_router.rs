@@ -7,14 +7,16 @@
 //! `prime-agent-runtime/src/rlm/inbox_lifecycle.py`). Every unread arrival
 //! reaches the agent: a busy session folds it into the live turn, and an
 //! idle session takes the row at once, unless the row holds only
-//! successes while other background work runs (see [`only_successes`]).
+//! successes while handles from the same cells still run (see
+//! [`only_successes`] and [`creating_cells`]).
 
 #[cfg(test)]
 mod tests;
 
-use pa_core::session_engine::inbox::{arrival_notice, arrival_summary, InboxMessage};
+use pa_core::session_engine::inbox::{arrival_notice, arrival_summary, InboxMessage, InboxNotice};
 use pa_types::inbox_notice::INBOX_CLASS_BASH_DONE;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 /// Rule 3: a row covering at most this many items carries their content
 /// under the summary line; a larger one is the summary line only.
@@ -23,10 +25,41 @@ const INLINE_ITEM_LIMIT: usize = 2;
 const INLINE_TAIL_MAX_LINES: usize = 5;
 const INLINE_TAIL_MAX_BYTES: usize = 400;
 
+/// Stamp the cell that created a bash completion's handle onto its inbox
+/// message (`cellId`), read while the kernel still lists the handle.
+pub(crate) fn stamp_creating_cell(
+    notice: &mut InboxNotice,
+    engine: &crate::agent_engine::AgentSessionEngine,
+) {
+    if notice.class != INBOX_CLASS_BASH_DONE {
+        return;
+    }
+    if let Some(cell) = notice
+        .meta
+        .get("pid")
+        .and_then(Value::as_i64)
+        .and_then(|pid| engine.background_bash_handle_cell(pid))
+    {
+        notice.meta["cellId"] = json!(cell);
+    }
+}
+
+/// The cells that created a batch's bash handles: a success-only row
+/// waits while another handle from these cells runs, so jobs started
+/// together report together and older work never holds it.
+pub(crate) fn creating_cells(batch: &[InboxMessage]) -> BTreeSet<String> {
+    batch
+        .iter()
+        .filter(|message| message.class == INBOX_CLASS_BASH_DONE)
+        .filter_map(|message| message.meta.get("cellId").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Whether a wake row covers only successful bash completions: such a row
-/// waits on an idle session while other background work runs, and the
-/// last job's settle wakes it. Anything else, including a recovered row
-/// whose batch is unknown (empty), wakes at once.
+/// waits on an idle session while handles from the same cells run, and
+/// their settle wakes it. Anything else, including a recovered row whose
+/// batch is unknown (empty), wakes at once.
 pub(crate) fn only_successes(batch: &[InboxMessage]) -> bool {
     !batch.is_empty()
         && batch

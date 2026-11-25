@@ -740,10 +740,11 @@ impl Worker {
                     // close paths mark the session BEFORE clearing the lanes.
                     let closed = || engine.session_is_closed();
                     if crate::agent_inbox::inbox_enabled(&engine.cwd(), &notice_agent_dir) {
-                        if let (Some(inbox), Some(fields)) = (
+                        if let (Some(inbox), Some(mut fields)) = (
                             engine.inbox(),
                             pa_core::session_engine::inbox::inbox_notice_fields(&notice),
                         ) {
+                            inbox_router::stamp_creating_cell(&mut fields, &engine);
                             let admitted = admit_inbox_notice(
                                 &notice_recovery,
                                 &notice_core,

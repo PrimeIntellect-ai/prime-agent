@@ -9,7 +9,7 @@ use super::{
     WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
-use super::inbox_router::only_successes;
+use super::inbox_router::{creating_cells, only_successes};
 use std::sync::{Arc, Mutex};
 
 pub(super) struct TurnRunner {
@@ -50,17 +50,18 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
-            // The live inbox store and the background-work count, read
-            // before the core lock (each has its own lock): a picked arrival
-            // row consumes from the store, and the count decides its hold.
+            // The live inbox store and the row's same-cell work, read before
+            // the core lock (each has its own lock): a picked arrival row
+            // consumes from the store, and the work decides its hold.
             let agent_engine = self
                 .inbox_engine
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade);
             let inbox = agent_engine.as_ref().and_then(|engine| engine.inbox());
-            let background_work = agent_engine
-                .as_ref()
-                .is_some_and(|engine| engine.background_work_count() > 0);
+            let same_cell_work = agent_engine.as_ref().is_some_and(|engine| {
+                let cells = creating_cells(&self.inbox_arrivals.lock().unwrap());
+                engine.has_background_bash_handle_from(&cells)
+            });
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
@@ -73,7 +74,7 @@ impl TurnRunner {
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
                 if core.queued_input_parked(&self.input_pauses)
-                    || (background_work && self.inbox_row_held(&core))
+                    || (same_cell_work && self.inbox_row_held(&core))
                 {
                     core.busy = false;
                     None
@@ -186,12 +187,12 @@ impl TurnRunner {
         }
     }
 
-    /// Whether the queued inbox arrival row waits while background work
-    /// runs (the caller checks the work): it covers only successful bash
-    /// completions. The work's settle wakes the runner
+    /// Whether the queued inbox arrival row waits while handles from its
+    /// cells still run (the caller checks the handles): it covers only
+    /// successful bash completions. Each handle's settle wakes the runner
     /// (`on_background_work_settled`), and any other queued work takes the
-    /// row with it. A held row parks like idle: the live work already keeps
-    /// the kernel and the worker resident.
+    /// row with it. A held row parks like idle: the live handles already
+    /// keep the kernel and the worker resident.
     fn inbox_row_held(&self, core: &SessionCore) -> bool {
         core.inbox_row_holdable() && only_successes(&self.inbox_arrivals.lock().unwrap())
     }

@@ -1658,47 +1658,61 @@ fn cell_reply(id: &str, code: &str) -> Vec<String> {
     ]
 }
 
-/// The background-wake script: each turn starts two jobs and ends. A job
-/// that waits on a gate file runs until the test creates the file.
+/// A shell job that runs until the test creates its gate file.
+fn gated_job(name: &str) -> String {
+    let gate = WAKE_GATES.get().expect("gate dir").join(name);
+    format!(
+        "while [ ! -f {} ]; do sleep 0.1; done; echo WAKE_{}",
+        gate.to_string_lossy(),
+        name.to_uppercase()
+    )
+}
+
+/// The background-wake script: each turn runs one cell that starts jobs,
+/// then ends; the rest are the replies to the wakes.
 fn background_wake_script(request: usize) -> Vec<String> {
-    let gate = |name: &str| {
-        WAKE_GATES
-            .get()
-            .expect("gate dir")
-            .join(name)
-            .to_string_lossy()
-            .to_string()
-    };
     match request {
         0 => cell_reply(
-            "call-wake-1",
+            "call-wake-server",
+            &format!("from rlm import bash\nserver = bash('{}')\nprint('server started')", gated_job("server")),
+        ),
+        1 => text_reply("server started"),
+        2 => cell_reply(
+            "call-wake-jobs",
             &format!(
-                "from rlm import bash\nha = bash('sleep 1; echo WAKE_A')\nhb = bash('while [ ! -f {} ]; do sleep 0.1; done; echo WAKE_B')\nprint('two jobs started')",
-                gate("gate-b")
+                "from rlm import bash\nha = bash('sleep 1; echo WAKE_A')\nhb = bash('{}')\nprint('two jobs started')",
+                gated_job("b")
             ),
         ),
-        1 => text_reply("jobs started"),
-        2 => text_reply("woken by both successes"),
-        3 => cell_reply(
-            "call-wake-2",
+        3 => text_reply("jobs started"),
+        4 => text_reply("woken by both successes"),
+        5 => cell_reply(
+            "call-wake-lone",
+            "from rlm import bash\nhc = bash('sleep 1; echo WAKE_C')\nprint('one job started')",
+        ),
+        6 => text_reply("lone job started"),
+        7 => text_reply("woken by the lone success"),
+        8 => cell_reply(
+            "call-wake-failure",
             &format!(
-                "from rlm import bash\nhc = bash('while [ ! -f {} ]; do sleep 0.1; done; echo WAKE_C')\nhd = bash('sleep 1; echo WAKE_D; exit 3')\nprint('two more jobs started')",
-                gate("gate-c")
+                "from rlm import bash\nhd = bash('{}')\nhe = bash('sleep 1; echo WAKE_E; exit 3')\nprint('two more jobs started')",
+                gated_job("d")
             ),
         ),
-        4 => text_reply("failure jobs started"),
-        5 => text_reply("woken by the failure"),
-        6 => text_reply("woken by the last success"),
+        9 => text_reply("failure jobs started"),
+        10 => text_reply("woken by the failure"),
+        11 => text_reply("woken by job d"),
+        12 => text_reply("woken by the server"),
         _ => text_reply("unexpected wake"),
     }
 }
 
-/// An idle agent is woken by events, never by a timer: a success that
-/// lands while another job runs waits, the last job's completion wakes
-/// once with both, a failure wakes at once while a job still runs, and a
-/// success with nothing else running wakes at once.
+/// An idle agent is woken by events, never by a timer, and a success
+/// waits only for jobs started in its own cell: two jobs from one cell
+/// report together, a dev server from an earlier cell never holds a
+/// success, and a failure wakes at once.
 #[test]
-fn background_completions_wake_an_idle_agent_only_when_the_work_settles_or_fails() {
+fn background_completions_wake_an_idle_agent_once_their_cell_settles_or_fails() {
     static NEXT_WAKE: AtomicUsize = AtomicUsize::new(0);
     let root = tempfile::TempDir::new().expect("temp dir");
     let dir = root.path().to_path_buf();
@@ -1756,84 +1770,90 @@ fn background_completions_wake_an_idle_agent_only_when_the_work_settles_or_fails
         .or_else(|| created["data"]["activeSessionId"].as_str())
         .expect("active session id")
         .to_string();
+    let prompt = |client: &mut Client, id: &str, message: &str| {
+        let turn = client.request(
+            id,
+            &json!({
+                "type": "prompt_and_wait",
+                "activeSessionId": active_id,
+                "message": message,
+            }),
+        );
+        assert_eq!(turn["success"], true, "turn {id} failed: {turn}");
+    };
+    let inbox_has = |text: &str| {
+        std::fs::read_to_string(inbox_journal_path(&sessions)?)
+            .ok()?
+            .contains(text)
+            .then_some(())
+    };
+    // The wake requests are the mock's request indexes; each reply is
+    // scripted, so the count proves which wakes happened.
+    let wait_for_requests = |count: usize| {
+        wait_until(Duration::from_secs(120), || {
+            (NEXT_WAKE.load(Ordering::SeqCst) >= count).then_some(())
+        });
+    };
+    let wake_text = |request: usize| last_user_text(&captured_request_body(&bodies, request));
+    let reply_landed = |client: &mut Client, reply: &str| {
+        wait_until(Duration::from_secs(120), || {
+            client.transcript(&active_id).contains(reply).then_some(())
+        });
+    };
 
-    // Two jobs start and the turn ends. Job A succeeds while job B runs:
-    // its message lands in the inbox, and no wake follows.
-    let turn = client.request(
-        "p1",
-        &json!({
-            "type": "prompt_and_wait",
-            "activeSessionId": active_id,
-            "message": "start two jobs",
-        }),
-    );
-    assert_eq!(turn["success"], true, "first turn failed: {turn}");
-    wait_until(Duration::from_secs(120), || {
-        let journal = std::fs::read_to_string(inbox_journal_path(&sessions)?).ok()?;
-        journal.contains("echo WAKE_A").then_some(())
-    });
+    // A dev server starts in its own cell and keeps running.
+    prompt(&mut client, "p1", "start the dev server");
+    // Two jobs start in one cell. Job A succeeds while job B runs: its
+    // message lands in the inbox, and no wake follows.
+    prompt(&mut client, "p2", "start two jobs");
+    wait_until(Duration::from_secs(120), || inbox_has("echo WAKE_A"));
     assert_eq!(
         NEXT_WAKE.load(Ordering::SeqCst),
-        2,
-        "a success that lands while other work runs does not wake"
+        4,
+        "a success waits while a job from its cell runs"
     );
-
-    // Job B succeeds: ONE wake carries both successes.
-    std::fs::write(dir.join("gate-b"), "").expect("open gate b");
-    wait_until(Duration::from_secs(120), || {
-        client
-            .transcript(&active_id)
-            .contains("woken by both successes")
-            .then_some(())
-    });
-    let wake = last_user_text(&captured_request_body(&bodies, 2));
+    // Job B succeeds: ONE wake carries both.
+    std::fs::write(dir.join("b"), "").expect("open gate b");
+    wait_for_requests(5);
+    let wake = wake_text(4);
     assert!(
         wake.contains("2 new bash-done messages")
             && wake.contains("echo WAKE_A")
-            && wake.contains("echo WAKE_B"),
-        "the one wake carries both successes: {wake}"
+            && wake.contains("WAKE_B"),
+        "the one wake carries both jobs of the cell: {wake}"
     );
+    reply_landed(&mut client, "woken by both successes");
 
-    // The next request is the next prompt, not a second wake. Job D
-    // fails while job C runs: the failure wakes at once.
-    let turn = client.request(
-        "p2",
-        &json!({
-            "type": "prompt_and_wait",
-            "activeSessionId": active_id,
-            "message": "start two more jobs",
-        }),
-    );
-    assert_eq!(turn["success"], true, "second turn failed: {turn}");
-    assert_eq!(
-        last_user_text(&captured_request_body(&bodies, 3)),
-        "start two more jobs",
-        "no second wake followed the first"
-    );
-    wait_until(Duration::from_secs(120), || {
-        client
-            .transcript(&active_id)
-            .contains("woken by the failure")
-            .then_some(())
-    });
-    let wake = last_user_text(&captured_request_body(&bodies, 5));
+    // A lone success wakes at once although the server from an earlier
+    // cell still runs.
+    prompt(&mut client, "p3", "start one job");
+    wait_for_requests(8);
+    let wake = wake_text(7);
     assert!(
-        wake.contains("exit:3") && !wake.contains("WAKE_C"),
-        "the failure wakes while job C still runs: {wake}"
+        wake.contains("echo WAKE_C") && !wake.contains("WAKE_SERVER"),
+        "the earlier server never holds a success: {wake}"
     );
+    reply_landed(&mut client, "woken by the lone success");
 
-    // Job C succeeds with nothing else running: it wakes at once.
-    std::fs::write(dir.join("gate-c"), "").expect("open gate c");
-    wait_until(Duration::from_secs(120), || {
-        client
-            .transcript(&active_id)
-            .contains("woken by the last success")
-            .then_some(())
-    });
-    let wake = last_user_text(&captured_request_body(&bodies, 6));
+    // Job E fails while job D from the same cell runs: the failure wakes
+    // at once. Then job D's success wakes on its own.
+    prompt(&mut client, "p4", "start two more jobs");
+    wait_for_requests(11);
+    let wake = wake_text(10);
     assert!(
-        wake.contains("echo WAKE_C"),
-        "the last success woke: {wake}"
+        wake.contains("exit:3") && !wake.contains("WAKE_D"),
+        "the failure wakes while job D still runs: {wake}"
     );
-    assert_eq!(NEXT_WAKE.load(Ordering::SeqCst), 7, "no other wake");
+    reply_landed(&mut client, "woken by the failure");
+    std::fs::write(dir.join("d"), "").expect("open gate d");
+    wait_for_requests(12);
+    assert!(wake_text(11).contains("WAKE_D"), "job D woke on its own");
+    reply_landed(&mut client, "woken by job d");
+
+    // The server finishing is a success like any other.
+    std::fs::write(dir.join("server"), "").expect("open the server gate");
+    wait_for_requests(13);
+    assert!(wake_text(12).contains("WAKE_SERVER"), "the server woke");
+    reply_landed(&mut client, "woken by the server");
+    assert_eq!(NEXT_WAKE.load(Ordering::SeqCst), 13, "no other wake");
 }
