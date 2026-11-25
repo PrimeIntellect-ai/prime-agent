@@ -303,6 +303,14 @@ pub(crate) fn is_state_id(text: &str) -> bool {
     text.len() <= 64 && types::is_word(text) && !text.contains('_')
 }
 
+/// Python's lowercase keywords: an output name is an `rlm.factory.emit`
+/// keyword argument, so it cannot be one of these.
+const PYTHON_KEYWORDS: [&str; 32] = [
+    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+    "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+];
+
 /// A name usable as a Python identifier and a prompt placeholder.
 pub(crate) fn is_identifier(text: &str) -> bool {
     let mut chars = text.chars();
@@ -381,6 +389,31 @@ fn is_builtin_type_name(name: &str) -> bool {
         name,
         "text" | "int" | "float" | "bool" | "file" | "json" | "enum" | "list"
     )
+}
+
+/// The value path of a `file` inside a list or a record field of `ty`
+/// (`report[]`, `report.findings[].at`), or `None`. The emit copies only a
+/// top-level `file` port, so a nested one would reach later states as the
+/// child's own path.
+fn nested_file(
+    ty: &Type,
+    records: &Records,
+    path: String,
+    nested: bool,
+    seen: &mut BTreeSet<String>,
+) -> Option<String> {
+    match ty {
+        Type::File => nested.then_some(path),
+        Type::List(item) => nested_file(item, records, format!("{path}[]"), true, seen),
+        Type::Record(name) if seen.insert(name.clone()) => records
+            .fields(name)
+            .unwrap_or_default()
+            .iter()
+            .find_map(|(field, slot)| {
+                nested_file(&slot.ty, records, format!("{path}.{field}"), true, seen)
+            }),
+        _ => None,
+    }
 }
 
 fn refers_to(records: &Records, from: &str, target: &str, seen: &mut BTreeSet<String>) -> bool {
@@ -701,11 +734,11 @@ fn build_state(
     let mut outputs = Vec::new();
     for (name, text) in in_file_order(raw.outputs) {
         let key = format!("{at}.outputs.{name}");
-        if !is_identifier(&name) {
+        if !is_identifier(&name) || PYTHON_KEYWORDS.contains(&name.as_str()) {
             problems.push(Diagnostic::new(
                 MACHINE_FILE,
                 &key,
-                "output names are lowercase identifiers (a-z, 0-9, _)",
+                "output names are lowercase identifiers (a-z, 0-9, _) and not Python keywords: the child emits each one as a keyword argument",
             ));
             continue;
         }
@@ -721,7 +754,13 @@ fn build_state(
                         format!("unknown type {missing:?}; declare it under [types.{missing}]"),
                     ));
                 } else if slot.optional {
-                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "optional outputs need typed emit (rlm.factory.emit); this build captures outputs from the final answer, so every output is required"));
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "optional outputs are not supported yet; every output is required, and the child must emit each one"));
+                } else if let Some(path) =
+                    nested_file(&slot.ty, records, name.clone(), false, &mut BTreeSet::new())
+                {
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, format!("file ports inside a list or a record are not supported yet ({path}); declare each file as a top-level output, which the emit copies")));
+                } else if matches!(&work, Some(Work::Python(_))) && slot.ty == Type::File {
+                    problems.push(Diagnostic::new(MACHINE_FILE, &key, "a python state cannot return a file output; a file port needs an agent state's `rlm.factory.emit`, which copies it beside the session"));
                 } else {
                     outputs.push(Output { name, slot });
                 }

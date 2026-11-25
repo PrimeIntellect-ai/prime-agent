@@ -40,6 +40,7 @@ async fn scripted_engine(
         steering_mode: None,
         follow_up_mode: None,
         factory_child: false,
+        factory_contract: None,
         cwd,
         agent_dir: tmp.path().join("agent"),
         mcp_manager: None,

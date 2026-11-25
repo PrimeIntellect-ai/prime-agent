@@ -166,6 +166,9 @@ pub(crate) fn run_convert(machine: &pa_factory::MachineMd, out: &Path, json: boo
             out.display(),
             files.len()
         );
+        println!(
+            "Its prompts keep their hand-written output instructions; the generated Outputs section now asks for rlm.factory.emit, so delete those lines."
+        );
     }
     0
 }

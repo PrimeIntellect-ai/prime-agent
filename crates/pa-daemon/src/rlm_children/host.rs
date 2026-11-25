@@ -248,6 +248,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // The admission's ledger spawn record reads the run tag back.
                 if let Some(factory) = &request.factory {
                     runtime_metadata["factory"] = json!(factory);
+                    // The child's create reads its output contract here,
+                    // and a respawn replays it with the rest.
+                    if let Some(contract) = &factory.contract {
+                        runtime_metadata["factoryContract"] = contract.clone();
+                    }
                 }
                 let created = this
                     .create_child(

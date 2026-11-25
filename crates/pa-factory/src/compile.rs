@@ -3,16 +3,18 @@
 //! The canonical spec is the JSON machine form `rlm.factory` validates and
 //! runs today (`{"run", "params", "states", "transitions"}`). Compiling
 //! binds the params, assembles each agent prompt (shared context, the
-//! state's prompt, its rubric, and a generated Outputs section), and turns
-//! `next`, `route`, and `join` into transitions.
+//! state's prompt, its rubric, and a generated Outputs section), writes
+//! each state's emit [`Contract`], and turns `next`, `route`, and `join`
+//! into transitions.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
+use crate::emit::Contract;
 use crate::load::{routed_slot, MACHINE_FILE};
-use crate::machine::{Agent, Diagnostic, Machine, Output, State, Work};
+use crate::machine::{Agent, Diagnostic, Machine, State, Work};
 use crate::types::{self, check_value, record_names, Type};
 
 /// Compile `machine` with the params given at start.
@@ -213,6 +215,12 @@ fn compile_state(machine: &Machine, state: &State) -> Result<Value, Diagnostic> 
             .collect();
         out.insert("outputs".to_string(), Value::Array(outputs));
     }
+    // Every state carries the contract, even with no outputs: its bound
+    // inputs still need `factory.inputs` in the child.
+    out.insert(
+        "emit".to_string(),
+        Contract::for_outputs(machine, &state.outputs).to_json(),
+    );
     for (key, value) in [
         ("max_entries", state.max_entries),
         ("retries", state.retries),
@@ -261,46 +269,47 @@ fn assemble_prompt(machine: &Machine, state: &State, agent: &Agent) -> String {
     }
     if !state.outputs.is_empty() {
         prompt.push_str("\n\n");
-        prompt.push_str(&outputs_section(machine, &state.outputs));
+        prompt.push_str(&outputs_section(machine, state));
+    } else if !state.inputs.is_empty() {
+        // No outputs: the empty contract exists so the child can still
+        // read its bound inputs, so the prompt must say how.
+        prompt.push_str(
+            "\n\n## Inputs\n\nYour inputs, as typed values, are `await rlm.factory.inputs()`.",
+        );
     }
     to_executor_placeholders(&prompt)
 }
 
-/// How a child hands back its outputs on the current executor: the final
-/// answer, with one fenced JSON object for every non-text port.
-fn outputs_section(machine: &Machine, outputs: &[Output]) -> String {
-    let mut section = String::from("## Outputs\n\n");
-    let (text, structured): (Vec<&Output>, Vec<&Output>) = outputs
+/// How a child hands back its outputs: one `rlm.factory.emit` call, with
+/// each port's type spelled out and checked when the call is made.
+fn outputs_section(machine: &Machine, state: &State) -> String {
+    let mut section = String::from(
+        "## Outputs\n\nBefore you finish, hand back your outputs from your Python REPL:\n\n",
+    );
+    let call: Vec<String> = state
+        .outputs
         .iter()
-        .partition(|output| output.slot.ty == Type::Text);
-    for output in &text {
+        .map(|output| format!("{}=...", output.name))
+        .collect();
+    let _ = writeln!(section, "    await rlm.factory.emit({})\n", call.join(", "));
+    let mut records: Vec<&str> = Vec::new();
+    for output in &state.outputs {
         let _ = writeln!(
             section,
-            "Your whole final answer becomes the `{}` output.",
-            output.name
+            "- `{}`: {}",
+            output.name,
+            types::describe(&output.slot.ty)
         );
+        collect_records(machine, &output.slot.ty, &mut records);
     }
-    if !structured.is_empty() {
-        if !text.is_empty() {
-            section.push('\n');
-        }
-        section.push_str("End your final answer with one fenced ```json block holding a single object with exactly these keys:\n\n");
-        let mut records: Vec<&str> = Vec::new();
-        for output in &structured {
-            let _ = writeln!(
-                section,
-                "- `{}`: {}",
-                output.name,
-                types::describe(&output.slot.ty)
-            );
-            collect_records(machine, &output.slot.ty, &mut records);
-        }
-        for record in records {
-            section.push('\n');
-            section.push_str(&types::describe_record(record, &machine.records));
-        }
+    for record in records {
+        section.push('\n');
+        section.push_str(&types::describe_record(record, &machine.records));
     }
-    section.truncate(section.trim_end().len());
+    section.push_str("\nThe call checks every value and raises with the exact field when one is wrong; fix it and call again. Each call sets the outputs it names, and a later call replaces them. A file output takes a path, and the file is copied when you emit it.");
+    if !state.inputs.is_empty() {
+        section.push_str(" Your inputs, as typed values, are `await rlm.factory.inputs()`.");
+    }
     section
 }
 

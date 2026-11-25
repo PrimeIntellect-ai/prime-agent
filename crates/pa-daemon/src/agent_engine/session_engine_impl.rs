@@ -923,6 +923,9 @@ impl SessionEngine for AgentSessionEngine {
             .store(identity.rlm_depth, std::sync::atomic::Ordering::Relaxed);
         self.factory_child
             .store(identity.factory_child, std::sync::atomic::Ordering::Relaxed);
+        identity
+            .factory_contract
+            .clone_into(&mut self.factory_contract.lock().expect("factory contract lock"));
         if let Some(thinking) = &identity.thinking {
             pa_ai::models::thinking_level_from_str(thinking)
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;

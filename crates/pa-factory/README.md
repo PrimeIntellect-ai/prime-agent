@@ -44,7 +44,10 @@ rsi/
   max }`, and `resident`.
 
 Types: `text`, `int`, `float`, `bool`, `file`, `json`, `enum(a, b)`,
-`list[T]`, and record names.
+`list[T]`, and record names. A `file` output must be top-level, and only an
+agent state can declare one: the loader refuses a `file` inside a list or a
+record field, and a `file` output on a python state, because the emit copies
+only top-level file ports and a python state has no emit.
 
 Routing has two forms. `next` is unconditional. `route` switches on one
 enum or bool output, and every value needs a target. Any other condition is
@@ -55,8 +58,10 @@ and each member names it in `next`.
 
 - Load a machine directory into [`Machine`] with every problem reported as
   a [`Diagnostic`] (`file: key.path: message`).
-- Check types (`types::check_value`) with exact value paths, shared by
-  params today and typed outputs later.
+- Check types (`types::check_value`) with exact value paths, for params
+  and for outputs: each state's [`Contract`] (written into the canonical
+  spec as `emit`) is what a child's `rlm.factory.emit` and a python
+  state's returned dict are checked against.
 - Compile to the canonical v1 machine spec (`run`, `params`, `states`,
   `transitions`) the Python executor validates and runs. Prompts gain the
   shared context, the rubric, and a generated Outputs section.
@@ -73,7 +78,7 @@ and each member names it in `next`.
 
 ## Public API
 
-`load_machine_dir`, `compile`, `convert_spec`, `scan_library`,
+`load_machine_dir`, `compile`, `convert_spec`, `Contract`, `scan_library`,
 `read_machine_md`, the `limits` and `types` modules, and the model types
 re-exported from the crate root.
 
