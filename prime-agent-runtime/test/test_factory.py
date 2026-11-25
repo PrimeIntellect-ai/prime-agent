@@ -2184,6 +2184,7 @@ class ValidateFactorySpecFormTest(unittest.TestCase):
             {"states": [{"id": "a", "entry": True, "subagent": "w", "failure_policy": {}}]},
             {"states": [{"id": "a", "entry": True, "subagent": "w"}], "transitions": {"from": "a"}},
             {"nodes": [{"id": "a", "subagent": "w"}], "states": [{"id": "b", "entry": True, "subagent": "w"}]},
+            {"params": {"x": 1}, "states": [{"id": "a", "entry": True, "subagent": "w", "inputs": [{"name": ["x"]}]}]},
         ]
         for index, spec in enumerate(hostile):
             result = validate_factory_spec(spec)
@@ -8707,6 +8708,18 @@ class FactoryEmitApiTest(unittest.TestCase):
                 os.chdir(previous)
             self.assertEqual(sent, [{"outputs": {"design": "PLAN.md"}, "cwd": os.path.realpath(moved)}])
 
+    @async_test
+    async def test_emit_accepts_an_output_named_self(self) -> None:
+        sent: list[dict[str, Any]] = []
+
+        async def record(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            sent.append(payload or {})
+            return {"accepted": ["self"], "missing": []}
+
+        with patch.object(rlm_module, "host_request", record):
+            await rlm_module.rlm.factory.emit(self="ok")
+        self.assertEqual(sent[0]["outputs"], {"self": "ok"})
+
 
 class FactoryGraphWatchTest(_ExecutorTestCase):
     """The graph snapshot (structure fused with live state), the bounded
@@ -9904,6 +9917,15 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertNotIn("machine", result)
         self.assertEqual(result["nodes"], 2)
         self.assertEqual(sorted(result["started"]), ["entry-a", "entry-b"])
+
+    @async_test
+    async def test_a_stored_entry_id_that_looks_like_a_path_still_runs(self) -> None:
+        self.harness.create_factory(
+            "Team review", "A stored instance.", id="team/review",
+            dag={"nodes": [{"id": "only", "subagent": "worker"}]},
+        )
+        result = await rlm_module.rlm.factory.run("team/review")
+        self.assertEqual(result["started"], ["only"])
 
     @async_test
     async def test_unknown_names_report_the_library(self) -> None:
