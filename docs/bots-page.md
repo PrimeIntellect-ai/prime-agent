@@ -71,4 +71,6 @@ This machine refreshes a login while at least one running bot uses it. It refres
 
 If a refresh fails, bots keep the current token until it expires, and the daemon logs one warning. The /bots page shows `login stale: <provider>`. After the login expires, a bot turn on it ends with "the owner's <provider> login expired; log in again on the Mac".
 
-Set `bots.inject.<provider>` to `false` in `settings.json` to keep a login or API key out of new bots.
+MCP server logins go in the same way, after every other credential. Each remote HTTP MCP server with a stored bearer token (an OAuth login or a pasted token) gets one header rule on its endpoint's host, and the bot holds a placeholder bound to that endpoint. A server that the user declared in `mcpServers` is declared in the bot too, with only its URL. The platform allows 32 rule hosts per sandbox: past that limit, MCP logins are left out first, and the daemon logs one warning that names them. OAuth MCP logins refresh like the subscription logins.
+
+Set `bots.inject.<provider>` to `false` in `settings.json` to keep a login or API key out of new bots. For an MCP server, the name is `mcp:<server>`.

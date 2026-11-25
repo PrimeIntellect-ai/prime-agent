@@ -55,6 +55,8 @@ try:
 except (OSError, ValueError):
     settings = {}
 settings.setdefault("factory", {})["enabled"] = os.environ["BOT_FACTORY_ENABLED"] == "true"
+if os.environ.get("BOT_MCP_SERVERS"):
+    settings.setdefault("mcpServers", {}).update(json.loads(os.environ["BOT_MCP_SERVERS"]))
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as file:
     json.dump(settings, file)
@@ -157,7 +159,7 @@ pub struct BotManager {
     attached: Arc<Mutex<HashMap<String, usize>>>,
     /// The guest auth for a sandbox created with matching header rules,
     /// until its bootstrap writes it. Keyed by sandbox id.
-    guest_auth: Mutex<HashMap<String, Value>>,
+    guest_auth: Mutex<HashMap<String, GuestCredentials>>,
     image: String,
     release: ReleaseSource,
     /// The owner's agent dir: its `factory.enabled` carries into the bot.
@@ -743,12 +745,10 @@ impl BotManager {
             labels,
             idempotency_key: idempotency_key(&record.bot_id, record.generation, &source),
             checkpoint_id: checkpoint_id.map(str::to_string),
-            network_rules: credentials.network_rules,
+            network_rules: credentials.network_rules.clone(),
         };
         let created = retry(|| self.platform.create(&request)).await?;
-        if let Some(auth) = credentials.auth_json {
-            lock(&self.guest_auth).insert(created.id.clone(), auth);
-        }
+        lock(&self.guest_auth).insert(created.id.clone(), credentials);
         record.sandbox_id = Some(created.id.clone());
         record.status = created.status;
         self.save(record.clone())?;
@@ -817,20 +817,23 @@ impl BotManager {
         // header rules. Any other sandbox keeps its auth.json, and gets one
         // only when it has none (its create ran before a restart).
         let created_here = lock(&self.guest_auth).get(&sandbox_id).cloned();
-        let auth = match created_here {
-            Some(auth) => {
+        let guest = match created_here {
+            Some(guest) => {
                 env.insert("BOT_AUTH_OVERWRITE".to_string(), "1".to_string());
-                Some(auth)
+                Some(guest)
             }
             // Best effort: the sandbox's rules are already set.
             None => self
                 .guest_credentials(record, false)
                 .await
                 .ok()
-                .and_then(|(credentials, _)| credentials.auth_json),
+                .map(|(credentials, _)| credentials),
         };
-        if let Some(auth) = auth {
+        if let Some(auth) = guest.as_ref().and_then(|guest| guest.auth_json.as_ref()) {
             env.insert("BOT_AUTH_JSON".to_string(), auth.to_string());
+        }
+        if let Some(servers) = guest.and_then(|guest| guest.mcp_servers) {
+            env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
         }
         let output = self
             .exec_ready(&sandbox_id, BOOTSTRAP_SCRIPT, &env, None, deadline)
@@ -869,17 +872,56 @@ impl BotManager {
         })
         .await?;
         credentials.network_rules.extend(logins.rules);
-        if !logins.guest.is_empty() {
+        let mut providers = logins.providers;
+        let mut guest = logins.guest;
+        // MCP hosts come last; past the platform's host limit they stay home.
+        let mut left_out = Vec::new();
+        for injection in logins.mcp {
+            let fits = credentials.network_rules.len() + injection.rules.len()
+                <= super::credentials::MAX_RULE_HOSTS
+                && injection
+                    .rules
+                    .keys()
+                    .all(|host| !credentials.network_rules.contains_key(host));
+            if !fits {
+                left_out.push(injection.provider);
+                continue;
+            }
+            credentials.network_rules.extend(injection.rules);
+            guest.insert(injection.provider.clone(), injection.guest);
+            providers.push(injection.provider);
+        }
+        if !left_out.is_empty() {
+            eprintln!(
+                "bot credentials: past the platform's limit of {} rule hosts (or on a host \
+                 already in use); these MCP logins are not injected: {}",
+                super::credentials::MAX_RULE_HOSTS,
+                left_out.join(", ")
+            );
+        }
+        let servers: serde_json::Map<String, Value> = logins
+            .mcp_servers
+            .into_iter()
+            .filter(|(server, _)| {
+                providers
+                    .iter()
+                    .any(|login| login.strip_prefix(super::logins::MCP_PREFIX) == Some(server))
+            })
+            .collect();
+        if !servers.is_empty() {
+            credentials.mcp_servers = Some(Value::Object(servers));
+        }
+        if !guest.is_empty() {
             let mut auth = match credentials.auth_json.take() {
                 Some(Value::Object(auth)) => auth,
                 _ => serde_json::Map::new(),
             };
-            for (provider, record) in logins.guest {
+            for (provider, record) in guest {
                 auth.insert(provider, serde_json::to_value(record)?);
             }
             credentials.auth_json = Some(Value::Object(auth));
         }
-        Ok((credentials, logins.providers))
+        Ok((credentials, providers))
     }
 
     /// Run a guest command once the sandbox gateway answers: retries

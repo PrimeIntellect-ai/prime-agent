@@ -49,6 +49,8 @@ pub(crate) struct FakeState {
     pub links: Vec<(tokio::io::DuplexStream, tokio::io::DuplexStream)>,
     /// Every guest command: its script and environment.
     pub execs: Vec<(String, BTreeMap<String, String>)>,
+    /// API-key rule hosts each credentials request returns.
+    pub key_hosts: usize,
     /// Platform secrets by name, and how many puts ran.
     pub secrets: BTreeMap<String, String>,
     pub secret_puts: usize,
@@ -332,7 +334,14 @@ impl BotPlatform for FakePlatform {
             if std::mem::take(&mut state.fail_next_credentials) {
                 return Err(PlatformError::Transient("connection reset".into()));
             }
-            let mut network_rules = BTreeMap::new();
+            let mut network_rules: BTreeMap<String, pa_sandbox::HeaderRule> = (0..state.key_hosts)
+                .map(|n| {
+                    let rule = pa_sandbox::HeaderRule {
+                        headers: BTreeMap::new(),
+                    };
+                    (format!("key{n}.example.com"), rule)
+                })
+                .collect();
             if github {
                 network_rules.insert(
                     "api.github.com".to_string(),
@@ -347,6 +356,7 @@ impl BotPlatform for FakePlatform {
             Ok(GuestCredentials {
                 network_rules,
                 auth_json: None,
+                mcp_servers: None,
             })
         }
         .boxed()

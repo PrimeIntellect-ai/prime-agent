@@ -1,5 +1,6 @@
-//! Subscription logins for bots (Anthropic, Codex, Copilot, xAI). A bot
-//! never holds a login's tokens. Each login's access token is one stable
+//! Owner logins for bots: subscription logins (Anthropic, Codex, Copilot,
+//! xAI) and the bearer tokens of remote HTTP MCP servers (`mcp:<server>`).
+//! A bot never holds a login's tokens. Each login's access token is one stable
 //! platform secret per Prime account and provider, and a header rule sets
 //! it on the provider's API host, outside the sandbox. The guest holds an
 //! OAuth record of the right shape with a placeholder access token, a
@@ -44,6 +45,8 @@ pub const REFRESH_TICK: Duration = Duration::from_secs(60);
 const GUEST_EXPIRES_MS: i64 = 4_102_444_800_000;
 /// The platform's limit on one secret value.
 const MAX_SECRET_BYTES: usize = 16 * 1024;
+/// The auth storage prefix of MCP server logins.
+pub const MCP_PREFIX: &str = "mcp:";
 
 /// The error a bot's turn ends with once its owner's login expired.
 #[must_use]
@@ -140,6 +143,9 @@ pub fn injection(
     owner: &str,
     credential: &AuthCredential,
 ) -> Option<LoginInjection> {
+    if provider.starts_with(MCP_PREFIX) {
+        return mcp_injection(provider, owner, credential);
+    }
     let AuthCredential::Oauth {
         access,
         account_id,
@@ -212,6 +218,84 @@ pub fn injection(
     })
 }
 
+/// The host of an MCP endpoint the platform can set headers on: HTTPS on
+/// port 443.
+fn mcp_host(endpoint: &str) -> Option<String> {
+    let rest = endpoint.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = match authority.rsplit_once(':') {
+        Some((host, "443")) => host,
+        Some(_) => return None,
+        None => authority,
+    };
+    (!host.is_empty() && !authority.contains('@')).then(|| host.to_ascii_lowercase())
+}
+
+/// An MCP server login: its bearer token on the endpoint's host. The guest
+/// record keeps the endpoint binding, so the guest sends the placeholder
+/// only to that server.
+fn mcp_injection(
+    provider: &str,
+    owner: &str,
+    credential: &AuthCredential,
+) -> Option<LoginInjection> {
+    let (token, endpoint, guest) = match credential {
+        AuthCredential::Oauth {
+            access,
+            endpoint: Some(endpoint),
+            client_id,
+            resource,
+            issuer,
+            audience_mode,
+            ..
+        } => {
+            let mut guest = guest_record(GUEST_API_KEY_PLACEHOLDER.to_string());
+            if let AuthCredential::Oauth {
+                endpoint: guest_endpoint,
+                client_id: guest_client,
+                resource: guest_resource,
+                issuer: guest_issuer,
+                audience_mode: guest_audience,
+                ..
+            } = &mut guest
+            {
+                *guest_endpoint = Some(endpoint.clone());
+                guest_client.clone_from(client_id);
+                guest_resource.clone_from(resource);
+                guest_issuer.clone_from(issuer);
+                guest_audience.clone_from(audience_mode);
+            }
+            (access, endpoint, guest)
+        }
+        AuthCredential::McpStaticToken {
+            bearer,
+            endpoint: Some(endpoint),
+        } => (
+            bearer,
+            endpoint,
+            AuthCredential::McpStaticToken {
+                bearer: GUEST_API_KEY_PLACEHOLDER.to_string(),
+                endpoint: Some(endpoint.clone()),
+            },
+        ),
+        _ => return None,
+    };
+    if token.is_empty() || token.len() > MAX_SECRET_BYTES {
+        return None;
+    }
+    let host = mcp_host(endpoint)?;
+    let name = secret_name(provider, owner);
+    Some(LoginInjection {
+        provider: provider.to_string(),
+        rules: rule(
+            &host,
+            &[("Authorization", format!("Bearer {}", secret_ref(&name)))],
+        ),
+        secrets: vec![(name, token.clone())],
+        guest,
+    })
+}
+
 /// One read of a login.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Login {
@@ -240,9 +324,11 @@ pub fn read_login(
     obtained: Option<i64>,
     now: i64,
 ) -> Login {
-    let Some(credential @ AuthCredential::Oauth { expires, .. }) =
-        auth.get_all().credential(provider)
-    else {
+    let credential = auth.get_all().credential(provider);
+    if let Some(token @ AuthCredential::McpStaticToken { .. }) = credential {
+        return Login::Fresh(token);
+    }
+    let Some(credential @ AuthCredential::Oauth { expires, .. }) = credential else {
         return Login::Expired;
     };
     let obtained = obtained.unwrap_or(now);
@@ -268,8 +354,9 @@ fn now_ms() -> i64 {
         })
 }
 
-/// Builds the auth storage the logins are read from (blocking).
-pub type AuthSource = Arc<dyn Fn() -> AuthStorage + Send + Sync>;
+/// Builds the auth storage one login is read from (blocking): the storage
+/// local sessions use, with the refresh of that login's kind.
+pub type AuthSource = Arc<dyn Fn(&str) -> AuthStorage + Send + Sync>;
 
 #[derive(Default)]
 struct LoginState {
@@ -298,10 +385,53 @@ pub struct Logins {
 /// What [`Logins::prepare`] gives a new sandbox.
 #[derive(Debug, Default)]
 pub struct Prepared {
+    /// The subscription logins, their rules, and their guest records.
     pub providers: Vec<String>,
     pub rules: BTreeMap<String, HeaderRule>,
-    /// Guest `auth.json` records by provider.
     pub guest: BTreeMap<String, AuthCredential>,
+    /// The MCP server logins. They come last: past the platform's host
+    /// limit they are the first left out.
+    pub mcp: Vec<LoginInjection>,
+    /// The guest `mcpServers` entries of the user-declared MCP servers
+    /// among them (catalog servers need only the login).
+    pub mcp_servers: BTreeMap<String, Value>,
+}
+
+/// The `mcpServers` settings of `agent_dir` (global scope).
+fn user_mcp_servers(agent_dir: &Path) -> HashMap<String, pa_core::mcp::McpServerConfig> {
+    pa_core::settings::SettingsManager::create(agent_dir, agent_dir)
+        .global_settings()
+        .mcp_servers
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(server, config)| Some((server, serde_json::from_value(config).ok()?)))
+        .collect()
+}
+
+/// The guest's entry for a user-declared HTTP server, bound to the login's
+/// endpoint. It carries no headers, token variables, or client secret.
+fn guest_mcp_server(config: &pa_core::mcp::McpServerConfig, endpoint: &str) -> Option<Value> {
+    let pa_core::mcp::McpServerConfig::Http { url, oauth, .. } = config else {
+        return None;
+    };
+    (url == endpoint).then(|| {
+        let mut entry = serde_json::json!({ "type": "http", "url": url });
+        if *oauth == Some(true) {
+            entry["oauth"] = Value::Bool(true);
+        }
+        entry
+    })
+}
+
+/// The auth storage for `provider`'s login in `agent_dir`.
+fn auth_storage(agent_dir: &Path, provider: &str) -> AuthStorage {
+    if !provider.starts_with(MCP_PREFIX) {
+        return AuthStorage::create(agent_dir);
+    }
+    let dir = agent_dir.to_path_buf();
+    let servers: pa_core::mcp::UserServersFn = Arc::new(move || Some(user_mcp_servers(&dir)));
+    AuthStorage::create_with_oauth(agent_dir, Arc::new(pa_core::mcp::McpOAuth::new(servers)))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -317,7 +447,7 @@ impl Logins {
         Self::with_auth(
             platform,
             agent_dir,
-            Arc::new(move || AuthStorage::create(&dir)),
+            Arc::new(move |provider| auth_storage(&dir, provider)),
         )
     }
 
@@ -334,20 +464,36 @@ impl Logins {
     }
 
     /// The logins this Mac holds, each with whether bots get it
-    /// (`bots.inject.<provider>`, on by default).
+    /// (`bots.inject.<provider>`, on by default): the subscription logins,
+    /// then the MCP server logins with an endpoint.
     async fn stored(&self) -> Vec<(String, bool)> {
         let (auth, agent_dir) = (Arc::clone(&self.auth), self.agent_dir.clone());
         tokio::task::spawn_blocking(move || {
-            let stored = auth().get_all();
+            let stored = auth("").get_all();
             let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
-            LOGIN_PROVIDERS
-                .into_iter()
-                .filter(|provider| {
-                    matches!(
+            let subscriptions = LOGIN_PROVIDERS.into_iter().filter(|provider| {
+                matches!(
+                    stored.credential(provider),
+                    Some(AuthCredential::Oauth { .. })
+                )
+            });
+            let mcp = stored.0.keys().filter(|provider| {
+                provider.starts_with(MCP_PREFIX)
+                    && matches!(
                         stored.credential(provider),
-                        Some(AuthCredential::Oauth { .. })
+                        Some(
+                            AuthCredential::Oauth {
+                                endpoint: Some(_),
+                                ..
+                            } | AuthCredential::McpStaticToken {
+                                endpoint: Some(_),
+                                ..
+                            }
+                        )
                     )
-                })
+            });
+            subscriptions
+                .chain(mcp.map(String::as_str))
                 .map(|provider| (provider.to_string(), settings.get_bots_inject(provider)))
                 .collect()
         })
@@ -365,7 +511,17 @@ impl Logins {
     /// secret cannot be set.
     pub async fn prepare(&self, provider: &str) -> Result<Prepared> {
         let mut prepared = Prepared::default();
-        for (login, inject) in self.stored().await {
+        let stored = self.stored().await;
+        let user_servers = if stored
+            .iter()
+            .any(|(login, _)| login.starts_with(MCP_PREFIX))
+        {
+            let agent_dir = self.agent_dir.clone();
+            tokio::task::spawn_blocking(move || user_mcp_servers(&agent_dir)).await?
+        } else {
+            HashMap::new()
+        };
+        for (login, inject) in stored {
             let required = login == provider;
             if !inject {
                 if required {
@@ -378,6 +534,22 @@ impl Logins {
             }
             match self.refresh(&login).await {
                 Ok(Some(injection)) => {
+                    if let Some(server) = login.strip_prefix(MCP_PREFIX) {
+                        let endpoint = match &injection.guest {
+                            AuthCredential::Oauth { endpoint, .. }
+                            | AuthCredential::McpStaticToken { endpoint, .. } => endpoint.clone(),
+                            AuthCredential::ApiKey { .. } => None,
+                        };
+                        if let Some(entry) = user_servers
+                            .get(server)
+                            .zip(endpoint)
+                            .and_then(|(config, endpoint)| guest_mcp_server(config, &endpoint))
+                        {
+                            prepared.mcp_servers.insert(server.to_string(), entry);
+                        }
+                        prepared.mcp.push(injection);
+                        continue;
+                    }
                     prepared.rules.extend(injection.rules);
                     prepared.guest.insert(login.clone(), injection.guest);
                     prepared.providers.push(login);
@@ -413,9 +585,10 @@ impl Logins {
         let now = now_ms();
         let obtained = lock(&self.state).seen.get(provider).map(|(_, at)| *at);
         let (auth, owned) = (Arc::clone(&self.auth), provider.to_string());
-        let login =
-            tokio::task::spawn_blocking(move || read_login(&mut auth(), &owned, obtained, now))
-                .await?;
+        let login = tokio::task::spawn_blocking(move || {
+            read_login(&mut auth(&owned), &owned, obtained, now)
+        })
+        .await?;
         let credential = match login {
             Login::Fresh(credential) => {
                 let mut state = lock(&self.state);
@@ -440,7 +613,9 @@ impl Logins {
                 return Ok(None);
             }
         };
-        let AuthCredential::Oauth { access, .. } = &credential else {
+        let (AuthCredential::Oauth { access, .. }
+        | AuthCredential::McpStaticToken { bearer: access, .. }) = &credential
+        else {
             return Ok(None);
         };
         {
@@ -568,7 +743,7 @@ mod tests {
         Logins::with_auth(
             Arc::clone(platform) as Arc<dyn BotPlatform>,
             dir,
-            Arc::new(move || {
+            Arc::new(move |_: &str| {
                 AuthStorage::create_with_oauth(&dir_owned, Arc::clone(&refresh) as Arc<_>)
             }),
         )
@@ -758,5 +933,70 @@ mod tests {
         assert_eq!(auth["anthropic"]["type"], "oauth");
         assert!(auth["anthropic"].get("refresh").is_none_or(Value::is_null));
         assert!(!env["BOT_AUTH_JSON"].contains("a-1"));
+    }
+
+    fn mcp_login(endpoint: &str, access: &str) -> Value {
+        let mut credential = login(access, "mcp-refresh", now_ms() + 480 * MINUTE);
+        if let AuthCredential::Oauth {
+            endpoint: stored, ..
+        } = &mut credential
+        {
+            *stored = Some(endpoint.to_string());
+        }
+        serde_json::to_value(credential).unwrap()
+    }
+
+    #[tokio::test]
+    async fn past_the_host_limit_mcp_logins_are_left_out_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(FakePlatform::default());
+        platform.state().key_hosts = 30;
+        let refresh = Arc::new(ScriptedRefresh::default());
+        let auth = json!({
+            "anthropic": login("a-1", "r-1", now_ms() + 480 * MINUTE),
+            "mcp:alpha": mcp_login("https://alpha.example.org/mcp", "alpha-token"),
+            "mcp:beta": mcp_login("https://beta.example.org/mcp", "beta-token"),
+        });
+        std::fs::write(dir.path().join("auth.json"), auth.to_string()).unwrap();
+        let settings = json!({ "mcpServers": { "alpha": {
+            "type": "http", "url": "https://alpha.example.org/mcp", "oauth": true,
+            "clientSecret": "client-secret",
+        } } });
+        std::fs::write(dir.path().join("settings.json"), settings.to_string()).unwrap();
+        let manager = BotManager::with_logins(
+            dir.path(),
+            Arc::clone(&platform) as Arc<dyn BotPlatform>,
+            logins(dir.path(), &platform, &refresh),
+        )
+        .unwrap();
+        let mut bot = spec("bot-mcp");
+        bot.model = Some("anthropic/claude-sonnet-4-5".into());
+        let record = manager.spawn(&bot).await.unwrap();
+
+        // 30 key hosts + Anthropic + alpha = 32: beta stays home.
+        assert_eq!(record.logins, ["anthropic", "mcp:alpha"]);
+        let state = platform.state();
+        let rules = &state.creates[0].network_rules;
+        assert_eq!(rules.len(), 32);
+        assert!(rules.contains_key("alpha.example.org"));
+        assert!(!rules.contains_key("beta.example.org"));
+        let (_, env) = state
+            .execs
+            .iter()
+            .find(|(_, env)| env.contains_key("BOT_AUTH_JSON"))
+            .unwrap();
+        let guest: Value = serde_json::from_str(&env["BOT_AUTH_JSON"]).unwrap();
+        assert_eq!(guest["mcp:alpha"]["access"], GUEST_API_KEY_PLACEHOLDER);
+        assert_eq!(
+            guest["mcp:alpha"]["endpoint"],
+            "https://alpha.example.org/mcp"
+        );
+        assert!(guest.get("mcp:beta").is_none());
+        // The user-declared server is declared in the guest, without its client secret.
+        let servers: Value = serde_json::from_str(&env["BOT_MCP_SERVERS"]).unwrap();
+        assert_eq!(
+            servers,
+            json!({ "alpha": { "type": "http", "url": "https://alpha.example.org/mcp", "oauth": true } })
+        );
     }
 }
