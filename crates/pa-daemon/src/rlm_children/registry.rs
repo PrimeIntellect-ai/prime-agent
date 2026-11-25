@@ -94,6 +94,7 @@ impl SupervisorChildSessionsInner {
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
+                scope: None,
                 rest: Map::default(),
             };
             let abort_result = self

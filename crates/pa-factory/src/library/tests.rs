@@ -83,8 +83,8 @@ fn a_machine_md_reports_every_frontmatter_problem() {
         )
         .unwrap_err(),
         [
-            "machine name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)",
-            "machine name must not end with a hyphen",
+            "m: machine name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)",
+            "m: machine name must not end with a hyphen",
         ]
     );
 }

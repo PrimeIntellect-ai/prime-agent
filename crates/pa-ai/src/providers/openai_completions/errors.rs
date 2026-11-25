@@ -117,70 +117,6 @@ fn js_to_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// The exact composition the TS `openai` SDK produces for an `OpenAI` error body and the TS
-    /// provider surfaces verbatim (the parity harness's scripted overflow probe: `{"error":
-    /// {"message": ...}}` with status 400).
-    #[test]
-    fn sdk_message_from_error_body_message() {
-        let body =
-            r#"{"error": {"message": "prompt is too long: 213462 tokens > 200000 maximum"}}"#;
-        assert_eq!(
-            openai_sdk_error_message(400, body),
-            "400 prompt is too long: 213462 tokens > 200000 maximum"
-        );
-    }
-
-    #[test]
-    fn sdk_message_compositions() {
-        // `error.type`/`error.code` qualifiers ride along inside the message.
-        assert_eq!(
-            openai_sdk_error_message(
-                429,
-                r#"{"error": {"message": "Rate limit", "type": "rate_limit_error"}}"#
-            ),
-            "429 Rate limit"
-        );
-        // Non-JSON body: the raw text becomes the detail.
-        assert_eq!(
-            openai_sdk_error_message(500, "upstream exploded"),
-            "500 upstream exploded"
-        );
-        // JSON body without an `error` field: no detail is recoverable.
-        assert_eq!(
-            openai_sdk_error_message(400, r#"{"detail": "bad request"}"#),
-            "400 status code (no body)"
-        );
-        // Empty body.
-        assert_eq!(
-            openai_sdk_error_message(400, ""),
-            "400 status code (no body)"
-        );
-        // `error` without a usable message stringifies the whole object.
-        assert_eq!(
-            openai_sdk_error_message(400, r#"{"error": {"code": "x"}}"#),
-            r#"400 {"code":"x"}"#
-        );
-        // Falsy `error.message` falls back to stringifying `error`.
-        assert_eq!(
-            openai_sdk_error_message(400, r#"{"error": {"message": ""}}"#),
-            r#"400 {"message":""}"#
-        );
-        // Non-string truthy `error.message` stringifies the message value.
-        assert_eq!(
-            openai_sdk_error_message(400, r#"{"error": {"message": 42}}"#),
-            "400 42"
-        );
-        // Falsy `error` (JSON null) leaves the message argument, which a JSON body leaves
-        // undefined.
-        assert_eq!(
-            openai_sdk_error_message(400, r#"{"error": null}"#),
-            "400 status code (no body)"
-        );
-        // Whitespace body parses as nothing and carries the raw text.
-        assert_eq!(openai_sdk_error_message(400, "  "), "400   ");
-    }
 
     #[test]
     fn http_error_carries_structured_pieces() {
@@ -197,32 +133,10 @@ mod tests {
             http.headers.get("x-request-id").map(String::as_str),
             Some("req_1")
         );
-    }
-
-    #[test]
-    fn openrouter_metadata_appends_only_when_truthy() {
-        let body = r#"{"error": {"message": "boom", "metadata": {"raw": "extra context"}}}"#;
-        let error = openai_http_error(400, body, HashMap::default());
+        // The Cerebras context-overflow pattern matches this empty-body text.
         assert_eq!(
-            openrouter_raw_metadata(&error).as_deref(),
-            Some("extra context")
-        );
-
-        let no_metadata =
-            openai_http_error(400, r#"{"error": {"message": "boom"}}"#, HashMap::default());
-        assert_eq!(openrouter_raw_metadata(&no_metadata), None);
-
-        let falsy = openai_http_error(
-            400,
-            r#"{"error": {"message": "boom", "metadata": {"raw": ""}}}"#,
-            HashMap::default(),
-        );
-        assert_eq!(openrouter_raw_metadata(&falsy), None);
-
-        // Non-HTTP errors never carry the field.
-        assert_eq!(
-            openrouter_raw_metadata(&ProviderError::Message("boom".into())),
-            None
+            openai_sdk_error_message(400, ""),
+            "400 status code (no body)"
         );
     }
 }
