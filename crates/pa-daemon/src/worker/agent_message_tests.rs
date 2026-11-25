@@ -18,7 +18,7 @@ fn test_worker() -> Arc<Worker> {
     Arc::new(Worker::new(config, None))
 }
 
-async fn created_worker() -> Arc<Worker> {
+pub(super) async fn created_worker() -> Arc<Worker> {
     let worker = test_worker();
     let created = worker
         .dispatch(

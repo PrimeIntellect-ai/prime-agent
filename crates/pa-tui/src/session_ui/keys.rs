@@ -2,8 +2,8 @@
 //! selection/auto-scroll, and the input-state seams.
 use super::{
     key_event_to_id, AgentView, ChatEntry, ChoicePickerAction, ChoicePurpose, DaemonCommand,
-    DockFocusSource, Duration, Instant, KeyEvent, Map, Overlay, QueueBrowseDirection, QueueLane,
-    Result, SessionUi, StatusKind, SubmitBehavior,
+    DockFocusSource, Duration, Instant, InterruptOrigin, KeyEvent, Map, Overlay,
+    QueueBrowseDirection, QueueLane, Result, SessionUi, StatusKind, SubmitBehavior,
 };
 
 /// How long the Ctrl+C exit hint arms the second-press exit.
@@ -318,7 +318,9 @@ impl SessionUi {
                 view.overlay = None;
                 self.dirty = true;
                 match purpose {
-                    ChoicePurpose::Effort => self.apply_thinking_level(&key, view).await,
+                    ChoicePurpose::Effort => {
+                        self.apply_thinking_level(&key, view).await;
+                    }
                 }
             }
         }
@@ -350,7 +352,11 @@ impl SessionUi {
                 return self.handle_choice_picker_key(key, view).await
             }
             Some(Overlay::Mcp(_)) => return self.handle_mcp_view_key(key, view),
-            Some(Overlay::Factory(_)) => return self.handle_factory_view_key(key, view).await,
+            Some(Overlay::Factory { .. }) => return self.handle_factory_view_key(key, view).await,
+            Some(Overlay::Library(_)) => {
+                self.handle_library_view_key(key, view);
+                return Ok(());
+            }
             Some(Overlay::Heartbeats(_)) => {
                 return self.handle_heartbeats_picker_key(key, view).await;
             }
@@ -522,15 +528,17 @@ impl SessionUi {
                 "clear"
             };
             if action == "tree" && self.escape_tree_shortcut_spent {
-                // The gesture already fired: this press interrupts like every Escape
-                // but arms no reopen.
-                self.interrupt_running_work(view);
+                // The gesture already fired: this press interrupts like every
+                // Escape but arms no reopen — the one bare press the idle
+                // backgrounded-cell cancel may ride.
+                self.interrupt_running_work(view, InterruptOrigin::Bare);
                 return Ok(());
             }
             self.arm_escape_repeat(action);
-            // The repeat arms, then the same abort ladder as the Ctrl+C interrupt
-            // runs, minus the exit hint.
-            self.interrupt_running_work(view);
+            // The repeat arms, then the same abort ladder as the Ctrl+C
+            // interrupt runs, minus the exit hint. The press ARMS the
+            // clear/tree repeat, so the idle scoped cancel never rides it.
+            self.interrupt_running_work(view, InterruptOrigin::Arming);
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.exit") && view.editor.get_text().is_empty() {
@@ -574,7 +582,9 @@ impl SessionUi {
                     }
                 });
             }
-            self.interrupt_running_work(view);
+            // The press ARMS the Ctrl+C exit pair, so the idle scoped
+            // cancel never rides it.
+            self.interrupt_running_work(view, InterruptOrigin::Arming);
             self.show_ctrl_c_hint();
             self.dirty = true;
             return Ok(());

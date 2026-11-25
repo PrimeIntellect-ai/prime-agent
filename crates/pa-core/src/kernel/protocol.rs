@@ -18,6 +18,12 @@ pub const REPL_PROTOCOL_VERSION: u64 = 3;
 pub enum Request {
     Execute {
         code: String,
+        /// The runtime's own bootstrap execute (the host sends it after
+        /// every restore attempt). The runtime's only use of the flag is
+        /// to skip `boot_arm_persisted_runs()` in `_handle_execute`
+        /// (`prime-agent-runtime/src/rlm/repl.py`), so this execute never
+        /// releases the factory boot arm.
+        runtime_bootstrap: bool,
     },
     Interrupt,
     HostReply {
@@ -63,7 +69,10 @@ impl Request {
     #[must_use]
     pub fn to_json(&self) -> Value {
         match self {
-            Request::Execute { code } => json!({ "type": "execute", "code": code }),
+            Request::Execute {
+                code,
+                runtime_bootstrap,
+            } => json!({ "type": "execute", "code": code, "runtime_bootstrap": runtime_bootstrap }),
             Request::Interrupt => json!({ "type": "interrupt" }),
             Request::HostReply { data } => json!({ "type": "host_reply", "data": data }),
             Request::Snapshot {

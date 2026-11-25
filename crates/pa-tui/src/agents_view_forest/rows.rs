@@ -409,7 +409,7 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// The node's own `$ N shells[ · M persistent]` and `⚙ N factories · M running[ · K paused]` lines,
+/// The node's own `$ N shells[ · M persistent]` and `⚙ N machines · M running[ · K paused]` lines,
 /// each only when one of its counts is nonzero.
 /// Like the summary line they reuse the parent's summary, so the open action resolves the parent.
 fn activity_rows(parent: &BaseRow, depth: usize) -> Vec<AgentsViewRow> {

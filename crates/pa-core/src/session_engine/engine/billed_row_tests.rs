@@ -29,6 +29,8 @@ async fn scripted_engine(
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -38,6 +40,7 @@ async fn scripted_engine(
         steering_mode: None,
         follow_up_mode: None,
         factory_child: false,
+        factory_contract: None,
         cwd,
         agent_dir: tmp.path().join("agent"),
         mcp_manager: None,

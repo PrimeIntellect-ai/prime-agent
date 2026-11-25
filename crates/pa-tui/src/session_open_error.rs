@@ -216,13 +216,21 @@ pub fn decorate_interactive_refusal(
 /// The canonical form of a session path matching `pa_daemon::lease::canonical_session_path`
 /// without pa-tui depending on pa-daemon.
 fn canonical_form(path: &Path) -> std::path::PathBuf {
-    match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => match path.parent().map(Path::canonicalize) {
-            Some(Ok(parent)) => parent.join(path.file_name().unwrap_or_default()),
-            _ => path.to_path_buf(),
-        },
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
     }
+    let components: Vec<_> = path.components().collect();
+    for split in (0..components.len()).rev() {
+        let prefix: std::path::PathBuf = components[..split].iter().collect();
+        if let Ok(canonical) = prefix.canonicalize() {
+            let mut resolved = canonical;
+            for component in &components[split..] {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -322,6 +330,23 @@ mod tests {
         assert_eq!(holder.model.as_deref(), Some("z-ai/glm-5.3"));
         let text = already_active_error(&holder, &file);
         assert!(text.contains("\u{b7} model z-ai/glm-5.3"), "{text}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_holder_row_matches_through_a_symlinked_ancestor_before_the_session_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // The roster names the daemon's resolved identity of a session whose dir does not exist
+        // yet; the refused path names the same file through the symlink.
+        let resolved = real.canonicalize().unwrap().join("sessions/s.jsonl");
+        let rows = vec![row(&resolved.display().to_string(), "holder-1", None, None)];
+        let holder = holder_from_roster(&rows, &link.join("sessions/s.jsonl"))
+            .expect("the resolved row answers the symlinked path");
+        assert_eq!(holder.id, "holder-1");
     }
 
     #[test]

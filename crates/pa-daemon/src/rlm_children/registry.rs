@@ -36,6 +36,7 @@ impl SupervisorChildSessionsInner {
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
             status: record.roster_status(),
+            factory: record.factory,
             answer_preview: record.answer_preview.clone(),
             error: record
                 .run
@@ -93,6 +94,7 @@ impl SupervisorChildSessionsInner {
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
+                scope: None,
                 rest: Map::default(),
             };
             let abort_result = self
@@ -140,9 +142,35 @@ impl SupervisorChildSessionsInner {
             }
             // The settled/cancelled child releases an owed goal continuation.
             self.fire_settle_hook(record).await;
+            // A cancelled refinement child is a settled one: retire it too.
+            self.retire_refine_child_record(record).await;
             return true;
         }
         false
+    }
+
+    /// Retire one settled refinement child's record: the registry
+    /// observed the settle, so it owns the one-shot child's teardown —
+    /// the delete on a settled record goes through at once, no polling
+    /// loop and no engine-side teardown. Non-refine records retire
+    /// nothing (an ordinary subagent's row stays for `rlm.collect`), and
+    /// an already-deleted child (the user's own delete raced it) answers
+    /// `not_found` as a no-op.
+    pub(super) async fn retire_refine_child_record(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let rlm_child_id = {
+            let record = record.lock().await;
+            if !record.refine_child {
+                return;
+            }
+            record.rlm_child_id.clone()
+        };
+        // The delete on a settled record is one bounded kill round trip; it
+        // runs inline at the funnel's end, where the watcher has nothing
+        // left to do. A failure surfaces loudly and leaves the settled
+        // row visible for an operator's delete.
+        if let Err(error) = self.delete_inactive_subagent(&rlm_child_id).await {
+            eprintln!("pa-daemon: the refinement child {rlm_child_id} never retired: {error:#}");
+        }
     }
 
     /// Delete one inactive child by id: refresh the registry row first, refuse one still in flight,
@@ -616,6 +644,11 @@ fn ledger_child_records(
             direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             factory: edge.factory.is_some(),
+            factory_task_busy: None,
+            // A reseeded row is settled by construction (its watcher is
+            // gone with the old process), so the retire-at-settle funnel
+            // never runs for it — the flag is inert here either way.
+            refine_child: false,
             retirement: Retirement::live(),
             usage_registration_forgotten: false,
             session_file: Some(edge.child),

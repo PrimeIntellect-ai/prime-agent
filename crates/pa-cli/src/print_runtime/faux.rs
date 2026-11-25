@@ -132,6 +132,7 @@ pub(crate) async fn build_faux_engine_with(
         extra_host_handlers,
         rlm_depth,
         factory_child,
+        factory_contract,
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
@@ -139,6 +140,8 @@ pub(crate) async fn build_faux_engine_with(
     } = super::headless_embedding_fields(embedding);
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             on_late_sent_agent_message,
             cron_store: None,
             // Faux verification harness: no product telemetry.
@@ -168,6 +171,7 @@ pub(crate) async fn build_faux_engine_with(
             progress_note_emit: None,
             rlm_depth,
             factory_child,
+            factory_contract,
             daemonless: true,
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.

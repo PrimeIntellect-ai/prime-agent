@@ -1,0 +1,1 @@
+- A machine state child in a `--print --no-session` run can now hand back its outputs with `rlm.factory.emit`.

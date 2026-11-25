@@ -408,3 +408,104 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
         "the run boundary cleared the note: {summary:?}"
     );
 }
+
+/// Every `get_state` summary now carries the owed background-completion
+/// count.
+///
+/// This is a deliberate wire-shape change: the field was absent from
+/// `get_state`, and an ordinary child's settle watcher could not see a
+/// detached cell or a queued completion, so the child settled
+/// done/no-reply while the work was still landing. The count rides every
+/// read. The zero case is pinned too, so dropping the insertion fails here.
+#[allow(clippy::await_holding_lock)] // faux registry is process-global for this worker flow
+#[tokio::test]
+async fn get_state_reports_owed_background_completions_on_every_read() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!(
+        "pa-worker-background-jobs-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let worker = std::sync::Arc::new(Worker::new(
+        WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "background-jobs".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "engine": "faux", "responses": ["ready"] })),
+        },
+        None,
+    ));
+    let created = worker
+        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    worker.core.lock().unwrap().steering.push_back(QueuedItem {
+        message: "cell completion".to_string(),
+        priority: QueuePriority::Background,
+        preview: None,
+        custom_message: Some(json!({
+            "customType": pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE,
+            "details": {
+                "class": pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
+                "coversCellDone": true,
+            },
+        })),
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: false,
+        policy: TurnPolicy::Injected,
+        forced_batch: false,
+    });
+
+    let ordinary = worker.dispatch("get_state", &json!({})).await;
+    assert!(ordinary.success, "get_state failed: {ordinary:?}");
+    assert_eq!(
+        ordinary.data.as_ref().unwrap_or(&Value::Null)["pendingBackgroundCompletions"],
+        json!(1),
+        "ordinary summaries carry the queued cell completion"
+    );
+    // The factory task observation opts in to the wider aggregate; ordinary
+    // summaries do not carry it.
+    assert!(
+        ordinary
+            .data
+            .as_ref()
+            .unwrap_or(&Value::Null)
+            .get("outstandingBackgroundJobs")
+            .is_none(),
+        "only the factory task observation reports outstanding jobs"
+    );
+    let observed = worker
+        .dispatch("get_state", &json!({ "taskObservation": "factory" }))
+        .await;
+    assert_eq!(
+        observed.data.as_ref().unwrap_or(&Value::Null)["outstandingBackgroundJobs"],
+        json!(1),
+        "the opt-in reports the pending completion delivery"
+    );
+    // The handler reads the summary and the count under one core guard; the
+    // locked variant must not re-lock it (that would deadlock here).
+    let core = worker.core.lock().unwrap();
+    assert_eq!(worker.outstanding_background_jobs_locked(&core), 1);
+    drop(core);
+    // The zero case: the field is present with 0, so a dropped insertion
+    // fails this assertion instead of silently returning the old shape.
+    worker.core.lock().unwrap().steering.clear();
+    let idle = worker.dispatch("get_state", &json!({})).await;
+    assert_eq!(
+        idle.data.as_ref().unwrap_or(&Value::Null)["pendingBackgroundCompletions"],
+        json!(0),
+        "the field is always present, zero included"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

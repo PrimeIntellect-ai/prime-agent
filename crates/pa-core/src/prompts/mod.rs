@@ -10,6 +10,6 @@ pub mod model_prompts;
 pub mod system_prompt;
 
 pub use system_prompt::{
-    build_system_prompt, system_prompt_breakdown, BuildSystemPromptOptions, PromptSegment,
-    SegmentKind, SystemPromptBreakdown, REFINE_SKILL_NAME,
+    build_system_prompt, system_prompt_breakdown, BuildSystemPromptOptions, FactoryChild,
+    PromptSegment, SegmentKind, SystemPromptBreakdown, REFINE_SKILL_NAME,
 };

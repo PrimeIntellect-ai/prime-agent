@@ -2,11 +2,11 @@
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
 use super::{
-    anyhow, bail, join_all, json, list_sessions, mpsc, name_unavailable_error, paths,
-    reservation_key, response_failure, response_line, response_success, subscribers, Arc,
-    DaemonCommand, DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf,
-    ResidentWorker, Result, RosterFamilySeedOwner, RouteAdmission, Supervisor, Value,
-    ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS,
+    anyhow, bail, join_all, json, mpsc, name_unavailable_error, paths, reservation_key,
+    response_failure, response_line, response_success, subscribers, Arc, DaemonCommand,
+    DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
+    Result, RosterFamilySeedOwner, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
+    SUMMARY_TIMEOUT_MS,
 };
 use crate::session_scan::list_sessions_with;
 
@@ -455,22 +455,22 @@ impl Supervisor {
             // TS `buildSessionList` order: saved rows (resident ones replaced in place by
             // their live summary), then passive children, then resident-only rows.
             let mut residents = Vec::new();
-            let mut resident_roots = Vec::new();
+            let mut resident_files = Vec::new();
             for resident in self.registry.list().await {
                 let descriptor = resident.descriptor.lock().await;
                 if let Some(session_file) = &descriptor.session_file {
                     residents.push(Arc::clone(&resident));
                     // Resident roots carry their active session id so passive children of a
                     // resident parent report parentActiveSessionId.
-                    resident_roots.push((
-                        session_file.clone(),
-                        descriptor.root_active_session_id.clone(),
-                    ));
+                    resident_files.push(super::known_sessions::ResidentFile {
+                        session_file: PathBuf::from(session_file),
+                        active_session_id: descriptor.root_active_session_id.clone(),
+                    });
                 }
             }
-            let summaries_by_resident = self.worker_summaries(&residents).await;
-            let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
-                Ok(ledger) => ledger,
+            let mut resident_summaries = self.worker_summaries(&residents).await;
+            let roots = match self.known_session_roots(dir, resident_files, false).await {
+                Ok(roots) => roots,
                 Err(error) => {
                     return response_failure(
                         Some(&command_id),
@@ -480,72 +480,11 @@ impl Supervisor {
                     );
                 }
             };
-            let scan = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
-                let mut infos = list_sessions(&dir);
-                if let Some(cwd) = &cwd {
-                    infos.retain(|info| info.cwd == *cwd);
-                }
-                let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
-                for ((session_file, active_session_id), summary) in
-                    resident_roots.into_iter().zip(summaries_by_resident)
-                {
-                    resident_by_file.push(ResidentRoot {
-                        session_file: crate::lease::canonical_session_path(Path::new(
-                            &session_file,
-                        )),
-                        summary,
-                        active_session_id: Some(active_session_id),
-                    });
-                }
-                let mut summaries = Vec::new();
-                let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
-                for info in &infos {
-                    roots.push(crate::rlm_roster::RosterWalkRoot {
-                        session_file: info.path.clone(),
-                        active_session_id: None,
-                    });
-                    let canonical = crate::lease::canonical_session_path(&info.path);
-                    let resident = resident_by_file
-                        .iter()
-                        .position(|root| root.session_file == canonical)
-                        .map(|at| resident_by_file.swap_remove(at));
-                    match resident {
-                        Some(root) => {
-                            roots.last_mut().expect("saved root").active_session_id =
-                                root.active_session_id;
-                            summaries.push(root.summary);
-                        }
-                        None => summaries.push(saved_session_summary(info)),
-                    }
-                }
-                let mut resident_only = Vec::new();
-                for root in resident_by_file {
-                    roots.push(crate::rlm_roster::RosterWalkRoot {
-                        session_file: root.session_file,
-                        active_session_id: root.active_session_id,
-                    });
-                    resident_only.push(root.summary);
-                }
-                match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
-                    Ok(children) => {
-                        for child in &children {
-                            summaries.push(crate::rlm_roster::passive_child_summary(child));
-                        }
-                    }
-                    Err(error) => {
-                        return Err(anyhow!("Could not walk passive RLM children: {error:#}"));
-                    }
-                }
-                summaries.append(&mut resident_only);
-                Ok(summaries)
+            let scan = tokio::task::spawn_blocking(move || {
+                super::known_sessions::scan_known_sessions(&roots, cwd.as_deref())
             });
-            match scan.await {
-                Ok(Ok(summaries)) => summaries,
-                Ok(Err(message)) => {
-                    let message = message.to_string();
-                    self.log_line(&message);
-                    return response_failure(Some(&command_id), &type_name, &message, None);
-                }
+            let known = match scan.await {
+                Ok(known) => known,
                 Err(error) => {
                     return response_failure(
                         Some(&command_id),
@@ -554,7 +493,35 @@ impl Supervisor {
                         None,
                     );
                 }
+            };
+            for warning in &known.warnings {
+                self.log_line(warning);
             }
+            if let Some(message) = known.walk_errors.first() {
+                self.log_line(message);
+                return response_failure(Some(&command_id), &type_name, message, None);
+            }
+            let mut summaries: Vec<Value> = known
+                .saved
+                .iter()
+                .map(|(info, resident)| match resident {
+                    Some(index) => std::mem::take(&mut resident_summaries[*index]),
+                    None => saved_session_summary(info),
+                })
+                .collect();
+            summaries.extend(
+                known
+                    .children
+                    .iter()
+                    .map(crate::rlm_roster::passive_child_summary),
+            );
+            summaries.extend(
+                known
+                    .resident_only
+                    .iter()
+                    .map(|index| std::mem::take(&mut resident_summaries[*index])),
+            );
+            summaries
         } else {
             // Live residents of this supervisor.
             let residents = self.registry.list().await;
@@ -789,13 +756,6 @@ impl Supervisor {
             key,
         }))
     }
-}
-
-/// One resident's roster identity for the `list --all` merge.
-struct ResidentRoot {
-    session_file: PathBuf,
-    summary: Value,
-    active_session_id: Option<String>,
 }
 
 pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {

@@ -21,6 +21,10 @@ pub(crate) const SUMMARY_TIMEOUT_MS: u64 = 5_000;
 /// The route failure for a worker whose command channel is gone: the request did not
 /// leave the supervisor, so the route may retry it without risking a duplicate landing.
 pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
+/// The route failure for a read that outlives its budget: the request landed but the
+/// worker never answered inside it. The overview's busy-owner classification matches
+/// this same constant, so a wording change cannot strand a busy owner as broken.
+pub(crate) const WORKER_READ_TIMED_OUT: &str = "Session worker timed out";
 /// TS daemon-worker-client.ts:98 reports this when the worker socket closes.
 pub(crate) const WORKER_SOCKET_CLOSED: &str = "Daemon worker socket closed";
 
@@ -124,7 +128,7 @@ impl Supervisor {
                     Ok(Ok(permit)) => permit,
                     // Both remaining shapes are budget exhaustion: the wait elapsed, or the
                     // semaphore closed with its resident.
-                    Ok(Err(_)) | Err(_) => return Err(anyhow!("Session worker timed out")),
+                    Ok(Err(_)) | Err(_) => return Err(anyhow!(WORKER_READ_TIMED_OUT)),
                 }
             }
         };
@@ -175,7 +179,7 @@ impl Supervisor {
                         }
                         Err(_budget_elapsed) => {
                             resident.pending.lock().await.remove(&request_id);
-                            return Err(anyhow!("Session worker timed out"));
+                            return Err(anyhow!(WORKER_READ_TIMED_OUT));
                         }
                     }
                 }
@@ -195,7 +199,7 @@ impl Supervisor {
                 // A timed-out request's reply slot must not sit in the pending map forever
                 // (a wedged worker never answers).
                 resident.pending.lock().await.remove(&request_id);
-                Err(anyhow!("Session worker timed out"))
+                Err(anyhow!(WORKER_READ_TIMED_OUT))
             }
         }
     }
@@ -310,14 +314,14 @@ impl Supervisor {
             }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                bail!("Session worker timed out");
+                bail!(WORKER_READ_TIMED_OUT);
             }
             // Sleep until the route state moves or the deadline passes.
             match tokio::time::timeout_at(deadline, state.changed()).await {
                 Ok(Ok(())) => {}
                 // The resident (and its watch sender) was dropped entirely.
                 Ok(Err(_)) => bail!(WORKER_NOT_CONNECTED),
-                Err(_) => bail!("Session worker timed out"),
+                Err(_) => bail!(WORKER_READ_TIMED_OUT),
             }
         }
     }
@@ -601,6 +605,29 @@ impl Supervisor {
                         false,
                     );
                 }
+            }
+        }
+        // The scoped idle cancel must reach a worker that reads the
+        // scope: an older worker answers EVERY abort with the full
+        // queue-suspending abort, so forwarding would mutate true-idle
+        // queues. Refuse at the routing boundary — the serving worker's
+        // own `worker_auth` advertisement is the only gate that matters
+        // (the supervisor's own hello is not evidence about the adopted
+        // worker's binary); never fall back to the plain abort.
+        if let DaemonCommand::Abort { scope: Some(_), .. } = command {
+            if !resident
+                .background_cell_abort_capable
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        "this session's worker does not support scoped aborts",
+                        None,
+                    ))],
+                    false,
+                );
             }
         }
         if let DaemonCommand::Attach {

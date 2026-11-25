@@ -22,7 +22,7 @@ impl Inner {
                 let _ = tx.send(Err(anyhow!("{error}")));
             }
         }
-        self.reject_active_execution(&error);
+        self.reject_active_executions(&error);
         if lock(&self.shutdown_memo).is_some() || !lock(&self.guarded).lifecycle.is_running() {
             return;
         }
@@ -150,10 +150,12 @@ impl Inner {
         let result = Box::pin(self.enqueue_request(
             Request::Execute {
                 code: code.to_string(),
+                runtime_bootstrap: true,
             },
             ExecuteOptions {
                 internal: true,
                 protocol_repair: true,
+                runtime_bootstrap: true,
                 ..ExecuteOptions::default()
             },
             Some(REPAIR_STEP_TIMEOUT_MS),

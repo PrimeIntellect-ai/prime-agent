@@ -18,12 +18,23 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// Write one newline-delimited JSON frame to the client.
+/// Write one newline-delimited JSON frame to the client. A reply held past the plan's end finds
+/// the client gone; it is dropped, and the serve loop ends at its next read.
 pub fn write_json(writer: &mut UnixStream, value: &Value) {
     let mut line = serde_json::to_string(value).expect("serialize mock frame");
     line.push('\n');
-    writer.write_all(line.as_bytes()).expect("write mock frame");
-    writer.flush().expect("flush mock frame");
+    match writer
+        .write_all(line.as_bytes())
+        .and_then(|()| writer.flush())
+    {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+            ) => {}
+        Err(error) => panic!("write mock frame: {error}"),
+    }
 }
 
 /// Write one `session_event` frame for the attached session `s1`.

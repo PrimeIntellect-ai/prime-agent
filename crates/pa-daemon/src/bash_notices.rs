@@ -30,6 +30,30 @@ impl AgentSessionEngine {
             .expect("bash consumed sink lock") = Some(consumed);
     }
 
+    /// Route one auto-backgrounded cell's completion into the worker's kernel
+    /// notice seam (the same lane `bash.completed` rides: inbox when enabled,
+    /// else a steering row). The notice composes the cell's WHOLE settled
+    /// result inside `pa-core` — the one conversion and formatter the
+    /// foreground tool result shares — never a stdout-only digest.
+    pub(crate) fn admit_background_cell_outcome(
+        &self,
+        outcome: &pa_core::kernel::shared::BackgroundCellOutcome,
+    ) {
+        let Some(sink) = self
+            .kernel_notice_sink
+            .lock()
+            .expect("kernel notice sink lock")
+            .clone()
+        else {
+            return;
+        };
+        sink(
+            pa_core::session_engine::bash_notices::KernelNotice::background_cell_completion(
+                outcome,
+            ),
+        );
+    }
+
     /// The `bash.completed`/`bash.consumed`/`factory.progress` kernel host
     /// handlers. Registered only when both seams are wired — no worker queue
     /// leaves the requests honestly unavailable.

@@ -118,31 +118,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_basic_events() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.push_text("event: message_start\ndata: {\"a\":1}\n\n");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event.as_deref(), Some("message_start"));
-        assert_eq!(events[0].data, "{\"a\":1}");
-    }
-
-    #[test]
-    fn handles_crlf_and_multiline_data() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.push_text("data: line1\r\ndata: line2\r\n\r\n");
-        assert_eq!(events[0].data, "line1\nline2");
-        assert_eq!(events[0].event, None);
-    }
-
-    #[test]
-    fn skips_comments_and_unknown_fields() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.push_text(": keep-alive\ndata: x\nid: 3\n\n");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "x");
-    }
-
-    #[test]
     fn decodes_prime_inference_capture() {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -203,6 +178,13 @@ mod tests {
                 raw: vec!["data: final".into()],
             }]
         );
+
+        // Multi-line data joins with `\n`; comments and unknown fields are skipped.
+        let mut decoder = SseDecoder::new();
+        let events =
+            decoder.push_text("data: line1\r\ndata: line2\r\n\r\n: keep-alive\ndata: x\nid: 3\n\n");
+        let data: Vec<&str> = events.iter().map(|event| event.data.as_str()).collect();
+        assert_eq!(data, ["line1\nline2", "x"]);
     }
 
     #[test]

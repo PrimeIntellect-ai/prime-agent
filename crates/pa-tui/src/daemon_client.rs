@@ -518,6 +518,22 @@ impl DaemonClient {
         &self.protocol
     }
 
+    /// Whether the peer serving SESSION commands advertises `capability`:
+    /// the direct worker link's own hello when one is live (the worker is
+    /// the peer a session-plane command reaches), else the supervisor's
+    /// hello. A mixed-version daemon can adopt an older live worker, so a
+    /// session-scoped gate must consult the worker's own advertisement.
+    #[must_use]
+    pub fn supports_session_server_capability(&self, capability: &str) -> bool {
+        if let Some(link) = self.direct.live_link() {
+            return link
+                .server_capabilities
+                .iter()
+                .any(|entry| entry == capability);
+        }
+        self.supports_server_capability(capability)
+    }
+
     /// Whether the daemon advertised `capability` (TS
     /// `supportsServerCapability`): capability-gated commands fall back to
     /// their older shape without it.

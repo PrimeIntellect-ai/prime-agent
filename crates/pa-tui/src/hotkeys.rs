@@ -195,7 +195,8 @@ mod tests {
             guide.contains("| `Ctrl+Z` | Suspend to background |"),
             "{guide}"
         );
-        let alt = crate::keybindings::format_key_text("alt");
+        // `alt` renders with the host platform's label (macOS: Option, elsewhere: Alt).
+        let alt = crate::keybindings::host_alt_label();
         assert!(
             guide.contains(&format!(
                 "| `Shift+Ctrl+\u{2191}` / `Shift+{alt}+\u{2193}` | Select one paragraph |"
@@ -220,7 +221,8 @@ mod tests {
         );
         let kb = KeybindingsManager::with_user_bindings(cfg);
         let guide = hotkeys_guide(&kb);
-        let alt = crate::keybindings::format_key_text("alt");
+        // `alt` renders with the host platform's label (macOS: Option, elsewhere: Alt).
+        let alt = crate::keybindings::host_alt_label();
         assert!(
             guide.contains(&format!("| `Ctrl+{alt}+X` | Cycle overview")),
             "{guide}"
@@ -238,6 +240,8 @@ mod tests {
         let kb = KeybindingsManager::with_user_bindings(cfg);
         let guide = hotkeys_guide(&kb);
         assert!(guide.contains("| `` | Cycle overview"), "{guide}");
+        // The disabled binding's cell is the formatted `` `Ctrl+O` `` pair — a bare
+        // substring match would also trip on macOS `Ctrl+Option+...` cells.
         assert!(!guide.contains("`Ctrl+O`"), "{guide}");
     }
 }

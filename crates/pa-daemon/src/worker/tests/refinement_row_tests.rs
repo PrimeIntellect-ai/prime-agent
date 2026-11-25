@@ -49,10 +49,11 @@ async fn refinement_row_cannot_broadcast_into_a_replacement_session() {
         "display": true,
         "details": { "refinementId": "refine-test" },
     });
-    assert!(emit_refinement_row(
+    assert!(emit_refinement_row_for_generation(
         &worker.core,
         &worker.events,
         &original_id,
+        /*expected_generation*/ None,
         &message,
     ));
     let mut actual = Vec::new();
@@ -103,10 +104,11 @@ async fn refinement_row_cannot_broadcast_into_a_replacement_session() {
         core.store = Some(SessionFile::create("/tmp", None, 0));
         core.active_session_id = "replacement-active".to_string();
     }
-    assert!(!emit_refinement_row(
+    assert!(!emit_refinement_row_for_generation(
         &worker.core,
         &worker.events,
         &original_id,
+        /*expected_generation*/ None,
         &message,
     ));
     assert!(subscription.try_recv().is_err());

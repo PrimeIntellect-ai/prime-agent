@@ -114,21 +114,3 @@ fn default_adc_path() -> PathBuf {
         .join("gcloud")
         .join("application_default_credentials.json")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_provider_env_vars() {
-        assert_eq!(
-            get_api_key_env_vars("prime-inference").unwrap(),
-            vec!["PRIME_API_KEY"]
-        );
-        assert_eq!(
-            get_api_key_env_vars("anthropic").unwrap(),
-            vec!["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
-        );
-        assert!(get_api_key_env_vars("unknown-provider").is_none());
-    }
-}

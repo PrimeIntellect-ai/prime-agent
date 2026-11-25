@@ -87,6 +87,7 @@ fn manager_options(
             false,
         )),
         stderr_log_path: None,
+        pending_detached_completions: None,
     }
 }
 

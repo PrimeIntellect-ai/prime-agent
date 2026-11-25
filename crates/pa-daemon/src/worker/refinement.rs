@@ -1,4 +1,4 @@
-//! Background refinement completion, fenced to the session that scheduled it.
+//! Refinement completion, fenced to the session that scheduled it.
 
 use super::{
     emit_refinement_event_for_generation, emit_refinement_row_for_generation,
@@ -28,39 +28,51 @@ pub(super) fn completion_sink(
             let Some((session_id, generation)) = origin else {
                 return;
             };
-            match result {
-                Ok(committed) => {
-                    for row in committed.rows {
-                        if let Ok(value) =
-                            serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
-                        {
-                            emit_refinement_row_for_generation(
-                                &core,
-                                &events,
-                                &session_id,
-                                Some(&generation),
-                                &value,
-                            );
-                        }
-                    }
-                    emit_refinement_event_for_generation(
-                        &core,
-                        &events,
-                        &session_id,
-                        Some(&generation),
-                        refine_complete_event(&committed.result),
-                    );
-                }
-                Err(error) => {
-                    emit_refinement_event_for_generation(
-                        &core,
-                        &events,
-                        &session_id,
-                        Some(&generation),
-                        json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+            emit_refinement_outcome(&core, &events, &session_id, &generation, result);
+        });
+    })
+}
+
+/// Emit one finished refinement: its durable rows and `refine_complete`, or
+/// `refine_failed`.
+pub(super) fn emit_refinement_outcome(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    session_id: &str,
+    generation: &str,
+    result: anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+) {
+    match result {
+        Ok(committed) => {
+            for row in committed.rows {
+                if let Ok(value) =
+                    serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
+                {
+                    emit_refinement_row_for_generation(
+                        core,
+                        events,
+                        session_id,
+                        Some(generation),
+                        &value,
                     );
                 }
             }
-        });
-    })
+            emit_refinement_event_for_generation(
+                core,
+                events,
+                session_id,
+                Some(generation),
+                refine_complete_event(&committed.result),
+            );
+        }
+        Err(error) => {
+            emit_refinement_event_for_generation(
+                core,
+                events,
+                session_id,
+                Some(generation),
+                json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+            );
+        }
+    }
 }
