@@ -32,6 +32,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ._read_tracker import install as _install_read_tracker
 from .factory import schedule_activity
 from .bash import _kill_live_handles, _rehydrate_persistent_shells
 
@@ -1907,6 +1908,9 @@ def main() -> None:
     global _loop, _serve_task
     stdin_fd = _setup_fds()
     _start_owner_watchdog()
+    # Record read-mode opens so the edit skill can refuse editing a file this
+    # session never read, or one that changed on disk since it was read.
+    _install_read_tracker()
 
     # Alias the executing module so an in-cell `from rlm.repl import emit`
     # binds the live module, not a second copy.

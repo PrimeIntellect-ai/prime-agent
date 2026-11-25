@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 
 async def run(path: str, old_str: str, new_str: str) -> str:
@@ -23,11 +24,15 @@ async def run(path: str, old_str: str, new_str: str) -> str:
 
     Raises:
         FileNotFoundError: If ``path`` does not exist.
-        ValueError: If ``old_str`` is absent or matches more than once.
+        ValueError: If ``old_str`` is absent or matches more than once, or if the
+            file was not read in this session or changed on disk since that read
+            (the message asks for a re-read).
     """
     filepath = Path(path).expanduser()
     if not filepath.exists():
         raise FileNotFoundError(f"{path} not found")
+    # Before this function's own read: that read would otherwise satisfy the guard.
+    _require_read(path, filepath)
     content = filepath.read_text(encoding="utf-8")
     count = content.count(old_str)
     if count == 0:
@@ -40,9 +45,40 @@ async def run(path: str, old_str: str, new_str: str) -> str:
     match_index = content.index(old_str)
     start_line = content.count("\n", 0, match_index) + 1
     filepath.write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
+    _note_written(filepath)
     resolved_path = str(filepath.resolve())
     _emit_diff(resolved_path, old_str, new_str, start_line)
     return f"Edited {resolved_path}"
+
+
+def _read_tracker() -> Any:
+    """The kernel's read tracker, or None outside the kernel (e.g. plain pytest)."""
+    try:
+        from rlm import _read_tracker as tracker
+    except Exception:
+        return None
+    return tracker if tracker.is_installed() else None
+
+
+def _require_read(path: str, filepath: Path) -> None:
+    tracker = _read_tracker()
+    if tracker is None:
+        return
+    recorded = tracker.last_read(filepath)
+    if recorded is None:
+        raise ValueError(f"{path} was not read in this session; read it first, then edit")
+    stat = filepath.stat()
+    if recorded != (stat.st_mtime_ns, stat.st_size):
+        raise ValueError(
+            f"{path} changed on disk since this session read it; read it again, then edit"
+        )
+
+
+def _note_written(filepath: Path) -> None:
+    """Record the post-write state so a second edit needs no redundant re-read."""
+    tracker = _read_tracker()
+    if tracker is not None:
+        tracker.note_write(filepath)
 
 
 # Keep in sync with DIFF_DISPLAY_MIME in src/core/kernel/index.ts.

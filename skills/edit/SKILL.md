@@ -11,7 +11,7 @@ Call directly from the kernel:
 
     await edit(path="pkg/file.py", old_str=old, new_str=new)
 
-Use exact old/new strings. If the text contains triple double quotes, use triple single-quoted variables (`old = '''...'''`) or build `old`/`new` from inspected file slices. Returns a short confirmation; raises if `old_str` is missing or matches more than once (widen the snippet to make it unique).
+Use exact old/new strings. If the text contains triple double quotes, use triple single-quoted variables (`old = '''...'''`) or build `old`/`new` from inspected file slices. Returns a short confirmation; raises if `old_str` is missing or matches more than once (widen the snippet to make it unique). The file must have been read in this session, and it must not have changed on disk since that read; otherwise the edit is refused with a request to re-read.
 
 Or from a shell cell:
 

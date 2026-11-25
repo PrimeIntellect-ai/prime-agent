@@ -1,0 +1,1 @@
+- The `edit` skill now refuses to edit a file this kernel session never read, or one that changed on disk since it was read, and asks for a re-read instead of overwriting stale content.
