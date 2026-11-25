@@ -306,3 +306,97 @@ impl Supervisor {
         super::manager_for(agent_dir).ok()?.get(target)
     }
 }
+
+impl Supervisor {
+    /// The `/secrets` commands. Each answers with the current list; a
+    /// change also sends running and paused bots their new header rules
+    /// in the background.
+    pub(crate) async fn handle_bot_secrets(
+        self: &Arc<Self>,
+        command_id: &str,
+        command: &DaemonCommand,
+    ) -> DaemonResponse {
+        let type_name = crate::protocol::command_type_name(command);
+        let agent_dir = self.options.agent_dir.clone();
+        let changed = !matches!(command, DaemonCommand::ListBotSecrets { .. });
+        let result = match command {
+            DaemonCommand::ListBotSecrets { .. } => Ok(()),
+            DaemonCommand::SetBotSecretInject { name, inject, .. } => {
+                let (name, inject) = (name.clone(), *inject);
+                let dir = agent_dir.clone();
+                blocking(move || {
+                    pa_core::settings::SettingsManager::create(&dir, &dir)
+                        .set_bots_inject(&name, inject)
+                })
+                .await
+            }
+            DaemonCommand::AddBotSecret {
+                name,
+                host,
+                header,
+                scheme,
+                value,
+                ..
+            } => {
+                let new = super::secrets::NewSecret {
+                    name: name.clone(),
+                    host: host.clone(),
+                    header: header.clone(),
+                    scheme: scheme.clone(),
+                    value: value.clone(),
+                };
+                let dir = agent_dir.clone();
+                blocking(move || super::secrets::add(&dir, &new)).await
+            }
+            DaemonCommand::RemoveBotSecret { name, .. } => {
+                super::secrets::remove(&agent_dir, name).await
+            }
+            _ => Err(anyhow::anyhow!("invalid command")),
+        };
+        if let Err(error) = result {
+            return response_failure(Some(command_id), type_name, &format!("{error:#}"), None);
+        }
+        if changed && super::registry::BotRegistry::path_in(&agent_dir).exists() {
+            let dir = agent_dir.clone();
+            tokio::spawn(async move {
+                let Ok(manager) = super::manager_for(&dir) else {
+                    return;
+                };
+                for failure in manager.refresh_network_rules().await.1 {
+                    eprintln!("bot secrets: kept the old header rules for {failure}");
+                }
+            });
+        }
+        let dir = agent_dir.clone();
+        match blocking(move || {
+            Ok(super::secrets::view_rows(&super::secrets::view_plan(
+                &dir,
+                &owner_of(&dir),
+            )))
+        })
+        .await
+        {
+            Ok(rows) => response_success(Some(command_id), type_name, Some(rows)),
+            Err(error) => {
+                response_failure(Some(command_id), type_name, &format!("{error:#}"), None)
+            }
+        }
+    }
+}
+
+/// The Prime account fingerprint that names its GitHub secrets; empty
+/// without a Prime credential (the view then lists no GitHub secret names).
+fn owner_of(agent_dir: &Path) -> String {
+    super::prime_client(agent_dir)
+        .map(|(_, owner)| owner)
+        .unwrap_or_default()
+}
+
+/// Run blocking settings and auth storage work off the runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .context("the secrets task failed")?
+}

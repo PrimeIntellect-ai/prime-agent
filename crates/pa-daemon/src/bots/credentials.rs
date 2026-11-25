@@ -6,8 +6,8 @@
 //! auth header on the sandbox's HTTPS requests, outside the sandbox. The
 //! guest sends [`GUEST_API_KEY_PLACEHOLDER`], which the platform replaces.
 //!
-//! Subscription logins are injected by [`super::logins`]. A key or login
-//! with `bots.inject.<provider>` set to `false` stays home.
+//! Subscription logins are injected by [`super::logins`]. The plan in
+//! [`super::secrets`] decides which keys reach a bot.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -23,6 +23,8 @@ use pa_sandbox::transport::{ReqwestSandboxTransport, SandboxTransport};
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
 use sha2::Sha256;
 
+use super::secrets::{Candidate, Planned, SecretKind, SecretStatus};
+
 /// The API key the guest holds. The platform replaces the auth header it
 /// rides in with the real key, outside the sandbox.
 pub const GUEST_API_KEY_PLACEHOLDER: &str = "injected-by-platform";
@@ -31,9 +33,6 @@ pub const GUEST_API_KEY_PLACEHOLDER: &str = "injected-by-platform";
 /// terminates TLS for the rule hosts to set their headers, so the guest's
 /// clients must trust it.
 pub const PLATFORM_CA_PATH: &str = "/mnt/sandboxd/platform-ca.pem";
-
-/// The platform's limit on header-rule hosts per sandbox.
-pub(super) const MAX_RULE_HOSTS: usize = 32;
 
 /// A secret's scope: the platform origin, the team, and the secret name.
 type SecretScope = (String, Option<String>, String);
@@ -44,15 +43,6 @@ type SecretScope = (String, Option<String>, String);
 /// secret twice.
 static CONFIRMED: LazyLock<tokio::sync::Mutex<BTreeSet<SecretScope>>> =
     LazyLock::new(Default::default);
-
-/// One provider's injected key: the secret that holds it, and the rules
-/// that set it on the provider's API hosts.
-struct Injection {
-    provider: String,
-    secret: String,
-    key: String,
-    rules: BTreeMap<String, HeaderRule>,
-}
 
 /// The platform secret that holds `provider`'s key.
 fn secret_name(provider: &str) -> String {
@@ -163,22 +153,17 @@ fn provider_rules(provider: &str, secret: &str) -> BTreeMap<String, HeaderRule> 
     rules
 }
 
-/// The API keys the platform can inject (stored, or from the environment
-/// for `required`), `required` first, then prime-inference. OAuth logins
-/// and keys that `allowed` refuses are left out. A
-/// host an earlier provider holds (the platform never combines rules), or
-/// one past the platform's host limit, is left out.
-fn injections(
-    auth: &mut AuthStorage,
-    required: Option<&str>,
-    max_hosts: usize,
-    allowed: impl Fn(&str) -> bool,
-) -> Vec<Injection> {
+/// The stored API keys (or the environment key of `required`) as plan
+/// candidates: `required` first, then prime-inference. OAuth logins and
+/// keys with no injectable API host are left out.
+pub(super) fn api_key_candidates(auth: &mut AuthStorage, required: Option<&str>) -> Vec<Candidate> {
     let stored = auth.get_all();
     let mut providers = auth.list();
-    providers.retain(|provider| provider != super::github::GITHUB_AUTH_ID && allowed(provider));
-    // A key that `bots.inject` turns off stays home, even for the bot's own provider.
-    if let Some(required) = required.filter(|required| allowed(required)) {
+    providers.retain(|provider| {
+        provider != super::github::GITHUB_AUTH_ID
+            && !provider.starts_with(super::secrets::CUSTOM_AUTH_PREFIX)
+    });
+    if let Some(required) = required {
         if !providers.iter().any(|provider| provider == required) {
             providers.push(required.to_string());
         }
@@ -190,28 +175,25 @@ fn injections(
             provider.clone(),
         )
     });
-    let mut hosts = BTreeSet::new();
-    let mut injections = Vec::new();
+    let mut candidates = Vec::new();
     for provider in providers {
         let Some(key) = injectable_key(auth, &stored, &provider) else {
             continue;
         };
-        let fingerprint = key_fingerprint(&key);
-        let secret = format!("{}_{fingerprint}", secret_name(&provider));
-        let mut rules = provider_rules(&provider, &secret);
-        rules.retain(|host, _| hosts.len() < max_hosts && hosts.insert(host.clone()));
+        let secret = format!("{}_{}", secret_name(&provider), key_fingerprint(&key));
+        let rules = provider_rules(&provider, &secret);
         if rules.is_empty() {
-            eprintln!("bot credentials: no injectable API host for {provider}; its key stays home");
             continue;
         }
-        injections.push(Injection {
-            provider,
-            secret,
-            key,
+        candidates.push(Candidate {
+            name: provider,
+            kind: SecretKind::ApiKey,
+            secrets: vec![(secret, key)],
             rules,
+            stale: false,
         });
     }
-    injections
+    candidates
 }
 
 /// `provider`'s API key, unless its login is OAuth (a subscription or MCP
@@ -250,13 +232,14 @@ pub fn use_prime_inference_instead(
 }
 
 /// What [`provision`] confirmed: the rules for the confirmed secrets, the
-/// providers they belong to, and the providers whose secret could not be
-/// confirmed.
+/// API-key providers among them, the candidates whose secrets could not
+/// be confirmed, and the ones the user turned off.
 #[derive(Debug, Default)]
 pub struct Provisioned {
     rules: BTreeMap<String, HeaderRule>,
     providers: Vec<String>,
     failed: Vec<(String, anyhow::Error)>,
+    off: Vec<String>,
     /// The team the injected Prime Inference key bills to.
     prime_team: Option<PrimeTeamCredential>,
 }
@@ -280,8 +263,8 @@ impl Provisioned {
 
     /// The network rules for a guest running `provider`. Fails when that
     /// provider's secret could not be confirmed (the guest could not
-    /// authenticate a turn). Other providers' failures are logged and
-    /// only drop their own rules.
+    /// authenticate a turn). Other failures are logged and only drop
+    /// their own rules.
     ///
     /// # Errors
     ///
@@ -292,7 +275,7 @@ impl Provisioned {
             if failed == provider {
                 required = Some(error);
             } else {
-                eprintln!("bot credentials: the {failed} key is not injected: {error:#}");
+                eprintln!("bot credentials: {failed} is not injected: {error:#}");
             }
         }
         match required {
@@ -303,6 +286,10 @@ impl Provisioned {
                 "A bot cannot run on {provider}: its requests do not carry an API key \
                  the platform can inject. {}",
                 pass_another_model()
+            )),
+            None if self.off.iter().any(|off| off == provider) => Err(anyhow::anyhow!(
+                "A bot on {provider} needs the {provider} key, and /secrets has it off for \
+                 bots. Turn it on in /secrets or choose another provider."
             )),
             None if !self.providers.iter().any(|confirmed| confirmed == provider) => {
                 Err(anyhow::anyhow!(
@@ -324,31 +311,38 @@ fn pass_another_model() -> String {
     )
 }
 
-/// Make sure the platform holds a secret for each stored provider key it
-/// can inject: list first, create the missing, once per process.
-/// `provider` is the guest's provider when it uses an API key.
-/// `reserved_hosts` rule hosts are left for other rules. The
-/// secrets live in the client's team, the scope its sandboxes bill to,
-/// which a header rule's secret must share.
+/// Make sure the platform holds the secrets of every candidate the plan
+/// gives a bot (with GitHub when `github`; `provider` is its provider when
+/// it uses an API key), and
+/// collect their rules. `owner` names the GitHub secrets. The secrets live
+/// in the client's team, the scope its sandboxes bill to, which a header
+/// rule's secret must share. `reserved_hosts` rule hosts are left for the
+/// bot's logins.
 pub async fn provision(
     client: &PrimeSandboxClient<ReqwestSandboxTransport>,
     agent_dir: &Path,
+    owner: &str,
     provider: Option<&str>,
+    github: bool,
     reserved_hosts: usize,
 ) -> Provisioned {
-    // Reading the auth storage may run a `!command` key: keep it off the runtime.
-    let (agent_dir, required) = (agent_dir.to_path_buf(), provider.map(str::to_string));
-    let (injections, prime_team) = match tokio::task::spawn_blocking(move || {
-        let mut auth = AuthStorage::create(&agent_dir);
-        let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
+    // Reading the auth storage may run a `!command` key or the gh CLI:
+    // keep it off the runtime.
+    let (agent_dir, owner, required) = (
+        agent_dir.to_path_buf(),
+        owner.to_string(),
+        provider.map(str::to_string),
+    );
+    let (planned, prime_team) = match tokio::task::spawn_blocking(move || {
         (
-            injections(
-                &mut auth,
+            super::secrets::plan_for(
+                &agent_dir,
+                &owner,
                 required.as_deref(),
-                MAX_RULE_HOSTS.saturating_sub(reserved_hosts),
-                |provider| settings.get_bots_inject(provider),
+                github,
+                reserved_hosts,
             ),
-            effective_prime_team(&auth),
+            effective_prime_team(&AuthStorage::create(&agent_dir)),
         )
     })
     .await
@@ -356,7 +350,18 @@ pub async fn provision(
         Ok(read) => read,
         Err(error) => std::panic::resume_unwind(error.into_panic()),
     };
-    let mut provisioned = provision_injections(client, injections).await;
+    if github
+        && !planned
+            .iter()
+            .any(|entry| entry.candidate.kind == SecretKind::GitHub)
+    {
+        eprintln!(
+            "bot credentials: no GitHub token on this machine; the bot runs without GitHub \
+             access (run `{}`)",
+            super::github::SET_TOKEN_COMMAND
+        );
+    }
+    let mut provisioned = provision_planned(client, planned).await;
     provisioned.prime_team = prime_team;
     provisioned
 }
@@ -379,60 +384,88 @@ fn effective_prime_team(auth: &AuthStorage) -> Option<PrimeTeamCredential> {
     }
 }
 
-async fn provision_injections(
+async fn provision_planned(
     client: &PrimeSandboxClient<ReqwestSandboxTransport>,
-    injections: Vec<Injection>,
+    planned: Vec<Planned>,
 ) -> Provisioned {
     let mut confirmed = CONFIRMED.lock().await;
     let mut provisioned = Provisioned::default();
     let mut listed = None;
-    for injection in injections {
-        let scoped = (
-            client.base_url().to_string(),
-            client.team_id().map(str::to_string),
-            injection.secret.clone(),
-        );
-        let outcome = if confirmed.contains(&scoped) {
-            Ok(())
-        } else {
-            confirm_secret(client, &injection, &mut listed).await
-        };
+    for Planned { candidate, status } in planned {
+        if status == SecretStatus::Off {
+            provisioned.off.push(candidate.name);
+            continue;
+        }
+        if !status.injected() {
+            eprintln!(
+                "bot credentials: {} is not injected: {}",
+                candidate.name,
+                status.as_str()
+            );
+            continue;
+        }
+        let mut outcome = Ok(());
+        for (secret, value) in &candidate.secrets {
+            let scoped = (
+                client.base_url().to_string(),
+                client.team_id().map(str::to_string),
+                secret.clone(),
+            );
+            let description = format!("Prime Agent bot {} credential", candidate.name);
+            let result = if candidate.kind.stable_names() {
+                // Stable names: the value may have changed since the last check.
+                listed = None;
+                ensure_secret(client, secret, value, &description).await
+            } else if confirmed.contains(&scoped) {
+                Ok(())
+            } else {
+                confirm_secret(client, secret, value, &description, &mut listed).await
+            };
+            match result {
+                Ok(()) => {
+                    confirmed.insert(scoped);
+                }
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
         match outcome {
             Ok(()) => {
-                confirmed.insert(scoped);
-                provisioned.rules.extend(injection.rules);
-                provisioned.providers.push(injection.provider);
+                provisioned.rules.extend(candidate.rules);
+                if candidate.kind == SecretKind::ApiKey {
+                    provisioned.providers.push(candidate.name);
+                }
             }
-            Err(error) => provisioned.failed.push((injection.provider, error)),
+            Err(error) => provisioned.failed.push((candidate.name, error)),
         }
     }
     provisioned
 }
 
-/// Confirm one secret on the platform: listed (one list serves every
-/// provider), else created. A refused create lists again: another process
-/// may have created it meanwhile.
+/// Confirm one fingerprinted secret on the platform: listed (one list
+/// serves every candidate), else created. A refused create lists again:
+/// another process may have created it meanwhile.
 async fn confirm_secret(
     client: &PrimeSandboxClient<ReqwestSandboxTransport>,
-    injection: &Injection,
+    secret: &str,
+    value: &str,
+    description: &str,
     listed: &mut Option<BTreeSet<String>>,
 ) -> anyhow::Result<()> {
     let mut names = match listed.take() {
         Some(names) => names,
         None => secret_names(client).await?,
     };
-    if !names.contains(&injection.secret) {
-        let description = format!("Prime Agent bot {} credential", injection.provider);
-        if let Err(error) = client
-            .create_secret(&injection.secret, &injection.key, Some(&description))
-            .await
-        {
+    if !names.contains(secret) {
+        if let Err(error) = client.create_secret(secret, value, Some(description)).await {
             names = secret_names(client).await?;
-            if !names.contains(&injection.secret) {
+            if !names.contains(secret) {
                 return Err(error.into());
             }
         }
-        names.insert(injection.secret.clone());
+        names.insert(secret.to_string());
     }
     *listed = Some(names);
     Ok(())
@@ -570,31 +603,27 @@ mod tests {
     /// host (serper) are not.
     #[test]
     fn only_stored_api_keys_with_an_api_host_are_injected() {
-        let injected = injections(
-            &mut auth(&home_auth()),
-            Some(PRIME_INFERENCE_PROVIDER_ID),
-            MAX_RULE_HOSTS,
-            |_| true,
-        );
+        let injected =
+            api_key_candidates(&mut auth(&home_auth()), Some(PRIME_INFERENCE_PROVIDER_ID));
         let summary: Vec<(&str, &str)> = injected
             .iter()
-            .map(|injection| (injection.provider.as_str(), injection.key.as_str()))
+            .map(|candidate| (candidate.name.as_str(), candidate.secrets[0].1.as_str()))
             .collect();
         assert_eq!(
             summary,
             [("prime-inference", "sk-prime"), ("google", "sk-google")]
         );
         // A rotated key gets a new secret.
-        assert!(injected[1].secret.starts_with("PRIME_AGENT_GOOGLE_KEY_"));
-        let rotated = injections(
+        assert!(injected[1].secrets[0]
+            .0
+            .starts_with("PRIME_AGENT_GOOGLE_KEY_"));
+        let rotated = api_key_candidates(
             &mut auth(&json!({ "google": { "type": "api_key", "key": "sk-google-2" } })),
             Some("google"),
-            MAX_RULE_HOSTS,
-            |_| true,
         );
-        assert_ne!(rotated[0].secret, injected[1].secret);
+        assert_ne!(rotated[0].secrets[0].0, injected[1].secrets[0].0);
 
-        let keyed = injections(
+        let keyed = api_key_candidates(
             &mut auth(&json!({
                 "zai": { "type": "api_key", "key": "sk-zai" },
                 "openai": { "type": "api_key", "key": "sk-openai" },
@@ -602,23 +631,23 @@ mod tests {
                 "prime-inference": { "type": "api_key", "key": "" },
             })),
             Some(PRIME_INFERENCE_PROVIDER_ID),
-            MAX_RULE_HOSTS,
-            |_| true,
         );
         let providers: Vec<&str> = keyed
             .iter()
-            .map(|injection| injection.provider.as_str())
+            .map(|candidate| candidate.name.as_str())
             .collect();
         assert_eq!(providers, ["anthropic", "openai", "zai"]);
 
         // `bots.inject` off keeps a key home, even for the bot's own provider.
-        let off = injections(
-            &mut auth(&home_auth()),
-            Some("google"),
-            MAX_RULE_HOSTS,
+        let off = super::super::secrets::plan(
+            api_key_candidates(&mut auth(&home_auth()), Some("google")),
             |provider| provider != "google",
+            super::super::secrets::MAX_RULE_HOSTS,
         );
-        assert!(off.iter().all(|injection| injection.provider != "google"));
+        assert!(off
+            .iter()
+            .filter(|entry| entry.candidate.name == "google")
+            .all(|entry| entry.status == SecretStatus::Off));
     }
 
     /// A login that bots do not get falls back to Prime Inference when its

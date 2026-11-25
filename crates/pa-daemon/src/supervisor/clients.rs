@@ -794,6 +794,15 @@ impl Supervisor {
                 vec![response_line(&self.handle_list_bots(&command_id, command))],
                 false,
             ),
+            DaemonCommand::ListBotSecrets { .. }
+            | DaemonCommand::SetBotSecretInject { .. }
+            | DaemonCommand::AddBotSecret { .. }
+            | DaemonCommand::RemoveBotSecret { .. } => (
+                vec![response_line(
+                    &self.handle_bot_secrets(&command_id, command).await,
+                )],
+                false,
+            ),
             DaemonCommand::SendMessage { .. } => {
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let response = self

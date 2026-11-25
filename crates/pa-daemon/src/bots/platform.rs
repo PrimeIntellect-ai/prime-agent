@@ -16,9 +16,9 @@ use pa_sandbox::{
     MAX_PROCESS_INPUT_BYTES, NO_TIMEOUT_MINUTES,
 };
 
+use super::credentials;
 use super::exec_stream::{spawn_exec_halves, ExecStreamHalves, SandboxAuthSource};
 use super::BotStatus;
-use super::{credentials, github};
 
 /// The parts of a sandbox the manager reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +140,13 @@ pub trait BotPlatform: Send + Sync {
     /// Make the platform secret `name` hold `value` (create or update).
     fn put_secret<'a>(&'a self, name: &'a str, value: &'a str)
         -> BoxFuture<'a, PlatformResult<()>>;
+    /// Replace a running or paused sandbox's header rules (a paused one
+    /// gets them on resume).
+    fn set_network_rules<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        rules: &'a BTreeMap<String, HeaderRule>,
+    ) -> BoxFuture<'a, PlatformResult<()>>;
 }
 
 /// Map a sandbox status onto a bot status.
@@ -581,29 +588,22 @@ impl BotPlatform for PrimePlatform {
         reserved_hosts: usize,
     ) -> BoxFuture<'a, PlatformResult<GuestCredentials>> {
         async move {
-            let reserved = reserved_hosts + if github { github::RULE_HOSTS } else { 0 };
-            let provisioned =
-                credentials::provision(&self.client, &self.agent_dir, provider, reserved).await;
+            let provisioned = credentials::provision(
+                &self.client,
+                &self.agent_dir,
+                &self.owner,
+                provider,
+                github,
+                reserved_hosts,
+            )
+            .await;
             let auth_json = provisioned.guest_auth();
-            let mut network_rules = match provider {
+            let network_rules = match provider {
                 Some(provider) => provisioned
                     .rules_for(provider)
                     .map_err(|error| credential_error(&error))?,
                 None => provisioned.rules(),
             };
-            if github {
-                match github::provision(&self.client, &self.agent_dir, &self.owner)
-                    .await
-                    .map_err(|error| credential_error(&error))?
-                {
-                    Some(rules) => network_rules.extend(rules),
-                    None => eprintln!(
-                        "bot credentials: no GitHub token on this machine; the bot runs without \
-                         GitHub access (run `{}`)",
-                        github::SET_TOKEN_COMMAND
-                    ),
-                }
-            }
             Ok(GuestCredentials {
                 network_rules,
                 auth_json,
@@ -627,6 +627,20 @@ impl BotPlatform for PrimePlatform {
             credentials::ensure_secret(&self.client, name, value, "Prime Agent bot login")
                 .await
                 .map_err(|error| credential_error(&error))
+        }
+        .boxed()
+    }
+
+    fn set_network_rules<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        rules: &'a BTreeMap<String, HeaderRule>,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            self.client
+                .set_network_rules(sandbox_id, rules)
+                .await
+                .map_err(|error| map_error(&error))
         }
         .boxed()
     }

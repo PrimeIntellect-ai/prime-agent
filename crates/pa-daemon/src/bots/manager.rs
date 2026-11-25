@@ -306,6 +306,42 @@ impl BotManager {
         });
     }
 
+    /// Send every running or paused bot its header rules again, from the
+    /// current secrets plan. The platform replaces each sandbox's whole
+    /// policy; a paused sandbox gets it on resume. Returns the bots
+    /// updated and one message per bot that kept its old rules.
+    pub async fn refresh_network_rules(&self) -> (usize, Vec<String>) {
+        let mut updated = 0;
+        let mut failures = Vec::new();
+        for bot in self.list() {
+            let bot_lock = self.lock_for(&bot.bot_id);
+            let _held = bot_lock.lock().await;
+            let Ok(record) = self.record(&bot.bot_id) else {
+                continue;
+            };
+            let Some(sandbox_id) = record
+                .sandbox_id
+                .as_deref()
+                .filter(|_| matches!(record.status, BotStatus::Running | BotStatus::Paused))
+            else {
+                continue;
+            };
+            let outcome = match self.guest_credentials(&record, record.github).await {
+                Ok((credentials, _)) => self
+                    .platform
+                    .set_network_rules(sandbox_id, &credentials.network_rules)
+                    .await
+                    .map_err(anyhow::Error::from),
+                Err(error) => Err(error),
+            };
+            match outcome {
+                Ok(()) => updated += 1,
+                Err(error) => failures.push(format!("{}: {error:#}", record.name)),
+            }
+        }
+        (updated, failures)
+    }
+
     /// Record a settled guest turn.
     ///
     /// # Errors
@@ -896,7 +932,7 @@ impl BotManager {
         let mut left_out = Vec::new();
         for injection in logins.mcp {
             let fits = credentials.network_rules.len() + injection.rules.len()
-                <= super::credentials::MAX_RULE_HOSTS
+                <= super::secrets::MAX_RULE_HOSTS
                 && injection
                     .rules
                     .keys()
@@ -913,7 +949,7 @@ impl BotManager {
             eprintln!(
                 "bot credentials: past the platform's limit of {} rule hosts (or on a host \
                  already in use); these MCP logins are not injected: {}",
-                super::credentials::MAX_RULE_HOSTS,
+                super::secrets::MAX_RULE_HOSTS,
                 left_out.join(", ")
             );
         }

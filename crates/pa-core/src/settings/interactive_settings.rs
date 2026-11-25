@@ -482,6 +482,58 @@ impl SettingsManager {
         Ok(())
     }
 
+    /// `bots.secrets`: the custom bot secrets that parse.
+    #[must_use]
+    pub fn get_bots_secrets(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::settings::BotSecretDef> {
+        self.global_raw()
+            .and_then(|document| document.get("bots")?.get("secrets")?.as_object().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, def)| Some((name, serde_json::from_value(def).ok()?)))
+            .collect()
+    }
+
+    /// Add, replace, or (with `None`) remove the custom bot secret `name`
+    /// in `bots.secrets`, and drop its `bots.inject` entry on removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_bots_secret(
+        &mut self,
+        name: &str,
+        def: Option<&crate::settings::BotSecretDef>,
+    ) -> Result<()> {
+        let bots = self.global_mut().bots.get_or_insert_with(Default::default);
+        let mut map = match bots.secrets.take() {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        let mut fields = vec!["bots.secrets"];
+        if let Some(def) = def {
+            map.insert(name.to_string(), serde_json::to_value(def)?);
+        } else {
+            map.remove(name);
+            if bots
+                .inject
+                .as_mut()
+                .is_some_and(|inject| inject.remove(name).is_some())
+            {
+                fields.push("bots.inject");
+            }
+        }
+        bots.secrets = (!map.is_empty()).then_some(serde_json::Value::Object(map));
+        self.save_global_scope(&fields)?;
+        if let Some(message) = self.global_load_error() {
+            return Err(anyhow!(
+                "bots.secrets not saved: the global settings file could not be read: {message}"
+            ));
+        }
+        Ok(())
+    }
+
     /// `bots.enabled` setter: persists the opt-in gate to the global
     /// scope (the same shared settings key the daemon's
     /// sandbox-admission gate reads).

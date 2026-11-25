@@ -89,6 +89,8 @@ pub enum Method {
     Post,
     /// `PATCH`.
     Patch,
+    /// `PUT`.
+    Put,
     /// `DELETE`.
     Delete,
 }
@@ -101,6 +103,7 @@ impl Method {
             Self::Get => "GET",
             Self::Post => "POST",
             Self::Patch => "PATCH",
+            Self::Put => "PUT",
             Self::Delete => "DELETE",
         }
     }

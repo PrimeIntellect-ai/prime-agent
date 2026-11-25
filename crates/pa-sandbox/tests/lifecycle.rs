@@ -297,6 +297,38 @@ async fn pause_returns_the_checkpoint_and_resume_answers_the_record() {
     );
 }
 
+#[tokio::test]
+async fn a_network_rules_update_replaces_the_whole_policy() {
+    let transport = ScriptedTransport::new(vec![ok(json!({ "generation": 2, "applied": false }))]);
+    let client = test_client(&transport);
+    let rules = std::collections::BTreeMap::from([(
+        "api.example.com".to_string(),
+        pa_sandbox::HeaderRule {
+            headers: std::collections::BTreeMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${prime.secrets.EXAMPLE}".to_string(),
+            )]),
+        },
+    )]);
+    client.set_network_rules("sb-1", &rules).await.unwrap();
+
+    let recorded = transport.recorded();
+    assert_eq!(recorded[0].method.as_str(), "PUT");
+    assert_eq!(
+        recorded[0].url,
+        "https://api.test/api/v1/sandbox/sb-1/egress-policy"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(recorded[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "denylist": [],
+            "rules": { "api.example.com": { "headers": { "Authorization": "Bearer ${prime.secrets.EXAMPLE}" } } },
+        })
+    );
+}
+
 fn checkpoint_wire(state: &str) -> serde_json::Value {
     json!({
         "id": "ckpt-1",

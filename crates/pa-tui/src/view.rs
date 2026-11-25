@@ -61,6 +61,8 @@ pub(crate) enum Overlay {
     ChoicePicker(crate::choice_picker::ChoicePicker),
     /// The `/mcp` connections view.
     Mcp(crate::mcp_view::McpView),
+    /// The `/secrets` view.
+    Secrets(crate::secrets_view::SecretsView),
     /// The factory page: the activity dock's factory group's destination.
     Factory(crate::factory_view::FactoryView),
     /// The `/bots` page.
@@ -278,6 +280,7 @@ impl AgentView {
                 Overlay::Onboarding(_)
                 | Overlay::Factory(_)
                 | Overlay::Bots(_)
+                | Overlay::Secrets(_)
                 | Overlay::Heartbeats(_)
                 | Overlay::Bash(_)
                 | Overlay::Goal(_)

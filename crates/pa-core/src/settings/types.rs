@@ -283,6 +283,8 @@ pub struct FactorySettings {
 /// git author the bots commit as. `bots.inject.<name>` (default on)
 /// turns off one credential's injection into new bots; `<name>` is its
 /// auth storage id (a provider id or `mcp:<server>`).
+/// `bots.secrets` holds the custom secrets' hosts and headers (their
+/// values stay in the auth storage).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotsSettings {
@@ -292,6 +294,19 @@ pub struct BotsSettings {
     /// the whole settings file.
     pub git_identity: Option<serde_json::Value>,
     pub inject: Option<std::collections::BTreeMap<String, bool>>,
+    /// Custom secret name to [`BotSecretDef`], raw so a malformed value
+    /// never fails the whole settings file.
+    pub secrets: Option<serde_json::Value>,
+}
+
+/// One custom bot secret: the platform sets
+/// `<header>: [<scheme> ]<value>` on the bots' HTTPS requests to `host`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotSecretDef {
+    pub host: String,
+    pub header: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
 }
 
 /// `bots.gitIdentity`: the git author name and email of every bot.

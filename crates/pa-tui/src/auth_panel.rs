@@ -117,6 +117,10 @@ pub enum AuthPanelRequest {
     },
     /// A `/mcp` view auth command settled: its status line applies.
     McpSettled { note: String },
+    /// The `/secrets` add flow settled: `None` when a prompt was cancelled.
+    BotSecretSettled {
+        secret: Option<crate::secrets_view::NewBotSecret>,
+    },
     /// The `/traces` login settled: the login's outcome applies. `gen` is matched against the
     /// run loop's counter so a superseded run's late settle cannot clear a newer login.
     TracesSettled {

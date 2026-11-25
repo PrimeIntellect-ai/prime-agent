@@ -439,6 +439,19 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         r#"{"type": "pull_bot_files", "botId": "b", "ownerSessionId": "o", "path": "out", "dest": "/tmp/d"}"#,
     ),
     ("list_bots", r#"{"type": "list_bots"}"#),
+    ("list_bot_secrets", r#"{"type": "list_bot_secrets"}"#),
+    (
+        "set_bot_secret_inject",
+        r#"{"type": "set_bot_secret_inject", "name": "n", "inject": false}"#,
+    ),
+    (
+        "add_bot_secret",
+        r#"{"type": "add_bot_secret", "name": "n", "host": "h", "header": "x", "value": "v"}"#,
+    ),
+    (
+        "remove_bot_secret",
+        r#"{"type": "remove_bot_secret", "name": "n"}"#,
+    ),
 ];
 
 #[test]

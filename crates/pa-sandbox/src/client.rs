@@ -7,19 +7,21 @@
 //! - `GET    {base}/api/v1/sandbox/{id}` — fetch;
 //! - `GET    {base}/api/v1/sandbox?labels=..` — list by label, all pages;
 //! - `POST   {base}/api/v1/sandbox/{id}/pause|resume` — pause and resume;
+//! - `PUT    {base}/api/v1/sandbox/{id}/egress-policy` — replace the
+//!   network policy (header rules included);
 //! - `DELETE {base}/api/v1/sandbox/{id}` — delete; a 404 is success;
 //! - `{base}/api/v1/sandbox/{id}/checkpoints` and
 //!   `{base}/api/v1/sandbox/checkpoints/{id}` — filesystem checkpoints.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::error::SandboxError;
 use crate::record::{parse_checkpoint, parse_paused, parse_sandbox, parse_sandbox_page};
 use crate::transport::{ReqwestSandboxTransport, SandboxTransport, TransportRequest};
 use crate::types::{
-    Method, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxStatus, VmCreateRequest, WaitOptions,
-    DEFAULT_REQUEST_TIMEOUT, PRIME_SANDBOX_CREATE_MAX_ATTEMPTS,
+    HeaderRule, Method, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxStatus, VmCreateRequest,
+    WaitOptions, DEFAULT_REQUEST_TIMEOUT, PRIME_SANDBOX_CREATE_MAX_ATTEMPTS,
 };
 use crate::wire::{
     assert_sandbox_id, build_create_body, normalize_base_url, validate_create_request,
@@ -301,6 +303,40 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             self.platform_secrets(),
             "Sandbox resume",
             parse_sandbox,
+        )
+        .await
+    }
+
+    /// Replace the egress policy of a running or paused VM sandbox: no
+    /// allow or deny list (all egress allowed) and `rules` as the full set
+    /// of header rules. The platform replaces the whole policy; a paused
+    /// sandbox gets it on resume.
+    ///
+    /// # Errors
+    ///
+    /// Returns a status-mapped error for non-2xx responses.
+    pub async fn set_network_rules(
+        &self,
+        sandbox_id: &str,
+        rules: &BTreeMap<String, HeaderRule>,
+    ) -> Result<(), SandboxError> {
+        assert_sandbox_id(sandbox_id)?;
+        // An empty denylist is the platform's "allow all".
+        let body = serde_json::json!({ "denylist": [], "rules": rules })
+            .to_string()
+            .into_bytes();
+        self.request_json(
+            Method::Put,
+            format!(
+                "{}/api/v1/sandbox/{sandbox_id}/egress-policy",
+                self.base_url
+            ),
+            self.platform_headers(),
+            Some(body),
+            self.request_timeout,
+            self.platform_secrets(),
+            "Sandbox egress policy update",
+            |_| Ok(()),
         )
         .await
     }

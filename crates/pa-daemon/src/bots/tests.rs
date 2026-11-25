@@ -54,6 +54,8 @@ pub(crate) struct FakeState {
     /// Platform secrets by name, and how many puts ran.
     pub secrets: BTreeMap<String, String>,
     pub secret_puts: usize,
+    /// Each network rules update: the sandbox and its rule hosts.
+    pub rule_updates: Vec<(String, Vec<String>)>,
 }
 
 /// An in-memory Prime account: sandboxes are running as soon as they exist.
@@ -376,6 +378,20 @@ impl BotPlatform for FakePlatform {
             let mut state = self.state();
             state.secret_puts += 1;
             state.secrets.insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn set_network_rules<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        rules: &'a BTreeMap<String, pa_sandbox::HeaderRule>,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        async move {
+            self.state()
+                .rule_updates
+                .push((sandbox_id.to_string(), rules.keys().cloned().collect()));
             Ok(())
         }
         .boxed()
@@ -936,6 +952,13 @@ impl BotPlatform for ThrowawaySecret {
     ) -> BoxFuture<'a, PlatformResult<()>> {
         self.inner.put_secret(name, value)
     }
+    fn set_network_rules<'a>(
+        &'a self,
+        sandbox_id: &'a str,
+        rules: &'a BTreeMap<String, pa_sandbox::HeaderRule>,
+    ) -> BoxFuture<'a, PlatformResult<()>> {
+        self.inner.set_network_rules(sandbox_id, rules)
+    }
 }
 
 /// Ask a live bot for `pong` until it answers (`want_answer`) or a turn
@@ -1129,4 +1152,25 @@ async fn live_spawn_reply_pause_resume_delete() {
     assert!(left.iter().all(|sandbox| sandbox.status.is_terminal()));
     let checkpoint = paused.checkpoint_id.as_deref().unwrap();
     assert!(!platform.checkpoint_durable(checkpoint).await.unwrap());
+}
+#[tokio::test]
+async fn a_rules_refresh_reaches_running_and_paused_bots_only() {
+    let (_dir, platform, manager) = setup();
+    let running = manager.spawn(&spec("bot-a")).await.unwrap();
+    let paused = manager.spawn(&spec("bot-b")).await.unwrap();
+    manager.pause("bot-b").await.unwrap();
+    manager.spawn(&spec("bot-c")).await.unwrap();
+    manager.delete("bot-c").await.unwrap();
+
+    assert_eq!(manager.refresh_network_rules().await, (2, Vec::new()));
+    let mut updated: Vec<String> = platform
+        .state()
+        .rule_updates
+        .iter()
+        .map(|(sandbox, _)| sandbox.clone())
+        .collect();
+    updated.sort();
+    let mut expected = vec![running.sandbox_id.unwrap(), paused.sandbox_id.unwrap()];
+    expected.sort();
+    assert_eq!(updated, expected);
 }

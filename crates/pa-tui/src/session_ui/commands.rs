@@ -596,6 +596,7 @@ impl SessionUi {
             // The auth flows run in the client process; other management subcommands
             // surface through the `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
+            "secrets" => self.handle_secrets_command(resolved, view).await?,
             // `/plugins [search]` opens the `/mcp` view (this client folds the
             // catalog into it); an argument prefills its search field.
             "plugins" => {

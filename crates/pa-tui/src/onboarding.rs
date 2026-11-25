@@ -260,6 +260,7 @@ impl OnboardingScreen {
             }
             AuthPanelRequest::ProviderSettled { .. }
             | AuthPanelRequest::McpSettled { .. }
+            | AuthPanelRequest::BotSecretSettled { .. }
             | AuthPanelRequest::TracesSettled { .. } => {}
         }
     }
