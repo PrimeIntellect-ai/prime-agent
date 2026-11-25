@@ -1,0 +1,1 @@
+- Fixed a `/secrets` change waiting up to 75 seconds behind an older change's retries: a retry now waits without blocking newer changes, and a newer change ends the older retries.
