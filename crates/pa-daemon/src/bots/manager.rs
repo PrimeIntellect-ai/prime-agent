@@ -245,11 +245,19 @@ impl BotManager {
             .flatten()
     }
 
-    /// Refresh the bot's logins that are due, and update their secrets.
+    /// Refresh the bot's logins that are due, update their secrets, and
+    /// start the refresher for a running bot (also after a daemon restart,
+    /// when the follow of a running bot comes here first).
     pub async fn refresh_logins(&self, record: &BotRecord) {
+        if record.logins.is_empty() {
+            return;
+        }
         self.logins
             .tick(&record.logins.iter().cloned().collect())
             .await;
+        if record.status == BotStatus::Running {
+            self.watch_logins();
+        }
     }
 
     /// Start the login refresher unless it runs. It refreshes the logins
@@ -533,11 +541,8 @@ impl BotManager {
         record.sandbox_id = Some(sandbox.id.clone());
         record.status = BotStatus::Running;
         self.save(record.clone())?;
-        if !record.logins.is_empty() {
-            // A resumed bot gets a fresh token before its first request.
-            self.refresh_logins(&record).await;
-            self.watch_logins();
-        }
+        // A resumed bot gets a fresh token before its first request.
+        self.refresh_logins(&record).await;
         self.install_and_bootstrap(&mut record, deadline).await?;
         self.save(record.clone())?;
         Ok(record)

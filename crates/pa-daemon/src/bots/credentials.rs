@@ -177,7 +177,8 @@ fn injections(
     let stored = auth.get_all();
     let mut providers = auth.list();
     providers.retain(|provider| provider != super::github::GITHUB_AUTH_ID && allowed(provider));
-    if let Some(required) = required {
+    // A key that `bots.inject` turns off stays home, even for the bot's own provider.
+    if let Some(required) = required.filter(|required| allowed(required)) {
         if !providers.iter().any(|provider| provider == required) {
             providers.push(required.to_string());
         }
@@ -609,6 +610,15 @@ mod tests {
             .map(|injection| injection.provider.as_str())
             .collect();
         assert_eq!(providers, ["anthropic", "openai", "zai"]);
+
+        // `bots.inject` off keeps a key home, even for the bot's own provider.
+        let off = injections(
+            &mut auth(&home_auth()),
+            Some("google"),
+            MAX_RULE_HOSTS,
+            |provider| provider != "google",
+        );
+        assert!(off.iter().all(|injection| injection.provider != "google"));
     }
 
     /// A login that bots do not get falls back to Prime Inference when its
