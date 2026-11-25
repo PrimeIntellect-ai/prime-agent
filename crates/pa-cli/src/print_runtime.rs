@@ -129,6 +129,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
 fn run_a2a_mode(options: &RunOptions) -> Result<i32, String> {
     if options.session.fork.is_some()
         || options.session.resume.is_some()
+        || options.session.resume_bare
         || options.session.continue_recent
     {
         return Err(

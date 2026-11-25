@@ -27,8 +27,9 @@ struct TaskEntry {
     reply_message_id: String,
     /// The final reply: the turn's assistant messages, blank-line joined.
     reply: String,
-    /// Whether a live chunk opened the artifact on the streams.
-    streamed: bool,
+    /// The artifact text the streams received so far (the live chunks);
+    /// a live task's snapshot carries it, so later chunks append to it.
+    streamed: String,
     /// An assistant message started after streamed text: the next chunk
     /// opens with a blank line.
     separator: bool,
@@ -81,10 +82,17 @@ impl TaskEntry {
             id: id.to_string(),
             context_id: self.context_id.clone(),
             status: self.status(),
-            artifacts: if artifacts && !self.reply.is_empty() {
-                vec![Self::artifact(id, self.reply.clone())]
-            } else {
-                Vec::new()
+            artifacts: {
+                let text = if self.state.is_terminal() {
+                    &self.reply
+                } else {
+                    &self.streamed
+                };
+                if artifacts && !text.is_empty() {
+                    vec![Self::artifact(id, text.clone())]
+                } else {
+                    Vec::new()
+                }
             },
             history,
         }
@@ -126,7 +134,7 @@ impl Tasks {
                 user_message: message,
                 reply_message_id: uuid::Uuid::new_v4().to_string(),
                 reply: String::new(),
-                streamed: false,
+                streamed: String::new(),
                 separator: false,
                 status_message: None,
                 updated_at: crate::util::now_ms(),
@@ -164,7 +172,7 @@ impl Tasks {
     /// An assistant message started.
     pub fn assistant_message_start(&mut self, id: &str) {
         if let Some(entry) = self.live(id) {
-            entry.separator = entry.streamed;
+            entry.separator = !entry.streamed.is_empty();
         }
     }
 
@@ -178,7 +186,8 @@ impl Tasks {
         } else {
             delta.to_string()
         };
-        let append = std::mem::replace(&mut entry.streamed, true);
+        let append = !entry.streamed.is_empty();
+        entry.streamed.push_str(&text);
         entry.publish(StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
             task_id: id.to_string(),
             context_id: entry.context_id.clone(),
@@ -227,6 +236,7 @@ impl Tasks {
         });
         entry.publish_status(id, state);
         entry.stream = None;
+        entry.streamed = String::new();
         entry.terminal.send_replace(true);
         let snapshot = entry.snapshot(id, None, true);
         self.terminal_order.push_back(id.to_string());
@@ -372,6 +382,9 @@ mod tests {
         tasks.assistant_message_start("t");
         tasks.text_delta("t", "Hel");
         tasks.text_delta("t", "lo");
+        // A mid-stream subscriber's snapshot holds what the chunks built.
+        let (mid, _) = tasks.subscribe("t", None).unwrap();
+        assert_eq!(mid.artifacts[0].parts[0].text.as_deref(), Some("Hello"));
         tasks.assistant_message_end("t", "Hello");
         tasks.assistant_message_start("t");
         tasks.text_delta("t", "Done");

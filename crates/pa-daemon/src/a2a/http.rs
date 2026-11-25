@@ -222,16 +222,24 @@ fn to_json(frame: &StreamResponse) -> Value {
 }
 
 /// Whether a `Host` header names this machine: a loopback name or address,
-/// with any port.
+/// optionally with a numeric port.
 fn is_loopback_host(host: &str) -> bool {
-    let name = match host.strip_prefix('[') {
-        Some(rest) => rest.split_once(']').map_or("", |(name, _)| name),
-        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    let (name, port) = match host.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((name, "")) => (name, None),
+            Some((name, tail)) => (name, Some(tail.strip_prefix(':').unwrap_or(tail))),
+            None => return false,
+        },
+        None => match host.rsplit_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        },
     };
-    name.eq_ignore_ascii_case("localhost")
-        || name
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    port.is_none_or(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        && (name.eq_ignore_ascii_case("localhost")
+            || name
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()))
 }
 
 fn digest(value: &str) -> [u8; 32] {
@@ -335,6 +343,9 @@ mod tests {
             "192.168.1.4:7800",
             "0.0.0.0:7800",
             "[::2]:1",
+            "[::1]@evil.example",
+            "localhost:80@evil.example",
+            "[::1]x",
         ] {
             assert!(!is_loopback_host(host), "{host}");
         }

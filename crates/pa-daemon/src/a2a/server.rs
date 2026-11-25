@@ -529,10 +529,18 @@ impl Server {
         stop.await.ok().flatten().ok_or(A2aError::TaskNotCancelable)
     }
 
-    /// Stop every live task (the server is exiting).
+    /// Stop every live task and wait until each settled (the server is
+    /// exiting); a cancel already in flight finishes its own stop.
     pub(crate) async fn cancel_all(self: &Arc<Self>) {
         let live = self.state().tasks.live_ids();
-        futures::future::join_all(live.iter().map(|task_id| self.cancel_task(task_id))).await;
+        futures::future::join_all(live.iter().map(|task_id| async move {
+            let terminal = self.state().tasks.terminal_watch(task_id);
+            let _ = self.cancel_task(task_id).await;
+            if let Some(mut terminal) = terminal {
+                let _ = terminal.wait_for(|terminal| *terminal).await;
+            }
+        }))
+        .await;
     }
 }
 

@@ -173,20 +173,29 @@ impl A2a {
         self.rpc("SendMessage", &send_params(text, context, configuration))
     }
 
-    /// Poll `GetTask` until `done` holds (the observable readiness).
-    fn wait_task(&self, id: &str, done: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + Duration::from_mins(2);
-        loop {
-            let task = self.rpc("GetTask", &json!({ "id": id }))["result"].clone();
-            if done(&task) {
-                return task;
+    /// Follow the task's `SubscribeToTask` stream until a frame satisfies
+    /// `until` (the observable readiness); a task that already finished
+    /// answers an error instead of a stream. Returns the task's snapshot.
+    fn wait_task(&self, id: &str, until: impl Fn(&Value) -> bool) -> Value {
+        let mut stream = TcpStream::connect(&self.addr).unwrap();
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "SubscribeToTask", "params": { "id": id } })
+            .to_string();
+        write!(
+            stream,
+            "POST / HTTP/1.0\r\nHost: {}\r\nAuthorization: Bearer {}\r\nA2A-Version: 1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            self.addr,
+            self.token,
+            body.len()
+        )
+        .unwrap();
+        for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            if let Some(frame) = line.strip_prefix("data: ") {
+                if until(&serde_json::from_str::<Value>(frame).unwrap()["result"]) {
+                    break;
+                }
             }
-            assert!(
-                Instant::now() < deadline,
-                "the task never got there: {task}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
         }
+        self.rpc("GetTask", &json!({ "id": id }))["result"].clone()
     }
 
     fn daemon(&self, command: &Value) -> Value {
@@ -233,6 +242,14 @@ fn send_params(text: &str, context: Option<&str>, configuration: &Value) -> Valu
         message["contextId"] = json!(context);
     }
     json!({ "message": message, "configuration": configuration })
+}
+
+/// The task state a stream frame reports, if any.
+fn frame_state(frame: &Value) -> &str {
+    frame["task"]["status"]["state"]
+        .as_str()
+        .or_else(|| frame["statusUpdate"]["status"]["state"].as_str())
+        .unwrap_or_default()
 }
 
 fn state(task: &Value) -> &str {
@@ -459,7 +476,7 @@ fn subscribe_reconnects_to_a_running_task() {
     let task =
         server.send("go", None, &json!({ "returnImmediately": true }))["result"]["task"].clone();
     let id = task["id"].as_str().unwrap();
-    server.wait_task(id, |task| state(task) == "TASK_STATE_WORKING");
+    server.wait_task(id, |frame| frame_state(frame) == "TASK_STATE_WORKING");
     let frames = server.sse("SubscribeToTask", &json!({ "id": id }));
     assert_eq!(frames[0]["task"]["id"], id);
     assert_eq!(state(&frames[0]["task"]), "TASK_STATE_WORKING");
@@ -494,20 +511,22 @@ fn contexts_run_in_parallel_and_tasks_in_one_context_in_order() {
         .as_str()
         .unwrap()
         .to_string();
-    server.wait_task(&first, |task| state(task) == "TASK_STATE_WORKING");
-    server.wait_task(&other, |task| state(task) == "TASK_STATE_WORKING");
+    server.wait_task(&first, |frame| frame_state(frame) == "TASK_STATE_WORKING");
+    server.wait_task(&other, |frame| frame_state(frame) == "TASK_STATE_WORKING");
     assert_eq!(
         state(&server.rpc("GetTask", &json!({ "id": queued }))["result"]),
         "TASK_STATE_SUBMITTED"
     );
-    let a = server.wait_task(&first, |task| state(task) == "TASK_STATE_COMPLETED");
-    let b = server.wait_task(&other, |task| state(task) == "TASK_STATE_COMPLETED");
+    let a = server.wait_task(&first, |frame| frame_state(frame) == "TASK_STATE_COMPLETED");
+    let b = server.wait_task(&other, |frame| frame_state(frame) == "TASK_STATE_COMPLETED");
     assert_eq!(
         artifact_text(&a),
         artifact_text(&b),
         "each context has its own session"
     );
-    let second = server.wait_task(&queued, |task| state(task) == "TASK_STATE_COMPLETED");
+    let second = server.wait_task(&queued, |frame| {
+        frame_state(frame) == "TASK_STATE_COMPLETED"
+    });
     assert_eq!(artifact_text(&second), "next");
     assert_eq!(server.sessions().len(), 2, "one daemon session per context");
 }
@@ -536,39 +555,46 @@ fn cancel_stops_the_turn_and_the_child_agents() {
         ["task"]
         .clone();
     let id = task["id"].as_str().unwrap();
-    let deadline = Instant::now() + Duration::from_mins(2);
-    let session = loop {
-        let running = server.sessions().into_iter().find_map(|row| {
-            let session = row["activeSessionId"].as_str()?.to_string();
-            let children =
-                server.daemon(&json!({ "type": "get_rlm_children", "activeSessionId": session }));
-            children["data"]["children"]
-                .as_array()?
-                .iter()
-                .any(|child| child["status"] == "running")
-                .then_some(session)
-        });
-        if let Some(session) = running {
-            break session;
-        }
-        assert!(Instant::now() < deadline, "the child agent never ran");
-        std::thread::sleep(Duration::from_millis(100));
+    // The parent's answer streams after its spawn call returned: the child
+    // exists and the task now waits for it.
+    let streamed = std::cell::RefCell::new(String::new());
+    server.wait_task(id, |frame| {
+        let mut streamed = streamed.borrow_mut();
+        streamed.push_str(
+            frame["artifactUpdate"]["artifact"]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or_default(),
+        );
+        streamed.contains("waiting for the child")
+    });
+    let session = server.sessions()[0]["activeSessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let children = |server: &A2a| {
+        server.daemon(&json!({ "type": "get_rlm_children", "activeSessionId": session }))["data"]
+            ["children"]
+            .clone()
     };
+    assert_eq!(
+        children(&server).as_array().map(Vec::len),
+        Some(1),
+        "the child agent exists"
+    );
     assert_eq!(
         state(&server.rpc("GetTask", &json!({ "id": id }))["result"]),
         "TASK_STATE_WORKING"
     );
     let canceled = server.rpc("CancelTask", &json!({ "id": id }))["result"].clone();
     assert_eq!(state(&canceled), "TASK_STATE_CANCELED", "{canceled}");
-    let children =
-        server.daemon(&json!({ "type": "get_rlm_children", "activeSessionId": session }));
+    let stopped = children(&server);
     assert!(
-        children["data"]["children"]
+        stopped
             .as_array()
             .unwrap()
             .iter()
             .all(|child| child["status"] != "running" && child["status"] != "queued"),
-        "the cancel stopped the child agents: {children}"
+        "the cancel stopped the child agents: {stopped}"
     );
     assert_eq!(
         server.rpc("CancelTask", &json!({ "id": id }))["error"]["code"],
@@ -584,7 +610,7 @@ fn cancel_stops_the_turn_and_the_child_agents() {
     )["result"]["task"]
         .clone();
     let held_id = held["id"].as_str().unwrap();
-    server.wait_task(held_id, |task| state(task) == "TASK_STATE_WORKING");
+    server.wait_task(held_id, |frame| frame_state(frame) == "TASK_STATE_WORKING");
     let started = Instant::now();
     let canceled = server.rpc("CancelTask", &json!({ "id": held_id }))["result"].clone();
     assert_eq!(state(&canceled), "TASK_STATE_CANCELED", "{canceled}");
