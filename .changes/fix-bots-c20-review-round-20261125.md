@@ -1,0 +1,1 @@
+- Bots: a bot spawn's GitHub provisioning now detects a stolen github lock and a failed stale-secret cleanup, and drops the bot's GitHub header rules in both cases, so a bot never runs on a token the machine no longer resolves. Test-only hardening rides along: the clear test restores its scrubbed environment even on a failed assert, and the settings-lock test bounds its wait.

@@ -197,13 +197,33 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Remove `PRIME_API_KEY` and restore it on drop, so even a failed
+    /// assert leaves the environment as it was for the other tests.
+    struct ScrubPrimeApiKey(Option<String>);
+
+    impl ScrubPrimeApiKey {
+        fn new() -> Self {
+            let value = std::env::var("PRIME_API_KEY").ok();
+            std::env::remove_var("PRIME_API_KEY");
+            Self(value)
+        }
+    }
+
+    impl Drop for ScrubPrimeApiKey {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("PRIME_API_KEY", value),
+                None => std::env::remove_var("PRIME_API_KEY"),
+            }
+        }
+    }
+
     /// A platform delete that fails must fail the `clear`: exiting 0 would
     /// leave running bots with GitHub access.
     #[test]
     fn a_failed_platform_delete_fails_the_clear() {
         let _env = env_lock();
-        let prime_key = std::env::var("PRIME_API_KEY").ok();
-        std::env::remove_var("PRIME_API_KEY");
+        let _scrub = ScrubPrimeApiKey::new();
         let dir = tempfile::tempdir().unwrap();
         github::store_token(dir.path(), "ghp_test").unwrap();
         // No Prime credential in this agent dir: the platform delete fails.
@@ -211,8 +231,5 @@ mod tests {
         assert!(error.contains("Prime API key"), "{error}");
         // The local removal still happened first.
         assert!(github::stored_token(dir.path()).is_none());
-        if let Some(prime_key) = prime_key {
-            std::env::set_var("PRIME_API_KEY", prime_key);
-        }
     }
 }

@@ -308,6 +308,17 @@ impl LockDir {
         }
     }
 
+    /// Whether this guard still owns the lock: the lock directory exists
+    /// with the identity it was created with. A successor that reclaimed a
+    /// stale lock has a different identity, so a holder can detect that its
+    /// lock was taken over and treat its critical section as lost.
+    #[must_use]
+    pub fn owns(&self) -> bool {
+        fs::symlink_metadata(&self.path)
+            .and_then(|metadata| lock_identity(&metadata))
+            .is_ok_and(|identity| identity == self.created)
+    }
+
     /// Check that an owned lock is still held before writing its state file.
     ///
     /// # Errors
@@ -642,6 +653,31 @@ mod tests {
         let _guard = LockDir::acquire(&file, MIN_STALE).unwrap();
         let error = LockDir::acquire(&file, MIN_STALE).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// A holder owns its lock until a successor reclaims a stale one: the
+    /// old guard reports `false` then, and never removes the successor's
+    /// lock on release.
+    #[test]
+    fn a_stolen_lock_is_no_longer_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, "{}").unwrap();
+        let mut stolen = LockDir::acquire(&file, MIN_STALE).unwrap();
+        assert!(stolen.owns());
+        // Age the holder past the threshold, as if it had been held for
+        // minutes (the identity is second-granular, so the aged value also
+        // separates it from the successor's fresh probe), and let a
+        // successor take over.
+        set_mtime(&stolen.path, 1, 0).unwrap();
+        stolen.created = lock_identity(&fs::symlink_metadata(&stolen.path).unwrap()).unwrap();
+        let successor = LockDir::acquire(&file, MIN_STALE).unwrap();
+        assert!(!stolen.owns(), "the stolen lock is not owned any more");
+        assert!(successor.owns());
+        drop(stolen);
+        assert!(lock_of(&file).is_dir(), "the successor's lock survives");
+        drop(successor);
+        assert!(!lock_of(&file).exists());
     }
 
     #[test]
