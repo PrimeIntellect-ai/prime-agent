@@ -357,6 +357,7 @@ impl BotPlatform for FakePlatform {
                 network_rules,
                 auth_json: None,
                 mcp_servers: None,
+                mcp_connections: None,
             })
         }
         .boxed()

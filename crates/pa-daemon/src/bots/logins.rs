@@ -399,8 +399,20 @@ pub struct Prepared {
     /// limit they are the first left out.
     pub mcp: Vec<LoginInjection>,
     /// The guest `mcpServers` entries of the user-declared MCP servers
-    /// among them (catalog servers need only the login).
+    /// among them.
     pub mcp_servers: BTreeMap<String, Value>,
+    /// The connection records (no tokens) of the catalog connections among
+    /// them, aliases such as `linear-2` included, so the guest resolves them.
+    pub mcp_connections: BTreeMap<String, Value>,
+}
+
+/// The connection records in `agent_dir`'s `mcp-connections.json`, by id.
+fn mcp_connection_records(agent_dir: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(agent_dir.join("mcp-connections.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|file| file.get("connections")?.as_object().cloned())
+        .unwrap_or_default()
 }
 
 /// The `mcpServers` settings of `agent_dir` (global scope).
@@ -523,10 +535,17 @@ impl Logins {
             .any(|(login, _)| login.starts_with(MCP_PREFIX))
         {
             let agent_dir = self.agent_dir.clone();
-            tokio::task::spawn_blocking(move || user_mcp_servers(&agent_dir)).await?
+            tokio::task::spawn_blocking(move || {
+                (
+                    user_mcp_servers(&agent_dir),
+                    mcp_connection_records(&agent_dir),
+                )
+            })
+            .await?
         } else {
-            HashMap::new()
+            (HashMap::new(), serde_json::Map::new())
         };
+        let (user_servers, connections) = user_servers;
         for (login, inject) in stored {
             let required = login == provider;
             // A user-declared MCP server with `enabled: false` stays off in the bot.
@@ -559,12 +578,16 @@ impl Logins {
                             | AuthCredential::McpStaticToken { endpoint, .. } => endpoint.clone(),
                             AuthCredential::ApiKey { .. } => None,
                         };
-                        if let Some(entry) = user_servers
-                            .get(server)
-                            .zip(endpoint)
-                            .and_then(|(config, endpoint)| guest_mcp_server(config, &endpoint))
-                        {
-                            prepared.mcp_servers.insert(server.to_string(), entry);
+                        if let Some(config) = user_servers.get(server) {
+                            if let Some(entry) =
+                                endpoint.and_then(|endpoint| guest_mcp_server(config, &endpoint))
+                            {
+                                prepared.mcp_servers.insert(server.to_string(), entry);
+                            }
+                        } else if let Some(record) = connections.get(server) {
+                            prepared
+                                .mcp_connections
+                                .insert(server.to_string(), record.clone());
                         }
                         prepared.mcp.push(injection);
                         continue;
@@ -978,6 +1001,14 @@ mod tests {
             "mcp:gamma": mcp_login("https://gamma.example.org/mcp", "gamma-token"),
         });
         std::fs::write(dir.path().join("auth.json"), auth.to_string()).unwrap();
+        let connections = json!({ "version": 1, "connections": {
+            "beta": { "connectionId": "beta", "serviceId": "beta", "endpoint": "https://beta.example.org/mcp" },
+        } });
+        std::fs::write(
+            dir.path().join("mcp-connections.json"),
+            connections.to_string(),
+        )
+        .unwrap();
         let settings = json!({ "mcpServers": { "alpha": {
             "type": "http", "url": "https://alpha.example.org/mcp", "oauth": true,
             "clientSecret": "client-secret",
@@ -1029,5 +1060,7 @@ mod tests {
             servers,
             json!({ "alpha": { "type": "http", "url": "https://alpha.example.org/mcp", "oauth": true } })
         );
+        // Beta's connection record goes only with its login, which stayed home.
+        assert!(!env.contains_key("BOT_MCP_CONNECTIONS"));
     }
 }

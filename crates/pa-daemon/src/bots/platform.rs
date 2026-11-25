@@ -54,6 +54,8 @@ pub struct GuestCredentials {
     pub auth_json: Option<serde_json::Value>,
     /// The guest's `mcpServers` entries for the injected MCP logins.
     pub mcp_servers: Option<serde_json::Value>,
+    /// The guest's MCP connection records for the injected catalog logins.
+    pub mcp_connections: Option<serde_json::Value>,
 }
 
 /// One finished guest command.
@@ -606,6 +608,7 @@ impl BotPlatform for PrimePlatform {
                 network_rules,
                 auth_json,
                 mcp_servers: None,
+                mcp_connections: None,
             })
         }
         .boxed()

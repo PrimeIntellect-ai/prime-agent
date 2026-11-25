@@ -36,9 +36,9 @@ const RETRY_ATTEMPTS: u32 = 10;
 /// guest daemon when it is not up, then opens the bot session. It
 /// reopens `BOT_SESSION_FILE`, or the file a marker on the guest disk names, so
 /// a registry rebuilt from labels still finds the session. Prints the session ids as JSON.
-/// It also sets the git author, and with GitHub access (`GH_TOKEN` holds the
-/// placeholder) a git credential that sends the placeholder, which the
-/// platform replaces, and a CA bundle that adds the platform root.
+/// It also writes a CA bundle that adds the platform root, sets the git
+/// author, and with GitHub access (`GH_TOKEN` holds the placeholder) a git
+/// credential that sends the placeholder, which the platform replaces.
 const BOOTSTRAP_SCRIPT: &str = r#"set -euo pipefail
 export HOME="${HOME:-/root}"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -60,7 +60,22 @@ if os.environ.get("BOT_MCP_SERVERS"):
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as file:
     json.dump(settings, file)
+if os.environ.get("BOT_MCP_CONNECTIONS"):
+    path = os.path.join(os.environ["HOME"], ".prime/agent/mcp-connections.json")
+    try:
+        store = json.load(open(path))
+    except (OSError, ValueError):
+        store = {"version": 1, "connections": {}}
+    store.setdefault("connections", {}).update(json.loads(os.environ["BOT_MCP_CONNECTIONS"]))
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as file:
+        json.dump(store, file)
 PY
+if [ -f "${PLATFORM_CA:-}" ]; then
+  # The platform terminates TLS for the rule hosts (model APIs, GitHub, MCP
+  # servers): every client in the bot must trust its root.
+  cat /etc/ssl/certs/ca-certificates.crt "$PLATFORM_CA" >"$HOME/.prime-agent-ca.pem"
+  export SSL_CERT_FILE="$HOME/.prime-agent-ca.pem" REQUESTS_CA_BUNDLE="$HOME/.prime-agent-ca.pem"
+fi
 if [ -n "${BOT_GIT_NAME:-}" ]; then
   git config --global user.name "$BOT_GIT_NAME"
   git config --global user.email "$BOT_GIT_EMAIL"
@@ -71,10 +86,8 @@ if [ -n "${GH_TOKEN:-}" ]; then
     "$GH_TOKEN" >"$helper"
   chmod 755 "$helper"
   git config --global --replace-all credential.https://github.com.helper "$helper"
-  if [ -f "$PLATFORM_CA" ]; then
-    cat /etc/ssl/certs/ca-certificates.crt "$PLATFORM_CA" >"$HOME/.prime-agent-ca.pem"
+  if [ -f "$HOME/.prime-agent-ca.pem" ]; then
     git config --global http.sslCAInfo "$HOME/.prime-agent-ca.pem"
-    export SSL_CERT_FILE="$HOME/.prime-agent-ca.pem"
   fi
 fi
 if ! python3 -c "$BOT_CLIENT" probe; then
@@ -825,6 +838,9 @@ impl BotManager {
                 if let Some(servers) = &guest.mcp_servers {
                     env.insert("BOT_MCP_SERVERS".to_string(), servers.to_string());
                 }
+                if let Some(connections) = &guest.mcp_connections {
+                    env.insert("BOT_MCP_CONNECTIONS".to_string(), connections.to_string());
+                }
                 Some(guest)
             }
             // Best effort: the sandbox's rules are already set.
@@ -901,18 +917,19 @@ impl BotManager {
                 left_out.join(", ")
             );
         }
-        let servers: serde_json::Map<String, Value> = logins
-            .mcp_servers
-            .into_iter()
-            .filter(|(server, _)| {
-                providers
-                    .iter()
-                    .any(|login| login.strip_prefix(super::logins::MCP_PREFIX) == Some(server))
-            })
-            .collect();
-        if !servers.is_empty() {
-            credentials.mcp_servers = Some(Value::Object(servers));
-        }
+        let injected = |entries: BTreeMap<String, Value>| -> Option<Value> {
+            let entries: serde_json::Map<String, Value> = entries
+                .into_iter()
+                .filter(|(server, _)| {
+                    providers
+                        .iter()
+                        .any(|login| login.strip_prefix(super::logins::MCP_PREFIX) == Some(server))
+                })
+                .collect();
+            (!entries.is_empty()).then_some(Value::Object(entries))
+        };
+        credentials.mcp_servers = injected(logins.mcp_servers);
+        credentials.mcp_connections = injected(logins.mcp_connections);
         if !guest.is_empty() {
             let mut auth = match credentials.auth_json.take() {
                 Some(Value::Object(auth)) => auth,
@@ -1088,6 +1105,10 @@ fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
         ("BOT_CONFIG".to_string(), config.to_string()),
         (
             "NODE_EXTRA_CA_CERTS".to_string(),
+            super::credentials::PLATFORM_CA_PATH.to_string(),
+        ),
+        (
+            "PLATFORM_CA".to_string(),
             super::credentials::PLATFORM_CA_PATH.to_string(),
         ),
     ]);
