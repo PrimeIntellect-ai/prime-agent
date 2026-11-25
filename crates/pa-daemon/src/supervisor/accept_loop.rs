@@ -9,7 +9,6 @@ use std::time::Duration;
 use pa_types::platform::transport::TransportListener;
 
 use super::{anyhow, Arc, Ordering, Result, Supervisor};
-use crate::update_prepare::PrepareState;
 
 /// The backoff before retrying a non-recoverable accept error (Codex
 /// parity: the control-socket acceptor sleeps 1s between retries).
@@ -98,12 +97,6 @@ pub(super) async fn serve(
         };
         consecutive_failures = 0;
         recoverable_streak = 0;
-        // While an update restart stops the workers, new clients get no hello: a
-        // reconnecting window reads the daemon as not up yet and retries until the
-        // successor, or this supervisor after an abandon, serves.
-        if supervisor.update_prepare.active_state() == Some(PrepareState::Stopping) {
-            continue;
-        }
         let supervisor = Arc::clone(supervisor);
         tokio::spawn(async move {
             if let Err(error) = supervisor.handle_client(stream).await {
@@ -407,48 +400,6 @@ mod tests {
             started.elapsed() < BACKOFF,
             "the backoff ended at the wake, not the full second (elapsed {:?})",
             started.elapsed()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_stopping_update_greets_no_new_client() {
-        use tokio::io::AsyncReadExt as _;
-        let dir = TempDir::new().unwrap();
-        let supervisor = test_supervisor(&dir);
-        let update_id = pa_types::daemon::UpdateId::from("u-stopping".to_string());
-        let budget = pa_types::daemon::update_flow::UpdateTimeoutBudget::from_env();
-        let now = crate::util::now_ms();
-        supervisor
-            .update_prepare
-            .begin(update_id.clone(), now, &budget);
-        supervisor.update_prepare.drain_complete(&update_id);
-        supervisor
-            .update_prepare
-            .snapshot_written(&update_id, now, &budget);
-        supervisor.update_prepare.prepare_acked(&update_id);
-        supervisor.update_prepare.commit(&update_id);
-        let (mut client, accepted) = tokio::io::duplex(4096);
-        let scripted = ScriptedAccepts {
-            results: Arc::new(Mutex::new(
-                vec![Ok(
-                    Box::new(DuplexTransport(Mutex::new(accepted))) as Box<dyn TransportStream>
-                )]
-                .into(),
-            )),
-            supervisor: Arc::clone(&supervisor),
-        };
-        serve(&supervisor, Box::new(scripted))
-            .await
-            .expect("the loop exits at the scripted wake");
-        let mut received = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut received))
-            .await
-            .expect("the refused connection closes")
-            .unwrap();
-        assert!(
-            received.is_empty(),
-            "no hello: {}",
-            String::from_utf8_lossy(&received)
         );
     }
 }

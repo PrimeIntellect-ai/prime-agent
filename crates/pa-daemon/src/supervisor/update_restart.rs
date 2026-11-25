@@ -335,8 +335,9 @@ impl Supervisor {
                 // workers stop - the close frame is an instruction (reattach by durable id
                 // after the restart), not an error, and a client whose direct worker link
                 // dropped first would report a lost connection instead. While the workers
-                // stop, the accept loop greets no new client, so a reconnecting window keeps
-                // retrying until the successor (or, after an abandon, this supervisor) serves.
+                // stop, the admission gate refuses attaching with the typed `update_restarting`
+                // refusal, so a reconnecting window retries until the successor (or, after an
+                // abandon, this supervisor) serves.
                 let mut sessions: Vec<Value> = Vec::new();
                 for resident in &residents {
                     let descriptor = resident.descriptor.lock().await;
