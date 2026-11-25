@@ -1,0 +1,1 @@
+- Shorter bots text in the system prompt: the `## Bots` paragraph is tighter, the `rlm.spawn` doc no longer repeats it, and the `rlm.pull_bot_files` line drops a redundant note. The meaning stays the same.
