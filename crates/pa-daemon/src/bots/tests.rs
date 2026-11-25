@@ -1350,6 +1350,44 @@ async fn a_failed_checkpoint_list_falls_back_to_the_recorded_checkpoints() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pending_head_survives_a_promotion_of_an_older_durable_checkpoint() {
+    let (_dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    let durable = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    manager.ensure_running("bot-a").await.unwrap();
+    // The daemon's next pause freezes a checkpoint that never finishes
+    // uploading: the record's head is pending, the older one durable.
+    platform.state().pause_checkpoints_pending = true;
+    let pending = manager.pause("bot-a").await.unwrap().checkpoint_id.unwrap();
+    let sandbox_id = manager.get("bot-a").unwrap().sandbox_id.unwrap();
+    // The paused sandbox ends: the wake restores from the older durable
+    // checkpoint, and the pending head must survive that promotion.
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Stopped;
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let creates = platform.state().creates.clone();
+    assert_eq!(
+        creates.last().unwrap().checkpoint_id.as_deref(),
+        Some(durable.as_str()),
+        "only the durable one restores"
+    );
+    assert!(
+        platform.state().checkpoints.contains_key(&pending),
+        "the newest snapshot is kept until it is durable or superseded"
+    );
+    assert_eq!(
+        manager.get("bot-a").unwrap().checkpoint_id.as_deref(),
+        Some(pending.as_str()),
+        "the pending head is not demoted where prune would delete it"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_failed_install_fails_spawn_and_cleans_up() {
     for exit_code in [version::UNPUBLISHED_EXIT_CODE, version::NO_GUEST_EXIT_CODE] {
         let (_dir, platform, manager) = setup();

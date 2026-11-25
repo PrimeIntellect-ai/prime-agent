@@ -1,0 +1,1 @@
+- Fixed a follow-up of the checkpoint-restore fix: when a bot's newest checkpoint was still uploading, a wake that promoted an older durable one deleted the pending head, losing the newest snapshot. The promotion now leaves the record alone while the recorded head is pending and newer; the wake restores from the older durable one without deleting anything.
