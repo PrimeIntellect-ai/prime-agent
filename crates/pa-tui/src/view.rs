@@ -61,8 +61,15 @@ pub(crate) enum Overlay {
     ChoicePicker(crate::choice_picker::ChoicePicker),
     /// The `/mcp` connections view.
     Mcp(crate::mcp_view::McpView),
-    /// The factory page: the activity dock's factory group's destination.
-    Factory(crate::factory_view::FactoryView),
+    /// The machines page: every library machine, with the runs nested under it — the activity
+    /// dock's factory group's destination.
+    Library(crate::factory_view::LibraryView),
+    /// A run page, over the machines page it was opened from: its close returns to that page (a
+    /// rebind drops the page underneath).
+    Factory {
+        run: crate::factory_view::FactoryView,
+        page: Option<Box<crate::factory_view::LibraryView>>,
+    },
     /// The `/heartbeats` inline management view (TS `HeartbeatManagerComponent`).
     Heartbeats(crate::heartbeats_picker::HeartbeatsPicker),
     Goal(crate::goal_surface::GoalPanel),
@@ -274,7 +281,8 @@ impl AgentView {
             // The input-less frame owners never leave a paste to the editor behind.
             Some(
                 Overlay::Onboarding(_)
-                | Overlay::Factory(_)
+                | Overlay::Library(_)
+                | Overlay::Factory { .. }
                 | Overlay::Heartbeats(_)
                 | Overlay::Bash(_)
                 | Overlay::Goal(_)
@@ -284,6 +292,43 @@ impl AgentView {
                 | Overlay::ShareLoader(_)
                 | Overlay::Reload(_),
             ) => true,
+        }
+    }
+
+    /// The open run page, over the machines page or alone.
+    pub(crate) fn run_page(&self) -> Option<&crate::factory_view::FactoryView> {
+        match &self.overlay {
+            Some(Overlay::Factory { run, .. }) => Some(run),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn run_page_mut(&mut self) -> Option<&mut crate::factory_view::FactoryView> {
+        match &mut self.overlay {
+            Some(Overlay::Factory { run, .. }) => Some(run),
+            _ => None,
+        }
+    }
+
+    /// The machines page: open, or under the run page opened from it (its folds keep landing
+    /// there, so the close returns to current rows).
+    pub(crate) fn machines_page(&self) -> Option<&crate::factory_view::LibraryView> {
+        match &self.overlay {
+            Some(Overlay::Library(page)) => Some(page),
+            Some(Overlay::Factory {
+                page: Some(page), ..
+            }) => Some(page),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn machines_page_mut(&mut self) -> Option<&mut crate::factory_view::LibraryView> {
+        match &mut self.overlay {
+            Some(Overlay::Library(page)) => Some(page),
+            Some(Overlay::Factory {
+                page: Some(page), ..
+            }) => Some(page),
+            _ => None,
         }
     }
 

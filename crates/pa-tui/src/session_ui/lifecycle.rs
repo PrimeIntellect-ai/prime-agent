@@ -149,11 +149,17 @@ impl SessionUi {
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
             factory_graph: serde_json::json!({"runs": []}),
+            factory_overview: serde_json::json!({"runs": []}),
             factory_view_session: None,
             factory_refresh_in_flight: false,
             factory_refresh_queued: false,
             factory_list_epoch: 0,
+            factory_node_epoch: 0,
             factory_updates: activity_updates.factory,
+            library_updates: activity_updates.library,
+            library_list_epoch: 0,
+            library_overview_in_flight: false,
+            library_overview_epoch: 0,
             factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
@@ -610,19 +616,57 @@ impl SessionUi {
                 .as_deref()
                 .is_some_and(|session| session != self.session_id)
             {
-                view.close_overlay_if(|overlay| matches!(overlay, Overlay::Factory(_)));
+                view.close_overlay_if(|overlay| matches!(overlay, Overlay::Factory { .. }));
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 self.factory_graph = serde_json::json!({"runs": []});
             }
-            // An agents-view panel the rebind tore down takes its return-to-agents-view flag
-            // with it; a kept factory page keeps it.
-            self.panel_returns_to_agents_view &= matches!(view.overlay, Some(Overlay::Factory(_)));
+            // A same-session reattach replaces the worker but keeps this
+            // mounted page, so retarget its outstanding node request to the
+            // new active-session id. The epoch drops any reply from before
+            // the reattach instead of leaving the page blank.
+            let reattached_node = self
+                .factory_view_session
+                .as_deref()
+                .filter(|session| *session == self.session_id.as_str())
+                .and(view.run_page())
+                .and_then(|factory_view| factory_view.node.as_ref())
+                .map(|node| {
+                    (
+                        node.run_id.clone(),
+                        node.state_id.clone(),
+                        node.selected_selector(),
+                    )
+                });
+            if let Some((run_id, state_id, selector)) = reattached_node {
+                self.open_factory_node(view, &run_id, &state_id, selector);
+            }
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
             // owning the frame over the rebind with stale content.
-            view.close_overlay_if(|overlay| matches!(overlay, Overlay::Goal(_) | Overlay::Info(_)));
+            // The machines page dies only when another session took its
+            // place (it tells its own rows from other sessions' by the
+            // session that opened it); a same-session reattach keeps it,
+            // like the run page.
+            let foreign_page =
+                |page: &crate::factory_view::LibraryView| !page.opened_by(&self.session_id);
+            view.close_overlay_if(|overlay| match overlay {
+                Overlay::Goal(_) | Overlay::Info(_) => true,
+                Overlay::Library(page) => foreign_page(page),
+                _ => false,
+            });
+            if let Some(Overlay::Factory { page, .. }) = view.overlay.as_mut() {
+                if page.as_deref().is_some_and(foreign_page) {
+                    *page = None;
+                }
+            }
+            // An agents-view panel the rebind tore down takes its return-to-agents-view flag
+            // with it; a kept machines or run page keeps it.
+            self.panel_returns_to_agents_view &= matches!(
+                view.overlay,
+                Some(Overlay::Factory { .. } | Overlay::Library(_))
+            );
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -884,6 +928,7 @@ mod backfill_tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             backfill_tx,
@@ -934,6 +979,40 @@ mod backfill_tests {
         })
         .await
         .expect("mock session open, rebind and panel close complete within ten seconds");
+    }
+
+    /// A same-session rebind keeps the machines page; a page another session opened closes.
+    #[tokio::test]
+    async fn a_same_session_rebind_keeps_the_machines_page() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("machines.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            let page = |owner: &str| {
+                Overlay::Library(crate::factory_view::LibraryView::new(
+                    Vec::new(),
+                    vec![owner.to_string()],
+                    20,
+                ))
+            };
+            view.overlay = Some(page(&session.session_id.clone()));
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert!(
+                matches!(view.overlay, Some(Overlay::Library(_))),
+                "the same session's page stays"
+            );
+            view.overlay = Some(page("another-session"));
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert!(view.overlay.is_none(), "another session's page closes");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open and rebinds complete within ten seconds");
     }
 
     /// An agents-view shell open selects its shell in the Bash panel, also when the shell lands in
@@ -1106,6 +1185,7 @@ mod backfill_tests {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
                 factory: mpsc::unbounded_channel().0,
+                library: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
             mpsc::unbounded_channel().0,
