@@ -18,6 +18,58 @@ fn document(storage: &dyn SettingsStorage) -> Value {
 }
 
 #[test]
+fn project_trace_settings_can_only_opt_out_after_global_consent() {
+    for (global, project, expected) in [
+        (None, Some(true), (false, false)),
+        (None, Some(false), (false, false)),
+        (Some(false), Some(true), (false, true)),
+        (Some(true), None, (true, true)),
+        (Some(true), Some(true), (true, true)),
+        (Some(true), Some(false), (false, true)),
+    ] {
+        let global_document = json!({"agentTraces": {"enabled": global}});
+        let (storage, mut manager) = fixture(&global_document.to_string());
+        if let Some(project) = project {
+            let project_document = json!({"agentTraces": {"enabled": project}});
+            storage
+                .with_lock(SettingsScope::Project, &mut |_| {
+                    Some(project_document.to_string())
+                })
+                .unwrap();
+        }
+        manager.reload().unwrap();
+        for settings in [&manager, &manager.reopen()] {
+            assert_eq!(
+                (
+                    settings.get_agent_traces_enabled(),
+                    settings.agent_traces_choice_written(),
+                ),
+                expected,
+                "global={global:?}, project={project:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn only_global_onboarding_flags_can_skip_onboarding() {
+    let (storage, mut manager) = fixture("{}");
+    storage
+        .with_lock(SettingsScope::Project, &mut |_| {
+            Some(json!({"onboardingShown": true, "onboardingCompleted": true}).to_string())
+        })
+        .unwrap();
+    manager.reload().unwrap();
+    assert!(!manager.get_onboarding_shown());
+
+    manager.set_onboarding_completed(true).unwrap();
+    assert!(manager.reopen().get_onboarding_shown());
+
+    manager.set_onboarding_shown(false).unwrap();
+    assert!(!manager.reopen().get_onboarding_shown());
+}
+
+#[test]
 fn project_settings_cannot_select_executable_configuration() {
     let (storage, mut manager) = fixture(
         r#"{"theme":"global","sessionDir":"/trusted/sessions","shellPath":"/trusted/shell","shellCommandPrefix":"trusted", "npmCommand":["trusted-npm"],"packages":["trusted-package"],"mcpServers":{"trusted":{"command":"trusted"}},"mcpCatalogSources":["trusted.json"]}"#,
