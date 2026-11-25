@@ -113,9 +113,13 @@ pub fn install_failure(exit_code: i32, version: &str) -> Option<String> {
 }
 
 /// Prints the guest's `prime-agent --version` when it has the bot guest
-/// side, else nothing (the manager then installs).
+/// side and the tools the installer adds (Node.js with npm, and `gh`),
+/// else nothing (the manager then installs). A guest whose install half
+/// failed (prime-agent in place, a tool download not) reports nothing, so
+/// the idempotent installer runs again.
 pub const GUEST_VERSION_SCRIPT: &str = r#"export PATH="$HOME/.local/bin:$PATH"
 command -v prime-agent >/dev/null 2>&1 && prime-agent relay --probe >/dev/null 2>&1 \
+  && command -v node >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
   && prime-agent --version || true
 "#;
 

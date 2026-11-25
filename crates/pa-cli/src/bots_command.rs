@@ -84,6 +84,10 @@ fn read_hidden_line() -> std::io::Result<String> {
 }
 
 fn clear(agent_dir: &Path) -> Result<(), String> {
+    // One critical section with the daemon's GitHub provisioning (the same
+    // agent-dir lock): a bot spawn that planned before this clear must not
+    // recreate the secrets after it.
+    let github_lock = github::lock(agent_dir).map_err(|error| error.to_string())?;
     let stored = github::clear_token(agent_dir).map_err(|error| error.to_string())?;
     println!(
         "{}",
@@ -94,11 +98,13 @@ fn clear(agent_dir: &Path) -> Result<(), String> {
         }
     );
     // Revoke the platform copy too, so running bots lose GitHub access.
-    match delete_platform_secrets(agent_dir) {
+    let platform_delete = delete_platform_secrets(agent_dir);
+    drop(github_lock);
+    match &platform_delete {
         Ok(0) => {}
         Ok(_) => println!("Deleted the bots' GitHub secrets on Prime."),
         Err(error) => {
-            eprintln!("Warning: the bots' GitHub secrets on Prime were not deleted: {error}");
+            eprintln!("Warning: the bots' GitHub secrets on Prime were not deleted: {error:#}");
         }
     }
     if github::gh_cli_token().is_some() {
@@ -106,15 +112,19 @@ fn clear(agent_dir: &Path) -> Result<(), String> {
             "New bots still use the gh CLI login. Set bots.github to false in settings.json to turn GitHub off."
         );
     }
-    Ok(())
+    // A failed platform delete leaves running bots with GitHub access, so
+    // the command fails instead of exiting 0.
+    platform_delete
+        .map(|_| ())
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn delete_platform_secrets(agent_dir: &Path) -> anyhow::Result<usize> {
-    let (client, owner) = pa_daemon::bots::prime_client(agent_dir)?;
+    let (client, _) = pa_daemon::bots::prime_client(agent_dir)?;
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(github::delete_secrets(&client, &owner))
+        .block_on(github::delete_secrets(&client))
 }
 
 fn status(agent_dir: &Path) {
@@ -129,6 +139,38 @@ fn status(agent_dir: &Path) {
         Some(identity) => println!("git author: {} <{}>", identity.name, identity.email),
         None => {
             println!("git author: none (set bots.gitIdentity or git config --global user.name)");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine reads process env (the Prime credential); the tests that
+    /// touch it serialize on one lock.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A platform delete that fails must fail the `clear`: exiting 0 would
+    /// leave running bots with GitHub access.
+    #[test]
+    fn a_failed_platform_delete_fails_the_clear() {
+        let _env = env_lock();
+        let prime_key = std::env::var("PRIME_API_KEY").ok();
+        std::env::remove_var("PRIME_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        github::store_token(dir.path(), "ghp_test").unwrap();
+        // No Prime credential in this agent dir: the platform delete fails.
+        let error = clear(dir.path()).expect_err("the clear fails");
+        assert!(error.contains("Prime API key"), "{error}");
+        // The local removal still happened first.
+        assert!(github::stored_token(dir.path()).is_none());
+        if let Some(prime_key) = prime_key {
+            std::env::set_var("PRIME_API_KEY", prime_key);
         }
     }
 }
