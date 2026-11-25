@@ -288,6 +288,9 @@ pub struct Logins {
     agent_dir: PathBuf,
     auth: AuthSource,
     state: Mutex<LoginState>,
+    /// One flight per provider: a read and its secret uploads finish before
+    /// the next read starts, so an older token never overwrites a newer one.
+    flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// True while the refresher task runs.
     pub(super) refresher: Mutex<bool>,
 }
@@ -325,6 +328,7 @@ impl Logins {
             agent_dir: agent_dir.to_path_buf(),
             auth,
             state: Mutex::default(),
+            flights: Mutex::default(),
             refresher: Mutex::new(false),
         }
     }
@@ -404,6 +408,8 @@ impl Logins {
     /// Read one login (refreshing it when due) and put its secrets on the
     /// platform when they changed. `None` once it expired.
     async fn refresh(&self, provider: &str) -> Result<Option<LoginInjection>> {
+        let flight = Arc::clone(lock(&self.flights).entry(provider.to_string()).or_default());
+        let _flight = flight.lock().await;
         let now = now_ms();
         let obtained = lock(&self.state).seen.get(provider).map(|(_, at)| *at);
         let (auth, owned) = (Arc::clone(&self.auth), provider.to_string());
@@ -415,7 +421,6 @@ impl Logins {
                 let mut state = lock(&self.state);
                 state.stale.remove(provider);
                 state.expired.remove(provider);
-                state.warned.remove(provider);
                 credential
             }
             Login::Stale(credential) => {
@@ -459,6 +464,11 @@ impl Logins {
             }
             self.platform.put_secret(name, value).await?;
             lock(&self.state).pushed.insert(name.clone(), fingerprint);
+        }
+        // Warn again only after a full recovery: a fresh login whose upload
+        // keeps failing warns once.
+        if !lock(&self.state).stale.contains(provider) {
+            lock(&self.state).warned.remove(provider);
         }
         Ok(Some(injection))
     }
