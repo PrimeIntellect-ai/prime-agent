@@ -8678,6 +8678,8 @@ class FactoryEmitRetryTest(_ExecutorTestCase):
         self.assertEqual(status["state"], "stopped")
         self.assertEqual(plan["status"], "cancelled")
         self.assertEqual(plan["instances"][0]["status"], "cancelled")
+        cancelled = [e for e in self.executor._runs[result["run_id"]].events if e["kind"] == "cancelled"]
+        self.assertEqual([(e["node"], e["instance"]) for e in cancelled], [("plan", 0)])
         self.assertEqual(self.host.spawn_calls("build"), [])
 
 
