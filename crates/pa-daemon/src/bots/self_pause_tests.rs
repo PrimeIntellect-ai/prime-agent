@@ -241,24 +241,37 @@ fn a_running_session_summary_is_busy() {
     assert!(!super::summary_busy(&json!({})));
 }
 
-/// Spawn the loop with a wall clock that advances one tick per call and a
-/// shared log of the sync/pause order.
+/// Spawn the loop with a wall clock that advances one tick per call, a
+/// shared client-line counter, and a log of the sync/pause order.
 fn spawn_test_loop(
     path: PathBuf,
     wall: Arc<AtomicU64>,
+    lines: Arc<AtomicU64>,
     events: Arc<Mutex<Vec<&'static str>>>,
     requests: Arc<AtomicUsize>,
+    bump_lines_on_first_sync: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let busy = || false;
-        let lines = || 0_u64;
+        let lines_now = {
+            let lines = Arc::clone(&lines);
+            move || lines.load(Ordering::Relaxed)
+        };
         let wall = move || wall.fetch_add(TICK_MS, Ordering::Relaxed);
+        let bumped = Arc::new(AtomicBool::new(false));
         let before_pause = {
             let events = Arc::clone(&events);
+            let lines = Arc::clone(&lines);
+            let bumped = Arc::clone(&bumped);
             move || {
                 let events = Arc::clone(&events);
+                let lines = Arc::clone(&lines);
+                let bumped = Arc::clone(&bumped);
                 async move {
                     events.lock().unwrap().push("sync");
+                    if bump_lines_on_first_sync && !bumped.swap(true, Ordering::SeqCst) {
+                        lines.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         };
@@ -275,7 +288,7 @@ fn spawn_test_loop(
                 }
             }
         };
-        self_pause_loop(path, busy, lines, wall, before_pause, request).await;
+        self_pause_loop(path, busy, lines_now, wall, before_pause, request).await;
     })
 }
 
@@ -288,11 +301,14 @@ async fn a_wall_clock_jump_starts_a_fresh_idle_window() {
     let wall = Arc::new(AtomicU64::new(1_000_000));
     let events = Arc::new(Mutex::new(Vec::new()));
     let requests = Arc::new(AtomicUsize::new(0));
+    let lines = Arc::new(AtomicU64::new(0));
     let task = spawn_test_loop(
         path,
         Arc::clone(&wall),
+        Arc::clone(&lines),
         Arc::clone(&events),
         Arc::clone(&requests),
+        false,
     );
     // Let the loop read its first wall clock before the test advances time.
     tokio::task::yield_now().await;
@@ -332,11 +348,14 @@ async fn a_pre_pause_sync_runs_before_the_pause_request() {
     let wall = Arc::new(AtomicU64::new(1_000_000));
     let events = Arc::new(Mutex::new(Vec::new()));
     let requests = Arc::new(AtomicUsize::new(0));
+    let lines = Arc::new(AtomicU64::new(0));
     let task = spawn_test_loop(
         path,
         Arc::clone(&wall),
+        Arc::clone(&lines),
         Arc::clone(&events),
         Arc::clone(&requests),
+        false,
     );
     tokio::task::yield_now().await;
     for _ in 0..2 {
@@ -353,6 +372,50 @@ async fn a_pre_pause_sync_runs_before_the_pause_request() {
     let events = events.lock().unwrap();
     assert_eq!(events.first(), Some(&"sync"));
     assert_eq!(events.get(1), Some(&"pause"));
+    task.abort();
+}
+
+/// A client command that arrives and finishes during the pre-pause sync is
+/// fresh activity: the loop must re-arm, not pause on the stale busy check.
+#[tokio::test(start_paused = true)]
+async fn client_activity_during_the_pre_pause_sync_re_arms_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &config_value(1));
+    let wall = Arc::new(AtomicU64::new(1_000_000));
+    let lines = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let task = spawn_test_loop(
+        path,
+        Arc::clone(&wall),
+        Arc::clone(&lines),
+        Arc::clone(&events),
+        Arc::clone(&requests),
+        true,
+    );
+    tokio::task::yield_now().await;
+    for _ in 0..2 {
+        tokio::time::advance(TICK).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "client activity during the sync held the pause"
+    );
+    assert_eq!(lines.load(Ordering::Relaxed), 1);
+    // The next full window has no new client line.
+    for _ in 0..2 {
+        tokio::time::advance(TICK).await;
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..20 {
+        if requests.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
     task.abort();
 }
 
@@ -412,4 +475,45 @@ fn a_due_heartbeat_holds_off_the_pause() {
         })
         .expect("plain job");
     assert!(!heartbeat_due_soon(agent_dir, now + 60 * 1000 - 1000));
+}
+
+/// A dormant session's old overdue heartbeat must not keep an idle sandbox
+/// billing forever: the guard only covers the recent wake window.
+#[test]
+fn an_old_dormant_heartbeat_does_not_block_the_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path();
+    let now = 1_700_000_000_000_u64;
+    let store = AgentCronJobStore::for_session_artifacts();
+    let partition = agent_dir.join("session-artifacts").join("main");
+    std::fs::create_dir_all(&partition).unwrap();
+    store.register_session_artifact("main", &partition);
+    store
+        .create_rlm_heartbeat(&CreateAgentCronJobInput {
+            active_session_id: "live-1".to_string(),
+            session_id: "main".to_string(),
+            session_file: "/w/main.jsonl".to_string(),
+            cwd: "/w".to_string(),
+            prompt: "check".to_string(),
+            schedule_text: "every 10m".to_string(),
+            now: Some(now - 20 * 60 * 1000),
+            ..Default::default()
+        })
+        .expect("old heartbeat");
+    // Overdue by 10 minutes: dormant, so it does not hold off the pause.
+    assert!(!heartbeat_due_soon(agent_dir, now));
+    // Overdue by 4 minutes: still inside the recent wake window.
+    store
+        .create_rlm_heartbeat(&CreateAgentCronJobInput {
+            active_session_id: "live-2".to_string(),
+            session_id: "main".to_string(),
+            session_file: "/w/main.jsonl".to_string(),
+            cwd: "/w".to_string(),
+            prompt: "check".to_string(),
+            schedule_text: "every 10m".to_string(),
+            now: Some(now - 14 * 60 * 1000),
+            ..Default::default()
+        })
+        .expect("recent heartbeat");
+    assert!(heartbeat_due_soon(agent_dir, now));
 }

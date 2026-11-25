@@ -43,6 +43,10 @@ const TICK: Duration = Duration::from_millis(TICK_MS);
 /// gap means the VM was frozen or the runtime was starved; the idle
 /// window starts over so a due heartbeat can fire first.
 const RESUME_JUMP_MS: u64 = 45_000;
+/// The oldest overdue heartbeat that still holds off a self-pause. A due
+/// job older than this is dormant (no live scheduler) or stuck; an idle
+/// sandbox must not keep billing for it.
+const HEARTBEAT_GUARD_MAX_OVERDUE_MS: u64 = 5 * 60 * 1000;
 /// The pause request's deadline.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -154,9 +158,12 @@ pub(crate) async fn self_pause_loop<F, S>(
         // current next run times first, so a frozen VM never leaves a
         // stale schedule on the relay.
         before_pause().await;
-        if busy() {
+        let lines_after_sync = lines();
+        if busy() || lines_after_sync != lines_now {
             // The sync can give a due heartbeat or a fresh turn time to
-            // start; never pause over it.
+            // start, or a client command can arrive and finish during it:
+            // never pause over either.
+            lines_at_start = lines_after_sync;
             idle_since = tokio::time::Instant::now();
             continue;
         }
@@ -174,6 +181,7 @@ pub(crate) async fn self_pause_loop<F, S>(
 /// the due turn.
 pub(crate) fn heartbeat_due_soon(agent_dir: &Path, now_ms: u64) -> bool {
     let horizon = now_ms.saturating_add(TICK_MS);
+    let floor = now_ms.saturating_sub(HEARTBEAT_GUARD_MAX_OVERDUE_MS);
     crate::update_roster::scan_scheduled_jobs(agent_dir)
         .into_iter()
         .filter(|job| is_heartbeat_cron_job(job) && job.status == JobStatus::Active)
@@ -181,7 +189,7 @@ pub(crate) fn heartbeat_due_soon(agent_dir: &Path, now_ms: u64) -> bool {
             job.next_run_at
                 .as_deref()
                 .and_then(parse_iso_millis)
-                .is_some_and(|next| next <= horizon)
+                .is_some_and(|next| (floor..=horizon).contains(&next))
         })
 }
 

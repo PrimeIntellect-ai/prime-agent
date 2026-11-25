@@ -20,17 +20,34 @@ use super::self_pause::SelfPauseConfig;
 
 /// How often the mirror re-reads the schedule set when no change wakes it.
 const POLL: Duration = Duration::from_secs(10);
+/// How often the supervisor checks the worker-written request file.
+const FILE_POLL: Duration = Duration::from_secs(1);
 /// The boot mirror waits briefly for the first session artifacts.
 const BOOT_DELAY: Duration = Duration::from_secs(3);
 /// The mirror request's deadline.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// The agent-dir file a worker touches to wake the supervisor's mirror.
+const SYNC_REQUEST_FILE: &str = "bot-wakeup-sync.request";
 
 /// Wakes the mirror after a heartbeat mutation or fire.
 static WAKEUP_SYNC_NOTIFY: LazyLock<Notify> = LazyLock::new(Notify::new);
 
-/// Wake the guest's mirror (a no-op outside a bot guest).
+/// The supervisor's sync request file: the self-pause config's directory.
+fn sync_request_path() -> Option<PathBuf> {
+    let config = std::env::var_os(super::self_pause::SELF_PAUSE_ENV)?;
+    PathBuf::from(config)
+        .parent()
+        .map(|dir| dir.join(SYNC_REQUEST_FILE))
+}
+
+/// Wake the guest's mirror. Session workers and the supervisor are separate
+/// processes, so the in-process `Notify` cannot cross that boundary: the
+/// request file wakes the supervisor's loop too.
 pub(crate) fn notify() {
     WAKEUP_SYNC_NOTIFY.notify_one();
+    if let Some(path) = sync_request_path() {
+        let _ = std::fs::write(path, crate::util::now_ms().to_string());
+    }
 }
 
 /// The guest's relay wake-up mirror.
@@ -63,6 +80,10 @@ impl WakeupSync {
     /// relay configured, or the accepted payload is unchanged; `force`
     /// sends even when unchanged (the pre-pause checkpoint).
     pub(crate) async fn sync(&self, force: bool) -> Result<bool> {
+        // Serialize the whole snapshot-to-PUT transaction. A background scan
+        // must never publish an older snapshot after a pre-pause force sync:
+        // the pre-pause sync waits here, then scans the newer state.
+        let mut last_sent = self.last_sent.lock().await;
         let Some(config) = SelfPauseConfig::load_from(&self.config_path) else {
             return Ok(false);
         };
@@ -80,7 +101,6 @@ impl WakeupSync {
             "sandboxId": config.sandbox_id,
             "wakeups": wakeups,
         }))?;
-        let mut last_sent = self.last_sent.lock().await;
         if !force && last_sent.as_deref() == Some(body.as_str()) {
             return Ok(false);
         }
@@ -117,13 +137,29 @@ impl WakeupSync {
     /// The loop body, with injectable timings for tests.
     pub(crate) async fn run_loop(self: Arc<Self>, boot_delay: Duration, poll: Duration) {
         tokio::time::sleep(boot_delay).await;
+        let request_path = sync_request_path();
         loop {
+            // Read the request baseline before the sync: a worker request
+            // that lands during it must trigger one more sync afterwards.
+            let baseline = request_path
+                .as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok());
             if let Err(error) = self.sync(false).await {
                 eprintln!("pa-daemon: bots: the relay wake-up sync failed: {error:#}");
             }
-            tokio::select! {
-                () = tokio::time::sleep(poll) => {}
-                () = WAKEUP_SYNC_NOTIFY.notified() => {}
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(poll) => break,
+                    () = WAKEUP_SYNC_NOTIFY.notified() => break,
+                    () = tokio::time::sleep(FILE_POLL) => {
+                        let current = request_path
+                            .as_ref()
+                            .and_then(|path| std::fs::read_to_string(path).ok());
+                        if current != baseline {
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
