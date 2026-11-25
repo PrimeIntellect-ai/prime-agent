@@ -913,13 +913,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         super::super::github::store_token(dir.path(), "ghp_first").unwrap();
         let platform = Platform::default();
-        // ensure_secret lists and creates both secrets; the recheck then
-        // lists them and refuses the first delete.
+        // ensure_secret lists and creates both secrets (a create answer
+        // names the created secret); the second create clears the stored
+        // token; the recheck then lists them and refuses the first delete.
+        let created = |name: &str| json!({ "data": { "id": format!("id-{name}"), "name": name } });
         platform.answers.lock().unwrap().extend([
             json!({ "data": [] }),
-            json!({}),
+            created("PRIME_AGENT_GITHUB_OWNER"),
             json!({ "data": [] }),
-            json!({}),
+            created("PRIME_AGENT_GITHUB_OWNER_BASIC"),
             json!({ "data": [
                 { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER" },
                 { "id": "id-2", "name": "PRIME_AGENT_GITHUB_OWNER_BASIC" },
@@ -946,6 +948,28 @@ mod tests {
         let provisioned = provision(&client, dir.path(), "OWNER", None, true, 0).await;
         let rules = provisioned.rules();
 
+        // The intended path ran: both secrets were created, the token was
+        // cleared mid-provision, and the stale-secret delete was refused.
+        let methods: Vec<&str> = platform
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect();
+        assert_eq!(
+            methods.iter().filter(|method| **method == "POST").count(),
+            2,
+            "both secrets were created: {methods:?}"
+        );
+        assert!(
+            methods.contains(&"DELETE"),
+            "the refused stale-secret delete was attempted: {methods:?}"
+        );
+        assert!(
+            super::super::github::stored_token(dir.path()).is_none(),
+            "the token changed mid-provision"
+        );
         assert!(
             !rules.contains_key("api.github.com") && !rules.contains_key("github.com"),
             "the GitHub hosts are dropped: {rules:?}"
