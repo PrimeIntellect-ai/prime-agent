@@ -226,6 +226,15 @@ async fn arrivals_coalesce_into_one_row_on_the_most_urgent_lane() {
     assert_eq!(follow_up[0].key.as_deref(), Some(INBOX_ARRIVAL_QUEUE_KEY));
     assert_eq!(follow_up[0].covers.len(), 2, "the row kept its place");
     assert_eq!(follow_up[1].text, "queued behind");
+    {
+        let core = fx.worker.core.lock().unwrap();
+        let row = core.follow_up.front().expect("the arrival row");
+        assert!(
+            row.queue_visible,
+            "a busy session keeps a visible queued row"
+        );
+        assert_eq!(row.policy, TurnPolicy::Queued);
+    }
 
     fx.route(notice(INBOX_CLASS_AGENT_MESSAGE, "third"), Lane::Steering);
     fx.route(notice(INBOX_CLASS_BASH_DONE, "fourth"), Lane::FollowUp);
