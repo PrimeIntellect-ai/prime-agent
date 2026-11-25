@@ -147,7 +147,8 @@ fn changelog_parses_and_orders_newest_first() {
 }
 
 /// The grand totals bill the daemon's family total, which includes spend
-/// of descendants that render no row (a retired refine child).
+/// of descendants that render no row (a retired refine child); that spend
+/// joins the unknown-model line so the cost breakdown still adds up.
 #[test]
 fn context_tree_totals_bill_the_root_family_total() {
     let tree = json(
@@ -155,6 +156,11 @@ fn context_tree_totals_bill_the_root_family_total() {
                 "id": "root", "label": "main agent", "status": "active",
                 "ownUsage": {"input": 900, "output": 90, "cacheRead": 0,
                              "cacheWrite": 10, "cost": {"total": 0.03}},
+                "ownUsageByModel": [
+                    {"provider": "anthropic", "id": "claude-opus-4-6",
+                     "ownUsage": {"input": 900, "output": 90, "cacheRead": 0,
+                                  "cacheWrite": 10, "cost": {"total": 0.03}}}
+                ],
                 "totalUsage": {"input": 1900, "output": 190, "cacheRead": 0,
                                "cacheWrite": 10, "cost": {"total": 0.05}},
                 "children": []
@@ -168,6 +174,17 @@ fn context_tree_totals_bill_the_root_family_total() {
     ));
     assert!(
         rows.contains(&"Total: 2.1k tokens \u{b7} $0.05".to_string()),
+        "{rows:#?}"
+    );
+    let cost = &rows[rows.iter().position(|row| row == "Cost").unwrap()..];
+    assert_eq!(
+        cost[..4],
+        [
+            "Cost",
+            "Total: $0.0500",
+            "anthropic/claude-opus-4-6: $0.0300",
+            "unknown model (deleted agents): $0.0200",
+        ],
         "{rows:#?}"
     );
 }

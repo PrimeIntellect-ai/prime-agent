@@ -529,17 +529,21 @@ fn sum_own_usage_by_model(node: &ContextNode, total: &mut Vec<ModelUsage>) {
             totals: node.own_usage,
         });
     for bucket in node.own_usage_by_model.iter().chain(&unsplit_deleted) {
-        if let Some(existing) = total
-            .iter_mut()
-            .find(|existing| existing.provider == bucket.provider && existing.id == bucket.id)
-        {
-            existing.totals.add_fold(&bucket.totals);
-        } else {
-            total.push(bucket.clone());
-        }
+        fold_bucket(total, bucket);
     }
     for child in &node.children {
         sum_own_usage_by_model(child, total);
+    }
+}
+
+fn fold_bucket(total: &mut Vec<ModelUsage>, bucket: &ModelUsage) {
+    if let Some(existing) = total
+        .iter_mut()
+        .find(|existing| existing.provider == bucket.provider && existing.id == bucket.id)
+    {
+        existing.totals.add_fold(&bucket.totals);
+    } else {
+        total.push(bucket.clone());
     }
 }
 
@@ -559,6 +563,31 @@ fn tree_own_usage_by_model(root: &ContextNode) -> Option<Vec<ModelUsage>> {
     }
     let mut total = Vec::new();
     sum_own_usage_by_model(root, &mut total);
+    // Spend of descendants that render no row (a retired refine child) rides
+    // only the root's family total: it joins the unknown-model bucket, so the
+    // lines add up to the Cost Total.
+    let mut rendered = UsageTotals::default();
+    for bucket in &total {
+        rendered.add_fold(&bucket.totals);
+    }
+    let family = root.total_usage;
+    let unrendered = UsageTotals {
+        input: family.input.saturating_sub(rendered.input),
+        output: family.output.saturating_sub(rendered.output),
+        cache_read: family.cache_read.saturating_sub(rendered.cache_read),
+        cache_write: family.cache_write.saturating_sub(rendered.cache_write),
+        cost_total: (family.cost_total - rendered.cost_total).max(0.0),
+    };
+    if unrendered.spent_tokens() > 0 {
+        fold_bucket(
+            &mut total,
+            &ModelUsage {
+                provider: String::new(),
+                id: String::new(),
+                totals: unrendered,
+            },
+        );
+    }
     Some(total)
 }
 
