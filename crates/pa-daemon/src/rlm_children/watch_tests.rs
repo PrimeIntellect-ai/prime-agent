@@ -135,6 +135,16 @@ async fn spawn_fake_supervisor(
                     let id = value["id"].as_str().unwrap_or_default().to_string();
                     let command = value["command"].clone();
                     let command_type: &str = command["type"].as_str().unwrap_or_default();
+                    if command_type == "get_state" {
+                        if let Some(gate) = child_subagents
+                            .state_gate
+                            .as_ref()
+                            .filter(|gate| gate.armed.swap(false, Ordering::SeqCst))
+                        {
+                            gate.copied.notify_one();
+                            gate.release.notified().await;
+                        }
+                    }
                     let response = match command_type {
                         _ if matches!(
                             (child, command_type),
@@ -236,10 +246,8 @@ async fn spawn_fake_supervisor(
                             }
                             response_success(Some(&id), command_type, None)
                         }
-                        "get_state" => response_success(
-                            Some(&id),
-                            command_type,
-                            Some(child_subagents.scripted_states.lock().unwrap().pop_front().or_else(|| child_subagents.live_state.lock().unwrap().clone()).unwrap_or_else(|| {
+                        "get_state" => {
+                            let mut state = child_subagents.scripted_states.lock().unwrap().pop_front().or_else(|| child_subagents.live_state.lock().unwrap().clone()).unwrap_or_else(|| {
                                 json!({
                                     "isStreaming": false,
                                     "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
@@ -247,8 +255,21 @@ async fn spawn_fake_supervisor(
                                     "progressNote": "halfway through the task",
                                     "toolUseCount": 3,
                                 })
-                            })),
-                        ),
+                            });
+                            if command.get("taskObservation").and_then(Value::as_str)
+                                == Some("factory")
+                            {
+                                if let Some(object) = state.as_object_mut() {
+                                    object.insert(
+                                        "outstandingBackgroundJobs".to_string(),
+                                        json!(child_subagents
+                                            .background_jobs
+                                            .load(Ordering::SeqCst)),
+                                    );
+                                }
+                            }
+                            response_success(Some(&id), command_type, Some(state))
+                        }
                         "list_agent_peers" => {
                             let snapshot = peers.lock().unwrap().clone();
                             if let Some(gate) = child_subagents
@@ -319,8 +340,7 @@ async fn spawn_fake_supervisor(
                                     response_success(Some(&id), command_type, None)
                                 }
                                 FakeKill::SuccessAfterMs(ms) => {
-                                    tokio::time::sleep(std::time::Duration::from_millis(ms))
-                                        .await;
+                                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                                     response_success(Some(&id), command_type, None)
                                 }
                                 FakeKill::UnknownSession => response_failure(
@@ -391,6 +411,7 @@ struct FakeChildSubagents {
     quiescent_waits: std::sync::atomic::AtomicUsize,
     wait_for_idle_requests: AtomicU32,
     answer_reads: AtomicU32,
+    background_jobs: AtomicU32,
     /// The fake answers `abort` with a real refusal (the cancel path's
     /// failed-abort lane).
     abort_fails: AtomicBool,
@@ -400,6 +421,8 @@ struct FakeChildSubagents {
     peer_gate: Option<Arc<FakePeerGate>>,
     /// Holds the task `prompt` in flight: the worker has not accepted it yet.
     prompt_gate: Option<Arc<FakePeerGate>>,
+    /// Holds one `get_state` answer: the worker has not answered yet.
+    state_gate: Option<Arc<FakePeerGate>>,
     /// Holds kill confirmation so tests control the retirement window.
     kill_gate: Option<Arc<FakePeerGate>>,
 }
@@ -476,6 +499,264 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
 }
 
 #[tokio::test]
+async fn collect_reports_factory_task_work_separately_from_turn_settlement() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_state = Arc::new(FakeChildSubagents::default());
+    child_state.background_jobs.store(1, Ordering::SeqCst);
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_state),
+    )
+    .await;
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+                contract: None,
+            }),
+        })
+        .await
+        .expect("spawn must succeed against the fake supervisor");
+
+    let busy = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 10_000)
+        .await
+        .expect("collect the still-busy factory task");
+    assert!(
+        busy[0].settled,
+        "the assistant turn remains terminal: {busy:?}"
+    );
+    assert_eq!(busy[0].factory_task_busy, Some(true));
+
+    child_state.background_jobs.store(0, Ordering::SeqCst);
+    let settled = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 10_000)
+        .await
+        .expect("collect after background completion delivery");
+    assert!(
+        settled[0].settled,
+        "the child turn stays settled: {settled:?}"
+    );
+    assert_eq!(settled[0].factory_task_busy, Some(false));
+
+    // The completion notice's follow-up turn still works in the checkout.
+    *child_state.live_state.lock().unwrap() =
+        Some(json!({ "isStreaming": true, "sessionActions": { "queuedCount": 0 } }));
+    let follow_up = sessions
+        .collect(vec![handle.rlm_child_id], 10_000)
+        .await
+        .expect("collect during the follow-up turn");
+    assert!(follow_up[0].settled, "the run never reopens: {follow_up:?}");
+    assert_eq!(follow_up[0].factory_task_busy, Some(true));
+}
+
+/// A refresh whose direct read was idle but whose settle re-check sees the
+/// child busy again records the factory task as busy, never the stale idle.
+#[tokio::test]
+async fn an_idle_read_that_the_recheck_sees_busy_records_factory_task_busy() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_state = Arc::new(FakeChildSubagents::default());
+    // A parked idle wait keeps the settle watcher out of the scripted reads.
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        10_000,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_state),
+    )
+    .await;
+    sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+                contract: None,
+            }),
+        })
+        .await
+        .expect("spawn must succeed against the fake supervisor");
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    assert!(
+        super::host::wait_for_prompt_state(
+            &record,
+            super::host::PromptWait::Admission,
+            Some(Instant::now() + Duration::from_secs(10)),
+        )
+        .await,
+        "the spawned task prompt must be admitted"
+    );
+    child_state.scripted_states.lock().unwrap().extend([
+        json!({ "isStreaming": false, "sessionActions": { "queuedCount": 0 } }),
+        json!({ "isStreaming": true, "sessionActions": { "queuedCount": 0 } }),
+    ]);
+
+    assert!(
+        sessions.inner.refresh_record(&record).await,
+        "the re-check saw it busy"
+    );
+    assert_eq!(record.lock().await.factory_task_busy, Some(true));
+}
+
+/// The task-activity write is part of the direct read: while one refresh
+/// holds the record for it, the next refresh cannot start its worker round
+/// trip. The unreachable arm proves a failed read also records its
+/// unverified `None` inside the direct-observation lock.
+#[tokio::test]
+async fn factory_task_activity_is_written_inside_the_direct_observation() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(FakePeerGate::default());
+    let child_state = Arc::new(FakeChildSubagents {
+        state_gate: Some(Arc::clone(&gate)),
+        ..FakeChildSubagents::default()
+    });
+    // A parked idle wait keeps the settle watcher out of the gate.
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        10_000,
+        FakeKill::Success,
+        FakeChild::Unreachable,
+        child_state,
+    )
+    .await;
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+                contract: None,
+            }),
+        })
+        .await
+        .expect("spawn must succeed against the fake supervisor");
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    let direct_observation = Arc::clone(&record.lock().await.direct_observation);
+    assert!(
+        super::host::wait_for_prompt_state(
+            &record,
+            super::host::PromptWait::Admission,
+            Some(Instant::now() + Duration::from_secs(10)),
+        )
+        .await,
+        "the spawned task prompt must be admitted"
+    );
+    record.lock().await.factory_task_busy = Some(true);
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let collect = {
+        let sessions = sessions.clone();
+        let child_id = handle.rlm_child_id.clone();
+        tokio::spawn(async move { sessions.collect(vec![child_id], 0).await })
+    };
+    gate.copied.notified().await;
+    // Hold the record so the refresh parks on its task-activity write while
+    // still holding the direct observation.
+    let record_guard = record.lock().await;
+    gate.release.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        direct_observation.try_lock().is_err(),
+        "the task-activity write must finish before the direct observation releases"
+    );
+    drop(record_guard);
+    let results = collect
+        .await
+        .expect("collect task")
+        .expect("collect the unreachable child");
+    assert_eq!(results[0].factory_task_busy, None);
+    assert_eq!(record.lock().await.factory_task_busy, None);
+}
+
+#[tokio::test]
+async fn ordinary_child_collection_ignores_factory_task_observation() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_state = Arc::new(FakeChildSubagents::default());
+    child_state.background_jobs.store(1, Ordering::SeqCst);
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        child_state,
+    )
+    .await;
+    let handle = spawn_child(&sessions).await;
+
+    let results = sessions
+        .collect(vec![handle.rlm_child_id], 10_000)
+        .await
+        .expect("collect ordinary child");
+    assert!(
+        results[0].settled,
+        "ordinary child turn semantics stay unchanged: {results:?}"
+    );
+    assert_eq!(results[0].factory_task_busy, None);
+}
+
+#[tokio::test]
+async fn a_deleted_factory_child_confirms_task_quiescence() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "f20 child task".to_string(),
+            name: Some("f20-worker".to_string()),
+            model: None,
+            thinking: None,
+            kind: RlmSpawnKind::Subagent,
+            cwd: None,
+            spawned_by_request_id: None,
+            factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {
+                run_id: "run".to_string(),
+                spec_id: "spec".to_string(),
+                state_id: "state".to_string(),
+                contract: None,
+            }),
+        })
+        .await
+        .expect("spawn factory child");
+
+    sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("confirm factory actor deletion");
+    let results = sessions
+        .collect(vec![handle.rlm_child_id], 0)
+        .await
+        .expect("collect factory deletion receipt");
+    assert_eq!(results[0].status, "cancelled");
+    assert_eq!(results[0].factory_task_busy, Some(false));
+}
+
+#[tokio::test]
 async fn a_factory_child_settles_without_a_parent_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
@@ -493,6 +774,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
                 run_id: "run".to_string(),
                 spec_id: "spec".to_string(),
                 state_id: "state".to_string(),
+                contract: None,
             }),
         })
         .await
@@ -929,6 +1211,157 @@ async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
     gate.release.notify_one();
 }
 
+/// The recursion budget bounds subagents only: at a maxed-out depth (a
+/// depth-2 leaf under the default max of 2) an ordinary spawn refuses
+/// with the depth-limit error, while a refinement child (`refine_child`)
+/// still admits — refinement is its parent's one-shot
+/// planning pass, so refusing it at the limit would lock every depth-2
+/// session out of `refine.run()` and the compaction-triggered
+/// refinement. Red when the `!refine_child` skip is lost: the ordinary
+/// half fails on the admit, the refine half fails on the refusal.
+#[tokio::test]
+async fn a_refine_child_spawns_past_the_recursion_limit_while_an_ordinary_child_refuses() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions.set_identity(ParentIdentity {
+        rlm_depth: 2,
+        model: Some("mock/mock-1".to_string()),
+        cwd: Some(std::env::temp_dir().to_string_lossy().to_string()),
+        ..ParentIdentity::with_default_depth()
+    });
+    // The ordinary spawn refuses at the limit.
+    let error = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "depth-2 leaf task".to_string(),
+            name: Some("d2-worker".to_string()),
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            kind: RlmSpawnKind::Subagent,
+            factory: None,
+        })
+        .await
+        .expect_err("the ordinary spawn must refuse at the limit");
+    assert!(
+        error
+            .to_string()
+            .contains("RLM recursion depth limit reached"),
+        "the refusal names the gate: {error}"
+    );
+    // The refinement child admits past the same limit.
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "refinement planning pass".to_string(),
+            name: None,
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            kind: RlmSpawnKind::Refine,
+            factory: None,
+        })
+        .await
+        .expect("the refinement child must admit past the limit");
+    sessions.release_child_prompt(&handle.rlm_child_id).await;
+    let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the admitted refinement child settles")
+        .expect("the follow_up channel stays open");
+    assert_eq!(
+        follow_up["customMessage"]["customType"], "rlm_child_terminal_notice",
+        "the refinement child's notice: {follow_up}"
+    );
+}
+
+/// The spawn-wait polarity, refinement half: a refinement child's prompt
+/// waits for its parent's release, never a turn boundary — its one
+/// planning prompt never contends with the parent's provider continuation
+/// and `/refine` fires off-turn, so a boundary would idle the child for
+/// its whole budget. Red when the turn wait comes back (the refinement
+/// child idles behind a boundary that never fires).
+#[tokio::test]
+async fn a_refine_childs_prompt_waits_for_its_release_not_the_turn_boundary() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions.notify_turn_started();
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "refinement planning pass".to_string(),
+            name: None,
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            kind: RlmSpawnKind::Refine,
+            factory: None,
+        })
+        .await
+        .expect("the refinement child spawn must succeed against the fake supervisor");
+    // No boundary ever fires: the release alone sends the prompt.
+    sessions.release_child_prompt(&handle.rlm_child_id).await;
+    let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the refinement child's prompt must fire without a turn boundary")
+        .expect("the follow_up channel stays open");
+    assert_eq!(
+        follow_up["customMessage"]["customType"], "rlm_child_terminal_notice",
+        "the refinement child's notice: {follow_up}"
+    );
+}
+
+/// The registry retires a refinement child at its own settle: the
+/// watcher observed the run's end, so the one-shot record leaves the
+/// roster on its own — the engine never polls for it. Red when the
+/// retire is dropped: the completed record lingers like an ordinary
+/// subagent's row.
+#[tokio::test]
+async fn a_refine_child_record_retires_at_its_settle() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let handle = sessions
+        .spawn(RlmSpawnRequest {
+            prompt: "refinement planning pass".to_string(),
+            name: None,
+            model: None,
+            thinking: None,
+            cwd: None,
+            spawned_by_request_id: None,
+            kind: RlmSpawnKind::Refine,
+            factory: None,
+        })
+        .await
+        .expect("the refinement child spawn must succeed against the fake supervisor");
+    sessions.release_child_prompt(&handle.rlm_child_id).await;
+    let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
+        .await
+        .expect("the refinement child settles")
+        .expect("the follow_up channel stays open");
+    assert_eq!(
+        follow_up["customMessage"]["customType"], "rlm_child_terminal_notice",
+        "the refinement child's notice: {follow_up}"
+    );
+    // The settle retired the record: the roster empties on its own.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let rows = sessions
+            .list_subagents()
+            .await
+            .expect("the roster read succeeds");
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the settled refinement child never retired; rows: {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 /// A `collect` that lands while the task prompt is still in flight reads
 /// the child's pre-prompt idle worker: the child is still running, never a
 /// `done` settle with no answer (the factory settled its verifier before
@@ -1308,6 +1741,8 @@ async fn a_decision_child_keeps_its_display_running_through_the_watcher_settle()
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
+        factory_task_busy: None,
+        refine_child: false,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(
@@ -2837,6 +3272,7 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
     assert_eq!(results[0].session_name.as_deref(), Some("f20-worker"));
     assert_eq!(results[0].status, "cancelled");
     assert!(results[0].settled);
+    assert_eq!(results[0].factory_task_busy, None);
     assert_eq!(
         results[0].error.as_deref(),
         Some("Deleted by parent orchestrator")
@@ -3139,6 +3575,8 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
+        factory_task_busy: None,
+        refine_child: false,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: None,
@@ -3211,6 +3649,8 @@ async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() 
         direct_observation: Arc::new(Mutex::new(())),
         notice_delivered: false,
         factory: false,
+        factory_task_busy: None,
+        refine_child: false,
         retirement: Retirement::live(),
         usage_registration_forgotten: false,
         session_file: Some(

@@ -520,6 +520,9 @@ pub(crate) struct ChildEngineOverrides {
     pub spawned_by_request_id: Option<String>,
     /// The spawn carried a factory run tag.
     pub factory_child: bool,
+    /// The factory state's output contract from the spawn's run tag: the
+    /// child's `rlm.factory.emit` checks against it.
+    pub factory_contract: Option<serde_json::Value>,
 }
 
 /// A child's model source: a real-provider child carries its resolved
@@ -541,6 +544,7 @@ pub(crate) struct HeadlessEmbeddingFields {
     pub(crate) extra_host_handlers: Option<pa_core::kernel::shared::HostRequestHandlers>,
     pub(crate) rlm_depth: Option<u32>,
     pub(crate) factory_child: bool,
+    pub(crate) factory_contract: Option<serde_json::Value>,
     pub(crate) bash_wake: pa_core::session_engine::bash_notices::BashNoticeWake,
     /// The RPC mode's wake handle, carried onto the engine handle so the
     /// queue-pump listener parks on it; `None` outside the RPC embedding.
@@ -597,6 +601,10 @@ pub(crate) fn headless_embedding_fields(embedding: &HeadlessEmbedding) -> Headle
             embedding,
             HeadlessEmbedding::Child(overrides) if overrides.factory_child
         ),
+        factory_contract: match embedding {
+            HeadlessEmbedding::Child(overrides) => overrides.factory_contract.clone(),
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc { .. } => None,
+        },
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
@@ -792,6 +800,7 @@ pub(crate) async fn build_headless_engine_with(
         extra_host_handlers,
         rlm_depth,
         factory_child,
+        factory_contract,
         bash_wake,
         rpc_bash_wake,
         on_late_sent_agent_message,
@@ -830,6 +839,8 @@ pub(crate) async fn build_headless_engine_with(
     };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             on_late_sent_agent_message,
             cron_store: None,
             semantic_edges,
@@ -866,6 +877,7 @@ pub(crate) async fn build_headless_engine_with(
             progress_note_emit: None,
             rlm_depth,
             factory_child,
+            factory_contract,
             daemonless: true,
             model_info: Some(model.clone()),
             // The kernel boots in the background at creation; a spawned

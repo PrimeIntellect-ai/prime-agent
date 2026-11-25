@@ -79,20 +79,57 @@ impl Worker {
             .and_then(Value::as_str)
             .map(str::to_string);
         let timeout_ms = payload.get("timeoutMs").and_then(Value::as_u64);
+        // The machines page's list reads the library from disk (the one Rust
+        // scan): no kernel, no core session. The kernel's factory gate never
+        // sees this read, so it refuses here while the factory is disabled;
+        // the settings read and the scan both stay off the executor.
+        if action == "library" && spec_id.is_none() {
+            let agent_dir = self.config.agent_dir.clone();
+            let listed = tokio::task::spawn_blocking(move || {
+                factory_lane_enabled(&agent_dir).then(|| {
+                    pa_core::session_engine::factory_host::machine_library(&agent_dir).to_json()
+                })
+            })
+            .await;
+            return match listed {
+                Ok(Some(listed)) => response_success(None, "factory_activity", Some(listed)),
+                Ok(None) => response_failure(
+                    None,
+                    "factory_activity",
+                    pa_core::refinement::FACTORY_DISABLED_MESSAGE,
+                    None,
+                ),
+                Err(error) => response_failure(
+                    None,
+                    "factory_activity",
+                    &format!("machine library scan failed: {error}"),
+                    None,
+                ),
+            };
+        }
         let reply = match &self.agent_engine {
             Some(engine) => {
                 engine
-                    .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)
+                    .factory_activity(
+                        &action,
+                        run_id.as_deref(),
+                        spec_id.as_deref(),
+                        timeout_ms,
+                        payload.get("entry"),
+                        payload.get("instance"),
+                    )
                     .await
             }
             None => Err(anyhow::anyhow!(
                 pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE
             )),
         };
-        // The unscoped graph (the dock's and the agents view's poll) also carries the session's
-        // stored specs: durable harness entries, so a live session without a kernel (not booted
-        // yet, or passivated) answers them with no runs instead of the refusal.
-        let lists_runs = action == "graph" && run_id.is_none() && spec_id.is_none();
+        // The unscoped graph (the dock's and the agents view's poll) and
+        // the overview's arming-free peek both list runs: a live session
+        // without a kernel (not booted yet, or passivated) answers them
+        // with no runs instead of the refusal.
+        let lists_runs =
+            matches!(action.as_str(), "graph" | "peek") && run_id.is_none() && spec_id.is_none();
         let reply = match reply {
             Err(error)
                 if lists_runs
@@ -104,7 +141,9 @@ impl Worker {
         };
         match reply {
             Ok(mut result) => {
-                if lists_runs {
+                // The graph (the dock's and the agents view's poll) also
+                // carries the session's stored specs: durable harness entries.
+                if action == "graph" && run_id.is_none() && spec_id.is_none() {
                     match self.stored_factory_specs().await {
                         Ok(count) => result["factorySpecs"] = json!(count),
                         Err(error) => {
@@ -219,6 +258,78 @@ mod tests {
                 Some(serde_json::json!({ "runs": [], "factorySpecs": 2 }))
             );
         }
+        let _ = worker.dispatch("kill", &serde_json::json!({})).await;
+    }
+
+    /// The machines page's list reads the library from disk: a session with
+    /// no kernel lists the user level's machine with its source, and the list
+    /// refuses while the factory is disabled.
+    #[tokio::test]
+    async fn the_library_list_answers_without_a_kernel() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let agent_dir = dir.path().join("agent");
+        let machine = agent_dir.join("machines/list-probe");
+        std::fs::create_dir_all(machine.join("prompts")).expect("machine dir");
+        std::fs::write(
+            machine.join("machine.toml"),
+            "format = 1\nname = \"list-probe\"\nversion = 1\ndescription = \"Probe.\"\n\n[states.go]\nentry = true\nagent = { prompt = \"prompts/go.md\" }\n",
+        )
+        .expect("machine.toml");
+        std::fs::write(machine.join("prompts/go.md"), "Go.\n").expect("prompt");
+        let worker = Worker::new(
+            crate::worker::WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: std::path::PathBuf::new(),
+                token: "token".to_string(),
+                worker_instance_id: String::new(),
+                active_session_id: "library-list".to_string(),
+                agent_dir: agent_dir.clone(),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                telemetry_disabled: Some(true),
+                script: Some(serde_json::json!({ "responses": [] })),
+            },
+            None,
+        );
+        let created = worker
+            .dispatch(
+                "create",
+                &serde_json::json!({ "cwd": "/tmp", "sessionDir": sessions }),
+            )
+            .await;
+        assert!(created.success, "{created:?}");
+        let payload = serde_json::json!({ "action": "library" });
+        let list = || worker.dispatch("factory_activity", &payload);
+        // The factory is off by default: the list refuses like the kernel.
+        let refused = list().await;
+        assert_eq!(
+            refused.error.as_deref(),
+            Some(pa_core::refinement::FACTORY_DISABLED_MESSAGE),
+            "{refused:?}"
+        );
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"factory": {"enabled": true}}"#,
+        )
+        .expect("write settings");
+        let listed = list().await;
+        assert!(listed.success, "{listed:?}");
+        let data = listed.data.expect("list data");
+        let row = data["machines"]
+            .as_array()
+            .expect("machines")
+            .iter()
+            .find(|row| row["name"] == "list-probe")
+            .expect("the user machine is listed");
+        assert_eq!(
+            (&row["source"], &row["kind"], &row["description"]),
+            (
+                &serde_json::json!("user"),
+                &serde_json::json!("directory"),
+                &serde_json::json!("Probe.")
+            )
+        );
         let _ = worker.dispatch("kill", &serde_json::json!({})).await;
     }
 

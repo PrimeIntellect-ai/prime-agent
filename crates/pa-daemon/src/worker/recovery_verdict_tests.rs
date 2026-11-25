@@ -54,7 +54,7 @@ async fn idle_time_injected_admission_is_busy_evidence() {
         !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
         "the settled session proves nothing"
     );
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_autonomous_follow_up(
         &worker.recovery,
         &worker.core,
@@ -83,7 +83,7 @@ async fn idle_time_injected_admission_is_busy_evidence() {
 async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() {
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,
@@ -144,7 +144,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
 async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row() {
     let worker = created_worker_with_journal().await;
     worker.core.lock().unwrap().busy = true;
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,
@@ -160,257 +160,12 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// A turn-held pacing notice queues like a completion on a busy session — a
-/// visible steer row that cuts the turn at its next boundary — and the
-/// held gate keeps it quiet once the delivery settled.
-#[tokio::test]
-async fn a_turn_held_notice_queues_on_a_busy_session_and_stays_quiet_when_idle() {
-    let worker = created_worker_with_journal().await;
-    {
-        let mut core = worker.core.lock().unwrap();
-        core.busy = true;
-        core.running_tool_calls.insert("cell".to_string());
-    }
-    let notify = Arc::new(Notify::new());
-    admit_turn_held_notice(
-        &worker.recovery,
-        &worker.core,
-        &notify,
-        crate::engine::KernelNotice::turn_held(60_000),
-        &tokio_util::sync::CancellationToken::new(),
-    );
-    let core = worker.core.lock().unwrap();
-    let item = core
-        .steering
-        .front()
-        .expect("the turn-held notice queues on the steering lane");
-    let row = item.custom_message.as_ref().expect("the injected row");
-    assert_eq!(
-        row.get("customType").and_then(Value::as_str),
-        Some("turn_held_notice"),
-        "the row is the turn-held notice: {row}"
-    );
-    assert!(
-        item.message
-            .starts_with("[turn-held] This turn has been open for 60s."),
-        "the turn runs on the notice content: {item:?}"
-    );
-    assert!(item.queue_visible, "the busy session keeps a visible row");
-    assert_eq!(item.policy, TurnPolicy::Queued);
-    drop(core);
-    assert!(
-        WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
-        "the pacing notice admission is live work"
-    );
-    // The held gate: a settled delivery must not be woken by the pacing
-    // notice.
-    {
-        let mut core = worker.core.lock().unwrap();
-        core.steering.clear();
-        core.busy = false;
-    }
-    admit_turn_held_notice(
-        &worker.recovery,
-        &worker.core,
-        &notify,
-        crate::engine::KernelNotice::turn_held(60_000),
-        &tokio_util::sync::CancellationToken::new(),
-    );
-    let core = worker.core.lock().unwrap();
-    assert_eq!(
-        core.steering.len(),
-        0,
-        "the idle session refuses the pacing notice"
-    );
-    drop(core);
-    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
-}
-
-#[tokio::test]
-async fn a_turn_held_notice_from_a_settled_delivery_cannot_cut_the_next_turn() {
-    let dir = tempfile::tempdir().unwrap();
-    let journal_path = dir.path().join("recovery.jsonl");
-    let recovery = Arc::new(Mutex::new(Some(
-        WorkerRecoveryJournal::open(&journal_path).unwrap(),
-    )));
-    let core = Arc::new(Mutex::new(SessionCore::test_core(None, String::new())));
-    let delivery = tokio_util::sync::CancellationToken::new();
-    let timer_delivery = delivery.clone();
-    let notify = Arc::new(Notify::new());
-    let timer = {
-        // The timer has finished sleeping but cannot take the admission lock.
-        let mut guard = core.lock().unwrap();
-        guard.busy = true;
-        guard.running_tool_calls.insert("cell".to_string());
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let timer_core = Arc::clone(&core);
-        let timer_recovery = Arc::clone(&recovery);
-        let timer = tokio::task::spawn_blocking(move || {
-            started_tx.send(()).unwrap();
-            admit_turn_held_notice(
-                &timer_recovery,
-                &timer_core,
-                &notify,
-                crate::engine::KernelNotice::turn_held(60_000),
-                &timer_delivery,
-            );
-        });
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        delivery.cancel();
-        // Abort cannot preempt synchronous admission. The next delivery
-        // also has busy=true when the old timer gets the lock.
-        timer.abort();
-        timer
-    };
-    timer.await.unwrap();
-    assert!(
-        core.lock().unwrap().steering.is_empty(),
-        "the previous delivery must not queue a pacing turn"
-    );
-    assert!(
-        !WorkerRecoveryJournal::read_interrupted(&journal_path),
-        "a stale timer must not create recovery work"
-    );
-}
-
-#[tokio::test]
-async fn a_turn_held_notice_stays_quiet_during_an_abort() {
-    let worker = created_worker_with_journal().await;
-    worker.dispatch("clear_queue", &json!({})).await;
-    {
-        let mut core = worker.core.lock().unwrap();
-        core.busy = true;
-        core.running_tool_calls.insert("cell".to_string());
-        core.abort_requested = true;
-    }
-    let notify = Arc::new(Notify::new());
-    admit_turn_held_notice(
-        &worker.recovery,
-        &worker.core,
-        &notify,
-        crate::engine::KernelNotice::turn_held(60_000),
-        &tokio_util::sync::CancellationToken::new(),
-    );
-    assert!(
-        worker.core.lock().unwrap().steering.is_empty(),
-        "an aborted delivery must not queue a pacing turn"
-    );
-    assert!(
-        !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
-        "a refused pacing notice must not create recovery work"
-    );
-    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
-}
-
-/// A waiting keepalive notice queues on the steering lane like a completion,
-/// with its [waiting] content and the capped-pid row.
-#[tokio::test]
-async fn a_bash_waiting_notice_queues_on_the_steering_lane() {
-    let worker = created_worker_with_journal().await;
-    worker.dispatch("clear_queue", &json!({})).await;
-    let notify = Arc::new(Notify::new());
-    admit_kernel_notice(
-        &worker.recovery,
-        &worker.core,
-        &notify,
-        crate::engine::KernelNotice::bash_waiting(
-            &[7227, 7228],
-            &["heavy.py alpha".to_string(), "heavy.py beta".to_string()],
-            2,
-        ),
-        || false,
-    );
-    let core = worker.core.lock().unwrap();
-    let item = core
-        .steering
-        .front()
-        .expect("the waiting notice queues on the steering lane");
-    let row = item.custom_message.as_ref().expect("the injected row");
-    assert_eq!(
-        row.get("customType").and_then(Value::as_str),
-        Some("bash_waiting_notice"),
-        "the row is the waiting keepalive notice: {row}"
-    );
-    assert!(
-        item.message
-            .starts_with("[waiting] Background work still running: 2 command(s)"),
-        "the turn runs on the notice content: {item:?}"
-    );
-    // An idle session's wake is an invisible injected turn.
-    assert!(!item.queue_visible, "the idle wake stays invisible");
-    drop(core);
-    assert!(
-        WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
-        "the keepalive admission is live work"
-    );
-    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
-}
-
-#[tokio::test]
-async fn waiting_admission_rechecks_parked_state_after_taking_the_queue_lock() {
-    for compacting in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let journal_path = dir.path().join("recovery.jsonl");
-        let recovery = Arc::new(Mutex::new(Some(
-            WorkerRecoveryJournal::open(&journal_path).unwrap(),
-        )));
-        let core = Arc::new(Mutex::new(SessionCore::test_core(None, String::new())));
-        let notify = Arc::new(Notify::new());
-        let admission = {
-            let mut guard = core.lock().unwrap();
-            let (started_tx, started_rx) = std::sync::mpsc::channel();
-            let admission_core = Arc::clone(&core);
-            let admission_recovery = Arc::clone(&recovery);
-            let admission_notify = Arc::clone(&notify);
-            let admission = tokio::task::spawn_blocking(move || {
-                started_tx.send(()).unwrap();
-                admit_kernel_notice(
-                    &admission_recovery,
-                    &admission_core,
-                    &admission_notify,
-                    crate::engine::KernelNotice::bash_waiting(&[42], &["build".into()], 1),
-                    || false,
-                )
-            });
-            started_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-            guard.busy = !compacting;
-            guard.compacting = compacting;
-            admission
-        };
-        assert!(!admission.await.unwrap());
-        assert!(core.lock().unwrap().steering.is_empty());
-        assert!(!WorkerRecoveryJournal::read_interrupted(&journal_path));
-        assert!(
-            tokio::time::timeout(std::time::Duration::ZERO, notify.notified())
-                .await
-                .is_err()
-        );
-        {
-            let mut guard = core.lock().unwrap();
-            guard.busy = false;
-            guard.compacting = false;
-        }
-        assert!(admit_kernel_notice(
-            &recovery,
-            &core,
-            &notify,
-            crate::engine::KernelNotice::bash_waiting(&[42], &["build".into()], 1),
-            || false,
-        ));
-        assert_eq!(core.lock().unwrap().steering.len(), 1);
-    }
-}
-
 /// The withdrawal settles the busy evidence so the journal never promises a replay.
 #[tokio::test]
 async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     let worker = created_worker_with_journal().await;
     worker.dispatch("clear_queue", &json!({})).await;
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(crate::worker::WorkNotify::new(Arc::default()));
     admit_kernel_notice(
         &worker.recovery,
         &worker.core,

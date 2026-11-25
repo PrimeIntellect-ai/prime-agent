@@ -7,6 +7,7 @@ members = [
     "crates/pa-models",
     "crates/pa-agent",
     "crates/pa-core",
+    "crates/pa-factory",
     "crates/pa-daemon",
     "crates/pa-tui",
     "crates/pa-cli",
@@ -40,6 +41,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 tracing = { version = "0.1", features = ["attributes"] }
 pa-telemetry = { path = "crates/pa-telemetry" }
+pa-factory = { path = "crates/pa-factory" }
 pa-types = { path = "crates/pa-types" }
 pa-ai = { path = "crates/pa-ai" }
 pa-agent = { path = "crates/pa-agent" }

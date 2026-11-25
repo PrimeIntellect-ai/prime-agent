@@ -1,1 +1,1 @@
-- The first `[waiting]` notice for each background job now comes one full window after the job starts, also when an earlier job already finished.
+- Python runtime: the kernel owns its SIGINT mask at startup.

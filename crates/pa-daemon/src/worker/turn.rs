@@ -1,24 +1,15 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    admit_turn_held_notice, checkpoint_queue_recovery, compact_action_label,
-    consume_shown_inbox_items_locked, create_daemon_event_meta, deliver_inbox_arrival_row_locked,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    checkpoint_queue_recovery, compact_action_label, consume_shown_inbox_items_locked,
+    create_daemon_event_meta, deliver_inbox_arrival_row_locked, emit_refinement_event_for_session,
+    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
+    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
 use std::sync::{Arc, Mutex};
-
-/// The `[turn-held]` pacing window: a non-pacing delivery held past this bound
-/// admits a single `[turn-held]` teaching notice on the steering lane, so the
-/// queued row cuts the held turn at its next boundary and delivers as the
-/// next turn's prompt. Matches the default python cell budget
-/// (`DEFAULT_PYTHON_CELL_TIMEOUT_MS`, 60s): a turn held past the cell
-/// budget is waiting, not working.
-const TURN_HELD_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) struct TurnRunner {
     pub(crate) core: Arc<Mutex<SessionCore>>,
@@ -26,7 +17,7 @@ pub(super) struct TurnRunner {
     /// The prompt-admission registry: an admitted prompt clears when its
     /// turn settles.
     pub(super) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
-    pub(super) work_notify: Arc<Notify>,
+    pub(super) work_notify: Arc<super::WorkNotify>,
     pub(super) idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
     pub(super) engine: std::sync::Arc<dyn SessionEngine>,
@@ -123,7 +114,19 @@ impl TurnRunner {
                 }
                 self.push_roster_delta();
                 self.run_turn(engine, lane, items).await;
+                // Refine replies that parked during the turn apply at
+                // this park boundary, before any queued turn starts: the
+                // next turn must see the applied harness.
+                self.apply_parked_refine_replies().await;
             } else {
+                // Parked refine child replies apply at this idle
+                // boundary: the runner owns turn admission, so the apply's
+                // context push can never interleave with a running turn's
+                // history (a notice between an assistant tool call and its
+                // tool result drops the real result). The apply runs before
+                // the idle notify, so a waiter never sees a session whose
+                // refinement is still parked.
+                self.apply_parked_refine_replies().await;
                 self.idle_notify.notify_waiters();
                 // A held inbox row (`SessionCore::inbox_wake_hold`) is not
                 // idle: no activity stamp, no kernel release. It wakes the
@@ -163,6 +166,30 @@ impl TurnRunner {
                         self.work_notify.notified().await;
                     }
                 }
+            }
+        }
+    }
+
+    /// Apply the parked refine child replies at the idle boundary through
+    /// the engine's shared commit, then emit each one's durable rows and
+    /// event here — sequenced by this runner so they never interleave with
+    /// a turn's rows.
+    async fn apply_parked_refine_replies(&self) {
+        while let Some(outcome) = self.engine.apply_pending_refine_reply().await {
+            let origin = {
+                let core = self.core.lock().unwrap();
+                core.store
+                    .as_ref()
+                    .map(|store| (store.session_id().to_string(), core.generation.clone()))
+            };
+            if let Some((session_id, generation)) = origin {
+                super::refinement::emit_refinement_outcome(
+                    &self.core,
+                    &self.events,
+                    &session_id,
+                    &generation,
+                    outcome,
+                );
             }
         }
     }
@@ -374,48 +401,6 @@ impl TurnRunner {
         };
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
-        // The `[turn-held]` pacing window: one notice per non-pacing delivery
-        // held busy past [`TURN_HELD_WINDOW`]. The admission's held gate
-        // (same delivery still busy with a tool call running, nothing queued
-        // to cut it already, not compacting or shutting down) runs inside its ONE lock section —
-        // never through a re-locking closed-check closure, which would
-        // self-deadlock the session. A queued row stops the held turn at
-        // its next boundary (the queued-steering probe) and delivers as
-        // the next turn's prompt. The delivery revokes admission before
-        // it settles.
-        let turn_held_delivery = tokio_util::sync::CancellationToken::new();
-        let pacing_only = items.iter().all(|item| {
-            item.custom_message
-                .as_ref()
-                .and_then(|row| row.get("customType"))
-                .and_then(Value::as_str)
-                == Some(pa_core::session_engine::messages::TURN_HELD_NOTICE_CUSTOM_TYPE)
-        });
-        let turn_held_window = (!pacing_only).then(|| {
-            let delivery = turn_held_delivery.clone();
-            let core = Arc::clone(&self.core);
-            let recovery = Arc::clone(&self.recovery);
-            let work_notify = Arc::clone(&self.work_notify);
-            let window = tokio::time::sleep(TURN_HELD_WINDOW);
-            tokio::spawn(async move {
-                tokio::select! {
-                    () = delivery.cancelled() => {}
-                    () = window => {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            admit_turn_held_notice(
-                                &recovery,
-                                &core,
-                                &work_notify,
-                                pa_core::session_engine::bash_notices::KernelNotice::turn_held(
-                                    TURN_HELD_WINDOW.as_millis() as u64,
-                                ),
-                                &delivery,
-                            );
-                        }).await;
-                    }
-                }
-            })
-        });
         // The pane reporter's run boundary (TS `agent_start`): working.
         self.herdr.lock().unwrap().run_started();
         engine.on_turn_start();
@@ -1218,12 +1203,6 @@ impl TurnRunner {
         });
         let held_run_end = turn.await.ok().flatten();
         let accepted_rows = accepted_prefix.load(std::sync::atomic::Ordering::SeqCst);
-        // Revoke admission before settling and stop a still-sleeping timer.
-        turn_held_delivery.cancel();
-        // Finish admission before the next delivery can start.
-        if let Some(window) = turn_held_window {
-            let _ = window.await;
-        }
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();
@@ -1334,9 +1313,11 @@ impl TurnRunner {
                 let _ = done.send(result.clone());
             }
         }
-        // The compact-trigger review services off the settle as a
-        // background round: the queued next prompt's admission never
-        // waits on it.
+        // The compact-trigger round services off the settle as a
+        // background task: the queued next prompt's admission never waits
+        // on it. The round is the refinement child's spawn — fire-and-wake;
+        // the child's proposal applies on its reply's arrival (the reply's
+        // wake emits the outcome rows and the `refine_complete` event).
         {
             let engine = review_engine;
             let core = Arc::clone(&self.core);
@@ -1346,14 +1327,14 @@ impl TurnRunner {
                 // The round takes the engine's session mutex on the blocking
                 // pool, never on this async task: a `blocking_lock` from the
                 // runtime thread deadlocks.
-                let refined = tokio::task::spawn_blocking(move || {
+                let spawned = tokio::task::spawn_blocking(move || {
                     pa_core::session_engine::compaction_trace::trace(
-                        "autorefine.review_started",
+                        "autorefine.round_started",
                         &serde_json::Value::Null,
                     );
                     let outcome = engine.consume_compact_auto_refine();
                     pa_core::session_engine::compaction_trace::trace(
-                        "autorefine.review_done",
+                        "autorefine.round_done",
                         &serde_json::json!({ "ran": outcome.is_ok() }),
                     );
                     outcome
@@ -1362,49 +1343,14 @@ impl TurnRunner {
                 .unwrap_or_else(|error| {
                     Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
                 });
-                match refined {
-                    Ok(Some(result)) => {
-                        // The outcome row and the model-facing notice (when edits
-                        // applied) persist like the `/refine` command's rows, fenced on
-                        // the serviced session.
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            emit_refinement_row(&core, &events, &review_session_id, &value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
-                                emit_refinement_row(&core, &events, &review_session_id, &value);
-                            }
-                        }
-                        emit_refinement_event_for_session(
-                            &core,
-                            &events,
-                            &review_session_id,
-                            crate::worker::refine_complete_event(&result),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
-                        emit_refinement_event_for_session(
-                            &core,
-                            &events,
-                            &review_session_id,
-                            json!({ "type": "refine_failed", "error": format!("{error:#}") }),
-                        );
-                    }
+                if let Err(error) = spawned {
+                    eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    emit_refinement_event_for_session(
+                        &core,
+                        &events,
+                        &review_session_id,
+                        json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+                    );
                 }
             });
         }

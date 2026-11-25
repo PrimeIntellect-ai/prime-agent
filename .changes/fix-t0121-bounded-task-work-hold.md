@@ -1,0 +1,1 @@
+- A machine run no longer waits silently when a finished state's child leaves background work running: the parent is told when the hold starts and which child holds it, and the run continues when that work ends.

@@ -431,7 +431,10 @@ fn agents_view_factory_panel_opens_on_the_run_list_and_returns() {
     });
     let outcome = run_plan_with(
         vec![wait_render("solo-spec"), key(KeyCode::Esc)],
-        Some(SessionPanel::FactoryRuns { row: None }),
+        Some(SessionPanel::FactoryRuns {
+            row: None,
+            node: None,
+        }),
         Some(graph),
     );
     assert!(
@@ -439,7 +442,7 @@ fn agents_view_factory_panel_opens_on_the_run_list_and_returns() {
             .frames
             .iter()
             .any(|frame| frame.contains("solo-spec") && frame.contains("open \u{b7}")),
-        "the factory page mounted on its run list"
+        "the machines page mounted on its run list"
     );
     assert!(
         outcome.return_to_agents_view,

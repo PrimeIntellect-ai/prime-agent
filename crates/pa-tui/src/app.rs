@@ -265,6 +265,7 @@ pub(crate) fn draw(
     let frame_area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
     let width = area.width as usize;
     let height = area.height as usize;
+    view.set_terminal_rows(area.height);
     let frame = view.render_frame(width, height);
     let cursor = view.frame_cursor();
     // The frame's embedded OSC 8 sequences drive the paint backend's hyperlink injection; install

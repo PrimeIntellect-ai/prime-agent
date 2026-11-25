@@ -107,9 +107,19 @@ impl Inner {
             }
             Err(error) => {
                 self.append_diagnostic(&format!("state snapshot error: {error:#}"));
+                // A failed capture stays owed: the next backgrounded cell's
+                // settle (any status, kernel alive) retries it. No re-check
+                // of the detached cell here: it may settle between the
+                // failure and a re-check, which would drop the capture.
+                self.snapshot_owed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
         }
+    }
+
+    pub(crate) fn is_running_state(&self) -> bool {
+        lock(&self.guarded).lifecycle.is_running()
     }
 
     /// The recurring capture-freshness skip (see `CaptureFreshness`):
@@ -423,8 +433,13 @@ impl Inner {
         // snapshot and stall dispose.
         lock(&self.guarded).flushing_snapshot_for_dispose = true;
         async {
-            if lock(&self.guarded).active_execution.is_some() {
-                let _ = self.interrupt(None).await;
+            let running: Vec<String> = lock(&self.guarded)
+                .active_executions
+                .iter()
+                .map(|execution| execution.request_id.clone())
+                .collect();
+            for id in running {
+                let _ = self.interrupt(Some(&id)).await;
             }
             // Wait for the execution queue to drain, bounded by the snapshot
             // execution timeout.

@@ -412,10 +412,10 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
     drop(supervisor);
 }
 
-/// Ctrl+F switches the search to message text: a transcript-only word matches nothing by title,
-/// then finds the session whose user or assistant text holds it, and Ctrl+F switches back.
+/// Ctrl+G switches the search to message text: a transcript-only word matches nothing by title,
+/// then finds the session whose user or assistant text holds it, and Ctrl+G switches back.
 #[tokio::test]
-async fn ctrl_f_searches_message_text() {
+async fn ctrl_g_searches_message_text() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -467,17 +467,17 @@ async fn ctrl_f_searches_message_text() {
                 needle: "No sessions match".to_string(),
                 timeout_ms: 5_000,
             },
-            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::Key("ctrl+g".to_string()),
             AgentsStep::WaitRender {
                 needle: "gateway worker".to_string(),
                 timeout_ms: 10_000,
             },
-            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::Key("ctrl+g".to_string()),
             AgentsStep::WaitRender {
                 needle: "No sessions match".to_string(),
                 timeout_ms: 5_000,
             },
-            AgentsStep::Key("ctrl+f".to_string()),
+            AgentsStep::Key("ctrl+g".to_string()),
             AgentsStep::WaitRender {
                 needle: "gateway worker".to_string(),
                 timeout_ms: 10_000,
@@ -496,7 +496,7 @@ async fn ctrl_f_searches_message_text() {
 
     let hit = frame_of(&outcome.frames, "gateway worker");
     assert!(
-        hit.contains("Ctrl+F search titles"),
+        hit.contains("Ctrl+G search titles"),
         "the hint offers the way back to title search:\n{hit}"
     );
     assert!(
