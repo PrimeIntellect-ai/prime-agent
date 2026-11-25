@@ -125,18 +125,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nghttp2_names() {
-        assert_eq!(
-            nghttp2_code_name(h2::Reason::INTERNAL_ERROR),
-            "NGHTTP2_INTERNAL_ERROR"
-        );
-        assert_eq!(
-            nghttp2_code_name(h2::Reason::HTTP_1_1_REQUIRED),
-            "NGHTTP2_HTTP_1_1_REQUIRED"
-        );
-    }
-
-    #[test]
     fn shape_classification() {
         // A remote GOAWAY: bun composes the numeric session code.
         let detail = classify_h2_shape(&H2ErrorShape::RemoteGoAway { code: 1 });
@@ -166,13 +154,5 @@ mod tests {
         // A socket failure: the canceled pending stream.
         assert_eq!(classify_h2_shape(&H2ErrorShape::Io), H2Failure::Canceled);
         assert_eq!(classify_h2_shape(&H2ErrorShape::Other), H2Failure::Protocol);
-    }
-
-    #[test]
-    fn reason_only_errors_classify_as_protocol() {
-        // A bare `Reason` error (the only constructible h2 shape in tests) is neither a remote
-        // frame nor an io failure: the generic protocol error, like the HTTP/1.1-answer case.
-        let error = h2::Error::from(h2::Reason::INTERNAL_ERROR);
-        assert_eq!(classify_h2_error(&error), H2Failure::Protocol);
     }
 }

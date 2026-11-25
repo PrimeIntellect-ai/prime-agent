@@ -544,11 +544,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_complete_json() {
-        assert_eq!(parse_streaming_json(Some(r#"{"a":1}"#)), json!({"a": 1}));
-    }
-
-    #[test]
     fn repairs_invalid_escapes() {
         // \q is invalid; repair doubles the backslash.
         assert_eq!(
@@ -573,34 +568,21 @@ mod tests {
             parse_partial_json("{\"arr\": [1, 2").unwrap(),
             json!({"arr": [1, 2]})
         );
-    }
-
-    #[test]
-    fn drops_incomplete_keys_and_literals() {
+        // Partial numbers keep their digits; incomplete keys and literals drop.
+        assert_eq!(parse_partial_json("[12").unwrap(), json!([12]));
+        assert_eq!(parse_partial_json("{\"n\": 12.").unwrap(), json!({"n": 12}));
+        assert_eq!(parse_partial_json("{\"n\": 1e").unwrap(), json!({"n": 1}));
         assert_eq!(parse_partial_json("{\"a\"").unwrap(), json!({}));
         assert_eq!(parse_partial_json("{\"a\": tru").unwrap(), json!({}));
         assert_eq!(
             parse_partial_json("{\"name\": \"John\", \"ag").unwrap(),
             json!({"name": "John"})
         );
-    }
-
-    #[test]
-    fn parses_partial_numbers() {
-        assert_eq!(parse_partial_json("[12").unwrap(), json!([12]));
-        assert_eq!(parse_partial_json("{\"n\": 12.").unwrap(), json!({"n": 12}));
-        assert_eq!(parse_partial_json("{\"n\": 1e").unwrap(), json!({"n": 1}));
-    }
-
-    #[test]
-    fn fails_on_invalid_input() {
+        assert!(parse_partial_json("{").is_ok());
         assert!(parse_partial_json("xyz").is_err());
-        assert!(parse_partial_json("{").is_ok()); // empty object partial
         assert!(parse_partial_json("{\"a\": @}").is_err());
-    }
-
-    #[test]
-    fn streaming_fallback_returns_object() {
+        // The streaming parse returns complete JSON as is and an empty object otherwise.
+        assert_eq!(parse_streaming_json(Some(r#"{"a":1}"#)), json!({"a": 1}));
         assert_eq!(parse_streaming_json(None), json!({}));
         assert_eq!(parse_streaming_json(Some("  ")), json!({}));
         assert_eq!(parse_streaming_json(Some("garbage {")), json!({}));
@@ -645,57 +627,5 @@ mod tests {
         assert!(parses < 700);
         assert_eq!(acc.flush(), Some(parse_streaming_json(Some(acc.text()))));
         assert_eq!(acc.flush(), None);
-    }
-
-    // Benchmark, not a CI test: the throttled accumulator vs the per-delta whole-buffer reparse.
-    // Run with: cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture
-    #[test]
-    #[ignore = "benchmark; see the comment above for the run command"]
-    fn accumulator_benchmark_10k_deltas() {
-        // Synthetic tool-call arguments through a 10k-delta stream: the per-delta whole-buffer
-        // reparse vs the growth-throttled accumulator.
-        let payload = format!(
-            r#"{{"content":"{}","path":"/tmp/stream.json"}}"#,
-            "x".repeat(150 * 1024)
-        );
-        let delta_count = 10_000usize;
-        let delta_len = payload.len().div_ceil(delta_count);
-
-        let mut parses = 0usize;
-        let mut parsed_bytes = 0usize;
-        let started = std::time::Instant::now();
-        let mut buffer = String::new();
-        for offset in (0..payload.len()).step_by(delta_len) {
-            buffer.push_str(&payload[offset..(offset + delta_len).min(payload.len())]);
-            let _ = parse_streaming_json(Some(&buffer));
-            parses += 1;
-            parsed_bytes += buffer.len();
-        }
-        let per_delta_reparse = started.elapsed();
-
-        let mut parses_after = 0usize;
-        let mut parsed_bytes_after = 0usize;
-        let started = std::time::Instant::now();
-        let mut acc = StreamingJsonAccumulator::default();
-        for offset in (0..payload.len()).step_by(delta_len) {
-            if acc
-                .append(&payload[offset..(offset + delta_len).min(payload.len())])
-                .is_some()
-            {
-                parses_after += 1;
-                parsed_bytes_after += acc.text().len();
-            }
-        }
-        let accumulator = started.elapsed();
-
-        eprintln!(
-            "accumulator_benchmark_10k_deltas payload_bytes={} deltas={} \
-             per_delta_reparse parses={parses} parsed_bytes={parsed_bytes} elapsed_ms={:.1} \
-             accumulator parses={parses_after} parsed_bytes={parsed_bytes_after} elapsed_ms={:.1}",
-            payload.len(),
-            delta_count,
-            per_delta_reparse.as_secs_f64() * 1000.0,
-            accumulator.as_secs_f64() * 1000.0,
-        );
     }
 }

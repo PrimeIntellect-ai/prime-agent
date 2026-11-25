@@ -410,7 +410,18 @@ fn handle(inner: &Arc<ProvisionerInner>, state: &Mutex<OwnerState>, command: Com
             let mut s = lock(state);
             let reboot = match &s.slot {
                 Slot::Empty => true,
-                Slot::Live(manager) => manager.is_defunct(),
+                Slot::Live(manager) => {
+                    let defunct = manager.is_defunct();
+                    // An ignored-interrupt retirement must surface on the
+                    // next foreground result: the revival's fresh kernel is
+                    // a restart, and the model must hear it.
+                    if defunct && manager.retired_for_ignored_interrupt() {
+                        inner
+                            .restart_note_pending
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    defunct
+                }
                 Slot::Booting(_) | Slot::Disposed { .. } => false,
             };
             if reboot {

@@ -202,12 +202,17 @@ mod tests {
 
     #[test]
     fn detects_error_overflow() {
-        let m = message(
-            StopReason::Error,
-            Some("prompt is too long: 213462 tokens > 200000 maximum"),
-            usage(0, 0, 0),
-        );
-        assert!(is_context_overflow(&m, None));
+        // The Anthropic wording, the live Prime Inference combined input + output 400 (no
+        // single-part wording matches an older pattern), and its remedy text alone.
+        for text in [
+            "prompt is too long: 213462 tokens > 200000 maximum",
+            "Error: 400 This model configuration accepts at most 1048576 combined input and output tokens. However, your request has 1017457 input tokens and asks for 32000 output tokens (1049457 tokens total). Please reduce the input length or requested output length and try again.",
+            "400: Please reduce the input length or requested output length and try again.",
+        ] {
+            let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
+            assert!(is_context_overflow(&m, None), "{text}");
+            assert!(error_message_has_overflow(text), "{text}");
+        }
     }
 
     #[test]
@@ -218,53 +223,16 @@ mod tests {
             usage(0, 0, 0),
         );
         assert!(!is_context_overflow(&m, None));
+        let m = message(StopReason::Stop, None, usage(100, 10, 0));
+        assert!(!is_context_overflow(&m, Some(100_000)));
     }
 
     #[test]
     fn detects_silent_overflow() {
         let m = message(StopReason::Stop, None, usage(100_001, 10, 0));
         assert!(is_context_overflow(&m, Some(100_000)));
-    }
-
-    #[test]
-    fn detects_length_stop_overflow() {
         let m = message(StopReason::Length, None, usage(99_500, 0, 0));
         assert!(is_context_overflow(&m, Some(100_000)));
-    }
-
-    #[test]
-    fn detects_combined_input_output_limit_overflow() {
-        // The live Prime Inference 400: input + requested output over a combined ceiling — no
-        // single-part wording matches any older pattern.
-        let m = message(
-            StopReason::Error,
-            Some(
-                "Error: 400 This model configuration accepts at most 1048576 combined input and output tokens. However, your request has 1017457 input tokens and asks for 32000 output tokens (1049457 tokens total). Please reduce the input length or requested output length and try again.",
-            ),
-            usage(1_017_457, 0, 0),
-        );
-        assert!(is_context_overflow(&m, Some(1_048_576)));
-        assert!(error_message_has_overflow(
-            m.error_message.as_deref().unwrap()
-        ));
-    }
-
-    #[test]
-    fn combined_limit_remedy_text_alone_classifies() {
-        // The remedy wording without the leading "combined" phrasing still matches the
-        // combined-limit arm.
-        let m = message(
-            StopReason::Error,
-            Some("400: Please reduce the input length or requested output length and try again."),
-            usage(0, 0, 0),
-        );
-        assert!(is_context_overflow(&m, None));
-    }
-
-    #[test]
-    fn normal_success_is_not_overflow() {
-        let m = message(StopReason::Stop, None, usage(100, 10, 0));
-        assert!(!is_context_overflow(&m, Some(100_000)));
     }
 
     /// The live Prime Inference 413 (captured against the gateway, 2026-11):
@@ -294,6 +262,31 @@ mod tests {
         ] {
             let m = message(StopReason::Error, Some(text), usage(0, 0, 0));
             assert!(is_context_overflow(&m, None), "unrecognized: {text}");
+        }
+
+        // A typed 413 through the real provider terminal path: `from_http_status_body` rewrites
+        // the message to `Provider rejected the request (<type>, 413): <detail>`, which the
+        // status-prefix arm misses, so the status recorded on the `provider_stream_failure`
+        // diagnostic must claim it, whatever the detail wording.
+        for detail in [
+            "Request entity too large",
+            "upload exceeds the allowed size",
+        ] {
+            let error = ProviderError::from_http_status_body(
+                413,
+                &format!(
+                    r#"{{"type":"error","error":{{"type":"invalid_request_error","message":"{detail}"}}}}"#
+                ),
+                HashMap::default(),
+            );
+            let text = format_stream_failure_message(&error);
+            let mut m = message(StopReason::Error, Some(&text), usage(0, 0, 0));
+            record_stream_failure(
+                ("anthropic", "claude-sonnet-4-5", "anthropic"),
+                &mut m,
+                &error,
+            );
+            assert!(is_context_overflow(&m, None), "{text}");
         }
     }
 
@@ -345,56 +338,5 @@ mod tests {
             &error,
         );
         assert!(!is_context_overflow(&m, None));
-    }
-
-    /// A typed 413 through the real provider terminal path:
-    /// `from_http_status_body` (anthropic, openai-responses, azure, google,
-    /// vertex) rewrites the message to `Provider rejected the request
-    /// (<type>, 413): <detail>`, which the status-prefix arm misses, and
-    /// `record_stream_failure` records the structured status on the
-    /// `provider_stream_failure` diagnostic - the structured check must claim it.
-    #[test]
-    fn typed_413_stream_failure_classifies() {
-        let error = ProviderError::from_http_status_body(
-            413,
-            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Request entity too large"}}"#,
-            HashMap::default(),
-        );
-        let text = format_stream_failure_message(&error);
-        assert_eq!(
-            text,
-            "Provider rejected the request (invalid_request_error, 413): Request entity too large",
-        );
-        let mut m = message(StopReason::Error, Some(&text), usage(0, 0, 0));
-        record_stream_failure(
-            ("anthropic", "claude-sonnet-4-5", "anthropic"),
-            &mut m,
-            &error,
-        );
-        assert!(is_context_overflow(&m, None));
-    }
-
-    /// The structured status is the universal claim: a 413 whose detail
-    /// wording matches no table arm still classifies through the status
-    /// recorded on the `provider_stream_failure` diagnostic.
-    #[test]
-    fn structured_413_status_classifies_unenumerated_wording() {
-        let error = ProviderError::from_http_status_body(
-            413,
-            r#"{"type":"error","error":{"type":"invalid_request_error","message":"upload exceeds the allowed size"}}"#,
-            HashMap::default(),
-        );
-        let text = format_stream_failure_message(&error);
-        assert_eq!(
-            text,
-            "Provider rejected the request (invalid_request_error, 413): upload exceeds the allowed size",
-        );
-        let mut m = message(StopReason::Error, Some(&text), usage(0, 0, 0));
-        record_stream_failure(
-            ("anthropic", "claude-sonnet-4-5", "anthropic"),
-            &mut m,
-            &error,
-        );
-        assert!(is_context_overflow(&m, None));
     }
 }

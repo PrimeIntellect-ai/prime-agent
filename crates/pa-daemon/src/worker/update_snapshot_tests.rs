@@ -628,6 +628,8 @@ async fn queued_inbox_notices_mark_their_own_rider() {
         "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 1. Read them with rlm.inbox.read().",
         pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
         1,
+        true,
+        false,
         1_730_000_000_000,
     );
     {
@@ -696,6 +698,8 @@ async fn an_idle_inbox_notice_rides_only_the_inbox_rider() {
         "[inbox 14:03 UTC] 1 new message (bash-done); total waiting: 1. Read them with rlm.inbox.read().",
         pa_types::inbox_notice::INBOX_NOTICE_CLASS_ARRIVAL,
         1,
+        true,
+        false,
         1_730_000_000_000,
     );
     {

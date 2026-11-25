@@ -1,1 +1,0 @@
-- The runtime declines in-cell waits and subprocess spawns, and the model prompt teaches the bash-over-subprocess contract.

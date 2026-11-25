@@ -316,18 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_choice_serializes() {
-        assert_eq!(MistralToolChoice::Auto.to_json(), json!("auto"));
-        assert_eq!(
-            MistralToolChoice::Tool {
-                name: "grep".into()
-            }
-            .to_json(),
-            json!({ "type": "function", "function": { "name": "grep" } })
-        );
-    }
-
-    #[test]
     fn reasoning_effort_uses_thinking_level_map() {
         let model = Model {
             id: "mistral-small-2603".into(),

@@ -66,10 +66,8 @@ impl AgentSessionEngine {
             let turn = self.run_model_turn(admission, &prompt, &boundary_passed, aborted, emit);
             match turn {
                 TurnResult::Message(_assistant) => {
-                    // A settled non-error turn resets the overflow state and
-                    // counts into the auto-refine review's turn line.
+                    // A settled non-error turn resets the overflow state.
                     self.reset_overflow_recovery();
-                    self.note_settled_turn_since_auto_refine_review();
                     // A parked session that completes a model call has its quota back:
                     // clear the park and resume; an early success queues a marker so the
                     // interrupted task continues.

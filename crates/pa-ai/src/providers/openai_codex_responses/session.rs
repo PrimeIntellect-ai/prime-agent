@@ -218,8 +218,8 @@ mod tests {
     use super::*;
     use crate::providers::openai_codex_responses::errors::WebSocketTransportError;
 
-    #[test]
-    fn sse_fallback_lifecycle() {
+    #[tokio::test]
+    async fn sse_fallback_lifecycle() {
         let session = format!("test-session-{}", std::process::id());
         reset_debug_stats(Some(&session));
         assert!(!is_websocket_sse_fallback_active(Some(&session)));
@@ -233,12 +233,8 @@ mod tests {
         reset_debug_stats(Some(&session));
         assert!(get_debug_stats(&session).is_none());
         assert!(!is_websocket_sse_fallback_active(Some(&session)));
-    }
 
-    #[tokio::test]
-    async fn records_failure_and_pins_fallback() {
-        let session = format!("failure-session-{}", std::process::id());
-        reset_debug_stats(Some(&session));
+        // A transport failure pins the session to SSE.
         record_websocket_failure(
             Some(&session),
             &CodexStreamError::Transport(WebSocketTransportError::runtime("boom")),

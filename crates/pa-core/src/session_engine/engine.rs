@@ -96,9 +96,18 @@ pub struct SessionEngineConfig {
     /// Fires when the kernel's last live background `bash()` handle
     /// settles; `None` installs nothing.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
+    /// The session's shared cell wake: the embedding fires it to end a
+    /// running cell's wait early when a user message or inbox arrival must
+    /// reach the session. `None` creates a private, never-fired one (cells
+    /// still auto-background at their wait budget).
+    pub cell_wake: Option<Arc<crate::kernel::cell_wake::CellWake>>,
+    /// Receives the late completion of an auto-backgrounded cell; the
+    /// embedding lands it as a notice. `None` drops the outcome (the cell
+    /// still runs on).
+    pub on_background_cell: Option<crate::kernel::shared::BackgroundCellCallback>,
     /// The daemonless kernel-notice wake (TS `resumeIfIdle`): with it
     /// the engine registers the `bash.completed`/`bash.consumed`/
-    /// `bash.waiting`/`factory.progress` handlers whose in-process sinks steer the notice
+    /// `factory.progress` handlers whose in-process sinks steer the notice
     /// row onto the session's agent and fire the wake. `None` installs nothing —
     /// the daemon keeps its worker-lane sinks via the extra handlers.
     pub bash_notice_wake: Option<super::bash_notices::BashNoticeWake>,
@@ -506,11 +515,15 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         .await
         .map_err(|join| anyhow::anyhow!("websearch key resolve join failed: {join}"))?
     };
-    // The cell time limit: daemon-backed sessions arm the settings default
-    // (60s, `0` disables); daemonless sessions keep `await bash()`
-    // unbounded by design (#3523), so their cells are never interrupted.
+    // The cell wait budget: daemon-backed sessions arm the settings default
+    // (60s, `0` disables); a cell that outlives it auto-backgrounds (it keeps
+    // running; its completion lands in the inbox). Daemonless sessions keep
+    // `await bash()` unbounded by design (#3523), so no budget arms there.
     let cell_timeout_ms =
         super::runtime_wiring::arm_cell_timeout_ms(config.daemonless, python_cell_timeout_ms);
+    // The session's cell wake: an embedding-supplied one (the daemon worker
+    // fires it on user/inbox arrivals), else a private never-fired one.
+    let cell_wake = config.cell_wake.clone().unwrap_or_default();
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id.clone(),
         handlers,
@@ -522,6 +535,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         websearch_env,
         session_artifact_dir,
         cell_timeout_ms,
+        cell_wake,
+        config.on_background_cell.clone(),
         on_restore,
         config.on_background_work_settled.clone(),
         on_unavailable_skills,
