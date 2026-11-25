@@ -1,0 +1,1 @@
+- Bots: the owner's remote MCP server logins go into new bots by default, one header rule per server host, with the token outside the sandbox. Past the platform's limit of 32 rule hosts, MCP logins are left out first with one warning. `bots.inject.mcp:<server>` turns one off.

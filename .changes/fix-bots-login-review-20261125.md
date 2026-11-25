@@ -1,0 +1,1 @@
+- Bots: a restarted daemon refreshes the logins of running bots again. Each MCP server gets its own secret, a disabled MCP server stays out of a bot, catalog MCP connections reach the bot, and every bot client trusts the platform root.

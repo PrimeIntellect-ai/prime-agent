@@ -33,7 +33,7 @@ pub const GUEST_API_KEY_PLACEHOLDER: &str = "injected-by-platform";
 pub const PLATFORM_CA_PATH: &str = "/mnt/sandboxd/platform-ca.pem";
 
 /// The platform's limit on header-rule hosts per sandbox.
-const MAX_RULE_HOSTS: usize = 32;
+pub(super) const MAX_RULE_HOSTS: usize = 32;
 
 /// A secret's scope: the platform origin, the team, and the secret name.
 type SecretScope = (String, Option<String>, String);
