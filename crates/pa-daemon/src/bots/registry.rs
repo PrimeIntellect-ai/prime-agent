@@ -119,6 +119,9 @@ pub struct BotRecord {
     /// (a merged child row); `None` for this daemon's own bots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_at: Option<i64>,
+    /// Unix milliseconds of the last status change.
+    #[serde(default)]
+    pub status_since: Option<i64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

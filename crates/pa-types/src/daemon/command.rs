@@ -672,6 +672,22 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// `pause_bot`: pause a running bot that no TUI is attached to.
+    PauseBot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        bot_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// `resume_bot`: make a paused bot run; it pauses again after the idle grace.
+    ResumeBot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        bot_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// The bots the daemon manages, optionally only one owner's.
     ListBots {
         #[serde(default, skip_serializing_if = "Option::is_none")]

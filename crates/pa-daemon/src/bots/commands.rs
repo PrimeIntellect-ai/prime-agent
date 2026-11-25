@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use pa_types::daemon::DaemonCommand;
 use serde_json::{json, Value};
 
-use super::{BotRecord, BotSpec};
+use super::{BotManager, BotRecord, BotSpec, BotStatus};
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::supervisor::Supervisor;
 
@@ -180,7 +180,58 @@ pub fn bot_row(
         // The bot may spawn its own bots, or already has children.
         "spawnsBots": spawns_bots,
         "parentBotId": record.parent_bot_id,
+        "statusSince": record.status_since,
+        // A merged child row carries its own daemon's pause time.
+        "pauseAt": super::replies::pause_at(&record.bot_id).or(record.pause_at),
     })
+}
+
+/// A bot this daemon manages. A bot that another bot spawned is only a
+/// mirror here, unless this daemon runs in that parent bot: the parent
+/// bot's daemon owns its lifecycle.
+fn own_bot(manager: &BotManager, bot_id: &str) -> Result<BotRecord> {
+    let record = manager
+        .get(bot_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown bot: {bot_id}"))?;
+    if !manager.manages(&record) {
+        bail!(
+            "the bot {} belongs to another bot; its parent bot pauses and resumes it",
+            record.name
+        );
+    }
+    Ok(record)
+}
+
+/// Pause a running bot now. Refuses a bot a TUI is attached to.
+///
+/// # Errors
+/// Returns an error for an unknown, attached, or not running bot, a bot
+/// another bot spawned, or a failed pause.
+pub async fn pause_bot(manager: &BotManager, bot_id: &str) -> Result<BotRecord> {
+    let record = own_bot(manager, bot_id)?;
+    if manager.attached(bot_id) {
+        bail!(
+            "the bot {} has an attached view; leave that view to pause it",
+            record.name
+        );
+    }
+    if record.status != BotStatus::Running {
+        bail!(
+            "the bot {} is {}; only a running bot pauses",
+            record.name,
+            record.status.as_str()
+        );
+    }
+    manager.pause(bot_id).await
+}
+
+/// Make a paused bot run again.
+///
+/// # Errors
+/// Returns an error for an unknown bot, a bot another bot spawned, or a failed resume.
+pub async fn resume_bot(manager: &BotManager, bot_id: &str) -> Result<BotRecord> {
+    own_bot(manager, bot_id)?;
+    manager.ensure_running(bot_id).await
 }
 
 impl Supervisor {
@@ -462,6 +513,77 @@ impl Supervisor {
         }
     }
 
+    /// `pause_bot`: pause one bot now (the `/bots` page's `p`).
+    pub(crate) async fn handle_pause_bot(
+        self: &Arc<Self>,
+        command_id: &str,
+        bot_id: &str,
+    ) -> DaemonResponse {
+        let paused = match super::manager_for(&self.options.agent_dir) {
+            Ok(manager) => pause_bot(&manager, bot_id).await.map(|record| {
+                let stale = manager.login_stale(&record);
+                (record, stale)
+            }),
+            Err(error) => Err(error),
+        };
+        match paused {
+            Ok((record, stale)) => response_success(
+                Some(command_id),
+                "pause_bot",
+                Some(bot_row(&record, false, &stale, record.bots)),
+            ),
+            Err(error) => {
+                response_failure(Some(command_id), "pause_bot", &format!("{error:#}"), None)
+            }
+        }
+    }
+
+    /// `resume_bot`: make one bot run; the follower pauses it again after the idle grace.
+    pub(crate) async fn handle_resume_bot(
+        self: &Arc<Self>,
+        command_id: &str,
+        bot_id: &str,
+    ) -> DaemonResponse {
+        let manager = match super::manager_for(&self.options.agent_dir) {
+            Ok(manager) => manager,
+            Err(error) => {
+                return response_failure(
+                    Some(command_id),
+                    "resume_bot",
+                    &format!("{error:#}"),
+                    None,
+                )
+            }
+        };
+        let resumed = resume_bot(&manager, bot_id).await;
+        // A resume can wake the sandbox and fail later (the install): the
+        // follower then still pauses the running bot after the idle grace.
+        if manager
+            .get(bot_id)
+            .is_some_and(|record| record.status == BotStatus::Running && manager.manages(&record))
+        {
+            self.follow_bot(bot_id);
+        }
+        match resumed {
+            Ok(record) => {
+                let stale = manager.login_stale(&record);
+                response_success(
+                    Some(command_id),
+                    "resume_bot",
+                    Some(bot_row(
+                        &record,
+                        manager.attached(bot_id),
+                        &stale,
+                        record.bots,
+                    )),
+                )
+            }
+            Err(error) => {
+                response_failure(Some(command_id), "resume_bot", &format!("{error:#}"), None)
+            }
+        }
+    }
+
     /// `list_bots`: every bot, or one owner's.
     pub(crate) fn handle_list_bots(
         self: &Arc<Self>,
@@ -660,4 +782,36 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .context("the secrets task failed")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{setup, spec};
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_refuses_an_attached_bot_and_resume_runs_it_again() {
+        let (_dir, _platform, manager) = setup();
+        manager.spawn(&spec("bot-a")).await.unwrap();
+
+        let guard = manager.attach_guard("bot-a");
+        assert!(
+            pause_bot(&manager, "bot-a").await.is_err(),
+            "an attached bot does not pause"
+        );
+        assert_eq!(manager.get("bot-a").unwrap().status, BotStatus::Running);
+        drop(guard);
+
+        let paused = pause_bot(&manager, "bot-a").await.unwrap();
+        assert_eq!(paused.status, BotStatus::Paused);
+        let paused_since = manager.get("bot-a").unwrap().status_since;
+        assert!(paused_since.is_some());
+        assert!(
+            pause_bot(&manager, "bot-a").await.is_err(),
+            "a paused bot does not pause"
+        );
+
+        let resumed = resume_bot(&manager, "bot-a").await.unwrap();
+        assert_eq!(resumed.status, BotStatus::Running);
+    }
 }

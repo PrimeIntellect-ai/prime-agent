@@ -799,6 +799,18 @@ impl Supervisor {
                 )],
                 false,
             ),
+            DaemonCommand::PauseBot { bot_id, .. } => (
+                vec![response_line(
+                    &self.handle_pause_bot(&command_id, bot_id).await,
+                )],
+                false,
+            ),
+            DaemonCommand::ResumeBot { bot_id, .. } => (
+                vec![response_line(
+                    &self.handle_resume_bot(&command_id, bot_id).await,
+                )],
+                false,
+            ),
             DaemonCommand::ListBots { .. } => (
                 vec![response_line(&self.handle_list_bots(&command_id, command))],
                 false,

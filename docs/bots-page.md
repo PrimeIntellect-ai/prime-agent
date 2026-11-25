@@ -27,11 +27,11 @@ A bot has no shared path with this machine. Its owner copies files out with `awa
 
 ## What it shows
 
-Each row shows a status dot, the bot's name and model, its version, and its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`, with the most recent activity first. `d` opens a detail pane with the bot id, sandbox id, checkpoint id, version, model, and timestamps.
+Each row shows a status dot, the bot's name and model, its version, and its last turn. Rows are grouped into `Running`, `Idle`, and `Inactive`, with the most recent activity first. `d` opens a detail pane with the pause timer, the bot id, sandbox id, checkpoint id, version, model, and timestamps. The pause timer reads `pauses in N min` while an idle bot waits out its grace, and `paused since <time>` for a paused bot.
 
 ## Attach
 
-`↑/↓` move the selection, `Enter` attaches to the selected bot, `r` refreshes, and `Esc` closes the page.
+`↑/↓` move the selection, `Enter` attaches to the selected bot, `p` pauses a running bot or resumes a paused bot, `r` refreshes, and `Esc` closes the page. The daemon refuses to pause a bot that has an attached view. A resumed bot pauses again 2 minutes after it goes idle.
 
 Attach opens the normal session view against the bot's daemon. Prompts, steering, scroll, and the model and effort pickers go to the bot unchanged. Slash commands that act on this machine (for example `/new`, `/fork`, `/login`, `/mcp`, `/update`) are refused with a clear message. Leaving the view closes the connection to the bot.
 

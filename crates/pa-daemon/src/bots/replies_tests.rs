@@ -194,6 +194,7 @@ fn a_send_during_a_boot_catch_up_waits_the_full_grace() {
             running: true,
             again: false,
             grace: std::time::Duration::ZERO,
+            pause_at: None,
         },
     );
     crate::supervisor::Supervisor::touch_bot("bot-boot");

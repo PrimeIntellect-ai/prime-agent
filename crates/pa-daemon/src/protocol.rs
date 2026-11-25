@@ -175,6 +175,8 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "spawn_bot",
     "delete_bot",
     "pull_bot_files",
+    "pause_bot",
+    "resume_bot",
     "list_bots",
     "list_bot_secrets",
     "set_bot_secret_inject",
@@ -947,6 +949,8 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::AllowBotSpawns { .. }
         | DaemonCommand::DeleteBot { .. }
         | DaemonCommand::PullBotFiles { .. }
+        | DaemonCommand::PauseBot { .. }
+        | DaemonCommand::ResumeBot { .. }
         | DaemonCommand::ListBots { .. }
         | DaemonCommand::ListBotSecrets { .. }
         | DaemonCommand::SetBotSecretInject { .. }
@@ -1021,6 +1025,8 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::AllowBotSpawns { .. } => "allow_bot_spawns",
         DaemonCommand::DeleteBot { .. } => "delete_bot",
         DaemonCommand::PullBotFiles { .. } => "pull_bot_files",
+        DaemonCommand::PauseBot { .. } => "pause_bot",
+        DaemonCommand::ResumeBot { .. } => "resume_bot",
         DaemonCommand::ListBots { .. } => "list_bots",
         DaemonCommand::ListBotSecrets { .. } => "list_bot_secrets",
         DaemonCommand::SetBotSecretInject { .. } => "set_bot_secret_inject",
