@@ -624,7 +624,8 @@ fn unknown_subagent_keys_are_refused_not_dropped() {
 
 #[test]
 fn a_state_id_that_is_not_a_file_name_is_refused_before_writing() {
-    let spec = json!({"states": [{"id": "../../victim", "entry": true, "subagent": {"prompt": "P."}}]});
+    let spec =
+        json!({"states": [{"id": "../../victim", "entry": true, "subagent": {"prompt": "P."}}]});
     assert_eq!(
         convert_spec(&spec, &meta("a")).unwrap_err(),
         ["\"../../victim\" is not a state id: lowercase letters, digits and -, at most 64 characters"]
