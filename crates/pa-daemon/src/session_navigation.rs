@@ -338,7 +338,7 @@ impl Worker {
         let _replacement_gate = self.replacement_gate.lock().await;
         // A failed retire fails the command with the old runtime already torn down.
         // A new session continues the conversation, so the waiting agent
-        // messages move with it; a switch to a saved session (or an import)
+        // messages and heartbeat fires move with it; a switch to a saved session (or an import)
         // leaves them for the outgoing session's next open.
         let moves_agent_messages = command == "new_session";
         if let Err(error) = self

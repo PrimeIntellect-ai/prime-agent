@@ -211,9 +211,9 @@ impl Worker {
     /// abort and settle, then the runtime retires and the RLM children close.
     /// Tree moves never run this (the kernel stays warm).
     /// `moves_agent_messages` hands the outgoing session's waiting agent
-    /// messages to the successor (a new session or a fork continues the
-    /// conversation; a switch to a saved session leaves them for their
-    /// own session's next open).
+    /// messages and heartbeat fires to the successor (a new session or a
+    /// fork continues the conversation; a switch to a saved session leaves
+    /// them for their own session's next open).
     pub(crate) async fn teardown_for_replacement(
         &self,
         successor: &std::path::Path,

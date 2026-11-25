@@ -592,6 +592,68 @@ async fn a_new_session_takes_only_the_waiting_agent_messages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `new_session` moves a waiting heartbeat fire with its job (the job
+/// rebinds onto the new session), so pausing or deleting the job withdraws
+/// the fire from the new session's inbox; the old session keeps nothing.
+#[tokio::test]
+async fn a_new_session_takes_the_waiting_heartbeat_fire_with_its_job() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-inbox-hb-{}", uuid::Uuid::new_v4()));
+    let (worker, old) = worker_on_session_file(&dir).await;
+    // Park the runner: the fire is due at once.
+    worker.core.lock().unwrap().queued_input_suspended = true;
+    let router = worker.inbox_router.as_ref().unwrap();
+    router
+        .route(
+            InboxNotice {
+                class: pa_types::inbox_notice::INBOX_CLASS_HEARTBEAT,
+                sender: Some("hb-1".to_string()),
+                text: "[heartbeat] check the run".to_string(),
+                meta: json!({ "jobId": "hb-1" }),
+            },
+            Lane::Steering,
+        )
+        .unwrap();
+    let replaced = worker.dispatch("new_session", &json!({})).await;
+    assert!(replaced.success, "{replaced:?}");
+    assert_eq!(
+        live_inbox(&worker).0,
+        [pa_types::inbox_notice::INBOX_CLASS_HEARTBEAT]
+    );
+    assert!(journal_classes(&old).is_empty());
+    let job = pa_core::cron::AgentCronJob {
+        id: "hb-1".to_string(),
+        status: pa_core::cron::JobStatus::Paused,
+        source: Some("rlm_heartbeat".to_string()),
+        runtime_kind: None,
+        delivery_mode: None,
+        active_session_id: "target-session".to_string(),
+        session_id: String::new(),
+        session_file: String::new(),
+        cwd: "/tmp".to_string(),
+        label: None,
+        prompt: "check the run".to_string(),
+        schedule: pa_core::cron::AgentCronSchedule {
+            kind: pa_core::cron::ScheduleKind::Interval,
+            expression: "every 10s".to_string(),
+            interval_ms: Some(10_000),
+        },
+        created_at: String::new(),
+        updated_at: String::new(),
+        next_run_at: None,
+        last_run_at: None,
+        last_skipped_at: None,
+        last_error: None,
+        run_count: 0,
+    };
+    worker.scheduled.remove_queued_heartbeat_follow_up(&job);
+    assert!(
+        live_inbox(&worker).0.is_empty(),
+        "the job's pause withdraws the moved fire"
+    );
+    let _ = worker.dispatch("kill", &json!({})).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A switch to a saved session moves nothing: the waiting agent message
 /// stays in its session's inbox and is announced when that session opens
 /// again.
