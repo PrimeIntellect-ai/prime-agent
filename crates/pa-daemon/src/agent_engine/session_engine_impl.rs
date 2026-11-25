@@ -5,9 +5,10 @@
 use super::{
     artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
     BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, GoalWakeKind,
+    ParentIdentity, PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine,
+    SideQuestionOutcome, SideQuestionRequest, StartupScope, TurnPrompt, Value,
+    DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -89,9 +90,18 @@ impl SessionEngine for AgentSessionEngine {
         let last_turn = self.last_loop_assistant_message();
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
-            // The quiescence arm: unsettled work defers the mint (owed, not consumed).
-            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+            // The quiescence arm: unsettled work defers the mint (owed, not
+            // consumed). Live background work also arms the fallback wake
+            // (once per deferral): its completion notice is the normal retry,
+            // and work that never completes gets one marker turn after one
+            // window.
+            let background_work = self.background_work_count() > 0;
+            if self.has_unsettled_rlm_work().await || background_work {
                 driver.mark_continuation_owed();
+                if background_work {
+                    drop(driver);
+                    self.arm_background_skip_wake().await;
+                }
                 return None;
             }
             // Now the failed pair can leave the loop (`last_turn` still
@@ -126,7 +136,8 @@ impl SessionEngine for AgentSessionEngine {
                 drop(driver);
                 live.publish_goal(&state);
                 if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
+                    self.schedule_goal_wake(GoalWakeKind::Backoff, wake_at)
+                        .await;
                 }
                 return None;
             }
@@ -136,7 +147,7 @@ impl SessionEngine for AgentSessionEngine {
             let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = live.publish_goal(&driver.state_with_creation_elapsed());
             drop(driver);
-            self.cancel_goal_backoff_wake();
+            self.cancel_goal_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
@@ -213,6 +224,10 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
+            // The replaced conversation's refinement children go with it.
+            // This runs before the retire takes the build gate: a spawn
+            // admission takes the build gate under the spawn lock.
+            self.abandon_refine_children().await;
             self.retire_session_runtime().await;
         })
     }
@@ -315,10 +330,31 @@ impl SessionEngine for AgentSessionEngine {
     /// The `compact` command path: the compact-trigger auto-refine round
     /// runs after the compaction answered (the same gated body as the
     /// boundaries).
-    fn consume_compact_auto_refine(
-        &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
+    fn consume_compact_auto_refine(&self) -> anyhow::Result<()> {
         self.consume_compact_auto_refine_round()
+    }
+
+    /// The refine child's reply wake, delivery half: an in-flight child's
+    /// reply (or its failure envelope) parks for the idle-boundary
+    /// apply — the child's send never waits on the parent's apply.
+    fn park_refine_child_reply(
+        &self,
+        sender_active_session_id: &str,
+        message: &str,
+    ) -> crate::engine::RefineChildReplyPark<'_> {
+        // The fully-qualified call names the inherent (sync) park over
+        // this same-named trait method: the delivery answers immediately.
+        let parked =
+            AgentSessionEngine::park_refine_child_reply(self, sender_active_session_id, message);
+        Box::pin(async move { parked })
+    }
+
+    /// The oldest parked refine reply's idle-boundary apply, through the
+    /// shared refinement commit.
+    fn apply_pending_refine_reply(&self) -> crate::engine::PendingRefineApply<'_> {
+        // The fully-qualified call names the inherent (async) apply over
+        // this same-named trait method.
+        Box::pin(async move { AgentSessionEngine::apply_pending_refine_reply(self).await })
     }
 
     /// The worker's live session summary, rendered into the sender identity block.
@@ -807,6 +843,9 @@ impl SessionEngine for AgentSessionEngine {
             return Ok(());
         }
         self.runtime.block_on(async move {
+            // The moved branch abandons the refinement children that plan on
+            // the conversation it leaves.
+            self.abandon_refine_children().await;
             let guard = self.session.lock().await;
             let Some(engine) = guard.as_deref() else {
                 return Ok(());
@@ -1244,14 +1283,16 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
-    fn run_refinement(
+    fn run_rollback_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
     ) -> anyhow::Result<Value> {
+        // The rollback plans without a model call; the commit waits for
+        // the session to go idle.
         let model = self.resolve_model()?;
         self.ensure_core_session(&model)?;
         let (model, api_key) = self.resolve_request_target(model);
-        // The lock covers the clone only; the model call below must not ride it.
+        // The lock covers the clone only; the commit below must not ride it.
         let core = self
             .session
             .blocking_lock()
@@ -1271,6 +1312,17 @@ impl SessionEngine for AgentSessionEngine {
         })?;
         serde_json::to_value(&committed.result)
             .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
+    }
+
+    fn spawn_refinement_child(
+        &self,
+        options: pa_core::session_engine::refine::RefineOptions,
+        source: pa_core::session_engine::refine::RefinementSource,
+    ) -> anyhow::Result<String> {
+        // Fire-and-wake: the spawn returns once the child is admitted; the
+        // child's proposal applies on its reply's arrival.
+        self.runtime
+            .block_on(async { self.spawn_refine_child(&options, source).await })
     }
 
     fn rlm_max_depth_status(&self) -> Value {
@@ -1522,6 +1574,21 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(agent) = agent {
             agent.abort();
         }
+        // The session's kernel stops its current user cell too (attached or
+        // detached): the run's own signal cannot reach a cell the run left
+        // behind (an auto-backgrounded one), so the abort path targets the
+        // execution directly. The interrupt is nonblocking; the kernel's
+        // watcher owns the grace and any retirement.
+        self.abort_kernel_user_execution();
+    }
+
+    /// The scoped idle cancel: stop ONLY a detached (backgrounded) kernel
+    /// cell. The queues, the running turn, and attached work stay exactly as
+    /// they are; a session without a detached cell answers `false` and
+    /// changes nothing.
+    fn abort_background_cell(&self) -> bool {
+        self.kernel_manager()
+            .is_some_and(|manager| manager.abort_detached_execution())
     }
 
     /// `set_steering_mode` / `set_follow_up_mode`: the queue delivery modes

@@ -807,7 +807,15 @@ pub(crate) fn block_diagram(
             if fired { Role::Fired } else { Role::Arrow },
         );
         if let Some(label) = &back.label {
-            let role = if fired { Role::Fired } else { Role::Label };
+            // The label lights only when THIS edge's guard fired, like the
+            // forward labels (the shared arrow above lights for any edge).
+            let label_fired = fired_pairs.contains(&(back.from, back.to))
+                && fired_labels.contains(&(back.to, label.clone()));
+            let role = if label_fired {
+                Role::Fired
+            } else {
+                Role::Label
+            };
             canvas.label_role(
                 center(back.from) + 2,
                 departure,
