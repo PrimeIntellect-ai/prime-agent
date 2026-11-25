@@ -168,6 +168,10 @@ impl super::SessionUi {
             node.set_request_epoch(request_epoch, selector);
             if fetch_files && spec_id.is_some() {
                 node.mark_files_requested(&self.active_session_id);
+            } else if fetch_files {
+                // A run with no spec id has no machine to read files from:
+                // the files document reports none instead of loading forever.
+                node.set_files(crate::factory_view::node::NodeFiles::default());
             }
         }
         let client = self.client.clone();
