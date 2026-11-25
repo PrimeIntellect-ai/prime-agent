@@ -6,8 +6,9 @@
 //! compiles it to the canonical spec the executor runs ([`compile`]), and
 //! converts a stored v1 spec into a directory ([`convert_spec`]). A
 //! state's [`Contract`] checks the values its child emits. It also owns
-//! the machine library ([`scan_library`]) and the factory's numeric limits
-//! ([`limits`]).
+//! the machine library ([`scan_library`]), the factory's numeric limits
+//! ([`limits`]), and the one structural check of a JSON factory spec
+//! ([`check_spec`]).
 //! It reads files and nothing else: no sessions, no spawning, no network.
 
 mod compile;
@@ -19,16 +20,18 @@ mod library;
 pub mod limits;
 mod load;
 mod machine;
+mod spec;
 pub mod types;
 
 pub use compile::{compile, compile_template};
 pub use convert::{convert_spec, DirFile, MachineMeta};
 pub use emit::Contract;
 pub use library::{
-    read_machine_md, scan_library, Level, Library, LibraryMachine, MachineKind, MachineMd,
-    MACHINE_MD_FILE,
+    machine_description_errors, machine_name_errors, read_machine_md, scan_library, Level,
+    Library, LibraryMachine, MachineKind, MachineMd, MACHINE_MD_FILE,
 };
 pub use load::{load_machine_dir, CONTEXT_FILE, MACHINE_FILE};
+pub use spec::check_spec;
 pub use machine::{
     Agent, Diagnostic, FailurePolicy, Foreach, Input, Machine, Output, Param, PythonCall, Route,
     Rubric, RubricRule, RunSettings, State, Work, FORMAT_VERSION,

@@ -515,10 +515,11 @@ impl FactoryActivityRequest {
 /// machine directory (by `path`) and answers its run spec.
 pub const FACTORY_COMPILE_REQUEST_TYPE: &str = "factory.compile";
 
-/// The kernel host request that checks a stored spec's numeric limits
-/// before a run starts and answers the `max_transitions` bound the run caps
-/// its default at (the limits live only in `pa_factory::limits`).
-pub const FACTORY_LIMITS_REQUEST_TYPE: &str = "factory.limits";
+/// The kernel host request that checks a factory spec (`pa_factory::check_spec`,
+/// the one validator) and, when given, a machine name and description; it
+/// answers the errors and the `max_transitions` bound a run caps its default
+/// at. Harness writes call it synchronously, run starts asynchronously.
+pub const FACTORY_VALIDATE_REQUEST_TYPE: &str = "factory.validate";
 
 /// The kernel host request that describes a library machine (by `name`) for
 /// the machines page's drill-in: its fields, its declared params, its spec
@@ -556,7 +557,7 @@ pub fn machine_library(agent_dir: &Path) -> pa_factory::Library {
     pa_factory::scan_library(&machine_library_levels(agent_dir))
 }
 
-/// Register `factory.compile`, `factory.describe` and `factory.limits`, the
+/// Register `factory.compile`, `factory.describe` and `factory.validate`, the
 /// loaders a session's kernel uses to run and show library machines and to
 /// check stored specs.
 pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers, agent_dir: &Path) {
@@ -589,20 +590,22 @@ pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers,
         }),
     );
     handlers.register(
-        FACTORY_LIMITS_REQUEST_TYPE,
-        host_handler(|payload| {
-            Box::pin(async move {
-                let errors = pa_factory::limits::check_spec_limits(
-                    payload.data.get("spec").unwrap_or(&Value::Null),
-                );
-                if errors.is_empty() {
-                    Ok(json!({"max_transitions": pa_factory::limits::MAX_TRANSITIONS}))
-                } else {
-                    Err(anyhow!(errors.join("; ")))
-                }
-            })
-        }),
+        FACTORY_VALIDATE_REQUEST_TYPE,
+        host_handler(|payload| Box::pin(async move { Ok(validate_factory(&payload.data)) })),
     );
+}
+
+/// `factory.validate`: the errors of `spec`, then of `name` and
+/// `description`, each checked only when present.
+fn validate_factory(data: &Value) -> Value {
+    let mut errors = data.get("spec").map(pa_factory::check_spec).unwrap_or_default();
+    if let Some(name) = data.get("name") {
+        errors.extend(pa_factory::machine_name_errors(name.as_str().unwrap_or_default()));
+    }
+    if let Some(description) = data.get("description") {
+        errors.extend(pa_factory::machine_description_errors(description.as_str()));
+    }
+    json!({"errors": errors, "max_transitions": pa_factory::limits::MAX_TRANSITIONS})
 }
 
 /// `factory.compile`: `{name}` resolves through the library scan, `{path}`
