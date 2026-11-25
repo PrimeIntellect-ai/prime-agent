@@ -6,11 +6,13 @@
 //! [`GUEST_API_KEY_PLACEHOLDER`] as its token.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use pa_core::auth::{AuthCredential, AuthStorage};
+use pa_core::platform::lock_dir::LockDir;
 use pa_core::settings::BotGitIdentity;
 use pa_sandbox::transport::SandboxTransport;
 use pa_sandbox::{HeaderRule, PrimeSandboxClient};
@@ -28,6 +30,17 @@ const API_HOST: &str = "api.github.com";
 const GIT_HOST: &str = "github.com";
 /// The platform's limit on one secret value.
 const MAX_SECRET_BYTES: usize = 16 * 1024;
+/// The prefix of every platform secret the GitHub plan ever made, on any
+/// Prime account: the account's key fingerprint follows it. `clear`
+/// deletes by this prefix, so a rotated Prime key cannot leave the old
+/// account's secrets behind.
+pub const SECRET_NAME_PREFIX: &str = "PRIME_AGENT_GITHUB_";
+/// How long a holder may keep [`lock`] before a stalled one is reclaimed:
+/// a provisioning or a clear holds it for seconds, not minutes.
+const LOCK_STALE_AFTER: Duration = Duration::from_mins(5);
+/// How long [`lock`] waits on a fresh foreign holder before giving up.
+const LOCK_ATTEMPTS: u32 = 120;
+const LOCK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Where the token comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +148,7 @@ pub fn clear_token(agent_dir: &Path) -> Result<bool> {
 /// the same when the token rotates; the values are updated.
 #[must_use]
 pub fn secret_names(owner: &str) -> [String; 2] {
-    let token = format!("PRIME_AGENT_GITHUB_{owner}");
+    let token = format!("{SECRET_NAME_PREFIX}{owner}");
     let basic = format!("{token}_BASIC");
     [token, basic]
 }
@@ -190,24 +203,70 @@ pub fn candidate(agent_dir: &Path, owner: &str) -> Option<Candidate> {
     })
 }
 
-/// Delete the account's GitHub secrets: bots lose GitHub access within a
-/// minute.
+/// Delete the GitHub secrets of every Prime account this client sees:
+/// bots lose GitHub access within a minute. The names carry the account
+/// key's fingerprint, but a rotated key must not protect the old account's
+/// secrets, so every [`SECRET_NAME_PREFIX`] name goes.
 ///
 /// # Errors
 /// Returns an error when listing or a delete fails.
-pub async fn delete_secrets<T: SandboxTransport>(
-    client: &PrimeSandboxClient<T>,
-    owner: &str,
-) -> Result<usize> {
-    let names = secret_names(owner);
+pub async fn delete_secrets<T: SandboxTransport>(client: &PrimeSandboxClient<T>) -> Result<usize> {
     let mut deleted = 0;
     for secret in client.list_secrets().await? {
-        if names.contains(&secret.name) {
+        if secret.name.starts_with(SECRET_NAME_PREFIX) {
             client.delete_secret(&secret.id).await?;
             deleted += 1;
         }
     }
     Ok(deleted)
+}
+
+/// The file whose `{file}.lock` directory is the agent-dir GitHub write
+/// lock: `bots/github` under the agent dir, beside the registry.
+fn lock_file(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("bots").join("github")
+}
+
+/// The lock that serializes the GitHub secret writes of one agent dir: a
+/// bot spawn's provisioning and `bots github clear` both take it, so a
+/// provisioning that planned before a clear cannot recreate the cleared
+/// secrets after it. The `LockDir` protocol the settings storage uses.
+///
+/// # Errors
+/// Returns an error when the lock directory cannot be created, or a live
+/// holder keeps the lock past the retry budget.
+pub fn lock(agent_dir: &Path) -> Result<LockDir> {
+    let file = lock_file(agent_dir);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    LockDir::acquire_retrying(&file, LOCK_STALE_AFTER, LOCK_ATTEMPTS, LOCK_INTERVAL)
+        .map_err(|error| anyhow::anyhow!("the bots github lock is held: {error}"))
+}
+
+/// The post-write recheck of a provisioning: when the token the machine
+/// resolves now differs from the one just written (a `clear` or a rotation
+/// that did not take [`lock`], an older binary), the secrets must not keep
+/// the old token. Delete them; the next spawn provisions the current one.
+pub(super) async fn recheck_provisioned_token<T: SandboxTransport>(
+    client: &PrimeSandboxClient<T>,
+    agent_dir: &Path,
+    planned_token: &str,
+) {
+    let dir = agent_dir.to_path_buf();
+    let resolved = match tokio::task::spawn_blocking(move || resolve_token(&dir)).await {
+        Ok(resolved) => resolved,
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    };
+    if resolved.as_ref().map(|(token, _)| token.as_str()) != Some(planned_token) {
+        eprintln!(
+            "bot credentials: the GitHub token changed while provisioning; the bots' GitHub \
+             secrets are removed until the next spawn provisions the current one"
+        );
+        if let Err(error) = delete_secrets(client).await {
+            eprintln!("bot credentials: removing the GitHub secrets failed: {error:#}");
+        }
+    }
 }
 
 /// This machine's git author (`git config --global`). Blocking.
@@ -448,6 +507,104 @@ mod tests {
             [
                 "https://api.test/api/v1/secrets/id-1",
                 "https://api.test/api/v1/secrets/id-2"
+            ]
+        );
+    }
+
+    /// The GitHub write lock is one agent-dir lock: a second taker contends
+    /// until the first drops it, and the lock directory lives beside the
+    /// bot registry.
+    #[test]
+    fn the_github_lock_serializes_its_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = lock(dir.path()).unwrap();
+        let path = LockDir::path_for(&lock_file(dir.path()));
+        assert!(path.is_dir());
+        let error =
+            LockDir::acquire(&lock_file(dir.path()), LOCK_STALE_AFTER).expect_err("contention");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        drop(held);
+        assert!(lock(dir.path()).is_ok());
+    }
+
+    /// `clear` deletes every `PRIME_AGENT_GITHUB_` secret, not only the
+    /// current Prime account's: a rotated Prime key must not leave the old
+    /// account's secrets (and the bots' access) behind.
+    #[tokio::test]
+    async fn clear_deletes_the_github_secrets_of_every_account() {
+        let platform = Platform::default();
+        platform.answers.lock().unwrap().extend([
+            json!({ "data": [
+                { "id": "id-old", "name": "PRIME_AGENT_GITHUB_OLDFP" },
+                { "id": "id-old-basic", "name": "PRIME_AGENT_GITHUB_OLDFP_BASIC" },
+                { "id": "id-new", "name": "PRIME_AGENT_GITHUB_NEWFP" },
+                { "id": "id-new-basic", "name": "PRIME_AGENT_GITHUB_NEWFP_BASIC" },
+                { "id": "id-keep", "name": "PRIME_AGENT_PRIME_INFERENCE_KEY_ABC123" },
+            ] }),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        ]);
+        let client = client(&platform);
+        assert_eq!(delete_secrets(&client).await.unwrap(), 4);
+        let deletes: Vec<String> = platform
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "DELETE")
+            .map(|request| request.url.clone())
+            .collect();
+        assert_eq!(
+            deletes,
+            [
+                "https://api.test/api/v1/secrets/id-old",
+                "https://api.test/api/v1/secrets/id-old-basic",
+                "https://api.test/api/v1/secrets/id-new",
+                "https://api.test/api/v1/secrets/id-new-basic",
+            ]
+        );
+    }
+
+    /// The post-write recheck: the secrets stay when the machine still
+    /// resolves the planned token, and go when a clear removed it.
+    #[tokio::test]
+    async fn a_changed_token_removes_the_provisioned_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        store_token(dir.path(), "ghp_first").unwrap();
+        let platform = Platform::default();
+        platform.answers.lock().unwrap().extend([
+            json!({ "data": [
+                { "id": "id-1", "name": "PRIME_AGENT_GITHUB_OWNER1" },
+                { "id": "id-2", "name": "PRIME_AGENT_GITHUB_OWNER1_BASIC" },
+            ] }),
+            json!({}),
+            json!({}),
+        ]);
+        let client = client(&platform);
+        recheck_provisioned_token(&client, dir.path(), "ghp_first").await;
+        assert!(platform
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.method.as_str() != "DELETE"));
+        clear_token(dir.path()).unwrap();
+        recheck_provisioned_token(&client, dir.path(), "ghp_first").await;
+        let deletes: Vec<String> = platform
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "DELETE")
+            .map(|request| request.url.clone())
+            .collect();
+        assert_eq!(
+            deletes,
+            [
+                "https://api.test/api/v1/secrets/id-1",
+                "https://api.test/api/v1/secrets/id-2",
             ]
         );
     }

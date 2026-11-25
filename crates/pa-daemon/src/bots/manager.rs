@@ -32,6 +32,81 @@ const OPERATION_BUDGET: Duration = Duration::from_mins(15);
 /// error: about 30 s of backoff, so a busy account's rate limit passes.
 const RETRY_ATTEMPTS: u32 = 10;
 
+/// The guest settings merge, run by the bootstrap script through the
+/// `BOT_SETTINGS_PY` environment variable. It writes the owner's
+/// `factory.enabled` and the bot's MCP servers into the guest
+/// `settings.json`, and the bot's MCP connection records into
+/// `mcp-connections.json`, each under the guest daemon's own `{file}.lock`
+/// protocol (a `LockDir`-style empty directory, a stale one reclaimed) with
+/// an atomic replace, so a concurrent update by the guest daemon is merged,
+/// not overwritten by a stale snapshot.
+pub(super) const GUEST_SETTINGS_PY: &str = r#"
+import json, os, time
+
+
+def locked_update(path, update):
+    """Read-modify-write under the daemon's {file}.lock protocol."""
+    lock = path + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - os.stat(lock).st_mtime > 10
+            except OSError:
+                stale = False
+            if stale:
+                try:
+                    os.rmdir(lock)
+                except OSError:
+                    pass
+            else:
+                time.sleep(0.02)
+    try:
+        try:
+            document = json.load(open(path))
+        except (OSError, ValueError):
+            document = None
+        document = update(document)
+        temp = path + ".tmp" + str(os.getpid())
+        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w") as file:
+            json.dump(document, file)
+        os.replace(temp, path)
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def settings_update(settings):
+    if settings is None:
+        settings = {}
+    settings.setdefault("factory", {})["enabled"] = os.environ["BOT_FACTORY_ENABLED"] == "true"
+    if os.environ.get("BOT_MCP_SERVERS"):
+        settings.setdefault("mcpServers", {}).update(json.loads(os.environ["BOT_MCP_SERVERS"]))
+    return settings
+
+
+locked_update(os.path.join(os.environ["HOME"], ".prime/agent/settings.json"), settings_update)
+
+
+def connections_update(store):
+    if store is None:
+        store = {"version": 1, "connections": {}}
+    store.setdefault("connections", {}).update(json.loads(os.environ["BOT_MCP_CONNECTIONS"]))
+    return store
+
+
+if os.environ.get("BOT_MCP_CONNECTIONS"):
+    locked_update(
+        os.path.join(os.environ["HOME"], ".prime/agent/mcp-connections.json"), connections_update
+    )
+"#;
+
 /// Writes the owner's `factory.enabled` into the guest settings, starts the
 /// guest daemon when it is not up, then opens the bot session. It
 /// reopens `BOT_SESSION_FILE`, or the file a marker on the guest disk names, so
@@ -47,29 +122,7 @@ mkdir -p "$(dirname "$PRIME_AGENT_DAEMON_SOCKET")"
 if [ -n "${BOT_AUTH_JSON:-}" ] && { [ -n "${BOT_AUTH_OVERWRITE:-}" ] || [ ! -s "$HOME/.prime/agent/auth.json" ]; }; then
   (umask 077; printf '%s' "$BOT_AUTH_JSON" >"$HOME/.prime/agent/auth.json")
 fi
-python3 - <<'PY'
-import json, os
-path = os.path.join(os.environ["HOME"], ".prime/agent/settings.json")
-try:
-    settings = json.load(open(path))
-except (OSError, ValueError):
-    settings = {}
-settings.setdefault("factory", {})["enabled"] = os.environ["BOT_FACTORY_ENABLED"] == "true"
-if os.environ.get("BOT_MCP_SERVERS"):
-    settings.setdefault("mcpServers", {}).update(json.loads(os.environ["BOT_MCP_SERVERS"]))
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "w") as file:
-    json.dump(settings, file)
-if os.environ.get("BOT_MCP_CONNECTIONS"):
-    path = os.path.join(os.environ["HOME"], ".prime/agent/mcp-connections.json")
-    try:
-        store = json.load(open(path))
-    except (OSError, ValueError):
-        store = {"version": 1, "connections": {}}
-    store.setdefault("connections", {}).update(json.loads(os.environ["BOT_MCP_CONNECTIONS"]))
-    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as file:
-        json.dump(store, file)
-PY
+python3 -c "$BOT_SETTINGS_PY"
 if [ -f "${PLATFORM_CA:-}" ]; then
   # The platform terminates TLS for the rule hosts (model APIs, GitHub, MCP
   # servers): every client in the bot must trust its root.
@@ -868,13 +921,24 @@ impl BotManager {
             check_exit("install prime-agent in the bot", &output)?;
         }
         record.version = local.to_string();
-        let mut env = bootstrap_env(record);
         let agent_dir = self.agent_dir.clone();
-        let factory_enabled = tokio::task::spawn_blocking(move || {
-            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_factory_enabled()
+        // A record rebuilt from labels carries no git author: fall back to
+        // the owner's (`bots.gitIdentity`, else this machine's git author)
+        // so a cold boot still commits as the owner.
+        let missing_identity = record.git_identity.is_none();
+        let (factory_enabled, identity) = tokio::task::spawn_blocking(move || {
+            let settings = pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir);
+            let identity = missing_identity
+                .then(|| super::github::git_identity(&agent_dir))
+                .flatten();
+            (settings.get_factory_enabled(), identity)
         })
         .await
-        .context("the factory.enabled read failed")?;
+        .context("the factory settings read failed")?;
+        if record.git_identity.is_none() {
+            record.git_identity = identity;
+        }
+        let mut env = bootstrap_env(record);
         env.insert(
             "BOT_FACTORY_ENABLED".to_string(),
             factory_enabled.to_string(),
@@ -1150,6 +1214,7 @@ fn bootstrap_env(record: &BotRecord) -> BTreeMap<String, String> {
             super::GUEST_DAEMON_SOCKET.to_string(),
         ),
         ("BOT_CLIENT".to_string(), BOT_CLIENT.to_string()),
+        ("BOT_SETTINGS_PY".to_string(), GUEST_SETTINGS_PY.to_string()),
         ("BOT_NAME".to_string(), record.name.clone()),
         (
             super::remote_parent::REMOTE_PARENT_ENV.to_string(),

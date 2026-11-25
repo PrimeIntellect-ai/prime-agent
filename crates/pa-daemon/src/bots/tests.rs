@@ -42,6 +42,9 @@ pub(crate) struct FakeState {
     pub pending_checkpoints: std::collections::HashSet<String>,
     /// The exit code of the next guest installs (0 = they succeed).
     pub install_exit_code: i32,
+    /// The guest lacks the installer's tools (node, gh): the version probe
+    /// reports nothing until an install succeeds.
+    pub guest_tools_missing: bool,
     /// A relay that ends with this before its hello (exit code and stderr).
     pub relay_end: Option<String>,
     /// The version a linked guest says hello with; `None` = this build's.
@@ -266,6 +269,10 @@ impl BotPlatform for FakePlatform {
                     .get(sandbox_id)
                     .cloned()
                     .unwrap_or_default();
+                // The probe also requires the installer's tools on PATH.
+                if state.guest_tools_missing {
+                    output.stdout.clear();
+                }
             } else if script == INSTALL_SCRIPT {
                 state.installs += 1;
                 output.exit_code = state.install_exit_code;
@@ -273,6 +280,7 @@ impl BotPlatform for FakePlatform {
                     state
                         .guest_versions
                         .insert(sandbox_id.to_string(), env["PA_VERSION"].clone());
+                    state.guest_tools_missing = false;
                 }
             } else {
                 assert!(env.contains_key("BOT_CLIENT"), "unexpected guest script");
@@ -852,6 +860,166 @@ fn attach_guard_counts_attaches() {
     assert!(!manager.attached("bot-a"));
 }
 
+/// The bootstrap environment of the last guest command that ran it.
+fn last_bootstrap_env(platform: &FakePlatform) -> BTreeMap<String, String> {
+    platform
+        .state()
+        .execs
+        .iter()
+        .rev()
+        .find(|(_, env)| env.contains_key("BOT_CLIENT"))
+        .map(|(_, env)| env.clone())
+        .expect("a bootstrap ran")
+}
+
+/// A bot whose guest has this build's prime-agent but lost the
+/// installer's tools (a half-failed install) gets the installer rerun on
+/// its next wake: the version probe reports nothing while a tool is
+/// missing, so the bot never boots without Node.js or `gh`.
+#[tokio::test(start_paused = true)]
+async fn a_missing_guest_tool_reruns_the_installer() {
+    let (dir, platform, manager) = setup();
+    // The bot's sandbox survived a lost registry: labels rebuild the
+    // record; the guest runs the right prime-agent, but no node.
+    let owner = saved_session(dir.path(), "owner");
+    let sandbox = platform.add_sandbox(
+        "helper",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-a"),
+            owner_label(&owner),
+        ],
+    );
+    platform
+        .state()
+        .guest_versions
+        .insert(sandbox.clone(), version::local_version().to_string());
+    platform.state().guest_tools_missing = true;
+
+    manager.reconcile_on_boot().await.unwrap();
+    let running = manager.ensure_running("bot-a").await.unwrap();
+
+    assert_eq!(running.status, BotStatus::Running);
+    assert_eq!(running.sandbox_id.as_deref(), Some(sandbox.as_str()));
+    // The probe saw the missing tool, so the idempotent installer ran.
+    assert_eq!(platform.state().installs, 1);
+    assert!(!platform.state().guest_tools_missing);
+}
+
+/// A record rebuilt from labels carries no git author: the bootstrap falls
+/// back to the owner's (`bots.gitIdentity`), so a cold boot still commits
+/// as the owner, and the recovered identity lands on the record.
+#[tokio::test(start_paused = true)]
+async fn a_rebuilt_record_keeps_the_git_author() {
+    let (dir, platform, manager) = setup();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({
+            "bots": { "gitIdentity": { "name": "Ada", "email": "ada@example.com" } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let owner = saved_session(dir.path(), "owner");
+    platform.add_sandbox(
+        "helper",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-a"),
+            owner_label(&owner),
+        ],
+    );
+
+    manager.reconcile_on_boot().await.unwrap();
+    assert_eq!(manager.get("bot-a").unwrap().git_identity, None);
+
+    manager.ensure_running("bot-a").await.unwrap();
+
+    let env = last_bootstrap_env(&platform);
+    assert_eq!(env["BOT_GIT_NAME"], "Ada");
+    assert_eq!(env["BOT_GIT_EMAIL"], "ada@example.com");
+    assert_eq!(
+        manager.get("bot-a").unwrap().git_identity,
+        Some(BotGitIdentity {
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+        })
+    );
+}
+
+/// The owner's `factory.enabled` rides the bootstrap environment into the
+/// guest's settings: `false` without the setting, `true` with it.
+#[tokio::test(start_paused = true)]
+async fn the_bootstrap_carries_the_owner_factory_setting() {
+    let (dir, platform, manager) = setup();
+    manager.spawn(&spec("bot-a")).await.unwrap();
+    assert_eq!(
+        last_bootstrap_env(&platform)["BOT_FACTORY_ENABLED"],
+        "false"
+    );
+
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({ "factory": { "enabled": true } }).to_string(),
+    )
+    .unwrap();
+    manager.spawn(&spec("bot-b")).await.unwrap();
+    assert_eq!(last_bootstrap_env(&platform)["BOT_FACTORY_ENABLED"], "true");
+}
+
+/// The bootstrap's settings write waits for the guest settings lock: a
+/// write that lands while the script waits survives the merge (the script
+/// reads under the lock, then atomically replaces), instead of being
+/// overwritten by the script's stale snapshot. The MCP-connection record
+/// write takes the same lock for its own file.
+#[tokio::test]
+async fn the_bootstrap_settings_write_waits_for_the_guest_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let agent = home.path().join(".prime").join("agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let settings = agent.join("settings.json");
+    std::fs::write(&settings, r#"{"existing": "kept"}"#).unwrap();
+    // The guest daemon holds the settings lock.
+    let lock = agent.join("settings.json.lock");
+    std::fs::create_dir(&lock).unwrap();
+    let mut script = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(super::manager::GUEST_SETTINGS_PY)
+        .env("HOME", home.path())
+        .env("BOT_FACTORY_ENABLED", "true")
+        .env_remove("BOT_MCP_SERVERS")
+        .env(
+            "BOT_MCP_CONNECTIONS",
+            r#"{"linear-2": {"url": "https://x"}}"#,
+        )
+        .spawn()
+        .expect("python3");
+    // While the script waits, the daemon writes new settings.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !std::fs::read_to_string(&settings)
+            .unwrap()
+            .contains("factory"),
+        "the locked write must not have landed yet"
+    );
+    std::fs::write(
+        &settings,
+        r#"{"existing": "kept", "writer": "guest-daemon"}"#,
+    )
+    .unwrap();
+    std::fs::remove_dir(&lock).unwrap();
+    assert!(script.wait().expect("python3 exits").success());
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(merged["writer"], "guest-daemon");
+    assert_eq!(merged["existing"], "kept");
+    assert_eq!(merged["factory"]["enabled"], true);
+    let connections: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agent.join("mcp-connections.json")).unwrap())
+            .unwrap();
+    assert_eq!(connections["connections"]["linear-2"]["url"], "https://x");
+}
+
 /// What [`live_ask`] returns for a turn that ended without an answer.
 const NO_ANSWER: &str = "<no answer>";
 
@@ -924,7 +1092,13 @@ async fn github_live_push_and_draft_pr() {
     let client = new_client();
     let dir = tempfile::tempdir().unwrap();
     super::github::store_token(dir.path(), &token).unwrap();
-    let owner = super::github::owner_fingerprint(&api_key);
+    // A per-run owner: the test's GitHub secrets never touch the secret
+    // namespace real bots on this account use.
+    let owner = format!(
+        "{}-LIVE-{}",
+        super::github::owner_fingerprint(&api_key),
+        uuid::Uuid::new_v4().simple().to_string()[..12].to_ascii_uppercase()
+    );
     let platform = Arc::new(super::platform::PrimePlatform::new(
         client,
         dir.path(),
@@ -974,9 +1148,12 @@ cat "$HOME/.gitconfig" "$HOME/.prime-agent-git-credential"
     }
     .await;
     manager.delete(&bot_id).await.unwrap();
-    super::github::delete_secrets(&new_client(), &owner)
-        .await
-        .unwrap();
+    let [token_secret, basic_secret] = super::github::secret_names(&owner);
+    for secret in new_client().list_secrets().await.unwrap() {
+        if secret.name == token_secret || secret.name == basic_secret {
+            new_client().delete_secret(&secret.id).await.unwrap();
+        }
+    }
     let (bot, output) = run.unwrap();
     eprintln!(
         "live github: exit={} stdout={}\nstderr={}",

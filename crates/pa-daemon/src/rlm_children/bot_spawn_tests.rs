@@ -205,3 +205,61 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
         .unwrap();
     assert!(collected[0].settled);
 }
+
+/// A spawn that inherits a subscription model the bot cannot use (the
+/// login is off for bots) runs on the Prime Inference default model
+/// instead, and the spawn handle says so.
+#[tokio::test]
+async fn an_inherited_login_model_falls_back_to_prime_inference() {
+    let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let running_reads = Arc::new(std::sync::Mutex::new(None));
+    let socket = fake_supervisor(Arc::clone(&commands), Arc::clone(&running_reads)).await;
+    let dir = tempfile::TempDir::new().unwrap();
+    // An Anthropic login plus a Prime Inference key, and the login off for
+    // bots: the inherited model cannot run in the bot.
+    std::fs::write(
+        dir.path().join("auth.json"),
+        json!({
+            "prime-inference": { "type": "api_key", "key": "sk-prime" },
+            "anthropic": { "type": "oauth", "access": "a", "refresh": "r", "expires": 1 },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        json!({ "bots": { "inject": { "anthropic": false } } }).to_string(),
+    )
+    .unwrap();
+    let sessions = SupervisorChildSessions::new(
+        Arc::new(crate::supervisor_link::SupervisorLink::new(socket)),
+        dir.path().to_path_buf(),
+        "parent-live".to_string(),
+        Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            dir.path().to_path_buf(),
+            /*telemetry_disabled*/ true,
+        )),
+        String::new(),
+    );
+    sessions.set_identity(ParentIdentity {
+        session_id: Some("parent-file".to_string()),
+        model: Some("anthropic/claude-haiku-4.5".to_string()),
+        cwd: Some(dir.path().to_string_lossy().to_string()),
+        ..ParentIdentity::with_default_depth()
+    });
+
+    let handle = sessions
+        .spawn(request("scout", RlmSpawnTarget::Sandbox))
+        .await
+        .expect("the bot spawn admits");
+
+    let fallback = format!(
+        "prime-inference/{}",
+        pa_core::models::PRIME_INFERENCE_DEFAULT_MODEL_ID
+    );
+    assert_eq!(handle.model, fallback);
+    let notice = handle.notice.expect("the fallback carries a notice");
+    assert!(notice.contains(&fallback), "{notice}");
+    let spawn = commands.lock().unwrap()[0].clone();
+    assert_eq!(spawn["model"], json!(fallback));
+}
