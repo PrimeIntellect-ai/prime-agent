@@ -22,6 +22,9 @@ use serde_json::{json, Value};
 /// until the test releases the gate.
 const HOLD_MARKER: &str = "HOLD-ME";
 
+/// The mock answers a request carrying this marker with an empty reply.
+const EMPTY_REPLY_MARKER: &str = "EMPTY-REPLY";
+
 struct Daemon {
     child: Child,
     socket: PathBuf,
@@ -38,9 +41,9 @@ impl Drop for Daemon {
 /// The release gate for held requests: `true` once released.
 type Gate = Arc<(Mutex<bool>, Condvar)>;
 
-/// An OpenAI-completions mock: every request answers `answer`, except one
-/// carrying [`HOLD_MARKER`] before the gate opens, which reports itself on
-/// `held` and waits for the release.
+/// An OpenAI-completions mock: every request answers `answer` (empty for
+/// one carrying [`EMPTY_REPLY_MARKER`]), and one carrying [`HOLD_MARKER`]
+/// before the gate opens reports itself on `held` and waits for the release.
 fn spawn_mock(answer: &'static str, gate: &Gate, held: mpsc::Sender<()>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
@@ -83,7 +86,13 @@ fn serve(
     }
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
-    if String::from_utf8_lossy(&body).contains(HOLD_MARKER) {
+    let body = String::from_utf8_lossy(&body);
+    let answer = if body.contains(EMPTY_REPLY_MARKER) {
+        ""
+    } else {
+        answer
+    };
+    if body.contains(HOLD_MARKER) {
         let (released, wake) = &**gate;
         let mut released = released.lock().unwrap();
         if !*released {
@@ -335,6 +344,23 @@ impl Fixture {
     }
 }
 
+/// The `-r <id> -p <prompt>` run against the fixture daemon.
+fn print_command(fixture: &Fixture, session_id: &str, prompt: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    command
+        .args(["--daemon-socket"])
+        .arg(&fixture.socket)
+        .args(["--provider", "prime-inference", "--model", "mock-1"])
+        .args(["-r", session_id, "-p", prompt])
+        .current_dir(&fixture.work)
+        .env("HOME", &fixture.home)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &fixture.agent_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
 /// A peer reaches a session driven by `-r <id> -p` while its turn runs:
 /// the print run is a daemon session, never a daemonless lease holder the
 /// daemon cannot wake.
@@ -346,17 +372,7 @@ fn a_peer_message_reaches_a_resumed_print_session_mid_turn() {
     let peer = client.create("c-peer", "peer", &fixture.config());
     let peer_active = peer["activeSessionId"].as_str().expect("peer active id");
 
-    let mut print = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
-        .args(["--daemon-socket"])
-        .arg(&fixture.socket)
-        .args(["--provider", "prime-inference", "--model", "mock-1"])
-        .args(["-r", &session_id, "-p", &format!("resume {HOLD_MARKER}")])
-        .current_dir(&fixture.work)
-        .env("HOME", &fixture.home)
-        .env("PRIME_AGENT_CODING_AGENT_DIR", &fixture.agent_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut print = print_command(&fixture, &session_id, &format!("resume {HOLD_MARKER}"))
         .spawn()
         .expect("spawn the print run");
     if fixture.held.recv_timeout(Duration::from_secs(90)).is_err() {
@@ -419,10 +435,23 @@ fn live_rows_for(client: &mut Client, id: &str, session_file: &Path) -> Vec<Valu
         .collect()
 }
 
-/// The print run's handshake is `list`, then a client-owned `create`. A
-/// resident client that opens the same saved session between the two keeps
-/// it: the daemon refuses the client-owned create atomically, so the file
-/// has exactly one live owner, and both clients stay usable.
+/// Wait until no live worker serves `session_file`, failing after `within`.
+fn wait_until_unhosted(client: &mut Client, session_file: &Path, within: Duration) {
+    let deadline = Instant::now() + within;
+    while !live_rows_for(client, "l-unhosted", session_file).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "a worker still serves {} after {within:?}",
+            session_file.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A resident client that opens a saved session before the print run's
+/// client-owned `create` keeps it: the daemon refuses the client-owned
+/// create atomically, so the file has exactly one live owner, and both
+/// clients stay usable.
 #[test]
 fn a_session_opened_between_list_and_create_keeps_one_owner() {
     let fixture = Fixture::start();
@@ -447,15 +476,7 @@ fn a_session_opened_between_list_and_create_keeps_one_owner() {
         command
     };
 
-    // The runner's `list`: the stopped session's worker has left the roster.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !live_rows_for(&mut runner, "l-runner", &session_file).is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "the stopped session never left the roster"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until_unhosted(&mut runner, &session_file, Duration::from_secs(30));
     let opened = resident.request("o-resident", &open(None));
     assert_eq!(opened["success"], true, "resident open failed: {opened}");
     let resident_active = opened["data"]["activeSessionId"]
@@ -497,4 +518,104 @@ fn a_session_opened_between_list_and_create_keeps_one_owner() {
     let rows = live_rows_for(&mut runner, "l-claimed", &session_file);
     assert_eq!(rows.len(), 1, "exactly one live owner: {rows:?}");
     assert_eq!(rows[0]["activeSessionId"], runner_active.as_str());
+}
+
+/// Ctrl-C on a daemon-backed print run stops the daemon-side turn: the run
+/// exits 130 and the session's worker is gone well inside the daemon's
+/// 30 s disconnect grace, while the provider still holds the turn.
+#[test]
+fn ctrl_c_stops_the_daemon_side_turn() {
+    let fixture = Fixture::start();
+    let mut client = Client::connect(&fixture.socket);
+    let session_id = fixture.saved_session(&mut client);
+    let session_file = fixture
+        .sessions
+        .join(format!("{session_id}.jsonl"))
+        .canonicalize()
+        .expect("saved session file");
+    let print = print_command(&fixture, &session_id, &format!("resume {HOLD_MARKER}"))
+        .spawn()
+        .expect("spawn the print run");
+    fixture
+        .held
+        .recv_timeout(Duration::from_secs(90))
+        .expect("the print turn reached the provider");
+    assert_eq!(
+        live_rows_for(&mut client, "l-running", &session_file).len(),
+        1,
+        "the print run's worker serves the session"
+    );
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(print.id()).expect("pid")),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .expect("send SIGINT");
+    let output = print.wait_with_output().expect("print output");
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_until_unhosted(&mut client, &session_file, Duration::from_secs(10));
+}
+
+/// A goal the run drives into the no-progress cap fails the text-mode run
+/// with the cap reason, like the daemonless run. The saved paused goal
+/// already has two no-output turns; the resumed continuation's empty reply
+/// is the third.
+#[test]
+fn a_goal_capped_during_the_run_exits_one_with_the_reason() {
+    let fixture = Fixture::start();
+    let mut client = Client::connect(&fixture.socket);
+    let session_id = fixture.saved_session(&mut client);
+    let session_file = fixture.sessions.join(format!("{session_id}.jsonl"));
+    wait_until_unhosted(
+        &mut client,
+        &session_file.canonicalize().expect("saved session file"),
+        Duration::from_secs(30),
+    );
+    let transcript = std::fs::read_to_string(&session_file).expect("transcript");
+    let last: Value = serde_json::from_str(transcript.lines().last().expect("an entry"))
+        .expect("parse the last entry");
+    let earlier = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("millis")
+        - 60_000;
+    let goal = json!({
+        "type": "custom",
+        "id": "goal-seed",
+        "parentId": last["id"],
+        "timestamp": last["timestamp"],
+        "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
+        "data": {
+            "active": false,
+            "status": "paused",
+            "goalId": "goal-seed",
+            "objective": format!("finish the work {EMPTY_REPLY_MARKER}"),
+            "tokensUsed": 0,
+            "timeUsedSeconds": 0,
+            "continuationsUsed": 2,
+            "createdAt": earlier,
+            "noProgressStreak": 2,
+            "noProgressTurnMs": earlier,
+            "updatedAt": earlier,
+        },
+    });
+    std::fs::write(&session_file, format!("{transcript}{goal}\n")).expect("seed the goal");
+
+    let output = print_command(&fixture, &session_id, "/goal resume")
+        .output()
+        .expect("print output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains(pa_core::session_engine::goal_driver::CONTINUATION_NO_PROGRESS_CAP_REASON),
+        "stderr: {stderr}"
+    );
 }

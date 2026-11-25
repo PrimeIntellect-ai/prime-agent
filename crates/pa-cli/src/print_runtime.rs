@@ -1785,15 +1785,11 @@ async fn run_prompts(
     // terminal selection — only the autonomous gates exit non-zero.
     let mut exit_code = 0;
     if !json_mode {
-        let goal = engine.goal_state().await;
-        let cap_reason = pa_core::session_engine::goal_driver::CONTINUATION_NO_PROGRESS_CAP_REASON;
-        if goal.status == pa_types::goal::GoalStatus::Error
-            && goal.last_error.as_deref() == Some(cap_reason)
-            && goal.updated_at != goal_updated_at_start
-        {
-            eprintln!("{cap_reason}");
-            exit_code = 1;
-        }
+        emit_goal_cap_result(
+            &engine.goal_state().await,
+            goal_updated_at_start,
+            &mut exit_code,
+        );
         let state = engine.session.agent().state().await;
         let messages: Vec<pa_types::session::AgentMessage> =
             state.messages.iter().filter_map(json_round_trip).collect();
@@ -1805,6 +1801,25 @@ async fn run_prompts(
         exit_code = 1;
     }
     Ok(exit_code)
+}
+
+/// The text-mode goal outcome: a goal this run drove into the no-progress
+/// cap prints the cap reason to stderr and exits 1. A cap an earlier run
+/// left (`updated_at` unchanged since the run started) stays silent. Both
+/// print paths apply it before the terminal result.
+pub(crate) fn emit_goal_cap_result(
+    goal: &pa_types::goal::GoalState,
+    goal_updated_at_start: Option<u64>,
+    exit_code: &mut i32,
+) {
+    let cap_reason = pa_core::session_engine::goal_driver::CONTINUATION_NO_PROGRESS_CAP_REASON;
+    if goal.status == pa_types::goal::GoalStatus::Error
+        && goal.last_error.as_deref() == Some(cap_reason)
+        && goal.updated_at != goal_updated_at_start
+    {
+        eprintln!("{cap_reason}");
+        *exit_code = 1;
+    }
 }
 
 /// The text-mode terminal output: the selected primary message (an error to

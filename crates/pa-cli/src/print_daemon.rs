@@ -5,7 +5,7 @@
 //! session, prompts it, waits for headless completion (RLM quiescence
 //! included), and prints the same output the daemonless runtime prints.
 
-use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent};
+use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent, RequestRejected};
 use pa_types::daemon::{DaemonCommand, PromptInput};
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -39,38 +39,21 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
         }
         crate::telemetry_notice::print_if_due(&options.config);
         let (_cwd, create) = crate::print_runtime::headless_daemon_create(options)?;
+        let session_path = match &create {
+            DaemonCommand::Create { session_path, .. } => session_path.clone(),
+            _ => None,
+        };
         // B-11: the run-owned session never takes over a file a live daemon
-        // worker already hosts. The daemon enforces it atomically on the
-        // client-owned create (TS `assertWorkerCreateOwner`); this roster
-        // check only gives the common case the descriptive refusal.
-        if let DaemonCommand::Create {
-            session_path: Some(session_path),
-            ..
-        } = &create
-        {
-            let list = client
-                .request_ok(DaemonCommand::List {
-                    id: None,
-                    all: None,
-                    cwd: None,
-                    session_dir: None,
-                    include_client_owned: None,
-                    rest: Map::default(),
-                })
-                .await
-                .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
-            if let Some(refusal) = live_session_refusal(
-                Some(&list),
-                std::path::Path::new(session_path),
-            ) {
+        // worker already hosts. The daemon refuses the client-owned create
+        // atomically (TS `assertWorkerCreateOwner`).
+        let summary = match client.request_ok(create).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                let refusal = describe_live_session_refusal(&client, &error, session_path).await;
                 client.close();
-                return Err(refusal);
+                return Err(refusal.unwrap_or_else(|| format!("{error:#}")));
             }
-        }
-        let summary = client
-            .request_ok(create)
-            .await
-            .map_err(|error| format!("{error:#}"))?;
+        };
         let active_session_id = summary
             .get("activeSessionId")
             .and_then(Value::as_str)
@@ -78,10 +61,10 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
             .to_string();
         // Attach, prompt, and settle the session, then print the result (TS
         // `runPrintModeWithConnectionInternal`).
-        let exit: Result<i32, String> = async {
+        let run = async {
             let json_mode = options.app_mode == AppMode::Json;
             let failed = |error: anyhow::Error| format!("{error:#}");
-            client
+            let attached = client
                 .request_ok(DaemonCommand::Attach {
                     id: None,
                     active_session_id: active_session_id.clone(),
@@ -96,6 +79,7 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                 })
                 .await
                 .map_err(failed)?;
+            let goal_updated_at_start = goal_of(&attached["snapshot"]["state"]).updated_at;
             if json_mode {
                 let header = client
                     .request_ok(DaemonCommand::GetSessionHeader {
@@ -143,14 +127,23 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                     },
                     rest: Map::default(),
                 };
-                relay_events_until(
+                let prompted = relay_events_until(
                     client.request_ok_with_timeout(command, NO_TIMEOUT_MS),
                     &mut events,
                     json_mode,
                     &active_session_id,
                 )
-                .await
-                .map_err(failed)?;
+                .await;
+                // A failed session command or turn rejects the prompt wait:
+                // the raw error goes to stderr and the run exits 1 with no
+                // later prompts, like the daemonless run.
+                if let Err(error) = prompted {
+                    let Some(rejected) = error.downcast_ref::<RequestRejected>() else {
+                        return Err(failed(error));
+                    };
+                    eprintln!("{}", rejected.message);
+                    return Ok(1);
+                }
             }
             // The daemonless print's #2270 contract: every admitted descendant
             // settles before the terminal result is read.
@@ -174,6 +167,19 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                 serde_json::from_value(status).map_err(|error| error.to_string())?;
             let mut exit_code = 0;
             if !json_mode {
+                let state = client
+                    .request_ok(DaemonCommand::GetConnectionState {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        rest: Map::default(),
+                    })
+                    .await
+                    .map_err(failed)?;
+                crate::print_runtime::emit_goal_cap_result(
+                    &goal_of(&state),
+                    goal_updated_at_start,
+                    &mut exit_code,
+                );
                 let messages = client
                     .request_ok(DaemonCommand::GetMessages {
                         id: None,
@@ -201,19 +207,77 @@ pub(crate) fn run_print_mode_via_daemon(options: &RunOptions) -> Result<Option<i
                 exit_code = 1;
             }
             Ok(exit_code)
-        }
-        .await;
-        // The run's session ends with it.
-        let _ = client
-            .request(DaemonCommand::CompleteOwnedSession {
+        };
+        // Ctrl-C or SIGTERM ends the run early: the teardown below still
+        // stops the daemon-side turn instead of leaving it to the
+        // disconnect grace.
+        let exit = tokio::select! {
+            exit = run => exit,
+            code = interrupted() => Ok(code),
+        };
+        // The run's session ends with it. A further signal skips the wait.
+        tokio::select! {
+            _ = client.request(DaemonCommand::CompleteOwnedSession {
                 id: None,
                 active_session_id,
                 rest: Map::default(),
-            })
-            .await;
+            }) => {}
+            _ = interrupted() => {}
+        }
         client.close();
         exit.map(Some)
     })
+}
+
+/// The first Ctrl-C (SIGINT) or, on unix, SIGTERM, as the shell's exit code
+/// for it (TS print mode's signal handlers).
+async fn interrupted() -> i32 {
+    let interrupt = async { tokio::signal::ctrl_c().await.map(|()| 130) };
+    #[cfg(unix)]
+    let terminate = async {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        terminate.recv().await;
+        Ok::<_, std::io::Error>(143)
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<std::io::Result<i32>>();
+    tokio::select! {
+        Ok(code) = interrupt => code,
+        Ok(code) = terminate => code,
+        else => std::future::pending().await,
+    }
+}
+
+/// The session goal in a connection state (`attach` snapshot or
+/// `get_connection_state`).
+fn goal_of(state: &Value) -> pa_types::goal::GoalState {
+    serde_json::from_value(state["goal"].clone())
+        .unwrap_or_else(|_| pa_types::goal::empty_goal_state())
+}
+
+/// The descriptive B-11 refusal for a create the daemon refused because a
+/// live worker hosts the file: the roster names the holder (the TUI's
+/// `describe_session_open_failure` order). `None` for any other failure.
+async fn describe_live_session_refusal(
+    client: &DaemonClient,
+    error: &anyhow::Error,
+    session_path: Option<String>,
+) -> Option<String> {
+    let rejected = error.downcast_ref::<RequestRejected>()?;
+    pa_tui::session_open_error::owner_from_refusal(&rejected.message)?;
+    let list = client
+        .request_ok(DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: None,
+            rest: Map::default(),
+        })
+        .await
+        .ok()?;
+    live_session_refusal(Some(&list), std::path::Path::new(&session_path?))
 }
 
 /// The refusal for a session file a live daemon worker already hosts, from a
