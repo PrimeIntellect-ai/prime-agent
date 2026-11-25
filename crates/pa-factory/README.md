@@ -61,18 +61,21 @@ and each member names it in `next`.
   `transitions`) the Python executor validates and runs. Prompts gain the
   shared context, the rubric, and a generated Outputs section.
 - Convert a stored v1 spec (machine or dag form) into directory files.
+- Scan the machine library (machine directories and v1 `MACHINE.md` files, level by level) for `factory list` and run-by-name.
+- Own the factory's numeric limits (`limits`), for directories and for stored JSON specs.
 
 ## Non-goals
 
 - Running machines, spawning children, or reading sessions.
 - Model catalog resolution: roles carry selectors; the session resolves
   them at spawn time.
-- Library resolution: callers decide which directories to load.
+- Choosing the library levels: callers pass the directories to scan.
 
 ## Public API
 
-`load_machine_dir`, `compile`, `convert_spec`, `parse_duration_ms`, the
-`types` module, and the model types re-exported from the crate root.
+`load_machine_dir`, `compile`, `convert_spec`, `scan_library`,
+`read_machine_md`, the `limits` and `types` modules, and the model types
+re-exported from the crate root.
 
 ## Dependencies
 
