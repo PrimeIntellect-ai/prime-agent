@@ -1271,7 +1271,10 @@ fn a_rejected_credential_still_stored_is_force_refreshed() {
         provider,
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
-    assert_eq!(auth.refresh_rejected_oauth(provider), Ok(()));
+    assert_eq!(
+        auth.refresh_rejected_oauth(provider),
+        Ok(RejectedAuthRecovery::Kept)
+    );
     assert_eq!(oauth.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let stored = parse_storage_data(backend.read().unwrap().as_deref())
         .unwrap()
@@ -1301,7 +1304,10 @@ fn a_rejection_of_a_superseded_credential_adopts_the_stored_one() {
     backend
         .with_lock(&mut |_| Ok(((), Some(content.clone()))))
         .unwrap();
-    assert_eq!(auth.refresh_rejected_oauth(provider), Ok(()));
+    assert_eq!(
+        auth.refresh_rejected_oauth(provider),
+        Ok(RejectedAuthRecovery::Kept)
+    );
     assert_eq!(oauth.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(auth.get_all().credential(provider), Some(newer));
 }
