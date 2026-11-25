@@ -22,7 +22,7 @@ impl Inner {
                 let _ = tx.send(Err(anyhow!("{error}")));
             }
         }
-        self.reject_active_execution(&error);
+        self.reject_active_executions(&error);
         if lock(&self.shutdown_memo).is_some() || !lock(&self.guarded).lifecycle.is_running() {
             return;
         }

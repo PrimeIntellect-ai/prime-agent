@@ -1,0 +1,1 @@
+- The session prompt names where a backgrounded cell's completion arrives: in the inbox when the agent inbox is on, as a `[cell-done]` notification when it is off.

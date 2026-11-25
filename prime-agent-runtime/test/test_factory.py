@@ -338,6 +338,13 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("node a failure_policy must be one of", errors[0])
 
+    def test_retries(self) -> None:
+        for good in (0, 5, 10):
+            self.assertEqual(validate_factory_spec({"nodes": [node("a", retries=good)]}), [])
+        for bad in (-1, 11, 1.5, "2", True):
+            errors = validate_factory_spec({"nodes": [node("a", retries=bad)]})
+            self.assertEqual(errors, ["node a retries must be an integer between 0 and 10"], bad)
+
     def test_depends_on(self) -> None:
         ok = {"nodes": [node("a"), node("b", depends_on=["a"])]}
         self.assertEqual(validate_factory_spec(ok), [])
@@ -575,6 +582,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         zero_retries = {"nodes": [node("watcher", lifecycle="resident", retries=0)]}
         self.assertEqual(validate_factory_spec(zero_retries), [])
 
+        # The type/range guard runs before the resident rule: a malformed
+        # value names the bound, not "cannot declare retries".
+        malformed_retries = {"nodes": [node("watcher", lifecycle="resident", retries="bad")]}
+        self.assertEqual(
+            validate_factory_spec(malformed_retries),
+            ["node watcher retries must be an integer between 0 and 10"],
+        )
+
         # Empty outputs list on a resident node is fine: nothing is declared.
         empty_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[])]}
         self.assertEqual(validate_factory_spec(empty_outputs), [])
@@ -712,6 +727,7 @@ class ValidateFactorySpecTest(unittest.TestCase):
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
                 "node a depends on unknown node 'ghost'",
+                "node b retries must be an integer between 0 and 10",
                 "node c failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'retry'",
             ],
         )
@@ -1379,6 +1395,15 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(declares_retries),
             ["resident state watcher cannot declare retries"],
         )
+        # Same order as the node form: the bound check reports first.
+        malformed_retries = {
+            "states": [state("watcher", entry=True, lifecycle="resident", retries="bad")],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(malformed_retries),
+            ["state watcher retries must be an integer between 0 and 10"],
+        )
         leaves_resident = {
             "states": [
                 {"id": "entry", "entry": True, "subagent": "w"},
@@ -1902,6 +1927,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             validate_factory_machine(machine),
             [
                 "run failure_policy must be one of ['fail_fast', 'continue', 'escalate'], got 'nope'",
+                "state a retries must be an integer between 0 and 10",
                 "transitions[0] references unknown to-state 'ghost'",
             ],
         )
@@ -2732,8 +2758,10 @@ class FakeHost:
         self.check_errors: dict[str, str] = {}
         self.factory_task_busy_until_collect: dict[str, int] = {}
         self.deleted: dict[str, dict[str, Any]] = {}
-        # factory.limits answers {} unless a test scripts its error.
+        # factory.limits answers the Rust max_transitions bound unless a
+        # test scripts its error.
         self.limits_error: str | None = None
+        self.max_transitions_bound = 10_000
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -2949,7 +2977,7 @@ class FakeHost:
         if request_type == "factory.limits":
             if self.limits_error is not None:
                 raise RuntimeError(self.limits_error)
-            return {}
+            return {"max_transitions": self.max_transitions_bound}
         if request_type == "agent_message.send":
             if self.on_message is not None:
                 self.on_message(payload or {})
@@ -7475,6 +7503,14 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
             await rlm_module.rlm.factory.run("sw")
         self.assertEqual(self.host.calls_of("factory.limits"), [{"spec": spec}])
         self.assertEqual(self.host.calls_of("rlm.run"), [])
+
+    @async_test
+    async def test_the_default_max_transitions_is_capped_at_the_host_bound(self) -> None:
+        # Two states default to 20 transitions; the host's bound caps it.
+        self.store_machine({"states": [state("a", entry=True), state("b")], "transitions": [{"from": "a", "to": "b"}]})
+        self.host.max_transitions_bound = 15
+        result = await rlm_module.rlm.factory.run("sw")
+        self.assertEqual(self.executor._runs[result["run_id"]].max_transitions, 15)
 
 
 class FactoryEmitTest(_ExecutorTestCase):

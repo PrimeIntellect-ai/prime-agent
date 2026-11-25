@@ -84,7 +84,7 @@ fn queued_prompt(message: &str, policy: TurnPolicy) -> QueuedItem {
 
 /// Run the pump until both lanes drain (the runner keeps idling; the
 /// task is aborted by the test's end).
-async fn drain_pump(core: &Arc<Mutex<SessionCore>>, work_notify: &Arc<Notify>) {
+async fn drain_pump(core: &Arc<Mutex<SessionCore>>, work_notify: &Arc<crate::worker::WorkNotify>) {
     work_notify.notify_one();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {

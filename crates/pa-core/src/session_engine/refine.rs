@@ -10,12 +10,13 @@ use serde_json::json;
 use super::model_usage::ModelUsage;
 use super::AgentSession;
 use crate::refinement::executor::{
-    apply_refinement_plan, plan_refinement, review_auto_refine, AutoRefineReview,
-    AutoRefineReviewContext, RefineOptions as CoreRefineOptions, RefinementPlan,
+    apply_refinement_plan, generate_refinement_id, plan_refinement, planner_reply_proposal,
+    planner_request, review_auto_refine, AutoRefineReview, AutoRefineReviewContext,
+    RefineOptions as CoreRefineOptions, RefinementPlan,
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
-    load_harness_state, merge_harness_states, HarnessScope, RefinementResult,
+    load_harness_state, merge_harness_states, HarnessScope, HarnessState, RefinementResult,
 };
 use crate::session::manager::SessionManager;
 
@@ -64,6 +65,14 @@ impl AutoRefineGates {
     }
 }
 
+const AUTO_REFINE_GUIDANCE: &str = "Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested.";
+
+/// The instructions of an automatic round that ran no review.
+#[must_use]
+pub fn unreviewed_auto_refine_instructions(reason: &str) -> String {
+    format!("Automatic refinement triggered by {reason}. {AUTO_REFINE_GUIDANCE}")
+}
+
 /// The instructions an approved review carries into the run.
 #[must_use]
 pub fn auto_refine_instructions(reason: &str, review: &AutoRefineReview) -> String {
@@ -79,7 +88,7 @@ Reviewer instructions: {instructions}"
         })
         .unwrap_or_default();
     format!(
-        "Automatic refine review triggered by {reason}. Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested. Reviewer rationale: {}{detail}",
+        "Automatic refine review triggered by {reason}. {AUTO_REFINE_GUIDANCE} Reviewer rationale: {}{detail}",
         review.rationale
     )
 }
@@ -313,7 +322,8 @@ pub async fn execute_refinement(
 
 /// Counts the refinement runs currently planning or committing — the
 /// counter `refine.status` answers `in_flight` from. The guard spans a
-/// run's whole body, so every source reports its flight at the one
+/// run's whole body (a refinement child's guard rides its
+/// `PreparedRefinement`), so every source reports its flight at the one
 /// shared start.
 struct RefinementFlightGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
@@ -407,6 +417,42 @@ pub(crate) async fn prepare_refinement(
         messages,
         refinement_history,
     } = transcript;
+    let (basis, planning_state) =
+        refinement_basis(session, agent_dir, refinement_history, stores, options).await?;
+    let plan = plan_refinement(
+        messages,
+        &planning_state,
+        &basis.history,
+        model,
+        &basis.core_options,
+        refine_call,
+    )
+    .await?;
+    ready_refinement(basis, plan)
+}
+
+/// What a refinement captures before its model pass: the gate, the stores,
+/// the merged history, and the baseline the commit's stale check compares
+/// against.
+struct RefinementBasis {
+    core_options: CoreRefineOptions,
+    requested_scope: HarnessScope,
+    local_harness_dir: Option<PathBuf>,
+    global_harness_dir: PathBuf,
+    history: Vec<RefinementResult>,
+    baseline_state: crate::refinement::HarnessState,
+    settings: Option<crate::settings::SettingsManager>,
+}
+
+/// The pre-plan half of a refinement: the basis plus the planning state the
+/// model pass reads.
+async fn refinement_basis(
+    session: &tokio::sync::Mutex<SessionManager>,
+    agent_dir: Option<&Path>,
+    refinement_history: &[RefinementResult],
+    stores: &RefinementStores,
+    options: &RefineOptions,
+) -> anyhow::Result<(RefinementBasis, HarnessState)> {
     let (local_harness_dir, cwd) = {
         let session = session.lock().await;
         (stores.local_dir.clone(), session.get_cwd().to_path_buf())
@@ -450,7 +496,7 @@ pub(crate) async fn prepare_refinement(
     // Planning state: global, or merged global+local for local refinements.
     let global_state = load_harness_state(&stores.global_dir, HarnessScope::Global);
     let planning_state = if requested_scope == HarnessScope::Global {
-        global_state.clone()
+        global_state
     } else {
         let local_state = local_harness_dir
             .as_deref()
@@ -472,21 +518,40 @@ pub(crate) async fn prepare_refinement(
         HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     let baseline_state = load_harness_state(&baseline_dir, baseline_scope);
+    Ok((
+        RefinementBasis {
+            core_options,
+            requested_scope,
+            local_harness_dir,
+            global_harness_dir: stores.global_dir.clone(),
+            history,
+            baseline_state,
+            settings,
+        },
+        planning_state,
+    ))
+}
 
-    let mut plan = plan_refinement(
-        messages,
-        &planning_state,
-        &history,
-        model,
-        &core_options,
-        refine_call,
-    )
-    .await?;
-    plan = strip_display_prefixes(plan);
+/// The post-plan half of a refinement: resolve the plan's target store and
+/// hand the commit everything it applies.
+fn ready_refinement(
+    basis: RefinementBasis,
+    plan: RefinementPlan,
+) -> anyhow::Result<ReadyRefinement> {
+    let RefinementBasis {
+        core_options,
+        requested_scope,
+        local_harness_dir,
+        global_harness_dir,
+        history,
+        baseline_state,
+        settings,
+    } = basis;
+    let plan = strip_display_prefixes(plan);
 
     let target_scope = plan.rollback_scope.unwrap_or(requested_scope);
     let target_dir = match target_scope {
-        HarnessScope::Global => stores.global_dir.clone(),
+        HarnessScope::Global => global_harness_dir.clone(),
         HarnessScope::Local => local_store_dir(local_harness_dir.as_deref())?,
     };
     // A rollback must land in the store its target actually wrote, named
@@ -528,7 +593,7 @@ pub(crate) async fn prepare_refinement(
         baseline_state,
         target_scope,
         target_dir,
-        global_harness_dir: stores.global_dir.clone(),
+        global_harness_dir,
         settings,
     })
 }
@@ -748,18 +813,6 @@ pub struct RefineOptions {
     pub rollback_id: Option<String>,
 }
 
-/// The compact-trigger round's resolution: decline, deferred behind an
-/// active agent turn, or ran.
-pub(crate) enum AutoRefineRound {
-    /// No refinement ran; the caller stamps the review cooldown.
-    Declined,
-    /// Approved mid-stream: the review is retained and the next serviced
-    /// boundary runs it.
-    Deferred(AutoRefineReview),
-    /// The refinement ran.
-    Ran(RefinementResult),
-}
-
 /// The refiner model call on the session model, with the merged request
 /// headers (the Prime team header) the session's own requests send.
 pub(super) async fn session_refiner_call(
@@ -911,46 +964,6 @@ impl AgentSession {
             .ok_or_else(refinement_stores_missing_error)
     }
 
-    /// The compact-trigger review: an LLM call over the conversation, the
-    /// merged harness state, and the refinement history. `Ok(None)` is the
-    /// decline; `Ok(Some(review))` a fresh approval.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the conversation history cannot be read or
-    /// when the review request fails; a decline is `Ok(None)`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the billed-call slot's mutex is poisoned.
-    pub async fn review_compact_auto_refine(
-        &self,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        turns_since_last_review: u32,
-        branch_version: u64,
-    ) -> anyhow::Result<Option<AutoRefineReview>> {
-        if !self.harness_refinements_enabled() {
-            return Ok(None);
-        }
-        let stores = self.refinement_stores()?;
-        pa_agent::abort::race_with_abort(
-            review_compact_refinement(
-                &self.session,
-                &self.compact_auto_refine,
-                self.auxiliary_model.clone(),
-                std::sync::Arc::clone(&self.usage_store),
-                model,
-                api_key,
-                &stores,
-                turns_since_last_review,
-                branch_version,
-            ),
-            &self.refinement_signal(),
-        )
-        .await?
-    }
-
     /// Review a compacted conversation and plan its refinement in the background.
     /// The returned task follows the same disposal and full-run commit boundary
     /// as [`Self::start_refinement`].
@@ -1020,51 +1033,6 @@ impl AgentSession {
             .map(Some)
         })
     }
-
-    /// The approved review's refinement run; the result consumes the
-    /// review.
-    pub(crate) async fn run_approved_refine(
-        &self,
-        review: &AutoRefineReview,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        cancel: pa_agent::abort::AbortSignal,
-    ) -> anyhow::Result<RefinementResult> {
-        let stores = self.refinement_stores()?;
-        let options = RefineOptions {
-            global: false,
-            instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
-            rollback_id: None,
-        };
-        let refiner = session_refiner_call(
-            self.auxiliary_model.clone(),
-            model,
-            api_key,
-            self.session_id().await,
-        )
-        .await?;
-        let refiner = recorded_refiner_call(
-            refiner,
-            "refine",
-            self.session.clone(),
-            self.usage_store.clone(),
-        );
-        run_refinement(
-            self.session.clone(),
-            self.agent.clone(),
-            self.compaction_flight.clone(),
-            self.refinements_in_flight.clone(),
-            cancel,
-            self.agent_dir.clone(),
-            options,
-            RefinementSource::Auto,
-            model.clone(),
-            refiner,
-            stores,
-        )
-        .await
-        .map(|committed| committed.result)
-    }
 }
 
 /// The default model seam over pa-ai completion.
@@ -1100,6 +1068,115 @@ pub fn default_refiner_call(
             Ok(pa_ai::complete_simple(&model, &context, Some(stream_options)).await?)
         })
     })
+}
+
+/// The refinement child's request tag: the JSON envelope its engine parses
+/// off its first prompt.
+pub const REFINEMENT_REQUEST_TYPE: &str = "refinement.request";
+
+/// A refinement whose model pass runs in the refinement child: the basis
+/// captured before the pass, applied through [`commit_refinement`] when the
+/// child replies.
+pub struct PreparedRefinement {
+    basis: RefinementBasis,
+    /// The planning request's output budget, which a `Length` stop names.
+    max_tokens: u64,
+    /// Counts this refinement in `refine.status` until it is applied or
+    /// dropped.
+    _in_flight: RefinementFlightGuard,
+}
+
+/// The refinement child's session-side surface: prepare the planning request
+/// and apply the child's reply on the wake.
+impl AgentSession {
+    /// Prepare one refinement for the child: the same basis and planning
+    /// request the in-process pipeline builds, wrapped in the child's
+    /// request envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when refinements are disabled in /settings, when a
+    /// local refinement is requested on an unpersisted session, when the
+    /// transcript cannot be read, or when the request cannot fit the model.
+    pub async fn prepare_refinement(
+        &self,
+        options: &RefineOptions,
+        model: &pa_types::ai::Model,
+    ) -> anyhow::Result<(PreparedRefinement, String)> {
+        let stores = self.refinement_stores()?;
+        let (parts, session_id) = {
+            let session = self.session.lock().await;
+            (
+                session.refine_transcript_parts(),
+                session.get_session_id().to_string(),
+            )
+        };
+        let crate::session::manager::RefineTranscriptParts {
+            messages,
+            refinement_history,
+        } = parts.await?;
+        let (basis, planning_state) = refinement_basis(
+            &self.session,
+            self.agent_dir.as_deref(),
+            &refinement_history,
+            &stores,
+            options,
+        )
+        .await?;
+        let request = planner_request(
+            &messages,
+            &planning_state,
+            &basis.history,
+            model,
+            &basis.core_options,
+        )?;
+        let max_tokens = request.model.max_tokens;
+        let prompt = json!({
+            "type": REFINEMENT_REQUEST_TYPE,
+            "sessionId": session_id,
+            "maxTokens": max_tokens,
+            "prompt": request.user_prompt,
+        })
+        .to_string();
+        let prepared = PreparedRefinement {
+            basis,
+            max_tokens,
+            _in_flight: RefinementFlightGuard::enter(self.refinements_in_flight.clone()),
+        };
+        Ok((prepared, prompt))
+    }
+
+    /// Apply the refinement child's planning reply: parse it like the
+    /// in-process pass does, then commit through [`commit_refinement`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reply was cut off, failed, or does not
+    /// parse, or when the commit fails.
+    pub async fn apply_child_refinement(
+        &self,
+        prepared: PreparedRefinement,
+        reply: &pa_types::ai::AssistantMessage,
+        source: RefinementSource,
+    ) -> anyhow::Result<CommittedRefinement> {
+        let plan = RefinementPlan {
+            proposal: planner_reply_proposal(reply, prepared.max_tokens)?,
+            id: generate_refinement_id(),
+            rollback_of: None,
+            rollback_scope: None,
+        };
+        let ready = ready_refinement(prepared.basis, plan)?;
+        commit_refinement(
+            &self.session,
+            &self.agent,
+            ready,
+            source,
+            self.agent_dir.as_deref(),
+            Some(&self.compaction_flight),
+            &self.refinement_signal(),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

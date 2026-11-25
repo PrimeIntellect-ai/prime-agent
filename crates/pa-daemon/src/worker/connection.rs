@@ -627,10 +627,15 @@ impl Worker {
                     .to_string();
                 // The roster capability is always granted; the peer
                 // transport capability rides on the worker instance id.
+                // The scoped-abort capability is this binary's own: the
+                // supervisor gates `abort` with a `background_cell`
+                // scope on it (an older adopted worker would read the
+                // scoped abort as the full queue-suspending abort).
                 let mut capabilities = vec!["agent_roster".to_string()];
                 if !self.config.worker_instance_id.is_empty() {
                     capabilities.push("direct_peer_transport".to_string());
                 }
+                capabilities.push("background_cell_abort".to_string());
                 let success = response_success(
                     Some(request_id),
                     "worker_auth",

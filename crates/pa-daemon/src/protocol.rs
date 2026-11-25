@@ -354,6 +354,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "session_input_pause",
                 "acp_mcp_servers",
                 "abort_and_send_queued",
+                "background_cell_abort",
                 "agent_roster",
                 "direct_peer_transport",
             ]

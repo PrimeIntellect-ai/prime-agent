@@ -217,6 +217,37 @@ pub async fn plan_refinement(
         });
     }
 
+    let request = planner_request(messages, state, history, model, options)?;
+    let max_tokens = request.model.max_tokens;
+    let reply = refine_call(request.model, REFINEMENT_SYSTEM_PROMPT, request.user_prompt).await?;
+    Ok(RefinementPlan {
+        proposal: planner_reply_proposal(&reply, max_tokens)?,
+        id,
+        rollback_of: None,
+        rollback_scope: None,
+    })
+}
+
+/// One planning request: the model with its output budget clamped to the
+/// window, and the user prompt sent with [`REFINEMENT_SYSTEM_PROMPT`].
+pub struct PlannerRequest {
+    pub model: pa_types::ai::Model,
+    pub user_prompt: String,
+}
+
+/// Build the planning request for a model pass (the caller sends it in
+/// process or through the refinement child).
+///
+/// # Errors
+///
+/// Error when the request cannot fit the model's context window.
+pub fn planner_request(
+    messages: &[AgentMessage],
+    state: &HarnessState,
+    history: &[RefinementResult],
+    model: &pa_types::ai::Model,
+    options: &RefineOptions,
+) -> anyhow::Result<PlannerRequest> {
     let conversation_text = conversation_text(messages, 80_000);
     let scope_instruction = if options.global {
         "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
@@ -257,15 +288,24 @@ pub async fn plan_refinement(
     let mut request_model = model.clone();
     request_model.max_tokens = request_max_tokens.min(REFINEMENT_MAX_OUTPUT_TOKENS);
 
-    let max_tokens = request_model.max_tokens;
-    let reply = refine_call(request_model, REFINEMENT_SYSTEM_PROMPT, user_prompt).await?;
-    let text = reply_text(&reply, max_tokens, "Refinement failed")?;
-    Ok(RefinementPlan {
-        proposal: parse_proposal(&text).map_err(anyhow::Error::msg)?,
-        id,
-        rollback_of: None,
-        rollback_scope: None,
+    Ok(PlannerRequest {
+        model: request_model,
+        user_prompt,
     })
+}
+
+/// The proposal in a planning reply: a reply cut off at its output limit or
+/// failed by the provider is an error that says so, never parsed as JSON.
+///
+/// # Errors
+///
+/// Error on a `Length` or `Error` stop, or an unparseable reply.
+pub fn planner_reply_proposal(
+    reply: &AssistantMessage,
+    max_tokens: u64,
+) -> anyhow::Result<RefinementProposal> {
+    let text = reply_text(reply, max_tokens, "Refinement failed")?;
+    parse_proposal(&text).map_err(anyhow::Error::msg)
 }
 
 /// The text of a side call's reply. A reply cut off at its output limit or
