@@ -689,6 +689,35 @@ async fn a_relay_added_after_the_spawn_reaches_the_existing_sandbox() {
     assert_eq!(platform.state().rule_updates.len(), 1, "no second push");
 }
 
+/// A wake whose relay rules push fails stays best effort: the bot
+/// remains usable, and the stale marker retries the push later.
+#[tokio::test(start_paused = true)]
+async fn a_failed_relay_rules_push_does_not_block_the_wake() {
+    let (dir, platform, manager) = setup();
+    let spawned = manager.spawn(&spec("bot-push-fail")).await.unwrap();
+    assert!(spawned.pause_rule_host.is_none());
+    // The relay host now collides with a key rule, so the push fails.
+    platform.state().key_hosts = 1;
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({
+            "bots": {
+                "relay": { "url": "http://key0.example.com" },
+                "selfPauseMinutes": 3,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let woken = manager.ensure_running("bot-push-fail").await.unwrap();
+    assert_eq!(woken.status, BotStatus::Running);
+    assert!(woken.pause_rule_host.is_none(), "the marker stays stale");
+    assert!(
+        platform.state().rule_updates.is_empty(),
+        "nothing was pushed"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn spawn_pause_resume_delete() {
     let (dir, platform, manager) = setup();

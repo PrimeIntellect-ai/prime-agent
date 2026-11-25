@@ -725,7 +725,16 @@ impl BotManager {
         // (its create applied the fresh credentials). A failed push
         // leaves the stale marker, so the next wake retries.
         if relay_host.is_some() && record.pause_rule_host != relay_host && reused {
-            self.push_relay_rules(&mut record, &sandbox).await?;
+            // Best effort, like the registration: a credentials failure
+            // must not block the wake (the sandbox keeps its old rules
+            // and stays usable); the stale marker makes the next wake
+            // retry the push.
+            if let Err(error) = self.push_relay_rules(&mut record, &sandbox).await {
+                eprintln!(
+                    "pa-daemon: bots: {}: the relay rules push failed: {error:#}",
+                    record.name
+                );
+            }
         }
         // A resumed bot gets a fresh token before its first request.
         self.refresh_logins(&record).await;
@@ -741,12 +750,12 @@ impl BotManager {
     async fn push_relay_rules(&self, record: &mut BotRecord, sandbox: &BotSandbox) -> Result<()> {
         let (credentials, logins, relay_host) =
             self.guest_credentials(record, record.github).await?;
-        record.logins = logins;
         retry(|| {
             self.platform
                 .set_network_rules(&sandbox.id, &credentials.network_rules)
         })
         .await?;
+        record.logins = logins;
         record.pause_rule_host = relay_host;
         Ok(())
     }
