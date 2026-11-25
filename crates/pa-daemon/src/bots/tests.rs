@@ -2248,7 +2248,7 @@ async fn children_count_toward_the_owners_bot_list() {
 /// and a child that vanished from the rows is deleted.
 #[tokio::test(start_paused = true)]
 async fn merged_child_rows_upsert_and_vanished_children_go() {
-    let (_dir, _platform, manager) = setup();
+    let (_dir, platform, manager) = setup();
     let spawn_a = manager.spawn(&spec("bot-a")).await.unwrap();
     let spawn_a_sandbox = spawn_a.sandbox_id.clone();
     let row = serde_json::json!({
@@ -2307,6 +2307,42 @@ async fn merged_child_rows_upsert_and_vanished_children_go() {
     manager.merge_children("bot-a", &[]).await.unwrap();
     assert!(manager.get("bot-c").is_none());
     assert!(manager.get("bot-a").is_some(), "the parent stays");
+
+    // A vanished row with a LIVE sandbox is not a deletion: an older guest
+    // snapshot must not delete a child that still runs.
+    let child_sandbox = platform.add_sandbox(
+        "live-child",
+        vec![
+            BOT_LABEL.to_string(),
+            bot_label("bot-live"),
+            owner_label("owner-1"),
+            super::parent_label("bot-a"),
+        ],
+    );
+    manager
+        .merge_children(
+            "bot-a",
+            &[serde_json::json!({
+                "botId": "bot-live", "name": "live", "ownerSessionId": "guest-session",
+                "parentBotId": "bot-a", "sandboxId": child_sandbox, "status": "running",
+                "createdAt": 1_i64,
+            })],
+        )
+        .await
+        .unwrap();
+    manager.merge_children("bot-a", &[]).await.unwrap();
+    assert!(
+        manager.get("bot-live").is_some(),
+        "a live child survives a stale snapshot"
+    );
+    assert!(
+        platform
+            .state()
+            .sandboxes
+            .get(&child_sandbox)
+            .is_some_and(|sandbox| !sandbox.status.is_terminal()),
+        "its sandbox was not deleted"
+    );
 }
 
 /// Deleting a bot deletes its descendants first: the registry's children

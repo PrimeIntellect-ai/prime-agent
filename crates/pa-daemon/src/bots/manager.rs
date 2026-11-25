@@ -892,6 +892,17 @@ impl BotManager {
             .map(|record| record.bot_id)
             .collect();
         for bot_id in vanished {
+            // An older guest snapshot omits a child that still runs; the
+            // platform listing is the truth, so a live child is kept and
+            // only its stale registry row waits for the next sync.
+            let label = bot_label(&bot_id);
+            let live = retry(|| self.platform.list(&label))
+                .await?
+                .into_iter()
+                .any(|sandbox| !sandbox.status.is_terminal());
+            if live {
+                continue;
+            }
             let bot_lock = self.lock_for(&bot_id);
             let _held = bot_lock.lock().await;
             self.delete_locked(&bot_id).await?;
