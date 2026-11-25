@@ -32,6 +32,17 @@ pub struct BotSandbox {
     pub error_message: Option<String>,
 }
 
+/// One checkpoint the platform reports for a bot's sandboxes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotCheckpoint {
+    pub id: String,
+    /// True once the checkpoint outlives its source sandbox and can be
+    /// restored; a pending or failed one cannot.
+    pub durable: bool,
+    /// RFC 3339; newest wins among the durable ones.
+    pub created_at: String,
+}
+
 /// One VM create.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BotCreate {
@@ -99,6 +110,13 @@ pub trait BotPlatform: Send + Sync {
     /// Request a pause; returns the pause checkpoint id when the platform reports one.
     fn pause<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<Option<String>>>;
     fn resume<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<BotSandbox>>;
+    /// Every checkpoint of the sandboxes carrying `label`, all pages,
+    /// oldest first; deleted sandboxes' checkpoints included, so an
+    /// outside pause's checkpoint stays findable after the sandbox ends.
+    fn list_checkpoints<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<BotCheckpoint>>>;
     /// Start a disk checkpoint; returns its id.
     fn checkpoint<'a>(&'a self, sandbox_id: &'a str) -> BoxFuture<'a, PlatformResult<String>>;
     /// Wait until the checkpoint is durable.
@@ -452,6 +470,32 @@ impl BotPlatform for PrimePlatform {
                 .resume_sandbox(sandbox_id)
                 .await
                 .map(sandbox_view)
+                .map_err(|error| map_error(&error))
+        }
+        .boxed()
+    }
+
+    fn list_checkpoints<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> BoxFuture<'a, PlatformResult<Vec<BotCheckpoint>>> {
+        async move {
+            self.client
+                .list_checkpoints(&[label.to_string()])
+                .await
+                .map(|checkpoints| {
+                    checkpoints
+                        .into_iter()
+                        .map(|checkpoint| {
+                            let durable = checkpoint.is_durable();
+                            BotCheckpoint {
+                                id: checkpoint.id,
+                                durable,
+                                created_at: checkpoint.created_at,
+                            }
+                        })
+                        .collect()
+                })
                 .map_err(|error| map_error(&error))
         }
         .boxed()

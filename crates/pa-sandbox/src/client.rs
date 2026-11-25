@@ -11,13 +11,17 @@
 //!   network policy (header rules included);
 //! - `DELETE {base}/api/v1/sandbox/{id}` — delete; a 404 is success;
 //! - `{base}/api/v1/sandbox/{id}/checkpoints` and
-//!   `{base}/api/v1/sandbox/checkpoints/{id}` — filesystem checkpoints.
+//!   `{base}/api/v1/sandbox/checkpoints/{id}` — filesystem checkpoints;
+//! - `GET    {base}/api/v1/sandbox/checkpoints?labels=..` — the
+//!   account's checkpoints across sandboxes (deleted ones included).
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::error::SandboxError;
-use crate::record::{parse_checkpoint, parse_paused, parse_sandbox, parse_sandbox_page};
+use crate::record::{
+    parse_checkpoint, parse_checkpoint_page, parse_paused, parse_sandbox, parse_sandbox_page,
+};
 use crate::transport::{ReqwestSandboxTransport, SandboxTransport, TransportRequest};
 use crate::types::{
     HeaderRule, Method, PausedSandbox, Sandbox, SandboxCheckpoint, SandboxStatus, VmCreateRequest,
@@ -530,6 +534,64 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             parse_checkpoint,
         )
         .await
+    }
+
+    /// List the account's rootfs checkpoints across sandboxes — only
+    /// those of sandboxes carrying every `label` — all pages, oldest
+    /// first. Checkpoints of deleted sandboxes are included, so a
+    /// sandbox's newest checkpoint stays findable after it ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns a status-mapped error for non-2xx responses and
+    /// [`crate::SandboxErrorCode::InvalidResponse`] for a malformed 200
+    /// body or a pagination that does not advance.
+    pub async fn list_checkpoints(
+        &self,
+        labels: &[String],
+    ) -> Result<Vec<SandboxCheckpoint>, SandboxError> {
+        let mut checkpoints = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let mut url = url::Url::parse(&format!("{}/api/v1/sandbox/checkpoints", self.base_url))
+                .map_err(|_| SandboxError::invalid_request("Checkpoint list URL is invalid"))?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("limit", "500");
+                for label in labels {
+                    query.append_pair("labels", label);
+                }
+                if let Some(team_id) = self.team_id.as_deref() {
+                    query.append_pair("team_id", team_id);
+                }
+                if let Some(cursor) = cursor.as_deref() {
+                    query.append_pair("cursor", cursor);
+                }
+            }
+            let result = self
+                .request_json(
+                    Method::Get,
+                    url.to_string(),
+                    self.platform_headers(),
+                    None,
+                    self.request_timeout,
+                    self.platform_secrets(),
+                    "Checkpoint list",
+                    parse_checkpoint_page,
+                )
+                .await?;
+            checkpoints.extend(result.checkpoints);
+            match result.next_cursor {
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                Some(_) => {
+                    return Err(SandboxError::invalid_response(
+                        "Checkpoint list pagination did not advance",
+                    ));
+                }
+                None => return Ok(checkpoints),
+            }
+        }
     }
 
     /// Delete one checkpoint by id; its storage billing stops (the

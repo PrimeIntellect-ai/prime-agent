@@ -17,7 +17,8 @@ use tokio::time::Instant;
 
 use super::logins::{Logins, REFRESH_TICK};
 use super::platform::{
-    BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError, PlatformResult,
+    BotCheckpoint, BotCreate, BotPlatform, BotSandbox, ExecOutput, GuestCredentials, PlatformError,
+    PlatformResult,
 };
 use super::registry::{BotRecord, BotRegistry, BotStatus};
 use super::version::{self, Install, ReleaseSource};
@@ -1344,10 +1345,60 @@ impl BotManager {
         }
     }
 
-    /// A new sandbox: restored from the recorded durable checkpoint, else
-    /// booted from the image. A restore that may still be booting keeps the
-    /// checkpoint and fails, so the next wake finds that sandbox.
+    /// Make the platform's newest durable checkpoint for the bot the
+    /// restore head. An outside pause (the relay's self-pause) freezes
+    /// checkpoints this daemon never records, so when the sandbox later
+    /// ends the recorded head may be stale, and a restore from it would
+    /// roll the bot back. A failed or empty query leaves the record
+    /// alone, so the recorded checkpoints stay the fallback.
+    async fn prefer_platform_checkpoint(&self, record: &mut BotRecord) {
+        let label = bot_label(&record.bot_id);
+        let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
+            Ok(listed) => listed,
+            Err(error) => {
+                eprintln!(
+                    "pa-daemon: bot {}: checkpoint list failed ({error}); using the recorded ones",
+                    record.bot_id
+                );
+                return;
+            }
+        };
+        let mut newest: Option<BotCheckpoint> = None;
+        for checkpoint in listed {
+            if !checkpoint.durable {
+                continue;
+            }
+            if newest
+                .as_ref()
+                .is_none_or(|found| checkpoint.created_at.as_str() > found.created_at.as_str())
+            {
+                newest = Some(checkpoint);
+            }
+        }
+        let Some(newest) = newest else {
+            return;
+        };
+        if record.checkpoint_id.as_deref() == Some(newest.id.as_str()) {
+            return;
+        }
+        // The winner may already sit in the older list (the recorded head
+        // never became durable): it must exist once, as the head.
+        record.older_checkpoint_ids.retain(|id| id != &newest.id);
+        if let Err(error) = self.replace_checkpoint(record, newest.id).await {
+            eprintln!(
+                "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
+                record.bot_id
+            );
+        }
+    }
+
+    /// A new sandbox: restored from the newest durable checkpoint the
+    /// platform reports for the bot (an outside pause may have frozen one
+    /// this daemon never recorded), else from the recorded ones, else
+    /// booted from the image. A restore that may still be booting keeps
+    /// the checkpoint and fails, so the next wake finds that sandbox.
     async fn acquire_new(&self, record: &mut BotRecord, deadline: Instant) -> Result<BotSandbox> {
+        self.prefer_platform_checkpoint(record).await;
         let candidates: Vec<String> = record
             .checkpoint_id
             .iter()
