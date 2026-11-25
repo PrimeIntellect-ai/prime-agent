@@ -98,6 +98,11 @@ pub struct BotRecord {
     /// refresher keeps them fresh while the bot runs.
     #[serde(default)]
     pub logins: Vec<String>,
+    /// The per-bot token of the relay pause endpoint: a platform secret
+    /// the relay verifies, injected on the bot's pause request outside
+    /// the sandbox. `None` until a wake with a relay configured.
+    #[serde(default)]
+    pub pause_token: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

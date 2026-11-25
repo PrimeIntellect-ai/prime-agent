@@ -120,8 +120,9 @@ fn auth_header(provider: &str, api: &str) -> Option<(&'static str, &'static str)
     }
 }
 
-/// The host of a catalog base URL.
-fn base_url_host(base_url: &str) -> Option<String> {
+/// The host of a base URL, as a header rule's key: the exact DNS name,
+/// lowercased.
+pub(super) fn base_url_host(base_url: &str) -> Option<String> {
     let (_, rest) = base_url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.split(':').next()?;

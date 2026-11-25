@@ -9,7 +9,7 @@ use futures::FutureExt;
 
 use pa_core::settings::BotGitIdentity;
 use pa_sandbox::CommandSpec;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::exec_stream::ExecStreamHalves;
 use super::platform::{
@@ -382,6 +382,7 @@ impl BotPlatform for FakePlatform {
         &'a self,
         name: &'a str,
         value: &'a str,
+        _description: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>> {
         async move {
             let mut state = self.state();
@@ -444,6 +445,172 @@ pub(crate) fn spec(bot_id: &str) -> BotSpec {
         github: false,
         git_identity: None,
     }
+}
+
+/// A relay-configured spawn: the bot's sandbox gets a header rule for
+/// the relay host only (never the Prime API host), the platform secret
+/// holds its pause token, the bootstrap carries the self-pause
+/// configuration, and the relay registration carries the sandbox id.
+#[tokio::test]
+async fn a_relay_configured_spawn_arms_the_guest_self_pause() {
+    let (dir, platform, manager) = setup();
+    // The stub relay: it answers the registration and records it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let relay = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // Read until the full request (headers plus the content length)
+        // arrived, then answer.
+        loop {
+            let read = socket.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(header_end) = find_header_end(&buffer) {
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or_default();
+                if buffer.len() >= header_end + 4 + length {
+                    break;
+                }
+            }
+        }
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        buffer
+    });
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({
+            "bots": {
+                "relay": {
+                    "url": format!("http://{address}"),
+                    "token": "relay-owner-token",
+                },
+                "selfPauseMinutes": 3,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let spawned = manager.spawn(&spec("bot-relay")).await.unwrap();
+    let sandbox_id = spawned.sandbox_id.clone().unwrap();
+    let bot_id = spawned.bot_id.clone();
+    let token = spawned.pause_token.clone().unwrap();
+
+    // The rule set: the relay's host only, and never the Prime API host.
+    // (A clone: a borrow of the fake's state would hold its lock for the
+    // rest of the test and deadlock the reads below.)
+    let create = platform.state().creates[0].clone();
+    let host = address.ip().to_string();
+    assert!(create.network_rules.contains_key(&host), "relay rule host");
+    assert!(
+        !create.network_rules.contains_key("api.primeintellect.ai"),
+        "no Prime API rule"
+    );
+    let rule = &create.network_rules[&host];
+    let value = rule.headers["Authorization"].clone();
+    assert!(value.starts_with("Bearer ${prime.secrets.PRIME_AGENT_BOT_PAUSE_"));
+    assert!(value.ends_with('}'));
+
+    // The platform secret holds the pause token, keyed by the bot id.
+    let name = format!(
+        "PRIME_AGENT_BOT_PAUSE_{}",
+        super::credentials::key_fingerprint(&bot_id)
+    );
+    assert_eq!(platform.state().secrets[&name], token);
+
+    // The bootstrap env arms the guest's self-pause.
+    let bootstrap = platform
+        .state()
+        .execs
+        .iter()
+        .find(|(script, _)| script.contains("prime-agent --mode daemon"))
+        .map(|(_, env)| env.clone())
+        .expect("the bootstrap ran");
+    assert_eq!(
+        bootstrap.get("PRIME_AGENT_BOT_ID").map(String::as_str),
+        Some(bot_id.as_str())
+    );
+    assert_eq!(
+        bootstrap
+            .get("PRIME_AGENT_BOT_SANDBOX_ID")
+            .map(String::as_str),
+        Some(sandbox_id.as_str())
+    );
+    assert_eq!(
+        bootstrap
+            .get("PRIME_AGENT_BOT_SELF_PAUSE")
+            .map(String::as_str),
+        Some(super::GUEST_SELF_PAUSE_FILE)
+    );
+    assert_eq!(
+        bootstrap.get("BOT_SELF_PAUSE_URL").map(String::as_str),
+        Some(format!("http://{address}/api/bots/{bot_id}/pause").as_str())
+    );
+    assert_eq!(
+        bootstrap.get("BOT_SELF_PAUSE_MINUTES").map(String::as_str),
+        Some("3")
+    );
+
+    // The registration reached the relay with the sandbox id and token.
+    let registered = tokio::time::timeout(std::time::Duration::from_secs(5), relay)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = String::from_utf8(registered).unwrap();
+    assert!(
+        request.starts_with(&format!("PUT /api/bots/{bot_id} ")),
+        "the relay registration path: {request}"
+    );
+    assert!(request
+        .to_ascii_lowercase()
+        .contains("authorization: bearer relay-owner-token"));
+    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+    let body: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+    assert_eq!(body["sandboxId"], serde_json::json!(sandbox_id));
+    assert_eq!(body["pauseToken"], serde_json::json!(token));
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// A bot the guest paused by itself: the daemon's own pause is a no-op
+/// (no second platform pause), and a wake resumes it.
+#[tokio::test(start_paused = true)]
+async fn a_bot_paused_by_the_guest_needs_no_second_pause() {
+    let (_dir, platform, manager) = setup();
+    let spawned = manager.spawn(&spec("bot-guest-paused")).await.unwrap();
+    let sandbox_id = spawned.sandbox_id.clone().unwrap();
+    // The guest paused it while the owner was offline.
+    platform
+        .state()
+        .sandboxes
+        .get_mut(&sandbox_id)
+        .unwrap()
+        .status = BotStatus::Paused;
+    let pause_calls_before = platform.state().pauses;
+
+    let paused = manager.pause("bot-guest-paused").await.unwrap();
+    assert_eq!(paused.status, BotStatus::Paused);
+    assert_eq!(
+        platform.state().pauses,
+        pause_calls_before,
+        "the daemon did not pause an already-paused sandbox"
+    );
+
+    let resumed = manager.ensure_running("bot-guest-paused").await.unwrap();
+    assert_eq!(resumed.status, BotStatus::Running);
+    assert_eq!(resumed.sandbox_id.as_deref(), Some(sandbox_id.as_str()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1260,8 +1427,9 @@ impl BotPlatform for ThrowawaySecret {
         &'a self,
         name: &'a str,
         value: &'a str,
+        description: &'a str,
     ) -> BoxFuture<'a, PlatformResult<()>> {
-        self.inner.put_secret(name, value)
+        self.inner.put_secret(name, value, description)
     }
     fn set_network_rules<'a>(
         &'a self,
@@ -1343,16 +1511,16 @@ async fn live_secret_update_reaches_a_running_bot() {
     };
     let mut asked = 0;
     let run = async {
-        platform.put_secret(&secret, &api_key).await?;
+        platform.put_secret(&secret, &api_key, "test").await?;
         let bot = manager.spawn(&spec).await?;
         step("spawned");
         let first = ask_until(&manager, dir.path(), &bot, &mut asked, true).await?;
         step("first answer");
-        platform.put_secret(&secret, "bad-key").await?;
+        platform.put_secret(&secret, "bad-key", "test").await?;
         step("secret set to a bad key");
         let failed = ask_until(&manager, dir.path(), &bot, &mut asked, false).await?;
         step("turn failed");
-        platform.put_secret(&secret, &api_key).await?;
+        platform.put_secret(&secret, &api_key, "test").await?;
         step("good key put back");
         let again = ask_until(&manager, dir.path(), &bot, &mut asked, true).await?;
         step("answer again");
