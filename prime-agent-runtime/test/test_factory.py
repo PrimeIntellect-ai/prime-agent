@@ -7541,6 +7541,7 @@ class FactoryEmitTest(_ExecutorTestCase):
         plan = next(entry for entry in status["nodes"] if entry["id"] == "plan")
         self.assertEqual(status["state"], "stopped")
         self.assertEqual(plan["status"], "cancelled")
+        self.assertEqual(plan["instances"][0]["status"], "cancelled")
         self.assertEqual(self.host.spawn_calls("build"), [])
 
     @async_test
