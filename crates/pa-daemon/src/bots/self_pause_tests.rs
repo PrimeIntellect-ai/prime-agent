@@ -73,6 +73,7 @@ async fn run_loop(
     busy: Arc<AtomicBool>,
     lines: Arc<AtomicU64>,
     fail: bool,
+    synced: bool,
     attempts: usize,
     deadline: Duration,
 ) -> Vec<SelfPauseConfig> {
@@ -99,7 +100,7 @@ async fn run_loop(
             let busy = move || busy.load(Ordering::SeqCst);
             let lines = move || lines.load(Ordering::Relaxed);
             let wall = || 0;
-            let before_pause = || std::future::ready(());
+            let before_pause = move || std::future::ready(synced);
             self_pause_loop(path, busy, lines, wall, before_pause, request).await;
         })
     };
@@ -122,6 +123,7 @@ async fn an_idle_daemon_requests_its_pause_once_per_window() {
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicU64::new(0)),
         false,
+        true,
         2,
         LONG,
     )
@@ -139,7 +141,25 @@ async fn a_busy_daemon_never_requests_its_pause() {
         Arc::new(AtomicBool::new(true)),
         Arc::new(AtomicU64::new(0)),
         false,
+        true,
         2,
+        LONG,
+    )
+    .await;
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_pre_pause_sync_skips_the_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &config_value(1));
+    let requests = run_loop(
+        path,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU64::new(0)),
+        false,
+        false,
+        1,
         LONG,
     )
     .await;
@@ -154,6 +174,7 @@ async fn a_failed_request_re_arms_the_window() {
         path,
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicU64::new(0)),
+        true,
         true,
         2,
         LONG,
@@ -182,6 +203,7 @@ async fn client_activity_holds_off_the_pause() {
         Arc::new(AtomicBool::new(false)),
         Arc::clone(&lines),
         false,
+        true,
         2,
         LONG,
     )
@@ -202,6 +224,7 @@ async fn an_empty_pause_url_disables_the_loop() {
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicU64::new(0)),
         false,
+        true,
         2,
         LONG,
     )
@@ -218,6 +241,7 @@ async fn a_zero_idle_window_disables_the_loop() {
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicU64::new(0)),
         false,
+        true,
         2,
         LONG,
     )
@@ -272,6 +296,7 @@ fn spawn_test_loop(
                     if bump_lines_on_first_sync && !bumped.swap(true, Ordering::SeqCst) {
                         lines.fetch_add(1, Ordering::Relaxed);
                     }
+                    true
                 }
             }
         };

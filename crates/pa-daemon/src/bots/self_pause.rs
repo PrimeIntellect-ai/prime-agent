@@ -109,8 +109,9 @@ pub(crate) fn note_client_activity() {
 /// The self-pause loop: one check per [`TICK`]; every pause attempt
 /// re-arms the full idle window. `busy` answers whether anything holds
 /// off the pause, `lines` counts the inbound client lines so far, `wall`
-/// reads the wall clock in epoch milliseconds, `before_pause` runs the
-/// best-effort relay wake-up sync, and `request` performs the pause.
+/// reads the wall clock in epoch milliseconds, `before_pause` reports
+/// whether the relay accepted the current wake-up set, and `request`
+/// performs the pause.
 pub(crate) async fn self_pause_loop<F, S>(
     config_path: PathBuf,
     mut busy: impl FnMut() -> bool,
@@ -120,7 +121,7 @@ pub(crate) async fn self_pause_loop<F, S>(
     request: impl Fn(SelfPauseConfig) -> F,
 ) where
     F: std::future::Future<Output = Result<()>>,
-    S: std::future::Future<Output = ()>,
+    S: std::future::Future<Output = bool>,
 {
     let mut idle_since = tokio::time::Instant::now();
     let mut lines_at_start = lines();
@@ -157,8 +158,16 @@ pub(crate) async fn self_pause_loop<F, S>(
         // A heartbeat fire can land just before this pause. Mirror the
         // current next run times first, so a frozen VM never leaves a
         // stale schedule on the relay.
-        before_pause().await;
+        let synced = before_pause().await;
         let lines_after_sync = lines();
+        if !synced {
+            // The relay never accepted the current schedule. A pause could
+            // miss a heartbeat that only the relay would wake, so re-arm
+            // the whole window and retry the sync later.
+            lines_at_start = lines_after_sync;
+            idle_since = tokio::time::Instant::now();
+            continue;
+        }
         if busy() || lines_after_sync != lines_now {
             // The sync can give a due heartbeat or a fresh turn time to
             // start, or a client command can arrive and finish during it:
@@ -276,11 +285,18 @@ impl Supervisor {
                 move || {
                     let sync = sync.clone();
                     async move {
-                        if let Some(sync) = sync {
-                            if let Err(error) = sync.sync(true).await {
+                        let Some(sync) = sync else {
+                            // The mirror could not be built, so a pause
+                            // could miss a heartbeat.
+                            return false;
+                        };
+                        match sync.sync(true).await {
+                            Ok(_) => true,
+                            Err(error) => {
                                 eprintln!(
                                     "pa-daemon: bots: the pre-pause relay sync failed: {error:#}"
                                 );
+                                false
                             }
                         }
                     }
