@@ -684,3 +684,184 @@ fn a_late_unscoped_abort_stops_a_parked_backgrounded_cell() {
     }
     drop(supervisor);
 }
+
+/// The faux script for the lost-supervisor round: turn one calls a kernel
+/// cell that records its kernel and worker pids, outlives its 2s wait
+/// budget (it auto-backgrounds), shows an image (so its notice is a rich
+/// row), and records the stop's interrupt. Any later turn answers with the
+/// woken marker.
+fn faux_lost_supervisor_script(dir: &Path) -> PathBuf {
+    let path = dir.join("faux-lost-supervisor.json");
+    let woken = json!({"content": [{"type": "text", "text": "WOKEN AFTER THE STOP"}]});
+    std::fs::write(
+        &path,
+        json!({
+            "engine": "faux",
+            "modelId": "faux-1",
+            "modelName": "Faux Model",
+            "reasoning": false,
+            "contextWindow": 128_000,
+            "tokensPerSecond": 30,
+            "responses": [
+                {"content": [
+                    {"type": "text", "text": "Running the background cell."},
+                    {"type": "toolCall", "name": "python_repl", "id": "toolu_lost01",
+                     "arguments": {"code":
+                        "import os, time\nfrom rlm import emit\nopen('bg-pids', 'w').write(f'{os.getpid()} {os.getppid()}')\ntime.sleep(3)\nemit({'application/vnd.prime-agent.attachment+json': {'mime_type': 'image/png', 'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='}, 'text/plain': 'an image'})\ntry:\n    time.sleep(600)\nexcept KeyboardInterrupt:\n    open('bg-caught', 'w').write('1')\n    raise",
+                        "timeout": 2}}
+                ]},
+                {"content": [{"type": "text", "text": "The cell runs in the background."}]},
+                woken.clone(), woken
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write faux script");
+    path
+}
+
+/// Liveness that ignores zombies: the orphaned worker is re-parented, and
+/// a reaper that never collects it keeps its /proc entry.
+fn process_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let state = rest.split_whitespace().next().unwrap_or_default();
+    !state.starts_with('Z') && !state.starts_with('X')
+}
+
+/// A lost supervisor stops a parked backgrounded cell: once the worker's
+/// supervisor-lost window elapses, the scoped stop interrupts the cell
+/// (no client is left to see or stop it), and the worker then exits. The
+/// stop lands inside the second window, so the cell never runs a whole
+/// extra window unwatched. The stopped cell's notice, an image row, starts
+/// no model turn: its text waits in the session's durable inbox for the
+/// next open.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_lost_supervisor_stops_a_parked_backgrounded_cell() {
+    let Some(_) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::create_dir_all(&cwd).expect("project dir");
+    let script = faux_lost_supervisor_script(dir.path());
+    let socket = dir.path().join("lost-supervisor.sock");
+    let mut supervisor = spawn_supervisor(&socket, &agent_dir, &script);
+    let mut client = Client::connect(&socket);
+    let created = client.send(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": cwd.to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "model": "faux-1",
+            },
+        }),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let session_file = PathBuf::from(
+        created["data"]["sessionFile"]
+            .as_str()
+            .expect("the created session file"),
+    );
+    let attached = client.send(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+
+    // The cell detaches at its 2s wait budget and the turn ends.
+    let started = client.send(
+        "p1",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the background cell" }),
+    );
+    assert_eq!(started["success"], true, "prompt failed: {started}");
+    let settle = Instant::now() + Duration::from_mins(3);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let rows = event_rows(&client.events);
+        let backgrounded = rows
+            .iter()
+            .any(|(role, text)| role == "toolResult" && text.contains("auto-backgrounded"));
+        let turn_done = event_types(&client.events).iter().any(|t| t == "agent_end");
+        if backgrounded && turn_done {
+            break;
+        }
+        assert!(
+            Instant::now() < settle,
+            "the backgrounding turn never settled; rows: {rows:?}"
+        );
+    }
+    let pids = std::fs::read_to_string(cwd.join("bg-pids")).expect("the cell wrote its pids");
+    let worker_pid: u32 = pids
+        .split_whitespace()
+        .nth(1)
+        .and_then(|pid| pid.parse().ok())
+        .expect("the worker pid");
+
+    // The supervisor dies without a graceful stop.
+    drop(client);
+    supervisor.child.kill().expect("kill the supervisor");
+    supervisor.child.wait().expect("reap the supervisor");
+    let lost_at = Instant::now();
+    let window = Duration::from_secs(15);
+
+    // The stop reaches the cell once the window elapses, and before a
+    // second window could pass.
+    let caught = cwd.join("bg-caught");
+    while !caught.exists() {
+        assert!(
+            lost_at.elapsed() < window * 2,
+            "the lost supervisor never stopped the backgrounded cell"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let stopped_after = lost_at.elapsed();
+    assert!(
+        stopped_after >= window,
+        "the cell stopped before the supervisor-lost window elapsed: {stopped_after:?}"
+    );
+
+    // The stopped cell's notice lands and the orphaned worker exits.
+    let exit_by = Instant::now() + Duration::from_secs(30);
+    while process_alive(worker_pid) {
+        assert!(
+            Instant::now() < exit_by,
+            "the orphaned worker never exited after the stop"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // No model turn ran after the stop: the session holds no woken answer.
+    let transcript = std::fs::read_to_string(&session_file).expect("read the session file");
+    assert!(
+        !transcript.contains("WOKEN AFTER THE STOP"),
+        "the stopped cell's notice started a model turn on the orphaned worker"
+    );
+
+    // The notice waits in the durable inbox a reopened session replays.
+    let inbox_dir =
+        pa_core::session_engine::harness_digest::session_artifact_dir_for_log(&session_file)
+            .expect("the session's artifact dir");
+    let (_, _, classes) =
+        pa_core::session_engine::inbox::SessionInbox::open(Some(&inbox_dir)).count();
+    assert_eq!(
+        classes.get(pa_types::inbox_notice::INBOX_CLASS_CELL_DONE),
+        Some(&1),
+        "the stopped cell's notice waits in the inbox: {classes:?}"
+    );
+}
