@@ -727,8 +727,12 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         .install_command_channel(stopped.begin_connection(), stopped_tx)
         .await;
     let pump_resident = Arc::clone(&stopped);
+    // What a client has already received when the first worker is told to stop.
+    let mut client_events = supervisor.events.subscribe();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let request = stopped_rx.recv().await.expect("the stop routes a shutdown");
+        let _ = seen_tx.send(client_events.try_recv().ok().map(|(_, frame)| frame));
         let reply = pump_resident
             .pending
             .lock()
@@ -750,6 +754,19 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         let _ = refused_rx.recv().await;
     });
     supervisor.registry.insert(Arc::clone(&refused)).await;
+    // A refuser whose process already exited: its late exit was read as the stop's own.
+    let refused_gone = abandon_update_resident(dir.path(), "w-abandon-refused-gone");
+    let mut exited = std::process::Command::new("true").spawn().unwrap();
+    refused_gone.descriptor.lock().await.pid = u64::from(exited.id());
+    exited.wait().unwrap();
+    let (refused_gone_tx, mut refused_gone_rx) = mpsc::channel::<WorkerRequest>(1);
+    refused_gone
+        .install_command_channel(refused_gone.begin_connection(), refused_gone_tx)
+        .await;
+    tokio::spawn(async move {
+        let _ = refused_gone_rx.recv().await;
+    });
+    supervisor.registry.insert(Arc::clone(&refused_gone)).await;
 
     // Reach the committed stop window without the prepare machinery's
     // snapshot phase: the update state machine is driven directly.
@@ -772,17 +789,32 @@ async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
         .handle_commit_update_restart("commit-1", "commit_update_restart", &command)
         .await;
     assert!(!ok, "the refusal abandons the update: {lines:?}");
+    let seen = seen_rx
+        .await
+        .unwrap()
+        .expect("a frame before the first stop");
+    assert_eq!(
+        (seen["type"].as_str(), seen["reason"].as_str()),
+        (Some("daemon_closing"), Some("update")),
+        "the update notice reaches clients before any worker stops"
+    );
 
     // The stopped worker's failed relaunch re-arms supervision: the give-up
     // (the resident's budget was at the cap) removes the resident instead
     // of leaving the dead channel in the registry.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while supervisor.registry.get("w-abandon-stopped").await.is_some() {
+        while supervisor.registry.get("w-abandon-stopped").await.is_some()
+            || supervisor
+                .registry
+                .get("w-abandon-refused-gone")
+                .await
+                .is_some()
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("the abandoned relaunch's failure reaches the give-up");
+    .expect("the abandoned relaunches (the stopped worker and the gone refuser) reach the give-up");
     assert_eq!(
         stopped.descriptor.lock().await.lifecycle,
         DaemonWorkerLifecycle::Failed
