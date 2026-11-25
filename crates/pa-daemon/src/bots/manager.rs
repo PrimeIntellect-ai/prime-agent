@@ -1741,11 +1741,8 @@ impl BotManager {
         github: bool,
     ) -> Result<(GuestCredentials, Vec<String>, Option<String>)> {
         if let Some(context) = super::nested::NestedContext::read(&self.agent_dir) {
-            return Ok((
-                self.nested_credentials(&context, record, github)?,
-                Vec::new(),
-                None,
-            ));
+            let (credentials, logins) = self.nested_credentials(&context, record, github)?;
+            return Ok((credentials, logins, None));
         }
         self.credentials_for(record, Some(guest_provider(record)), github)
             .await
@@ -1890,8 +1887,23 @@ impl BotManager {
         context: &super::nested::NestedContext,
         record: &BotRecord,
         github: bool,
-    ) -> Result<GuestCredentials> {
+    ) -> Result<(GuestCredentials, Vec<String>)> {
         let auth_json = read_guest_json(&self.agent_dir, "auth.json");
+        // The login dependencies the children carry: the guest auth's
+        // non-API-key records are the injected logins, so the owner-side
+        // refresher keeps their secrets fresh for the children too.
+        let logins: Vec<String> = auth_json
+            .as_ref()
+            .and_then(Value::as_object)
+            .map(|auth| {
+                auth.iter()
+                    .filter(|(_, record)| {
+                        record.get("type").and_then(Value::as_str) != Some("api_key")
+                    })
+                    .map(|(provider, _)| provider.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let provider = guest_provider(record);
         let mut network_rules = context.child_rules();
         if !github {
@@ -1912,7 +1924,16 @@ impl BotManager {
             .and_then(Value::as_object)
             .map(|auth| auth.keys().map(String::as_str).collect())
             .unwrap_or_default();
-        let hosts = super::credentials::provider_rule_hosts(provider);
+        let mut hosts = super::credentials::provider_rule_hosts(provider);
+        if hosts.is_empty() {
+            // A subscription login has no API-key host; its login rule host
+            // is the proof, so a revoked login (its rule dropped from the
+            // inherited set) refuses the child.
+            hosts = super::logins::login_rule_hosts(provider)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        }
         let credible = injected.contains(&provider)
             && (hosts.is_empty() || hosts.iter().any(|host| network_rules.contains_key(host)));
         if !credible {
@@ -1926,15 +1947,18 @@ impl BotManager {
                  credentials; the injected providers are: {known}"
             );
         }
-        Ok(GuestCredentials {
-            network_rules,
-            mcp_servers: read_guest_json(&self.agent_dir, "settings.json")
-                .as_ref()
-                .and_then(|settings| settings.get("mcpServers").cloned())
-                .filter(|servers| !servers.as_object().is_some_and(serde_json::Map::is_empty)),
-            mcp_connections: read_guest_json(&self.agent_dir, "mcp-connections.json"),
-            auth_json,
-        })
+        Ok((
+            GuestCredentials {
+                network_rules,
+                mcp_servers: read_guest_json(&self.agent_dir, "settings.json")
+                    .as_ref()
+                    .and_then(|settings| settings.get("mcpServers").cloned())
+                    .filter(|servers| !servers.as_object().is_some_and(serde_json::Map::is_empty)),
+                mcp_connections: read_guest_json(&self.agent_dir, "mcp-connections.json"),
+                auth_json,
+            },
+            logins,
+        ))
     }
 
     /// The owner's sandbox API key and its team, read off the runtime.

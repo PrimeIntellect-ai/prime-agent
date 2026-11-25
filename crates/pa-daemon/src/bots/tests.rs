@@ -2193,6 +2193,56 @@ async fn a_bot_refuses_a_child_on_a_provider_it_has_no_key_for() {
         refused.to_string().contains("no anthropic credentials"),
         "{refused}"
     );
+
+    // A login provider passes on its auth record plus its login rule host,
+    // and a revoked login (its rule host gone) refuses the child.
+    let mut login_auth = serde_json::json!({
+        "prime-inference": {
+            "type": "api_key", "key": "injected-by-platform",
+            "primeTeam": { "teamId": "team-1", "name": "Team One" },
+        }
+    });
+    login_auth["anthropic"] = serde_json::json!({
+        "type": "oauth", "access": "placeholder", "refresh": "r", "expires": 1,
+    });
+    std::fs::write(dir.path().join("auth.json"), login_auth.to_string()).unwrap();
+    let mut bot = spec("bot-c");
+    bot.model = Some("anthropic/model-x".to_string());
+    // Without the anthropic login rule host: refused.
+    let refused = manager
+        .spawn(&bot)
+        .await
+        .expect_err("refused without the rule");
+    assert!(
+        refused.to_string().contains("no anthropic credentials"),
+        "{refused}"
+    );
+    // With it: admitted.
+    let mut rules = BTreeMap::new();
+    rules.insert(
+        "api.anthropic.com".to_string(),
+        pa_sandbox::HeaderRule {
+            headers: BTreeMap::new(),
+        },
+    );
+    let ctx = super::nested::NestedContext {
+        bot_id: "bot-a".into(),
+        owner_session_id: "owner-9".into(),
+        depth: 1,
+        max_bots: 10,
+        network_rules: rules,
+    };
+    let path = super::nested::NestedContext::path_in(dir.path());
+    std::fs::write(&path, serde_json::to_string(&ctx).unwrap()).unwrap();
+    let child = manager
+        .spawn(&bot)
+        .await
+        .expect("admitted with the login rule");
+    assert!(
+        child.logins.iter().any(|login| login == "anthropic"),
+        "the child carries the login dependency: {:?}",
+        child.logins
+    );
 }
 
 /// Children count toward the owner's bot list: the registry's records plus
