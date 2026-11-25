@@ -529,6 +529,11 @@ impl Supervisor {
             })
             .await
             .map_err(|error| anyhow!("the bot did not list its children: {error}"))?;
+        // A guest without a registry answers an empty, marked list: that is
+        // not "the children are gone", so the merged records stay.
+        if reply.get("registry").and_then(Value::as_bool) == Some(false) {
+            return Ok(());
+        }
         let rows = reply
             .get("bots")
             .and_then(Value::as_array)

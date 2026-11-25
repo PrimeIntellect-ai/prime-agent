@@ -2366,3 +2366,36 @@ async fn allow_spawns_gives_a_running_bot_the_rule_and_context() {
         "{refused}"
     );
 }
+
+/// A /secrets refresh rewrites a bots=True bot's guest nested context, so a
+/// revoked secret leaves the children's inherited rules at the same moment
+/// it leaves the sandbox policy.
+#[tokio::test(start_paused = true)]
+async fn a_secrets_refresh_rewrites_a_spawning_bots_nested_context() {
+    let (dir, platform, manager) = setup();
+    guest_auth(dir.path());
+    platform.state().key_hosts = 1;
+    let mut bot = spec("bot-a");
+    bot.bots = true;
+    manager.spawn(&bot).await.unwrap();
+
+    let before: usize = platform
+        .state()
+        .execs
+        .iter()
+        .filter(|(script, _)| script == ALLOW_SPAWNS_SCRIPT)
+        .count();
+    manager.refresh_network_rules().await;
+
+    let execs = platform.state().execs.clone();
+    let after: usize = execs
+        .iter()
+        .filter(|(script, _)| script == ALLOW_SPAWNS_SCRIPT)
+        .count();
+    assert!(after > before, "the refresh rewrote the nested context");
+    let rewrite = execs
+        .iter()
+        .find(|(script, _)| script == ALLOW_SPAWNS_SCRIPT)
+        .expect("the nested write ran");
+    assert!(rewrite.1.contains_key("BOT_NESTED_JSON"));
+}

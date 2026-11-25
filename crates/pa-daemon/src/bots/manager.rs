@@ -500,18 +500,22 @@ impl BotManager {
                     .platform
                     .set_network_rules(&sandbox_id, &credentials.network_rules)
                     .await
-                    .map(|()| (logins, relay_host))
+                    .map(|()| (credentials.network_rules, logins, relay_host))
                     .map_err(anyhow::Error::from),
                 Err(error) => Err(error),
             };
+            let mut credentials_rules = None;
             match outcome {
-                Ok((logins, relay_host)) => {
+                Ok((rules, logins, relay_host)) => {
                     // The refresher follows the logins the new rules carry,
                     // and the relay host they now carry.
                     record.logins = logins;
                     record.pause_rule_host = relay_host;
                     let running = record.status == BotStatus::Running;
                     let watch = running && !record.logins.is_empty();
+                    if record.bots {
+                        credentials_rules = Some(rules);
+                    }
                     if let Err(error) = self.save(record.clone()) {
                         failures.push(format!("{}: {error:#}", record.name));
                     } else if watch {
@@ -520,8 +524,67 @@ impl BotManager {
                 }
                 Err(error) => failures.push(format!("{}: {error:#}", record.name)),
             }
+            // A bot that spawns bots hands its children the rules this
+            // refresh just computed; a revoked secret must leave the guest's
+            // nested context the same moment it leaves the sandbox policy.
+            if let (Some(rules), true) = (credentials_rules, record.status == BotStatus::Running) {
+                if let Err(error) = self
+                    .rewrite_nested_context(&record, &sandbox_id, rules)
+                    .await
+                {
+                    failures.push(format!("{}: {error:#}", record.name));
+                }
+            }
         }
         failures
+    }
+
+    /// Rewrite a running bot's guest nested context from `rules`: the same
+    /// write `allow_spawns` performs, so the children see the current
+    /// credentials, not the bootstrap-time snapshot.
+    async fn rewrite_nested_context(
+        &self,
+        record: &BotRecord,
+        sandbox_id: &str,
+        rules: BTreeMap<String, pa_sandbox::HeaderRule>,
+    ) -> Result<()> {
+        let agent_dir = self.agent_dir.clone();
+        let max_bots = tokio::task::spawn_blocking(move || {
+            pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_max_bots()
+                as usize
+        })
+        .await
+        .context("the bots.maxBots read failed")?;
+        let context = super::nested::NestedContext {
+            bot_id: record.bot_id.clone(),
+            owner_session_id: record.owner_session_id.clone(),
+            depth: 1,
+            max_bots,
+            network_rules: rules,
+        };
+        let team = self.sandbox_key_and_team().await?.1;
+        let prime = serde_json::to_value(pa_core::auth::AuthCredential::ApiKey {
+            key: super::credentials::GUEST_API_KEY_PLACEHOLDER.to_string(),
+            prime_team: team,
+        })?;
+        let env = BTreeMap::from([
+            (
+                "BOT_NESTED_JSON".to_string(),
+                serde_json::to_string(&context)?,
+            ),
+            ("BOT_PRIME_RECORD".to_string(), prime.to_string()),
+        ]);
+        let output = self
+            .exec_ready(
+                sandbox_id,
+                ALLOW_SPAWNS_SCRIPT,
+                &env,
+                None,
+                Instant::now() + OPERATION_BUDGET,
+            )
+            .await?;
+        check_exit("refresh the bot's nested context", &output)?;
+        Ok(())
     }
 
     /// Whether `bots.inject.<name>` gives bots the secret `name`.
@@ -722,6 +785,18 @@ impl BotManager {
                 Box::pin(self.delete_descendants_locked(&child)).await?;
                 self.delete_locked(&child).await?;
             }
+        }
+        let parent = super::parent_label(bot_id);
+        let left = retry(|| self.platform.list(&parent))
+            .await?
+            .into_iter()
+            .filter(|sandbox| !sandbox.status.is_terminal())
+            .count();
+        if left > 0 {
+            bail!(
+                "bot {bot_id}: {left} descendant sandboxes survived the delete sweeps; \
+                 retry the delete"
+            );
         }
         Ok(())
     }

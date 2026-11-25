@@ -474,9 +474,15 @@ impl Supervisor {
         else {
             return response_failure(Some(command_id), "list_bots", "invalid command", None);
         };
-        // No registry: no bot was ever spawned here, so skip the credential read.
+        // No registry: no bot was ever spawned here, so skip the credential
+        // read. The empty answer is marked, so a caller cannot mistake a
+        // lost guest registry for "this bot deleted its children".
         if !super::registry::BotRegistry::path_in(&self.options.agent_dir).exists() {
-            return response_success(Some(command_id), "list_bots", Some(json!({ "bots": [] })));
+            return response_success(
+                Some(command_id),
+                "list_bots",
+                Some(json!({ "bots": [], "registry": false })),
+            );
         }
         let manager = match super::manager_for(&self.options.agent_dir) {
             Ok(manager) => manager,
