@@ -158,6 +158,7 @@ impl SessionUi {
             factory_updates: activity_updates.factory,
             library_updates: activity_updates.library,
             library_list_epoch: 0,
+            library_detail_epoch: 0,
             library_overview_in_flight: false,
             library_overview_epoch: 0,
             factory_selected_run: None,
@@ -635,7 +636,10 @@ impl SessionUi {
                     (
                         node.run_id.clone(),
                         node.state_id.clone(),
-                        node.selected_selector(),
+                        // The instance the user asked for: a view still
+                        // loading it (a return from a child session) has
+                        // no selection yet, only the requested selector.
+                        node.target().instance,
                     )
                 });
             if let Some((run_id, state_id, selector)) = reattached_node {
@@ -875,11 +879,28 @@ mod backfill_tests {
         socket: &std::path::Path,
         backfill_tx: mpsc::UnboundedSender<TranscriptPageNote>,
     ) -> (SessionUi, tokio::task::JoinHandle<()>) {
+        mock_session_with_capabilities(socket, backfill_tx, &[]).await
+    }
+
+    /// The mock session whose daemon hello advertises `capabilities`.
+    async fn mock_session_with_capabilities(
+        socket: &std::path::Path,
+        backfill_tx: mpsc::UnboundedSender<TranscriptPageNote>,
+        capabilities: &[&str],
+    ) -> (SessionUi, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let mut hello = serde_json::to_vec(&json!({
+            "type": "daemon_hello",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "serverCapabilities": capabilities,
+            "clientId": "mock",
+        }))
+        .unwrap();
+        hello.push(b'\n');
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
-            write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[],\"clientId\":\"mock\"}\n").await.unwrap();
+            write.write_all(&hello).await.unwrap();
             let mut lines = BufReader::new(read).lines();
             while let Some(line) = lines.next_line().await.unwrap() {
                 let request: Value = serde_json::from_str(&line).unwrap();
@@ -936,6 +957,172 @@ mod backfill_tests {
         .await
         .unwrap();
         (session, server)
+    }
+
+    /// A same-session rebind re-requests the instance the node view asked for. A view that came
+    /// back from a child session is still loading that instance: it has no selection yet, only
+    /// the requested selector, and the rebind's new request must keep it.
+    #[tokio::test]
+    async fn a_same_session_rebind_keeps_the_requested_node_instance() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("node.sock");
+            let (mut session, server) = mock_session_with_capabilities(
+                &socket,
+                mpsc::unbounded_channel().0,
+                &["factory_activity"],
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::FactoryRuns {
+                    row: Some(crate::factory_view::FactoryRow::header("run-1")),
+                    node: Some(crate::factory_view::node::NodeTarget {
+                        run_id: "run-1".to_string(),
+                        state_id: "worker".to_string(),
+                        instance: Some((0, 1)),
+                    }),
+                },
+                true,
+                &mut view,
+            );
+            let target = |view: &AgentView| {
+                view.run_page()
+                    .and_then(|factory_view| factory_view.node.as_ref())
+                    .map(crate::factory_view::node::NodeView::target)
+                    .and_then(|target| target.instance)
+            };
+            assert_eq!(
+                target(&view),
+                Some((0, 1)),
+                "the remount asks for the instance"
+            );
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert_eq!(
+                target(&view),
+                Some((0, 1)),
+                "the rebind's request keeps the instance the user asked for"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open, node mount and rebind complete within ten seconds");
+    }
+
+    /// A node reply addressed to the active id a reattach replaced still settles its request:
+    /// the epoch alone names the request, so the run refresh keeps refetching the node.
+    #[tokio::test]
+    async fn a_node_reply_for_a_replaced_active_id_settles_its_request() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("reply.sock");
+            let (mut session, server) = mock_session_with_capabilities(
+                &socket,
+                mpsc::unbounded_channel().0,
+                &["factory_activity"],
+            )
+            .await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::FactoryRuns {
+                    row: Some(crate::factory_view::FactoryRow::header("run-1")),
+                    node: Some(crate::factory_view::node::NodeTarget {
+                        run_id: "run-1".to_string(),
+                        state_id: "worker".to_string(),
+                        instance: None,
+                    }),
+                },
+                true,
+                &mut view,
+            );
+            let in_flight = |view: &AgentView| {
+                view.run_page()
+                    .and_then(|factory_view| factory_view.node.as_ref())
+                    .is_some_and(crate::factory_view::node::NodeView::request_in_flight)
+            };
+            assert!(in_flight(&view), "the mount sends the node request");
+            let request_epoch = session.factory_node_epoch;
+            // A same-session reattach replaces the active id while the request is out.
+            session.active_session_id = "reattached-worker".to_string();
+            session.apply_factory_update(
+                crate::session_ui::FactoryUpdate::Node {
+                    run_id: "run-1".to_string(),
+                    state_id: "worker".to_string(),
+                    request_epoch,
+                    result: Err("worker replaced".to_string()),
+                },
+                &mut view,
+            );
+            assert!(!in_flight(&view), "the reply settles the request");
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open, node mount and reply complete within ten seconds");
+    }
+
+    /// A same-session rebind while the node's template-files fetch is out sends a new fetch on
+    /// the reattached active session: the old fetch's reply names the replaced session and is
+    /// dropped, so the view must not keep waiting on it.
+    #[tokio::test]
+    async fn a_same_session_rebind_refetches_the_node_files_in_flight() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("files.sock");
+            let (mut session, server) = mock_session_with_capabilities(
+                &socket,
+                mpsc::unbounded_channel().0,
+                &["factory_activity"],
+            )
+            .await;
+            let (factory_tx, mut factory_rx) = mpsc::unbounded_channel();
+            session.factory_updates = factory_tx;
+            session.factory_graph = json!({"runs": [
+                {"runId": "run-1", "specId": "pipeline", "machine": {"states": []}},
+            ]});
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(
+                crate::interactive::SessionPanel::FactoryRuns {
+                    row: Some(crate::factory_view::FactoryRow::header("run-1")),
+                    node: Some(crate::factory_view::node::NodeTarget {
+                        run_id: "run-1".to_string(),
+                        state_id: "worker".to_string(),
+                        instance: None,
+                    }),
+                },
+                true,
+                &mut view,
+            );
+            session.active_session_id = "s1-reattached".to_string();
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            loop {
+                let update = factory_rx
+                    .recv()
+                    .await
+                    .expect("the session holds the sender");
+                if matches!(
+                    update,
+                    crate::session_ui::FactoryUpdate::NodeFiles { ref session, .. }
+                        if session == "s1-reattached"
+                ) {
+                    break;
+                }
+            }
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("the rebind sends a files fetch on the reattached session within ten seconds");
     }
 
     /// A rebind that tears down an agents-view panel drops its return: a later dock-opened shells

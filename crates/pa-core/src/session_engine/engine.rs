@@ -1133,11 +1133,11 @@ impl SessionEngine {
 
     /// One factory activity over this session's live kernel: the `/factory`
     /// view's bridge lane (graph/status/watch/run/stop/resume, plus the
-    /// arming-free `peek` the all-session overview polls through). A `run`
-    /// prefights the spec's declared models first (allowlist pin, request
-    /// auth) so a doomed run fails before any child spawns; then the
-    /// out-of-band frame carries the request into the kernel's executor,
-    /// which owns the run registry.
+    /// machine library's list/graph reads, and the arming-free `peek`
+    /// the all-session overview polls through). A `run` prefights the spec's
+    /// declared models first (allowlist pin, request auth) so a doomed run
+    /// fails before any child spawns; then the out-of-band frame carries
+    /// the request into the kernel's executor, which owns the run registry.
     ///
     /// # Errors
     ///
@@ -1150,9 +1150,11 @@ impl SessionEngine {
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&serde_json::Value>,
+        instance: Option<&serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
         let request = super::factory_host::FactoryActivityRequest::parse(
-            action, run_id, spec_id, timeout_ms,
+            action, run_id, spec_id, timeout_ms, entry, instance,
         )?;
         if request.action == "run" {
             let spec_id = request
@@ -1171,16 +1173,24 @@ impl SessionEngine {
                 .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
             preflight?;
         }
-        let manager = self
-            .provisioner
-            .manager()
-            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        // The machines page's drill-in (`library` with a machine name) is an
+        // explicit open: it starts the kernel that builds the machine's
+        // graph. Every other action (the dock's run polling among them)
+        // never builds one.
+        let manager = if request.action == "library" {
+            self.provisioner.ensure(None, None).await?
+        } else {
+            self.provisioner
+                .manager()
+                .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?
+        };
         manager
             .factory_activity(
                 request.action,
                 request.run_id.as_deref(),
                 request.spec_id.as_deref(),
                 request.timeout_ms,
+                request.selector,
             )
             .await
     }

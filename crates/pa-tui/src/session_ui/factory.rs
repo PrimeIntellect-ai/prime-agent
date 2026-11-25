@@ -44,7 +44,6 @@ pub(crate) enum FactoryUpdate {
     /// state it answers, the request epoch that rejects older selector
     /// replies, and the reply payload or its request error.
     Node {
-        session: String,
         run_id: String,
         state_id: String,
         request_epoch: u64,
@@ -128,10 +127,11 @@ impl super::SessionUi {
         selector: Option<(u64, u64)>,
     ) {
         if !self.factory_activity_supported() {
-            self.note(
-                "The node view needs a daemon that advertises the factory lane",
-                view,
-            );
+            let text = "The node view needs a daemon that advertises the factory lane";
+            self.note(text, view);
+            // The factory page covers the transcript, so the status row alone
+            // would be invisible: the toast overlay sits above the page.
+            self.toast(text, view);
             return;
         }
         self.factory_node_epoch += 1;
@@ -139,7 +139,11 @@ impl super::SessionUi {
         let mut fetch_files = false;
         let mut spec_id = None;
         if let Some(factory_view) = view.run_page_mut() {
-            if factory_view.node.is_none() {
+            let new_mount = !factory_view
+                .node
+                .as_ref()
+                .is_some_and(|node| node.run_id == run_id && node.state_id == state_id);
+            if new_mount {
                 factory_view.node = Some(crate::factory_view::node::NodeView::loading(
                     run_id, state_id,
                 ));
@@ -147,7 +151,7 @@ impl super::SessionUi {
             fetch_files = factory_view
                 .node
                 .as_ref()
-                .is_some_and(|node| node.files.is_none());
+                .is_some_and(|node| node.wants_files(&self.active_session_id));
             if fetch_files {
                 // The machine's spec id rides the focused run: the node's
                 // template files fetch (the library payload) needs it.
@@ -161,10 +165,12 @@ impl super::SessionUi {
             .run_page_mut()
             .and_then(|factory_view| factory_view.node.as_mut())
         {
-            node.set_request_epoch(request_epoch);
-            // A run with no spec id has no machine to read files from: the
-            // files document reports none instead of loading forever.
-            if fetch_files && spec_id.is_none() {
+            node.set_request_epoch(request_epoch, selector);
+            if fetch_files && spec_id.is_some() {
+                node.mark_files_requested(&self.active_session_id);
+            } else if fetch_files {
+                // A run with no spec id has no machine to read files from:
+                // the files document reports none instead of loading forever.
                 node.set_files(crate::factory_view::node::NodeFiles::default());
             }
         }
@@ -187,7 +193,7 @@ impl super::SessionUi {
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
                 client.request_ok(DaemonCommand::FactoryActivity {
                     id: None,
-                    active_session_id: active_session_id.clone(),
+                    active_session_id,
                     action: "node".to_string(),
                     run_id: Some(run_id.clone()),
                     spec_id: Some(state_id.clone()),
@@ -202,7 +208,6 @@ impl super::SessionUi {
                 Err(_) => Err("the node request timed out".to_string()),
             };
             let _ = tx.send(FactoryUpdate::Node {
-                session: active_session_id,
                 run_id,
                 state_id,
                 request_epoch,
@@ -268,21 +273,6 @@ impl super::SessionUi {
             _ => None,
         };
         self.sync_factory_selection(view);
-        // The node view's walk: a selection that moved off the fetched
-        // instance refetches the document with the instance selector
-        // (fetch-on-walk, one request per instance mounted).
-        if let Some((run_id, state_id, selector)) = view.run_page().and_then(|factory_view| {
-            factory_view.node.as_ref().and_then(|node| {
-                let selected = node.selected_selector()?;
-                let fetched = node.document_selector();
-                if fetched.is_some_and(|fetched| fetched == selected) {
-                    return None;
-                }
-                Some((node.run_id.clone(), node.state_id.clone(), selected))
-            })
-        }) {
-            self.open_factory_node(view, &run_id, &state_id, Some(selector));
-        }
         match action {
             Some(FactoryViewAction::None) | None => {}
             Some(FactoryViewAction::Close) => {
@@ -301,8 +291,12 @@ impl super::SessionUi {
                 self.dirty = true;
             }
             Some(FactoryViewAction::Open { child_id }) => self.open_factory_child(view, &child_id),
-            Some(FactoryViewAction::OpenNode { run_id, state_id }) => {
-                self.open_factory_node(view, &run_id, &state_id, None);
+            Some(FactoryViewAction::OpenNode {
+                run_id,
+                state_id,
+                selector,
+            }) => {
+                self.open_factory_node(view, &run_id, &state_id, selector);
             }
             Some(FactoryViewAction::Stop { run_id }) => {
                 self.factory_control(view, "stop", run_id).await?;
@@ -602,21 +596,22 @@ impl super::SessionUi {
     /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
         let update = match update {
+            // The epoch alone names a node request: it is unique per session UI, and a
+            // cross-session switch unmounts the page. A reply addressed to the active id a
+            // same-session reattach replaced still settles its request, so the run refresh
+            // keeps refetching the node.
             FactoryUpdate::Node {
-                session,
                 run_id,
                 state_id,
                 request_epoch,
                 result,
             } => {
-                if session == self.active_session_id {
-                    let node = view
-                        .run_page_mut()
-                        .and_then(|factory_view| factory_view.node.as_mut())
-                        .filter(|node| node.run_id == run_id && node.state_id == state_id);
-                    self.dirty |=
-                        node.is_some_and(|node| node.apply_request_result(request_epoch, result));
-                }
+                let node = view
+                    .run_page_mut()
+                    .and_then(|factory_view| factory_view.node.as_mut())
+                    .filter(|node| node.run_id == run_id && node.state_id == state_id);
+                self.dirty |=
+                    node.is_some_and(|node| node.apply_request_result(request_epoch, result));
                 return;
             }
             FactoryUpdate::NodeFiles {
@@ -707,6 +702,21 @@ impl super::SessionUi {
                     if let Some(factory_view) = view.run_page_mut() {
                         factory_view.set_error(None);
                         factory_view.apply_runs(runs);
+                    }
+                    // A mounted node view refreshes with the run: its
+                    // instance list and document follow the live state.
+                    let target = view
+                        .run_page()
+                        .and_then(|factory_view| factory_view.node.as_ref())
+                        .filter(|node| !node.request_in_flight())
+                        .map(crate::factory_view::node::NodeView::target);
+                    if let Some(target) = target {
+                        self.open_factory_node(
+                            view,
+                            &target.run_id,
+                            &target.state_id,
+                            target.instance,
+                        );
                     }
                 }
                 None => {

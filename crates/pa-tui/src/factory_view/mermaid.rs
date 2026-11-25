@@ -67,7 +67,7 @@ impl Graph {
     fn node(&mut self, id: &str, display: &str) {
         if !self.ids.iter().any(|known| known == id) {
             self.ids.push(id.to_string());
-            self.display.insert(id.to_string(), display.to_string());
+            self.display.insert(id.to_string(), decode_label(display));
         }
     }
 
@@ -79,7 +79,7 @@ impl Graph {
         self.edges.push(FactoryTransition {
             from: vec![from.to_string()],
             to: to.to_string(),
-            when: label,
+            when: label.map(|label| decode_label(&label)),
         });
     }
 
@@ -105,7 +105,9 @@ impl Graph {
                 subagent: None,
                 python: None,
                 model: None,
-                label: Some(labels.get(id).cloned().unwrap_or_default()),
+                label: Some(decode_label(
+                    labels.get(id).map(String::as_str).unwrap_or_default(),
+                )),
             })
             .collect();
         let transitions = self
@@ -188,6 +190,60 @@ fn split_state_declaration(rest: &str) -> Option<(String, String)> {
 fn bare_id(token: &str) -> Option<String> {
     let id = token.split_whitespace().next()?;
     (id != "[*]").then(|| id.to_string())
+}
+
+/// Decode Mermaid's label escapes — `#34;` (numeric), `#x22;` (hex), and
+/// the named `#quot;`/`#amp;`/`#lt;`/`#gt;`/`#nbsp;` — so a generated guard
+/// label reads as its text instead of entity codes. A decoded control
+/// character becomes a space: the mermaid source is scrubbed at its seam,
+/// and an entity must not carry one past it.
+fn decode_label(text: &str) -> String {
+    // Generated foreach labels join their two lines with an HTML break;
+    // the terminal renderer reads text, so break to a space.
+    let text = text.replace("<br/>", " ");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find('#') {
+        out.push_str(&rest[..at]);
+        // The candidate ends at the next `;` or `#`: a hash before any
+        // semicolon is not an entity, and stopping there keeps the scan
+        // linear in the label length.
+        let Some(end) = rest[at + 1..]
+            .find([';', '#'])
+            .map(|offset| at + 1 + offset)
+        else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        let code = &rest[at + 1..end];
+        let decoded = if !rest[end..].starts_with(';') {
+            None
+        } else if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        } else if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_digit()) {
+            code.parse().ok().and_then(char::from_u32)
+        } else {
+            match code {
+                "quot" => Some('"'),
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "nbsp" => Some(' '),
+                _ => None,
+            }
+        };
+        if let Some(ch) = decoded {
+            out.push(if ch.is_control() { ' ' } else { ch });
+            rest = &rest[end + 1..];
+        } else {
+            // Not an entity: keep the hash and rescan from the next
+            // character, so an ordinary hash never eats a later entity.
+            out.push('#');
+            rest = &rest[at + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// An edge's right side: the target id and the `: label` that names the
@@ -323,40 +379,112 @@ pub(super) enum FileSegment {
     Mermaid(String),
 }
 
-/// Split a Markdown file on its `` ```mermaid `` fences: everything between a
-/// `` ```mermaid `` opening line and the next fence line (or the end of the
-/// file, the way Markdown reads an unterminated fence) is one diagram
-/// block; everything around them is prose.
+/// Split a Markdown file on its `` ```mermaid `` blocks, read by the same
+/// block parse `render_markdown` renders the prose with: each block is one
+/// diagram, and the source around them is prose.
 pub(super) fn split_mermaid_fences(text: &str) -> Vec<FileSegment> {
+    let lines: Vec<&str> = text.lines().collect();
     let mut segments = Vec::new();
+    let mut prose_from = 0;
+    for (range, code) in crate::markdown::fenced_code_blocks(text, "mermaid") {
+        push_prose(&mut segments, &lines[prose_from..range.start]);
+        segments.push(FileSegment::Mermaid(code));
+        prose_from = range.end;
+    }
+    push_prose(&mut segments, &lines[prose_from..]);
+    segments
+}
+
+/// Prose lines join the split as one segment, unless they are all blank.
+fn push_prose(segments: &mut Vec<FileSegment>, lines: &[&str]) {
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        return;
+    }
     let mut prose = String::new();
-    let mut fence = String::new();
-    let mut in_fence = false;
-    for line in text.lines() {
-        if in_fence {
-            if line.trim().starts_with("```") {
-                segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
-                in_fence = false;
-            } else {
-                fence.push_str(line);
-                fence.push('\n');
-            }
-            continue;
-        }
-        if line.trim().starts_with("```mermaid") {
-            if !prose.trim().is_empty() {
-                segments.push(FileSegment::Text(std::mem::take(&mut prose)));
-            }
-            in_fence = true;
-            continue;
-        }
+    for line in lines {
         prose.push_str(line);
         prose.push('\n');
     }
-    if in_fence {
-        segments.push(FileSegment::Mermaid(std::mem::take(&mut fence)));
-    } else if !prose.trim().is_empty() {
-        segments.push(FileSegment::Text(prose));
+    segments.push(FileSegment::Text(prose));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mermaid;
+
+    #[test]
+    fn mermaid_examples_inside_markdown_fences_remain_text() {
+        let example = "~~~markdown\n```mermaid\nflowchart TB\nA --> B\n```\n~~~\n\n";
+        let text = format!("{example}```mermaid\nflowchart TB\nC --> D\n```\n");
+        let segments = super::split_mermaid_fences(&text);
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Text(prose), super::FileSegment::Mermaid(graph)] if prose == example && graph == "flowchart TB\nC --> D\n"),
+            "{} segments",
+            segments.len()
+        );
+        let segments = super::split_mermaid_fences("~~~mermaid\nflowchart TB\nA --> B\n~~~\n");
+        assert!(
+            matches!(&segments[..], [super::FileSegment::Mermaid(graph)] if graph == "flowchart TB\nA --> B\n")
+        );
     }
-    segments
+
+    #[test]
+    fn label_entities_decode_to_their_text() {
+        let super::Mermaid::Diagram {
+            states,
+            transitions,
+        } = parse_mermaid(
+            "stateDiagram-v2\nstate \"Review#59; done\" as a\na --> b: verdict.approved eq #34;yes#34;\nb --> a: note#10;here\nc --> d: #x22;quoted#x22;\n",
+        )
+        .unwrap()
+        else {
+            panic!("expected diagram")
+        };
+        // The declaration names the state: its display name is the box title.
+        assert_eq!(states[0].id, "Review; done");
+        assert_eq!(
+            transitions[0].when.as_deref(),
+            Some("verdict.approved eq \"yes\"")
+        );
+        // A control entity decodes to a space, never to a control character.
+        assert_eq!(transitions[1].when.as_deref(), Some("note here"));
+        assert_eq!(transitions[2].when.as_deref(), Some("\"quoted\""));
+    }
+
+    #[test]
+    fn an_ordinary_hash_never_eats_a_later_entity() {
+        let super::Mermaid::Diagram { transitions, .. } =
+            parse_mermaid("stateDiagram-v2\na --> b: Issue #123: #quot;yes#quot;\n").unwrap()
+        else {
+            panic!("expected diagram")
+        };
+        assert_eq!(transitions[0].when.as_deref(), Some("Issue #123: \"yes\""));
+    }
+
+    #[test]
+    fn generated_foreach_labels_drop_the_break_tag() {
+        let super::Mermaid::Diagram { states, .. } =
+            parse_mermaid("flowchart TB\nplan[\"plan<br/>foreach: over items (max 2)\"]\n")
+                .unwrap()
+        else {
+            panic!("expected graph")
+        };
+        assert_eq!(
+            states[0].label.as_deref(),
+            Some("plan foreach: over items (max 2)")
+        );
+    }
+
+    #[test]
+    fn many_hashes_before_a_semicolon_decode_in_linear_time() {
+        let label = format!("{}{}", "#".repeat(200_000), ";#34;");
+        let started = std::time::Instant::now();
+        let decoded = super::decode_label(&label);
+        assert_eq!(&decoded[decoded.len() - 2..], ";\"");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "decode took {:?}",
+            started.elapsed()
+        );
+    }
 }

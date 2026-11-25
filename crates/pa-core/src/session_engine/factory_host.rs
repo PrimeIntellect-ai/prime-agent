@@ -408,14 +408,15 @@ fn split_harness_scope(id: &str) -> (Scope, &str) {
 }
 
 /// The out-of-band request the bridge sends into the kernel, validated
-/// host-side before the frame: one action with its target and the watch
-/// bound.
+/// host-side before the frame: one action with its target, the watch
+/// bound, and the `node` action's `(entry, instance)` selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactoryActivityRequest {
     pub action: &'static str,
     pub run_id: Option<String>,
     pub spec_id: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub selector: Option<(u64, u64)>,
 }
 
 impl FactoryActivityRequest {
@@ -426,13 +427,15 @@ impl FactoryActivityRequest {
     /// # Errors
     ///
     /// Returns an error when the action is unknown, a required target is
-    /// missing, `peek` carries a target, or the timeout is outside its
-    /// bounds.
+    /// missing, `peek` carries a target, the timeout is outside its
+    /// bounds, or a `node` selector is malformed or half given.
     pub fn parse(
         action: &str,
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&Value>,
+        instance: Option<&Value>,
     ) -> anyhow::Result<Self> {
         let Some(action) = FACTORY_ACTIVITY_ACTIONS
             .iter()
@@ -444,19 +447,28 @@ impl FactoryActivityRequest {
         if action == "run" && spec_id.is_none_or(|id| id.trim().is_empty()) {
             return Err(anyhow!("factory activity run requires specId"));
         }
-        // `peek` serves the unscoped list the overview reads and takes no
-        // target: a targeted peek would answer one snapshot with no live
-        // claim behind it.
+        // `library` is the target-free action pair: the list with no
+        // target, or one machine's graph payload when `specId` names it
+        // (`runId` names a run, which the library never reads).
+        // `graph` takes a target optionally; `peek` serves the
+        // unscoped list the overview reads and takes none: a targeted
+        // peek would answer one snapshot with no `armed` marker — a
+        // rehydrated run reading as executing — so the request refuses
+        // the target up front (the same rejection the supervisor's
+        // `overview` arm applies to its selectors).
         if action == "peek"
             && (run_id.is_some_and(|id| !id.trim().is_empty())
                 || spec_id.is_some_and(|id| !id.trim().is_empty()))
         {
             return Err(anyhow!("factory activity peek takes no runId or specId"));
         }
-        if !matches!(action, "graph" | "run" | "peek")
+        if !matches!(action, "graph" | "run" | "library" | "peek")
             && run_id.is_none_or(|id| id.trim().is_empty())
         {
             return Err(anyhow!("factory activity {action} requires runId"));
+        }
+        if action == "node" && spec_id.is_none_or(|id| id.trim().is_empty()) {
+            return Err(anyhow!("factory activity node requires specId"));
         }
         if let Some(timeout_ms) = timeout_ms {
             if timeout_ms > FACTIVITY_WATCH_TIMEOUT_MS_CAP {
@@ -465,6 +477,26 @@ impl FactoryActivityRequest {
                 ));
             }
         }
+        // The `node` selector picks one instance: both values or neither,
+        // each a non-negative integer. A malformed value fails here instead
+        // of narrowing to `None`, which would select the latest instance.
+        let selector = match (action, entry, instance) {
+            ("node", Some(entry), Some(instance)) => {
+                let entry = entry.as_u64().ok_or_else(|| {
+                    anyhow!("factory activity node entry must be a non-negative integer")
+                })?;
+                let instance = instance.as_u64().ok_or_else(|| {
+                    anyhow!("factory activity node instance must be a non-negative integer")
+                })?;
+                Some((entry, instance))
+            }
+            ("node", Some(_), None) | ("node", None, Some(_)) => {
+                return Err(anyhow!(
+                    "factory activity node entry and instance selectors must be provided together"
+                ));
+            }
+            _ => None,
+        };
         Ok(Self {
             action,
             run_id: run_id
@@ -474,6 +506,7 @@ impl FactoryActivityRequest {
                 .filter(|id| !id.trim().is_empty())
                 .map(str::to_string),
             timeout_ms,
+            selector,
         })
     }
 }
@@ -486,6 +519,11 @@ pub const FACTORY_COMPILE_REQUEST_TYPE: &str = "factory.compile";
 /// before a run starts and answers the `max_transitions` bound the run caps
 /// its default at (the limits live only in `pa_factory::limits`).
 pub const FACTORY_LIMITS_REQUEST_TYPE: &str = "factory.limits";
+
+/// The kernel host request that describes a library machine (by `name`) for
+/// the machines page's drill-in: its fields, its declared params, its spec
+/// with no params bound, and each state's files.
+pub const FACTORY_DESCRIBE_REQUEST_TYPE: &str = "factory.describe";
 
 /// The machine library's levels in search order: the bundled library
 /// (`PRIME_AGENT_MACHINES_DIR`, else the runtime's `src/rlm/machines`, which
@@ -518,9 +556,11 @@ pub fn machine_library(agent_dir: &Path) -> pa_factory::Library {
     pa_factory::scan_library(&machine_library_levels(agent_dir))
 }
 
-/// Register `factory.compile` and `factory.limits`, the loaders a session's
-/// kernel uses to run library machines and check stored specs.
+/// Register `factory.compile`, `factory.describe` and `factory.limits`, the
+/// loaders a session's kernel uses to run and show library machines and to
+/// check stored specs.
 pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers, agent_dir: &Path) {
+    let describe_dir = agent_dir.to_path_buf();
     let agent_dir = agent_dir.to_path_buf();
     handlers.register(
         FACTORY_COMPILE_REQUEST_TYPE,
@@ -532,6 +572,19 @@ pub fn register_factory_compile_host_handler(handlers: &mut HostRequestHandlers,
                 })
                 .await
                 .map_err(|error| anyhow!("factory.compile stopped: {error}"))?
+            })
+        }),
+    );
+    handlers.register(
+        FACTORY_DESCRIBE_REQUEST_TYPE,
+        host_handler(move |payload| {
+            let agent_dir = describe_dir.clone();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    describe_machine(&payload.data, &machine_library_levels(&agent_dir))
+                })
+                .await
+                .map_err(|error| anyhow!("factory.describe stopped: {error}"))?
             })
         }),
     );
@@ -847,6 +900,126 @@ fn emit_outputs(
         let _ = std::fs::remove_dir_all(dir);
     }
     Ok(json!({ "accepted": accepted, "missing": contract.missing(&merged) }))
+}
+
+/// `factory.describe`: `{name}` resolves through the library scan. A machine
+/// directory answers its spec with no params bound (prompts keep their param
+/// placeholders), its declared params, and each state's files with every
+/// file's text once; a `MACHINE.md` answers its spec as written and one
+/// `MACHINE.md · <state>` file per state naming where its work comes from.
+fn describe_machine(data: &Value, levels: &[pa_factory::Level]) -> anyhow::Result<Value> {
+    let name = data
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| anyhow!("factory.describe requires a library machine name"))?;
+    let library = pa_factory::scan_library(levels);
+    let found = library.resolve(name).map_err(|error| anyhow!(error))?;
+    if found.kind == pa_factory::MachineKind::File {
+        let machine = pa_factory::read_machine_md(&found.path).map_err(|error| anyhow!(error))?;
+        let (files, state_files) = machine_md_state_files(&machine.spec);
+        return Ok(json!({
+            "name": machine.name,
+            "version": machine.version,
+            "description": machine.description,
+            "author": machine.author,
+            "spec": machine.spec,
+            "params": [],
+            "files": files,
+            "state_files": state_files,
+        }));
+    }
+    let dir = &found.path;
+    let joined = |problems: Vec<pa_factory::Diagnostic>| {
+        let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
+        anyhow!("{}: {}", dir.display(), lines.join("; "))
+    };
+    let machine = pa_factory::load_machine_dir(dir).map_err(joined)?;
+    let spec = pa_factory::compile_template(&machine).map_err(joined)?;
+    let params: Vec<Value> = machine
+        .params
+        .iter()
+        .map(|param| {
+            let mut row = json!({"name": param.name, "type": param.ty.to_string()});
+            if let Some(default) = &param.default {
+                row["default"] = default.clone();
+            }
+            if let Some(description) = &param.description {
+                row["description"] = json!(description);
+            }
+            row
+        })
+        .collect();
+    // Each state's files, every file's text once (states share a context
+    // file and python modules).
+    let state_files = machine.state_files();
+    let mut paths: Vec<&String> = state_files.iter().flat_map(|(_, files)| files).collect();
+    paths.sort();
+    paths.dedup();
+    let files: Vec<Value> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(machine.dir.join(path)).ok()?;
+            Some(json!({"path": path, "text": text}))
+        })
+        .collect();
+    let state_files: Vec<Value> = state_files
+        .into_iter()
+        .map(|(state, paths)| json!({"state": state, "paths": paths}))
+        .collect();
+    Ok(json!({
+        "name": machine.name,
+        "version": machine.version,
+        "description": machine.description,
+        "author": machine.author,
+        "spec": spec,
+        "params": params,
+        "files": files,
+        "state_files": state_files,
+    }))
+}
+
+/// A `MACHINE.md` spec's per-state files: an inline prompt, or a line naming
+/// the harness subagent entry or python call that does the state's work.
+fn machine_md_state_files(spec: &Value) -> (Vec<Value>, Vec<Value>) {
+    let rows = spec
+        .get("states")
+        .or_else(|| spec.get("nodes"))
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut files = Vec::new();
+    let mut state_files = Vec::new();
+    for row in rows {
+        let Some(state) = row.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let text = match (row.get("python"), row.get("subagent")) {
+            (Some(Value::Object(python)), _) => format!(
+                "Runs {}.{} from the session's working directory.",
+                python
+                    .get("import")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                python
+                    .get("callable")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ),
+            (_, Some(Value::Object(subagent))) => subagent
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            (_, Some(Value::String(entry))) => {
+                format!("Runs the harness subagent entry '{entry}'; its content is the prompt.")
+            }
+            _ => continue,
+        };
+        let path = format!("MACHINE.md \u{b7} {state}");
+        files.push(json!({"path": path, "text": text}));
+        state_files.push(json!({"state": state, "paths": [path]}));
+    }
+    (files, state_files)
 }
 
 // The unit battery lives in the child module (factory_host::tests).

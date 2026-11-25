@@ -800,20 +800,29 @@ impl AgentSessionEngine {
     }
 
     /// One factory activity over this session's kernel (the `/factory`
-    /// view's lane); never builds a new session/kernel.
+    /// view's lane). Only the machines page's drill-in (`library` with a
+    /// machine name; the worker answers the list itself) builds the core
+    /// session (like a prompt read), so the session can start its kernel;
+    /// every other action never builds one.
     ///
     /// # Errors
     ///
-    /// Returns an error when no session kernel is running ("Kernel is
-    /// not running"), the preflight fails, or the kernel's own factory
-    /// activity call fails.
+    /// Returns an error when the `library` read cannot build the session,
+    /// no session kernel is running ("Kernel is not running"), the
+    /// preflight fails, or the kernel's own factory activity call fails.
     pub async fn factory_activity(
         &self,
         action: &str,
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&Value>,
+        instance: Option<&Value>,
     ) -> anyhow::Result<Value> {
+        if action == "library" {
+            let model = self.resolve_model()?;
+            self.ensure_core_session_async(&model).await?;
+        }
         let engine = self
             .session
             .lock()
@@ -821,7 +830,7 @@ impl AgentSessionEngine {
             .clone()
             .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
         engine
-            .factory_activity(action, run_id, spec_id, timeout_ms)
+            .factory_activity(action, run_id, spec_id, timeout_ms, entry, instance)
             .await
     }
 

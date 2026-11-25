@@ -649,7 +649,7 @@ fn a_spec_without_declared_models_preflights_cleanly() {
 fn factory_activity_requests_validate_like_the_kernel_frame() {
     let parse =
         |action: &str, run_id: Option<&str>, spec_id: Option<&str>, timeout_ms: Option<u64>| {
-            FactoryActivityRequest::parse(action, run_id, spec_id, timeout_ms)
+            FactoryActivityRequest::parse(action, run_id, spec_id, timeout_ms, None, None)
         };
     // the happy shapes
     assert_eq!(
@@ -659,6 +659,7 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: None,
             spec_id: None,
             timeout_ms: None,
+            selector: None,
         }
     );
     assert_eq!(
@@ -686,8 +687,98 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             run_id: None,
             spec_id: None,
             timeout_ms: None,
+            selector: None,
         }
     );
+    // the library action's target-free pair: the list takes no target,
+    // and the graph read names the machine through `specId` (never a
+    // `runId`, which the library never reads).
+    assert_eq!(
+        parse("library", None, None, None).unwrap(),
+        FactoryActivityRequest {
+            action: "library",
+            run_id: None,
+            spec_id: None,
+            timeout_ms: None,
+            selector: None,
+        }
+    );
+    assert_eq!(
+        parse("library", None, Some("pr-manager"), None)
+            .unwrap()
+            .spec_id
+            .as_deref(),
+        Some("pr-manager")
+    );
+    // the node view's read names the run and its state (`specId`).
+    assert_eq!(
+        parse("node", Some("run-1"), Some("review"), None).unwrap(),
+        FactoryActivityRequest {
+            action: "node",
+            run_id: Some("run-1".to_string()),
+            spec_id: Some("review".to_string()),
+            timeout_ms: None,
+            selector: None,
+        }
+    );
+    assert_eq!(
+        parse("node", None, Some("review"), None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity node requires runId"
+    );
+    assert_eq!(
+        parse("node", Some("run-1"), None, None)
+            .unwrap_err()
+            .to_string(),
+        "factory activity node requires specId"
+    );
+    // the node selector: both values or neither, each a non-negative
+    // integer; a malformed value never narrows to "the latest instance".
+    let node = |entry: Option<serde_json::Value>, instance: Option<serde_json::Value>| {
+        FactoryActivityRequest::parse(
+            "node",
+            Some("run-1"),
+            Some("review"),
+            None,
+            entry.as_ref(),
+            instance.as_ref(),
+        )
+    };
+    assert_eq!(
+        node(Some(json!(0)), Some(json!(2))).unwrap().selector,
+        Some((0, 2))
+    );
+    assert_eq!(node(None, None).unwrap().selector, None);
+    for (entry, instance, error) in [
+        (
+            Some(json!(null)),
+            Some(json!(null)),
+            "factory activity node entry must be a non-negative integer",
+        ),
+        (
+            Some(json!("0")),
+            Some(json!(0)),
+            "factory activity node entry must be a non-negative integer",
+        ),
+        (
+            Some(json!(0)),
+            Some(json!(-1)),
+            "factory activity node instance must be a non-negative integer",
+        ),
+        (
+            Some(json!(0)),
+            None,
+            "factory activity node entry and instance selectors must be provided together",
+        ),
+        (
+            None,
+            Some(json!(0)),
+            "factory activity node entry and instance selectors must be provided together",
+        ),
+    ] {
+        assert_eq!(node(entry, instance).unwrap_err().to_string(), error);
+    }
     // unknown action
     assert_eq!(
         parse("bogus", None, None, None).unwrap_err().to_string(),
@@ -789,6 +880,75 @@ async fn factory_compile_answers_the_spec_or_every_problem() {
             machine_dir.display()
         )
     );
+}
+
+/// `factory.describe` resolves a library machine by name for the machines
+/// page's drill-in: a machine directory answers its template spec (param
+/// placeholders kept), its params and each state's files; a `MACHINE.md`
+/// answers its spec and one inline file per state.
+#[tokio::test]
+async fn factory_describe_answers_a_library_machine_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let machines = dir.path().join("machines");
+    let machine_dir = machines.join("hello-describe");
+    std::fs::create_dir_all(machine_dir.join("prompts")).unwrap();
+    std::fs::write(
+        machine_dir.join("machine.toml"),
+        "format = 1\nname = \"hello-describe\"\nversion = 1\ndescription = \"Say hello\"\n\n[params]\nwho = { type = \"text\" }\n\n[states.greet]\nentry = true\nagent = { prompt = \"prompts/greet.md\" }\n",
+    )
+    .unwrap();
+    std::fs::write(machine_dir.join("prompts/greet.md"), "Greet {{who}}.\n").unwrap();
+    std::fs::create_dir_all(machines.join("notes-describe")).unwrap();
+    std::fs::write(
+        machines.join("notes-describe/MACHINE.md"),
+        "---\nname: notes-describe\ndescription: Take notes.\nversion: 1\nauthor: Tester\n---\n\n```machine-spec\n{\"states\": [{\"id\": \"a\", \"entry\": true, \"subagent\": {\"prompt\": \"Write notes.\"}}], \"transitions\": []}\n```\n",
+    )
+    .unwrap();
+    let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
+    super::register_factory_compile_host_handler(&mut handlers, dir.path());
+    let describe = handlers
+        .get(super::FACTORY_DESCRIBE_REQUEST_TYPE)
+        .unwrap()
+        .clone();
+    let call = |name: &str| {
+        describe(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "name": name }),
+        })
+    };
+
+    let described = call("hello-describe").await.unwrap();
+    assert_eq!(
+        described["params"],
+        json!([{"name": "who", "type": "text"}])
+    );
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "prompts/greet.md", "text": "Greet {{who}}.\n"}]),
+            &json!([{"state": "greet", "paths": ["prompts/greet.md"]}])
+        )
+    );
+    assert_eq!(
+        described["spec"]["states"][0]["subagent"]["prompt"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .next(),
+        Some("Greet {who}.")
+    );
+    assert!(described["spec"].get("params").is_none());
+
+    let described = call("notes-describe").await.unwrap();
+    assert_eq!(described["spec"]["states"][0]["id"], json!("a"));
+    assert_eq!(
+        (&described["files"], &described["state_files"]),
+        (
+            &json!([{"path": "MACHINE.md \u{b7} a", "text": "Write notes."}]),
+            &json!([{"state": "a", "paths": ["MACHINE.md \u{b7} a"]}])
+        )
+    );
+
+    assert!(call("no-such-machine-describe").await.is_err());
 }
 
 /// A temp session dir, a cwd holding `DESIGN.md`, and the emit and check

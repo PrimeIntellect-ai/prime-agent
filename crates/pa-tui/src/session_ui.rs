@@ -350,6 +350,9 @@ pub(crate) struct SessionUi {
     /// Monotonic id of the latest issued library list fetch; an older
     /// response never repaints a newer open's list.
     library_list_epoch: u64,
+    /// Monotonic id of the latest drill-in fetch; an older reply never
+    /// replaces a newer drill-in.
+    library_detail_epoch: u64,
     /// Whether one overview refresh is still in flight (the page poll's
     /// serialization): a tick that fires while the fetch runs waits for
     /// the next cadence instead of stacking a second request.
