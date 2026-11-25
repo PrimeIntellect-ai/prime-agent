@@ -618,3 +618,24 @@ fn a_goal_capped_during_the_run_exits_one_with_the_reason() {
         "stderr: {stderr}"
     );
 }
+
+/// A failed `/refine` fails the run with its reason, like the daemonless
+/// run: the run waits for the refinement child, whose reply (the mock's
+/// plain text, not a proposal) fails to parse.
+#[test]
+fn a_failed_refine_exits_one_with_the_reason() {
+    let fixture = Fixture::start();
+    let mut client = Client::connect(&fixture.socket);
+    let session_id = fixture.saved_session(&mut client);
+
+    let output = print_command(&fixture, &session_id, "/refine")
+        .output()
+        .expect("print output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    let reason = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("pa-cli: refinement failed: "))
+        .unwrap_or_else(|| panic!("no refinement failure reported: {stderr}"));
+    assert!(!reason.trim().is_empty(), "stderr: {stderr}");
+}
