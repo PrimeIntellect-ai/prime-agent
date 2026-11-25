@@ -106,13 +106,14 @@ impl std::fmt::Display for OAuthRefreshFailure {
     }
 }
 
-/// What [`AuthStorage::refresh_rejected_oauth`] did to the provider's sources.
+/// What [`AuthStorage::refresh_rejected_oauth`] found for the rejected provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectedAuthRecovery {
     /// The sources stand; a stored OAuth credential may have been rotated.
     Kept,
-    /// The runtime override was dropped: the stored OAuth credential serves.
-    OverrideDropped,
+    /// The runtime key was rejected and stays; the store also holds an OAuth
+    /// subscription for the provider.
+    RuntimeKeyOverSubscription,
 }
 
 /// OAuth integration seam, implemented by the pa-ai oauth registry; a

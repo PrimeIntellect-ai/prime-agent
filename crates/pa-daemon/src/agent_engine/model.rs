@@ -100,12 +100,6 @@ impl AgentSessionEngine {
     /// flags survive every replacement; the cached thinking level drops (the
     /// clamp follows the moved-to model).
     fn reset_selection_to_spawn_fallback(&self) {
-        // A restore re-applies the create's explicit flags: a provider that
-        // dropped the key earlier serves it again, like the selection reset.
-        self.dropped_selection_api_key_providers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
         *self
             .effective_thinking
             .write()
@@ -449,19 +443,48 @@ impl AgentSessionEngine {
         resolved
     }
 
+    /// Bind the selection's explicit key to the provider it was configured
+    /// for: the selection's provider, else the provider its model resolves
+    /// to now (TS binds `--api-key` to the initial model's provider, v0.9.8
+    /// main.ts:862).
+    pub(super) fn bind_selection_api_key(&self) {
+        let provider = self
+            .current_selection()
+            .provider
+            .or_else(|| self.resolve_model().ok().map(|model| model.provider));
+        *self
+            .selection_api_key_provider
+            .write()
+            .expect("selection api key provider lock") = provider;
+    }
+
+    /// The selection's explicit key when it was configured for `provider`.
+    pub(crate) fn selection_api_key_for(&self, provider: &str) -> Option<String> {
+        let bound = self
+            .selection_api_key_provider
+            .read()
+            .expect("selection api key provider lock");
+        if bound.as_deref() != Some(provider) {
+            return None;
+        }
+        self.current_selection().api_key
+    }
+
     /// The full request-auth resolution: the registry's single lookup —
     /// possibly refreshing an expired OAuth token through the engine's
     /// OAuth integration. `request_model` carries the per-call xAI
     /// request model the lookup serves (TS `requestModel`); other
     /// providers leave it unset.
     ///
-    /// The create-config key rides the store's runtime-override arm (TS
-    /// installs `--api-key` with `setRuntimeApiKey` before lookup, v0.9.8
-    /// main.ts:862), so the registry's resolution — the key, the headers,
-    /// and the xAI request model — follows one winning source: a stored
-    /// subscription never re-shapes a session the config keys
-    /// explicitly, and a mid-session `/login` never switches the request
-    /// model under the override.
+    /// The create-config key rides the store's runtime-override arm for the
+    /// provider it was configured for (TS installs `--api-key` with
+    /// `setRuntimeApiKey(provider, key)` before lookup, v0.9.8 main.ts:862),
+    /// so the registry's resolution — the key, the headers, and the xAI
+    /// request model — follows one winning source: a stored subscription
+    /// never re-shapes a session the config keys explicitly, and a
+    /// mid-session `/login` never switches the request model under the
+    /// override. Other providers (failover backups, `/model` switches)
+    /// resolve their own credentials.
     ///
     /// The engine keeps one request-auth `ModelRegistry`, and with it one
     /// `AuthStorage`, for its life — TS's single registry and auth-storage
@@ -500,19 +523,9 @@ impl AgentSessionEngine {
         // another process wrote serves the next call, and a failed read
         // keeps the last read's data (TS `this.data`).
         registry.auth.reload();
-        // The selection key is session-wide, but a provider that rejected it
-        // keeps its stored credential: a 401 there drops the key for that
-        // provider alone, never for the primary it was configured for.
-        let selection_key_dropped = self
-            .dropped_selection_api_key_providers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&model.provider);
-        match &self.current_selection().api_key {
-            Some(api_key) if !selection_key_dropped => registry
-                .auth
-                .set_runtime_api_key(&model.provider, api_key.clone()),
-            _ => registry.auth.remove_runtime_api_key(&model.provider),
+        match self.selection_api_key_for(&model.provider) {
+            Some(api_key) => registry.auth.set_runtime_api_key(&model.provider, api_key),
+            None => registry.auth.remove_runtime_api_key(&model.provider),
         }
         // The registry's single possibly-refreshing lookup answers the key,
         // the headers, the request model, and whether a live source served
@@ -526,30 +539,34 @@ impl AgentSessionEngine {
         resolved
     }
 
-    /// Recover the credential `provider` rejected, on the store the per-call
-    /// resolution reads (its last read served the rejected call). A dropped
-    /// override is remembered for that provider, so the retry serves the
-    /// store while the selection's key still serves the provider it was
-    /// configured for.
-    pub(crate) fn refresh_rejected_request_auth(
+    /// Recover the credential `provider` rejected with `error`, on the store
+    /// the per-call resolution reads (its last read served the rejected
+    /// call): a stored OAuth credential is force-refreshed and retried. A
+    /// rejected explicit key is never swapped for the store; when the store
+    /// also holds a subscription for the provider, the turn ends on the
+    /// rejection with a hint to use it.
+    pub(crate) fn recover_rejected_request_auth(
         &self,
         provider: &str,
-    ) -> Result<(), pa_core::auth::OAuthRefreshFailure> {
+        error: &str,
+    ) -> pa_core::session_engine::auto_retry::AuthRecovery {
+        use pa_core::auth::RejectedAuthRecovery;
+        use pa_core::session_engine::auto_retry::AuthRecovery;
         let recovery = self
             .request_auth_registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
-            .map_or(Ok(pa_core::auth::RejectedAuthRecovery::Kept), |registry| {
+            .map_or(Ok(RejectedAuthRecovery::Kept), |registry| {
                 registry.auth.refresh_rejected_oauth(provider)
-            })?;
-        if recovery == pa_core::auth::RejectedAuthRecovery::OverrideDropped {
-            self.dropped_selection_api_key_providers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(provider.to_string());
+            });
+        match recovery {
+            Ok(RejectedAuthRecovery::Kept) => AuthRecovery::Retry,
+            Ok(RejectedAuthRecovery::RuntimeKeyOverSubscription) => AuthRecovery::EndTurn(format!(
+                "{error}\n\nYou're also logged in with a subscription for {provider}; leave out --api-key to use it."
+            )),
+            Err(failure) => AuthRecovery::EndTurn(failure.to_string()),
         }
-        Ok(())
     }
 
     /// Request auth for a model call outside the session stream

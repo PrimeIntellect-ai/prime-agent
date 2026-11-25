@@ -274,12 +274,10 @@ impl AuthStorage {
 
     /// Recover from a provider rejection of the credential this store served.
     ///
-    /// A runtime override over a stored OAuth credential is dropped and the
-    /// store re-read, so the retry serves the stored subscription token (the
-    /// effect `/reload` has). An override over a stored API key, or over no
-    /// stored credential, stands. Without an override, the stored OAuth
-    /// credential (this store's last-read copy) is force-refreshed; a store
-    /// that holds another credential keeps it.
+    /// A runtime override always stands; the result reports whether the
+    /// store also holds an OAuth subscription for the provider. Without an
+    /// override, the stored OAuth credential (this store's last-read copy) is
+    /// force-refreshed; a store that holds another credential keeps it.
     ///
     /// # Errors
     ///
@@ -289,19 +287,12 @@ impl AuthStorage {
         provider_id: &str,
     ) -> Result<RejectedAuthRecovery, OAuthRefreshFailure> {
         if self.runtime_overrides.contains_key(provider_id) {
-            self.reload();
-            if !matches!(
-                self.data.credential(provider_id),
-                Some(AuthCredential::Oauth { .. })
-            ) {
-                return Ok(RejectedAuthRecovery::Kept);
-            }
-            self.remove_runtime_api_key(provider_id);
-            pa_ai::utils::log::get_logger("auth").info(
-                "credential reloaded from the store after a 401",
-                serde_json::json!({ "provider": provider_id }),
-            );
-            return Ok(RejectedAuthRecovery::OverrideDropped);
+            return Ok(match self.data.credential(provider_id) {
+                Some(AuthCredential::Oauth { .. }) => {
+                    RejectedAuthRecovery::RuntimeKeyOverSubscription
+                }
+                _ => RejectedAuthRecovery::Kept,
+            });
         }
         match self.data.credential(provider_id) {
             Some(credential @ AuthCredential::Oauth { .. }) => self

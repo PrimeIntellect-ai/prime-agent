@@ -244,35 +244,11 @@ fn a_cleared_selection_key_stops_serving() {
     );
 }
 
-/// A 401 on the create-config key over a stored subscription drops the key
-/// from the selection: the retry's resolution serves the stored token, the
-/// effect `/reload` has, instead of re-sending the rejected key.
+/// The explicit key serves only the provider it was configured for: a
+/// failover backup and a `/model` switch to another provider resolve that
+/// provider's own credential.
 #[test]
-fn a_rejected_selection_key_over_a_stored_subscription_stops_serving() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
-    write_credential_backed_faux_provider(&agent_dir);
-    write_oauth_credential(&agent_dir, "stored-access");
-    let engine = live_auth_engine(dir.path(), Some("sk-stale"), "battery", "mock-1");
-    let model = engine.resolve_model().expect("the custom model resolves");
-    assert_eq!(
-        engine.resolve_request_auth(&model).api_key.as_deref(),
-        Some("sk-stale")
-    );
-    engine
-        .refresh_rejected_request_auth("battery")
-        .expect("the recovery reloads without a token fetch");
-    assert_eq!(
-        engine.resolve_request_auth(&model).api_key.as_deref(),
-        Some("stored-access")
-    );
-}
-
-/// A rejected backup provider's 401 drops the runtime override for that
-/// provider only: the session's explicit key still serves the primary the
-/// user configured it for, while the backup retry serves its stored token.
-#[test]
-fn a_backup_rejection_keeps_the_selection_key_for_the_primary_provider() {
+fn an_explicit_key_serves_only_the_provider_it_was_configured_for() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     write_credential_backed_faux_provider(&agent_dir);
@@ -280,38 +256,66 @@ fn a_backup_rejection_keeps_the_selection_key_for_the_primary_provider() {
     let engine = live_auth_engine(dir.path(), Some("sk-primary"), "primary", "mock-1");
     let primary = engine.resolve_model().expect("the primary model resolves");
     assert_eq!(primary.provider, "primary");
-    let mut battery = primary.clone();
-    battery.provider = "battery".to_string();
+    let mut backup = primary.clone();
+    backup.provider = "battery".to_string();
     assert_eq!(
         engine.resolve_request_auth(&primary).api_key.as_deref(),
         Some("sk-primary")
     );
     assert_eq!(
-        engine.resolve_request_auth(&battery).api_key.as_deref(),
-        Some("sk-primary"),
-        "the selection key installs for a backup provider too"
-    );
-    engine
-        .refresh_rejected_request_auth("battery")
-        .expect("the recovery reloads without a token fetch");
-    assert_eq!(
-        engine.resolve_request_auth(&battery).api_key.as_deref(),
+        engine.resolve_request_auth(&backup).api_key.as_deref(),
         Some("battery-access"),
-        "the rejected provider's retry serves its stored token"
-    );
-    assert_eq!(
-        engine.resolve_request_auth(&primary).api_key.as_deref(),
-        Some("sk-primary"),
-        "the primary's explicit key is not cleared by a backup provider's 401"
+        "a backup provider never receives the primary's explicit key"
     );
     engine.configure_model(EngineModelSelection {
-        api_key: Some("sk-reconfigured".to_string()),
+        provider: Some("battery".to_string()),
+        model: Some("mock-1".to_string()),
         ..Default::default()
     });
+    let switched = engine.resolve_model().expect("the switched model resolves");
+    assert_eq!(switched.provider, "battery");
     assert_eq!(
-        engine.resolve_request_auth(&battery).api_key.as_deref(),
-        Some("sk-reconfigured"),
-        "a new explicit key applies to the provider an earlier 401 dropped"
+        engine.resolve_request_auth(&switched).api_key.as_deref(),
+        Some("battery-access"),
+        "a `/model` switch to another provider never carries the key along"
+    );
+}
+
+/// A 401 on the explicit key never switches to the stored subscription: the
+/// key keeps serving, and the turn ends on the 401 with a hint only when a
+/// subscription for the provider is stored.
+#[test]
+fn a_rejected_explicit_key_hints_at_a_stored_subscription_without_switching() {
+    use pa_core::session_engine::auto_retry::AuthRecovery;
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_faux_provider(&agent_dir);
+    let engine = live_auth_engine(dir.path(), Some("sk-rejected"), "battery", "mock-1");
+    let model = engine.resolve_model().expect("the custom model resolves");
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-rejected")
+    );
+    assert_eq!(
+        engine.recover_rejected_request_auth("battery", "401 Unauthorized"),
+        AuthRecovery::Retry,
+        "no stored subscription: no hint"
+    );
+    write_oauth_credential(&agent_dir, "stored-access");
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-rejected")
+    );
+    let verdict = engine.recover_rejected_request_auth("battery", "401 Unauthorized");
+    assert!(
+        matches!(&verdict, AuthRecovery::EndTurn(error)
+            if error.starts_with("401 Unauthorized") && error.contains("subscription for battery")),
+        "{verdict:?}"
+    );
+    assert_eq!(
+        engine.resolve_request_auth(&model).api_key.as_deref(),
+        Some("sk-rejected"),
+        "the explicit key keeps serving"
     );
 }
 

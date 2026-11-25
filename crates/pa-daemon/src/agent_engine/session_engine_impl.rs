@@ -430,12 +430,7 @@ impl SessionEngine for AgentSessionEngine {
             }
         }
         if replaces_key {
-            // An explicit key re-applies to every provider, including one a
-            // 401 dropped earlier.
-            self.dropped_selection_api_key_providers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
+            self.bind_selection_api_key();
         }
         // The merge may have changed the selection: drop the cached level;
         // later summary/state calls stay side-effect-free.

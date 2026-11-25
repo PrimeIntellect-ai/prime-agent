@@ -1,1 +1,1 @@
-- A session started with an explicit API key that the provider rejects (401) now retries once with the stored subscription credential instead of re-sending the rejected key until `/reload`.
+- An explicit `--api-key` now serves only the provider it was configured for; failover backups and `/model` switches to another provider use that provider's own credentials. When the key gets a 401 while a subscription for that provider is stored, the error adds a hint to leave out `--api-key`.
