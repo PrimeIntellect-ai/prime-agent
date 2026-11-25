@@ -238,6 +238,10 @@ pub struct AgentSessionEngine {
     /// failed `reload()` keeps the last read's data — a transiently-held
     /// document lock or a corrupt auth.json is not a logout.
     pub(crate) request_auth_registry: std::sync::Mutex<Option<pa_core::models::ModelRegistry>>,
+    /// The provider the selection's explicit key was configured for: the
+    /// key serves that provider only (see
+    /// [`Self::selection_api_key_for`]).
+    pub(crate) selection_api_key_provider: std::sync::RwLock<Option<String>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,
