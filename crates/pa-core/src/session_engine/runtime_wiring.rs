@@ -243,7 +243,9 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// likewise propagated (`RLM_SESSION_DIR` + `RLM_HARNESS_STATE_DIR`), so kernel-side
 /// harness writes land in the session-local store. The artifact dir is keyed by the
 /// durable session id (the session file's stem), exported as `RLM_SESSION_ID` for the
-/// persistent `bash()` shells' assignment. `cwd` is the SESSION's working directory.
+/// persistent `bash()` shells' assignment. `RLM_DAEMONLESS` tells the kernel its session's
+/// children live in this process (`--print`), so a factory run cannot outlive it. `cwd` is
+/// the SESSION's working directory.
 /// `shell_path` is the session-start-resolved kernel shell: an invalid `shellPath` fails
 /// `create_session`, not the kernel boot.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
@@ -266,8 +268,9 @@ pub fn kernel_provisioner(
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
     ready_gate: Option<crate::kernel::provisioner::KernelReadyGate>,
+    daemonless: bool,
 ) -> Arc<KernelProvisioner> {
-    let mut env = HashMap::with_capacity(3);
+    let mut env = HashMap::with_capacity(4);
     env.insert(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),
@@ -280,6 +283,11 @@ pub fn kernel_provisioner(
         .map(|id| id.to_string_lossy().to_string())
         .unwrap_or_default();
     env.insert("RLM_SESSION_ID".to_string(), rlm_session_id);
+    // Always set too: a daemon kernel must not inherit a `--print` ancestor's flag.
+    env.insert(
+        "RLM_DAEMONLESS".to_string(),
+        if daemonless { "1" } else { "" }.to_string(),
+    );
     for (key, value) in [
         ("RLM_SESSION_DIR", session_artifact_dir.clone()),
         (

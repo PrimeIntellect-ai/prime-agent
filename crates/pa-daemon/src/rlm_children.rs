@@ -195,6 +195,9 @@ struct ChildRecord {
     /// A factory state's child: the factory reads its settle through
     /// collect, so no terminal notice reaches the parent conversation.
     factory: bool,
+    /// The latest opt-in task-work observation, separate from the assistant
+    /// turn's terminal status so resident child sessions remain resident.
+    factory_task_busy: Option<bool>,
     /// The refinement child (the daemon's `refine_child` spawn): a
     /// one-shot planning pass whose record the registry retires at its
     /// own settle — no engine-side teardown.
@@ -302,6 +305,7 @@ struct DeletedChild {
     /// re-delete receipt reports it verbatim, so a repeated retire reads
     /// the same verdict as the first).
     status: &'static str,
+    factory: bool,
     answer_preview: Option<String>,
     /// The envelope's error: the child's own terminal error when one was
     /// recorded, else the delete reason.
@@ -774,6 +778,7 @@ impl SupervisorChildSessions {
                 direct_observation: Arc::new(Mutex::new(())),
                 notice_delivered: false,
                 factory: false,
+                factory_task_busy: None,
                 refine_child: false,
                 retirement: Retirement::live(),
                 usage_registration_forgotten: false,
@@ -861,10 +866,23 @@ impl SupervisorChildSessions {
             session_dir: Some(record.session_dir.clone()),
             status: record.run.status(),
             settled: !record.run.is_running(),
+            factory_task_busy: if record.factory {
+                record.factory_task_busy
+            } else {
+                None
+            },
             answer_preview: record.answer_preview.clone(),
             answer_text: record.answer_text.clone(),
             error: record.run.error().map(str::to_string),
-            duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
+            // A settled child's own run time: a parent that collects it late
+            // (a paused factory run) does not count the wait.
+            duration_ms: Some(
+                record
+                    .run
+                    .ended_at_ms()
+                    .unwrap_or_else(now_ms)
+                    .saturating_sub(record.started_at_ms),
+            ),
             tool_use_count: record.tool_use_count,
             replied_since_task: Some(record.replied_since_task),
         }
@@ -879,6 +897,7 @@ impl SupervisorChildSessions {
             session_dir: Some(deleted.session_dir.clone()),
             status: "cancelled",
             settled: true,
+            factory_task_busy: deleted.factory.then_some(false),
             answer_preview: deleted.answer_preview.clone(),
             answer_text: None,
             error: Some(deleted.error.clone()),

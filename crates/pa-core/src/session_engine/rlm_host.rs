@@ -115,6 +115,10 @@ pub struct RlmChildResult {
     /// `queued` | `running` | `done` | `error` | `cancelled`.
     pub status: &'static str,
     pub settled: bool,
+    /// Optional factory task-background observation: true means busy, false
+    /// confirms idle, and absent means unobserved (or an ordinary child).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory_task_busy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_preview: Option<String>,
     /// The full final-answer text (the settle-binding lane; the roster
@@ -1124,6 +1128,7 @@ mod tests {
                     session_dir: Some("/tmp/sub-1".into()),
                     status: "done",
                     settled: true,
+                    factory_task_busy: None,
                     answer_preview: Some("all done".into()),
                     answer_text: Some("all done".into()),
                     error: None,

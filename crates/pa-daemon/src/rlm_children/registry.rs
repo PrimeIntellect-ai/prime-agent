@@ -36,6 +36,7 @@ impl SupervisorChildSessionsInner {
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
             status: record.roster_status(),
+            factory: record.factory,
             answer_preview: record.answer_preview.clone(),
             error: record
                 .run
@@ -643,6 +644,7 @@ fn ledger_child_records(
             direct_observation: Arc::new(Mutex::new(())),
             notice_delivered: true,
             factory: edge.factory.is_some(),
+            factory_task_busy: None,
             // A reseeded row is settled by construction (its watcher is
             // gone with the old process), so the retire-at-settle funnel
             // never runs for it — the flag is inert here either way.

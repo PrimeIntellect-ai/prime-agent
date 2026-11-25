@@ -348,6 +348,12 @@ pub struct ExecuteOptions {
     /// `None` and zero disable it; the runtime bootstrap and state ops never
     /// arm it.
     pub cell_timeout_ms: Option<u64>,
+    /// The runtime's OWN bootstrap execute: the host sends it after every
+    /// restore attempt (a refused restore included), so it is internal
+    /// machinery, never a gate-permitted command. The runtime's only use
+    /// of the flag is to skip `boot_arm_persisted_runs()`, so this execute
+    /// never releases the factory boot arm.
+    pub runtime_bootstrap: bool,
 }
 
 /// A typed request from Python code running in the kernel to the host.

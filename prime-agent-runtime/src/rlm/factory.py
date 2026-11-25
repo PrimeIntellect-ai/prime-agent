@@ -21,9 +21,14 @@ run/status/stop/resume) that runs canonicalized machines through the
 existing RLM supervisor: states are admitted with ``rlm.spawn``, settled
 through ``rlm.collect``, and cancelled with ``rlm.delete_subagent``. The
 supervisor owns the children; the executor owns the run state in kernel
-memory. Runs do not survive a kernel restart (the registry lives in this
-module's state); children are supervisor-owned and keep running, so
-``rlm.list_subagents`` can still see them after a restart.
+memory, persisted under the session artifact dir
+(``$RLM_SESSION_DIR/factory-runs``: one JSON snapshot per run — forced on
+state changes and settle evaluations, throttled otherwise — plus a
+mutation journal for the instance batches and admissions in between): a
+kernel restart loses only the control-loop tasks; the registry rehydrates
+on the next factory use and the runs continue — children are
+supervisor-owned and never depended on the kernel, so a finished child's
+emitted outputs are still collected after any restart.
 
 The full agent-facing reference — authoring rules, guards/joins/cycles,
 foreach, budgets, stall detectors, and the ``rlm.factory`` API with worked
@@ -1016,7 +1021,6 @@ def topological_order(nodes: list[dict[str, Any]]) -> list[str]:
 __all__ = [
     "FACTORY_DISABLED_MESSAGE",
     "FACTORY_HELP",
-    "FactoryEmitError",
     "FactoryExecutor",
     "FactoryRun",
     "MachineFile",
@@ -1031,6 +1035,9 @@ __all__ = [
     "require_factory_enabled",
     "resume_factory",
     "run_factory",
+    "FactoryEmitError",
+    "emit_factory_outputs",
+    "factory_inputs",
     "status_factory",
     "stop_factory",
     "topological_order",
@@ -1144,6 +1151,65 @@ FACTORY_OUTPUTS_FILE = "factory-outputs.json"
 """A factory child's accepted outputs, beside its session file: the
 child's ``factory.emit`` host request writes it, the executor reads it."""
 
+RUNS_DIR_NAME = "factory-runs"
+#: The append-only tombstone ledger: one line per terminal run (the
+#: registry's durable post-mortem record — see _retire_run_files).
+RETIRED_RUNS_FILE = "retired.jsonl"
+#: The tombstone read bound: status answers the record, not the history.
+RETIRED_RUNS_READ_LIMIT = 1_000
+"""The run registry's durable home: one subdirectory of the session
+artifact dir, one JSON snapshot per run. The host exports the artifact
+dir as ``RLM_SESSION_DIR``; an unset value (an in-memory session, a
+headless test kernel) keeps the registry kernel-memory-only."""
+
+PERSISTED_EVENTS_CAP = 500
+"""How much of the event ledger one run keeps, in memory AND in the
+snapshot: ``status`` serves the trailing window, so a long-lived kernel
+serves the same recent history a rehydrated one does, bounded by this
+cap. The in-memory ledger trims from its front (the oldest end), and
+the trim bumps ``seq_base`` so the sequence numbers stay monotonic —
+no seq is ever reused, and the graph overlay's last-fired sort keeps
+its order (the opus F-12 finding: the memory ledger grew without a
+limit while only the snapshot was capped)."""
+
+RETAINED_RUNS_LIMIT = 50
+"""How many TERMINAL runs (done/failed/stopped) the registry keeps in
+memory: an operator reads a finished run's final status for a while, but
+a resident kernel that has run hundreds of machines keeps them all. Past
+this limit the OLDEST terminal runs are evicted from the registry —
+their files retired at the terminal persist already, so this is memory
+bookkeeping only; an evicted run answers ``unknown factory run`` exactly
+like a run of a previous boot (F-12's second half)."""
+
+ADMISSIONS_JOURNAL_SUFFIX = ".admissions.jsonl"
+"""A run's mutation journal: one ordered line per durable mutation made
+between two snapshots — an entry's prepared instance batch
+(``kind: "batch"``, one line when ``_prepare_entry`` binds a prompt per
+instance) and one admitted child (``kind: "admission"``, appended the
+moment the spawn handle lands). The rehydrate replays the lines the
+snapshot never absorbed, so entries, pending siblings, and child_ids stay
+durable at O(small) per line; a persist failure degrades durability
+loudly (a ``persist_failed`` ledger row), never the run itself."""
+
+TERMINAL_RUN_STATES = ("done", "failed", "stopped")
+"""The run states past which the durable registry retires a run's files once
+it owns no live child: the registry keeps the run in memory for this boot,
+and a restart forgets it — the durable archive holds only runs a restart
+must continue or stop."""
+
+RUN_LOST_PYTHON_CALL = (
+    "the kernel restart lost this state's running python call "
+    "(the call runs in a short-lived subprocess the new kernel cannot reattach); "
+    "retries re-run it, then the failure policy applies"
+)
+"""The failure reason a rehydrated run records for a python call that was
+mid-flight when the kernel restarted: honest about the loss, routed
+through the state's own retry/policy path."""
+
+REPAIR_POLL_SECONDS = 5.0
+"""How often a settled child is re-read while its repair turn or its
+background work runs (its collect answers at once)."""
+
 
 class FactoryEmitError(ValueError):
     """``rlm.factory.emit`` refused a value: the message names every wrong
@@ -1188,6 +1254,10 @@ def _emit_error_text(error: str) -> str:
         )
     return error
 
+
+FACTORY_OWNER_SESSION_ENV = "PRIME_AGENT_FACTORY_OWNER_SESSION"
+"""The env var a python state reads the running session's id from (the
+call itself sees no ``RLM_*`` variables)."""
 
 PYTHON_STATE_TIMEOUT_MS_DEFAULT = 60_000
 """A python call's time limit when neither the state nor the run sets
@@ -1442,7 +1512,12 @@ def _parse_json_output(
         except (ValueError, TypeError):
             continue
         if isinstance(parsed, dict) and output_name in parsed:
-            return parsed[output_name], None
+            # A child's JSON output may carry a lone-surrogate escape (a
+            # text cut mid-emoji, a Linux file name json.dumps'd by the
+            # child): clean it at the decode point (round-10 R10-01) or
+            # the binding flows into every downstream spawn request and
+            # frame — and the host's parser rejects the frame.
+            return _clean_surrogates(parsed[output_name]), None
     error = f"no JSON object containing output {output_name!r} in the upstream answer"
     if truncated_at is not None:
         error += (
@@ -1578,6 +1653,10 @@ class _PythonProcess:
         from .bash import _child_env
 
         env = {key: value for key, value in _child_env().items() if not key.startswith("RLM_")}
+        # The session running the machine, for states that act on its behalf
+        # (a Discord gate asks from the owner's help thread).
+        if os.environ.get("RLM_SESSION_ID"):
+            env[FACTORY_OWNER_SESSION_ENV] = os.environ["RLM_SESSION_ID"]
         stdout, stderr = tempfile.TemporaryFile(), tempfile.TemporaryFile()
         try:
             with tempfile.TemporaryFile() as stdin:
@@ -1632,16 +1711,22 @@ def _python_outputs(state_spec: dict[str, Any], stdout: str) -> "dict[str, Any] 
     """A python call's outputs from its stdout, or the error sentence when
     stdout is not one object whose keys are exactly the declared outputs."""
     try:
-        outputs = json.loads(stdout)
+        # The python-call decode point cleans too (round-11 probe
+        # R11-02): a lone surrogate in a python state's emitted output
+        # was re-sent once per remaining retry across boots (the
+        # factory.check frame carrying it, rejected by the host every
+        # time).
+        outputs = _clean_surrogates(json.loads(stdout))
     except ValueError:
         return "python state did not write one JSON object to stdout"
     if not isinstance(outputs, dict):
         return f"python state returned {type(outputs).__name__}, not a dict"
     declared = _declared_port_types(state_spec, "outputs")
-    if set(outputs) != set(declared):
+    optional = {out.get("name") for out in state_spec.get("outputs") or [] if out.get("optional")}
+    if not set(declared) - optional <= set(outputs) <= set(declared):
         return f"python state returned keys {sorted(outputs)} but declares outputs {sorted(declared)}"
     for name, port_type in declared.items():
-        if port_type == "text" and not isinstance(outputs[name], str):
+        if name in outputs and port_type == "text" and not isinstance(outputs[name], str):
             return f"python state output {name!r} is text but the call returned {type(outputs[name]).__name__}"
     return outputs
 
@@ -1679,7 +1764,6 @@ class _NodeInstance:
     # deferral (run()/resume(), allow_backoff=False) consumes an attempt
     # but never counts toward the backoff episode.
     child_id: str | None = None
-    session_dir: str | None = None  # the child's session dir: its emitted outputs live there
     spawned_at: float | None = None
     duration_ms: int | None = None
     answer: str | None = None  # the binding lane's captured answer (ANSWER_BINDING_CAP)
@@ -1688,7 +1772,14 @@ class _NodeInstance:
     # exit's last assistant text as delivered work (the M4 class).
     error: str | None = None
     tool_uses: int = 0
-    inputs: dict[str, Any] | None = None  # bound inputs and params; re-runs reuse them
+    inputs: dict[str, Any] | None = None  # the bound inputs (plus params); a python
+    # call receives them, an emit child gets them from rlm.factory.inputs(), re-runs reuse them
+    session_dir: str | None = None  # the child's session dir: its emitted outputs live there
+    child_name: str | None = None  # the child's session name (the repair message's receiver)
+    repair_sent: bool = False  # the one "you still owe ..." message went to this child;
+    # while the instance is running again, the repair turn decides it
+    ownership_change_in_progress: bool = False  # an admission or deletion owns the actor slot
+    factory_task_activity: str | None = None  # busy, idle, or unverified for factory children
     process: "_PythonProcess | None" = None  # a python state's running call
     deadline: float | None = None  # a python call's time limit (seconds on the injected clock)
 
@@ -1755,8 +1846,11 @@ class _StateRun:
 
 @dataclass
 class FactoryRun:
-    """Executor-side state for one run. Kernel memory only: it does not
-    survive a kernel restart; the children (supervisor-owned) keep running."""
+    """Executor-side state for one run: kernel memory while the kernel
+    lives, one JSON snapshot under ``$RLM_SESSION_DIR/factory-runs``
+    across a kernel restart (the loop tasks die with the kernel; the
+    registry rehydrates and re-arms; the children, supervisor-owned, run
+    straight through)."""
 
     run_id: str
     spec_id: str
@@ -1784,8 +1878,16 @@ class FactoryRun:
     last_error: str | None = None
     states: dict[str, _StateRun] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
-    transitions_from: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    transitions_from: dict[str, list[tuple[int, dict[str, Any]]]] = field(default_factory=dict)
     pending_evaluations: list[tuple[str, int, int]] = field(default_factory=list)
+    # Joins held on a queued arrival by an evaluation pass that a
+    # max_transitions pause interrupted (probe R3B): the holds ride the
+    # run so the next pass's drain recheck re-reaches them — the resume's
+    # replay of the paused settle starts PAST the join position, so the
+    # join itself would otherwise be skipped forever. Runtime-only state:
+    # a restart drops it with the process (a snapshot mid-hold loses the
+    # defer; the run's own settles re-reach the join on their next fire).
+    deferred_join_rechecks: list[tuple[str, int, int]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     milestones: set[str] = field(default_factory=set)
     spawn_count: int = 0
@@ -1803,9 +1905,12 @@ class FactoryRun:
     # collecting children while admission waits out the deadline.
     admission_backoff_until: float | None = None
     # Join-transition bookkeeping: the last-fired (source id, settle index)
-    # signature per join (keyed by the transition object), so a join whose
-    # sources settle in one collect batch fires once, not once per source
-    # settle, and re-fires only when a source settles again.
+    # signature per join, keyed by the transition's canonical index and
+    # target, so a join whose sources settle in one collect batch fires
+    # once, not once per source settle, re-fires only when a source
+    # settles again, keeps ONE key across the source states that share the
+    # transition object, and survives the registry snapshot verbatim (an
+    # in-memory object id() key would not).
     join_fired: dict[tuple[int, str], frozenset[tuple[str, int]]] = field(default_factory=dict)
     # Watch bookkeeping: bumped on every ledger event (every observable
     # mutation emits one), and every registered watch future resolves with
@@ -1813,6 +1918,391 @@ class FactoryRun:
     # that leaves the run's state/instance shape unchanged just re-arms.
     revision: int = 0
     watchers: list = field(default_factory=list)
+    # The event ledger's seq watermark: rehydrated events keep their seqs,
+    # so this boot's events number above them (``_event`` numbers from
+    # here; the snapshot keeps the trailing window, whose seqs can be high).
+    seq_base: int = 0
+    # The run budget's paused-time accounting: the total wall time the run
+    # has spent paused (waiting for the owner), which the budget excludes
+    # (``elapsed = now - started_at - paused_ms``) so an escalate pause
+    # does not spend the budget, and the pause in flight's start moment
+    # (folded into paused_ms at the resume; rebased with the other clock
+    # fields after a host restart).
+    paused_ms: float = 0.0
+    pause_started_at: float | None = None
+
+
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _frame_has_lone_surrogate(value: Any) -> bool:
+    """Whether the structure carries a lone surrogate anywhere — a KEY or
+    a value (round-11 probe R11-01: the recursive shape skipped dict keys,
+    and a lone surrogate in a KEY rode the contract inputs into every
+    spawn frame, persisting across boots).
+
+    One json.dumps scan, no Python recursion (round-11 probe R11-03: the
+    recursive cleaner blew the interpreter stack on 500-level legal JSON;
+    json's own C encoder carries the depth).
+    """
+    return _LONE_SURROGATE_RE.search(json.dumps(value, ensure_ascii=False)) is not None
+
+
+def _clean_surrogates(value: Any) -> Any:
+    r"""Render lone surrogates in decoded content protocol-safe — a KEY
+    or a value (round-11 probe R11-01, fix shape C).
+
+    Python's json decoder accepts a lone ``\udXXX`` escape and returns a
+    lone surrogate code point; the kernel's ``_send`` re-encodes it as the
+    same escape, and the host's serde_json rejects that frame — "Kernel
+    protocol error" for the session. The round-10 shape cleaned values but
+    skipped dict KEYS (a lone surrogate in a key rode the contract inputs
+    into every spawn frame and persisted across boots), and its recursion
+    blew the interpreter stack on deep legal JSON.
+
+    One json.dumps(ensure_ascii=False) scan carries the depth in C and
+    surfaces any lone surrogate — key or value — as a raw code point in
+    the text. The common case returns the original object untouched. A
+    dirty structure round-trips once through the regex: each lone
+    surrogate becomes a literal backslash-escape TEXT (json.loads keeps
+    it as text — the rendered escape), while valid astral characters are
+    single code points and pass untouched.
+    """
+    text = json.dumps(value, ensure_ascii=False)
+    if _LONE_SURROGATE_RE.search(text) is None:
+        return value
+    return json.loads(
+        _LONE_SURROGATE_RE.sub(lambda m: "\\\\u" + f"{ord(m.group()):04x}", text)
+    )
+
+
+def _shown(name: str) -> str:
+    """A file name safe to print through the kernel protocol (round-9
+    probe R9-01).
+
+    On Linux, an undecodable name byte from os.listdir arrives as a lone
+    surrogate (surrogateescape); printing it raw puts the escape into
+    the kernel's stderr frame, and the host's serde_json rejects a lone
+    surrogate escape — "Kernel protocol error" for every cell of the
+    session, every boot, until a human deletes the file. backslashreplace
+    turns the byte into printable text; normal names are unchanged.
+    """
+    return name.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _runs_dir() -> Path | None:
+    """The run registry directory, or ``None`` without a session artifact dir
+    or on a daemonless host (a ``--print`` run's children die with its
+    process, so its runs are never saved).
+
+    Set-but-empty env values behave as unset (mirrors ``harness._env_dir``).
+    """
+    if _daemonless_host():
+        return None
+    value = (os.environ.get("RLM_SESSION_DIR") or "").strip()
+    return Path(value).expanduser() / RUNS_DIR_NAME if value else None
+
+
+PRINT_RUNS_NOT_DURABLE = (
+    "--print runs are not durable; run machines under the daemon for restart safety"
+)
+"""The refusal ``resume`` gives on a daemonless host for a run this kernel did
+not start: a ``--print`` session's children live in its own process, so the
+runs they served cannot outlive it."""
+
+
+def _daemonless_host() -> bool:
+    """Whether the session runs without a daemon (the host sets
+    ``RLM_DAEMONLESS=1`` for ``--print`` sessions)."""
+    return os.environ.get("RLM_DAEMONLESS") == "1"
+
+
+def _transitions_index(machine: dict[str, Any]) -> dict[str, list[tuple[int, dict[str, Any]]]]:
+    """Every transition visible from each source state, paired with its
+    canonical index: a join (``from`` is a list) is visible from EVERY
+    source state's settle evaluation and is ONE transition object — the
+    canonical index is the identity the join bookkeeping keys, stable
+    across the source states that share it and across the registry
+    snapshot; a single-source transition registers once."""
+    transitions_from: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for canonical_index, transition in enumerate(machine.get("transitions") or []):
+        raw_from = transition["from"]
+        sources = raw_from if isinstance(raw_from, list) else [raw_from]
+        for source in sources:
+            transitions_from.setdefault(source, []).append((canonical_index, transition))
+    return transitions_from
+
+
+def _instance_json(instance: _NodeInstance) -> dict[str, Any]:
+    """One instance's persisted fields: everything but ``process`` (a live
+    subprocess handle dies with the kernel; the rehydrated run fails such
+    a call through its state's retry/policy path)."""
+    return {
+        "index": instance.index,
+        "prompt": instance.prompt,
+        "status": instance.status,
+        "attempt": instance.attempt,
+        "retry_base": instance.retry_base,
+        "infra_respawned": instance.infra_respawned,
+        "capture_failed": instance.capture_failed,
+        "rate_limit_streak": instance.rate_limit_streak,
+        "child_id": instance.child_id,
+        "spawned_at": instance.spawned_at,
+        "duration_ms": instance.duration_ms,
+        "answer": instance.answer,
+        "provisional": instance.provisional,
+        "error": instance.error,
+        "tool_uses": instance.tool_uses,
+        "inputs": instance.inputs,
+        "session_dir": instance.session_dir,
+        "child_name": instance.child_name,
+        "factory_task_activity": instance.factory_task_activity,
+        "repair_sent": instance.repair_sent,
+        "deadline": instance.deadline,
+    }
+
+
+def _instance_from_json(data: dict[str, Any]) -> _NodeInstance:
+    instance = _NodeInstance(index=data["index"], prompt=data["prompt"])
+    for field in (
+        "status", "attempt", "retry_base", "infra_respawned", "capture_failed",
+        "rate_limit_streak", "child_id", "spawned_at", "duration_ms", "answer",
+        "provisional", "error", "tool_uses", "inputs", "session_dir",
+        "child_name", "factory_task_activity", "repair_sent", "deadline",
+    ):
+        setattr(instance, field, data.get(field))
+    instance.attempt = data.get("attempt") or 0
+    instance.tool_uses = data.get("tool_uses") or 0
+    if instance.child_id is not None and instance.status != "running" and instance.factory_task_activity is None:
+        instance.factory_task_activity = "unverified"
+    return instance
+
+
+def _entry_json(entry: _StateEntry) -> dict[str, Any]:
+    return {
+        "index": entry.index,
+        "status": entry.status,
+        "instances": [_instance_json(instance) for instance in entry.instances],
+        "error": entry.error,
+        "answer": entry.answer,
+        "outputs": entry.outputs,
+        "output_errors": entry.output_errors,
+        "is_settle": entry.is_settle,
+        "consumed": entry.consumed,
+        "needs_verify": entry.needs_verify,
+    }
+
+
+def _entry_from_json(data: dict[str, Any]) -> _StateEntry:
+    entry = _StateEntry(index=data["index"])
+    entry.status = data["status"]
+    entry.instances = [_instance_from_json(row) for row in data["instances"]]
+    entry.error = data.get("error")
+    entry.answer = data.get("answer")
+    entry.outputs = data.get("outputs")
+    entry.output_errors = data.get("output_errors")
+    entry.is_settle = data.get("is_settle", False)
+    entry.consumed = data.get("consumed", False)
+    entry.needs_verify = data.get("needs_verify", False)
+    return entry
+
+
+def _state_json(state: _StateRun) -> dict[str, Any]:
+    return {
+        "state_id": state.state_id,
+        "spec": state.spec,
+        "position": state.position,
+        "prompt_template": state.prompt_template,
+        "name": state.name,
+        "model": state.model,
+        "thinking": state.thinking,
+        "max_entries": state.max_entries,
+        "entries_used": state.entries_used,
+        "instance_counter": state.instance_counter,
+        "error": state.error,
+        "cancelled": state.cancelled,
+        "entries": [_entry_json(entry) for entry in state.entries],
+    }
+
+
+def _state_from_json(data: dict[str, Any]) -> _StateRun:
+    state = _StateRun(
+        state_id=data["state_id"], spec=data["spec"], position=data["position"]
+    )
+    state.prompt_template = data.get("prompt_template")
+    state.name = data.get("name")
+    state.model = data.get("model")
+    state.thinking = data.get("thinking")
+    state.max_entries = data.get("max_entries", STATE_MAX_ENTRIES_DEFAULT)
+    state.entries_used = data.get("entries_used", 0)
+    state.instance_counter = data.get("instance_counter", 0)
+    state.error = data.get("error")
+    state.cancelled = data.get("cancelled", False)
+    state.entries = [_entry_from_json(row) for row in data["entries"]]
+    return state
+
+
+def rebase_run_clocks(
+    run: FactoryRun, clock: "dict[str, float] | None", now: float
+) -> None:
+    """Rebase one run's stored time fields onto the CURRENT monotonic clock.
+
+    The snapshot's ``clock`` pair records the snapshot moment on both the
+    monotonic clock (every stored field lives on it) and the wall clock.
+    A stored field's real remaining time is ``field - mono`` minus the
+    wall time that walked since the snapshot; on the CURRENT clock that
+    reads as ``now + (field - mono) - wall_elapsed``, so every field
+    shifts by ``(now - mono) - wall_elapsed``. With no restart the two
+    terms cancel and the shift is zero; a host reboot or a cloud-sandbox
+    checkpoint restore collapses ``now`` far below ``mono``, and the
+    shift maps each deadline onto the new clock with its REAL remaining
+    time instead of the old boot's uptime (probe D: the rebooted
+    executor waited 11.5 days to reach a pre-reboot backoff deadline).
+    A suspend is NOT a restart (round-1 probe D3): on Linux the
+    monotonic clock pauses through a suspend while the wall clock walks,
+    which produces the same negative drift — but the deadlines still
+    sit on the same clock, and shifting them would charge the budget
+    the suspend time. Only a RESTART shifts: ``now < mono`` is the
+    restart signature (a suspend never rewinds the monotonic clock
+    below the snapshot's reading; a reboot or a checkpoint restore
+    does).
+    A snapshot without the pair predates the field and stays untouched
+    (the shift would be a guess without the wall reference).
+    """
+    if clock is None:
+        return
+    wall = clock.get("wall")
+    mono = clock.get("mono")
+    if not _is_number(wall) or not _is_number(mono):
+        return
+    if now >= mono:
+        return  # no restart: the stored fields already sit on this clock
+    drift = (now - mono) - max(0.0, time.time() - wall)
+
+    def shift(value: float | None) -> float | None:
+        return None if value is None else value + drift
+
+    run.started_at += drift
+    run.admission_backoff_until = shift(run.admission_backoff_until)
+    run.pause_started_at = shift(run.pause_started_at)
+    for state in run.states.values():
+        for entry in state.entries:
+            for instance in entry.instances:
+                instance.spawned_at = shift(instance.spawned_at)
+                instance.deadline = shift(instance.deadline)
+
+
+def _run_json(run: FactoryRun, clock: dict[str, float] | None = None) -> dict[str, Any]:
+    """One run's registry snapshot: the full executor-side state minus the
+    kernel-bound members (the control-loop task, in-flight watch futures,
+    python subprocess handles) and with the event ledger capped to its
+    trailing window.
+
+    ``clock`` records the snapshot moment on BOTH clocks — the executor's
+    monotonic clock (every stored time field lives on it) and the wall
+    clock — so a rehydrate can rebase the fields after a host reboot or a
+    cloud-sandbox checkpoint restore restarts the monotonic clock (see
+    ``rebase_run_clocks``): without the pair, a rebooted executor reads
+    every pre-reboot deadline as far future, waits out the old boot's
+    uptime before admitting, and freezes repair waits forever.
+    """
+    if clock is None:
+        clock = {"wall": time.time(), "mono": time.monotonic()}
+    return {
+        "clock": clock,
+        "run_id": run.run_id,
+        "spec_id": run.spec_id,
+        "name": run.name,
+        "machine": run.machine,
+        "state": run.state,
+        "started_at": run.started_at,
+        "max_parallel": run.max_parallel,
+        "max_transitions": run.max_transitions,
+        "max_children": run.max_children,
+        "max_transitions_reported": run.max_transitions_reported,
+        "max_children_reported": run.max_children_reported,
+        "run_budget_ms": run.run_budget_ms,
+        "budget_reported": run.budget_reported,
+        "pause_reason": run.pause_reason,
+        "last_error": run.last_error,
+        "order": run.order,
+        "pending_evaluations": [
+            [state_id, entry_index, resume_from]
+            for state_id, entry_index, resume_from in run.pending_evaluations
+        ],
+        # The join holds a paused pass stashed on the run (round-3 R3B /
+        # round-4 R4-01): a restart inside the pause window must not lose
+        # them — the resume's replay starts past the join position, so the
+        # stash is the join's only re-entry.
+        "deferred_join_rechecks": [
+            [state_id, entry_index, position]
+            for state_id, entry_index, position in run.deferred_join_rechecks
+        ],
+
+        "events": run.events[-PERSISTED_EVENTS_CAP:],
+        "milestones": sorted(run.milestones),
+        "spawn_count": run.spawn_count,
+        "settle_count": run.settle_count,
+        "transitions_fired": run.transitions_fired,
+        "tool_use_total": run.tool_use_total,
+        "loop_generation": run.loop_generation,
+        "admission_backoff_until": run.admission_backoff_until,
+        "paused_ms": run.paused_ms,
+        "pause_started_at": run.pause_started_at,
+        "join_fired": {
+            f"{key[0]}|{key[1]}": [list(signature) for signature in value]
+            for key, value in run.join_fired.items()
+        },
+        "revision": run.revision,
+        "states": {state_id: _state_json(state) for state_id, state in run.states.items()},
+    }
+
+
+def _run_from_json(data: dict[str, Any]) -> FactoryRun:
+    run = FactoryRun(
+        run_id=data["run_id"],
+        spec_id=data["spec_id"],
+        name=data.get("name"),
+        machine=data["machine"],
+    )
+    run.state = data.get("state", "running")
+    run.started_at = data.get("started_at", 0.0)
+    for field in (
+        "max_parallel", "max_transitions", "max_children",
+        "max_transitions_reported", "max_children_reported",
+        "budget_reported", "spawn_count", "settle_count",
+        "transitions_fired", "tool_use_total", "loop_generation", "revision",
+    ):
+        setattr(run, field, data.get(field) or 0)
+    # A budget rides verbatim: JSON null is no budget (a 0 default is the
+    # canonical machine's own zero, not this loader's).
+    run.run_budget_ms = data.get("run_budget_ms")
+    run.pause_reason = data.get("pause_reason")
+    run.last_error = data.get("last_error")
+    run.order = list(data.get("order") or [])
+    run.pending_evaluations = [
+        (row[0], row[1], row[2]) for row in data.get("pending_evaluations") or []
+    ]
+    run.deferred_join_rechecks = [
+        (row[0], row[1], row[2]) for row in data.get("deferred_join_rechecks") or []
+    ]
+    run.events = list(data.get("events") or [])
+    run.milestones = set(data.get("milestones") or [])
+    run.admission_backoff_until = data.get("admission_backoff_until")
+    run.paused_ms = float(data.get("paused_ms") or 0.0)
+    run.pause_started_at = data.get("pause_started_at")
+    if not _is_number(run.pause_started_at):
+        run.pause_started_at = None
+    run.join_fired = {}
+    for key, value in (data.get("join_fired") or {}).items():
+        canonical_index, target = key.split("|")
+        run.join_fired[(int(canonical_index), target)] = frozenset(
+            (source_id, entry_index) for source_id, entry_index in value
+        )
+    run.states = {
+        state_id: _state_from_json(row) for state_id, row in (data.get("states") or {}).items()
+    }
+    return run
 
 
 class FactoryExecutor:
@@ -1821,8 +2311,14 @@ class FactoryExecutor:
     Ownership split: the supervisor owns the children (admission via
     ``rlm.spawn``, settlement via ``rlm.collect``, cancellation via
     ``rlm.delete_subagent``); this executor owns the run state in kernel
-    memory. Every host call resolves through the module-level ``rlm``
-    functions and ``host_request`` at call time, so tests can patch
+    memory, snapshotted to the session artifact dir
+    (``$RLM_SESSION_DIR/factory-runs/<run id>.json``, atomic writes at
+    the control loop's consistent points) with
+    a mutation journal for the batches and admissions between snapshots,
+    so a kernel restart loses only the control-loop tasks: the registry
+    rehydrates on the next factory use and the runs continue. Every host
+    call resolves through the module-level ``rlm`` functions and
+    ``host_request`` at call time, so tests can patch
     ``rlm.host_request``. ``now`` (default ``time.monotonic``) and ``sleep``
     (default ``asyncio.sleep``) are injectable: budgets measure admission
     to settlement and rate-limit backoff is testable with fake sleeps.
@@ -1835,9 +2331,12 @@ class FactoryExecutor:
     inputs. A run completes at quiescence: no state entry in flight
     (pending/running/waiting) and no unevaluated settle.
 
-    Runs do not survive a kernel restart (the registry lives in kernel
-    memory); children are supervisor-owned and keep running, so
-    ``rlm.list_subagents`` can still see and stop them after a restart.
+    A kernel restart does not orphan the runs: the registry rehydrates,
+    a run that was stopping finishes its cancellations, a running run
+    restarts its control loop (children kept running under the
+    supervisor, and a finished child's emitted outputs are read from its
+    session dir, never from kernel memory), and a python call the restart
+    orphaned fails through its state's retry/policy path.
     """
 
     def __init__(
@@ -1853,6 +2352,757 @@ class FactoryExecutor:
         self._sleep_fn: Callable[[float], Any] = sleep or asyncio.sleep
         self._harness = harness
         self._runs: dict[str, FactoryRun] = {}
+        # Run ids whose snapshots this executor loaded off disk: the
+        # boot-once arming queue (each id is armed exactly once per boot).
+        self._rehydrated: set[str] = set()
+        # (run id, writer) pairs whose write already failed once: a dead
+        # disk must not wedge the loop with a ledger row per event, and a
+        # writer that recovers clears its own mark.
+        self._persist_failed: set[tuple[str, str]] = set()
+        # Run id -> the run revision the last write persisted.
+        self._persist_marks: dict[str, int] = {}
+        # Run ids the unscoped graph's per-run guard already reported this
+        # boot (round-9 probe R9-03): the TUI polls every 2 seconds, and
+        # a line per poll filled the kernel's background buffer with one
+        # repeated line in minutes. Once per run per boot is the contract.
+        self._graph_guard_reported: set[str] = set()
+
+    # -- registry persistence -----------------------------------------------
+
+    def _persist_run(self, run: FactoryRun) -> None:
+        """Snapshot one run to the session artifact dir (atomic write) when it
+        changed since the last write; a finished run retires its files instead.
+
+        Callers persist only at consistent points: the control loop's
+        iteration boundary (before it waits on its children), a fired
+        transition, the loop's exit, and the run/stop/arm entry points. A
+        snapshot therefore never holds a half-applied settle; the mutations
+        made inside one iteration replay from the journal (prepared batches,
+        admissions) or re-derive (a settle re-collects a child that stayed
+        settled under the supervisor). A terminal run (done, failed,
+        stopped) that owns no live actor retires the snapshot and the
+        journal: the registry keeps the run in memory for this boot, and a
+        restart forgets it, so the durable archive holds only runs that can
+        still act. A terminal run with a live resident or in-flight child
+        keeps its snapshot, so ``stop`` still finds it after a restart.
+        Best-effort, exactly once per run and writer when it fails: the run
+        keeps running (the registry's memory copy is the truth the loop
+        reads); the durability loss is a ledger row, never a wedge.
+        """
+        directory = _runs_dir()
+        if directory is None:
+            return  # no session artifact dir, or a daemonless host: memory only
+        if self._persist_marks.get(run.run_id) == run.revision:
+            return  # nothing changed since the last write
+        if run.state in TERMINAL_RUN_STATES and not self._has_unresolved_actor(run):
+            self._persist_marks[run.run_id] = run.revision
+            self._retire_run_files(run, directory)
+            return
+        staging = directory / f".{run.run_id}.json.tmp"
+        try:
+            payload = _run_json(run, {"wall": time.time(), "mono": self._now_fn()})
+            os.makedirs(directory, exist_ok=True)
+            with open(staging, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            os.replace(staging, directory / f"{run.run_id}.json")
+            self._persist_marks[run.run_id] = run.revision
+            self._persist_failed.discard((run.run_id, "snapshot"))
+            # A recovered write clears any stale persist-failed marker.
+            try:
+                (directory / f"{run.run_id}.persist-failed").unlink(missing_ok=True)
+            except OSError:
+                pass
+            # The snapshot absorbed every journal line written before it;
+            # the journal restarts empty for the mutations still to come.
+            journal = directory / f"{run.run_id}{ADMISSIONS_JOURNAL_SUFFIX}"
+            with open(journal, "w", encoding="utf-8"):
+                pass
+        except (OSError, TypeError) as error:
+            # TypeError: a snapshot field json.dump cannot serialize
+            # (round-4 belt note) — the same durability loss as a disk
+            # error, not a crash through the persist path. The staging
+            # file never litters: an unlinked .tmp would be invisible to
+            # the dot-file-skipping rehydrate and hide the failure. The
+            # cleanup is itself guarded: the fault being handled may BE
+            # the staging path (a directory or a permission wall), and
+            # unlink would just raise again through the failure path.
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if (run.run_id, "snapshot") in self._persist_failed:
+                return
+            self._persist_failed.add((run.run_id, "snapshot"))
+            # One DURABLE marker, exactly once per run and writer
+            # (round-4 probe R4-04): the in-memory row warns "a kernel
+            # restart would lose it" and is itself lost to the restart it
+            # warns about — the marker survives it and names the loss.
+            try:
+                marker = directory / f"{run.run_id}.persist-failed"
+                marker.write_text(
+                    f"the run registry snapshot could not be written: {error}\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass  # the disk that lost the snapshot loses the marker too
+            # One direct ledger row, NOT via _event: this row must not
+            # re-enter the persist path that just failed.
+            run.events.append(
+                {
+                    "seq": run.seq_base + len(run.events) + 1,
+                    "kind": "persist_failed",
+                    "stage": "recorded",
+                    "detail": f"the run registry snapshot could not be written; the run keeps running but a kernel restart would lose it: {error}",
+                }
+            )
+            run.revision += 1
+
+    def _retire_run_files(self, run: FactoryRun, directory: Path) -> None:
+        """Retire a terminal run's snapshot and journal, and tombstone it.
+
+        The tombstone (round-4 probe R4-03) is one append-only line in
+        ``retired.jsonl``: after ANY restart, ``status`` answers a
+        tombstoned run's id with the record instead of ``unknown factory
+        run`` — an owner can tell a by-design retirement (the state, the
+        end time, the reason) from a lost registry. Without it, the two
+        are indistinguishable on disk (the incident that steered a false
+        "Part B failed" verdict).
+        """
+        try:
+            tombstone = {
+                "run_id": run.run_id,
+                "spec_id": run.spec_id,
+                "name": run.name,
+                "state": run.state,
+                "ended_at": time.time(),
+                "pause_reason": run.pause_reason,
+                "last_error": run.last_error,
+            }
+            # The ledger compacts to its read window (round-5 probe
+            # R5-02): append-only growth read whole on every status miss
+            # would cost unbounded memory and time, and records silently
+            # answer 'unknown' past the window anyway — the file itself
+            # keeps only the trailing RETIRED_RUNS_READ_LIMIT lines, so
+            # the durable post-mortem matches the readable one.
+            # The prior-ledger read and the rewrite are FAULT-TOLERANT
+            # (round-6 findings): the read decodes with replacement — one
+            # invalid byte must never crash the retire path
+            # (UnicodeDecodeError is a ValueError, not an OSError, and a
+            # crash here kills the loop task AFTER the snapshot unlink:
+            # the run would leave NO durable trace at all) — and the
+            # rewrite lands through a staging file + os.replace, atomic
+            # like the snapshot path: an in-place truncate+write would
+            # wipe every prior tombstone on a mid-write fault.
+            ledger_path = directory / RETIRED_RUNS_FILE
+            staging_path = directory / f".{RETIRED_RUNS_FILE}.tmp"
+            prior: list[str] = []
+            try:
+                prior = [
+                    line
+                    for line in ledger_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if line.strip()
+                ][-max(0, RETIRED_RUNS_READ_LIMIT - 1):]
+            except OSError:
+                pass  # no ledger yet: this append starts it
+            with open(staging_path, "w", encoding="utf-8") as handle:
+                for line in prior:
+                    handle.write(line + "\n")
+                handle.write(json.dumps(tombstone) + "\n")
+            os.replace(staging_path, ledger_path)
+        except OSError:
+            pass  # the tombstone is best-effort, like every retire step
+
+        for path in (
+            directory / f"{run.run_id}.json",
+            directory / f"{run.run_id}{ADMISSIONS_JOURNAL_SUFFIX}",
+            directory / f"{run.run_id}.persist-failed",
+        ):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass  # already gone, or never written: nothing to retire
+
+    def _retired_record(self, run_id: str) -> dict[str, Any] | None:
+        """The tombstone ledger's record for a run id, or None.
+
+        ``status`` answers this record for a run the live registry does
+        not hold when an earlier boot retired it (round-4 R4-03). The
+        scan is bounded (the trailing ``RETIRED_RUNS_READ_LIMIT`` lines)
+        and read-only.
+        """
+        directory = _runs_dir()
+        if directory is None:
+            return None
+        try:
+            # errors="replace" (round-6): an invalid byte in the ledger
+            # must skip its line like any other corrupt row, not raise the
+            # raw decode error through the status surface.
+            lines = (directory / RETIRED_RUNS_FILE).read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+        except OSError:
+            return None
+        record = None
+        for line in lines[-RETIRED_RUNS_READ_LIMIT:]:
+            try:
+                # The ledger's decode point cleans too (round-11 probe
+                # R11-02): a lone surrogate in a tombstone's name or
+                # reason returned through status — a model print of it
+                # was rejected by the host on the real kernel.
+                row = _clean_surrogates(json.loads(line))
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if row.get("run_id") == run_id:
+                # The LAST match wins (round-5 probe R5-03): a terminal
+                # transition can tombstone twice (done -> stop() re-tombs
+                # as stopped); the trailing record is the run's final
+                # truth, and the post-restart answer must match the
+                # in-boot one.
+                record = row
+        if record is not None:
+            row = record
+            return {
+                    "run_id": run_id,
+                    "spec_id": row.get("spec_id"),
+                    "name": row.get("name"),
+                    "state": row.get("state"),
+                    "retired": True,
+                    "ended_at": row.get("ended_at"),
+                    "pause_reason": row.get("pause_reason"),
+                    "last_error": row.get("last_error"),
+                    "events": [],
+                    "states": [],
+                }
+        return None
+
+    def _journal_line(self, run: FactoryRun, line: dict[str, Any]) -> None:
+        """Append one mutation line to the run's journal.
+
+        The line is the mutation the snapshot may not carry yet (the
+        throttle window): a prepared instance batch or an admitted child
+        must never exist only in kernel memory, or a restart loses pending
+        siblings or orphans the child under the supervisor. One small line
+        per mutation, O(1) whatever the machine's size.
+        """
+        directory = _runs_dir()
+        if directory is None:
+            return
+        try:
+            os.makedirs(directory, exist_ok=True)
+            with open(
+                directory / f"{run.run_id}{ADMISSIONS_JOURNAL_SUFFIX}", "a", encoding="utf-8"
+            ) as handle:
+                handle.write(json.dumps(line) + "\n")
+        except OSError as error:
+            if (run.run_id, "journal") in self._persist_failed:
+                return
+            self._persist_failed.add((run.run_id, "journal"))
+            # One direct ledger row, NOT via _event: this row must not
+            # re-enter the persist path that just failed.
+            run.events.append(
+                {
+                    "seq": run.seq_base + len(run.events) + 1,
+                    "kind": "persist_failed",
+                    "stage": "recorded",
+                    "detail": f"the run's mutation journal could not be written; the run keeps running but a kernel restart would lose its un-snapshotted mutations: {error}",
+                }
+            )
+            run.revision += 1
+
+    def _journal_batch(
+        self, run: FactoryRun, state: "_StateRun", entry: "_StateEntry"
+    ) -> None:
+        """Journal an entry's prepared instance batch (the prompt, inputs,
+        and pending status of every instance the prepare bound)."""
+        self._journal_line(
+            run,
+            {
+                "kind": "batch",
+                "state": state.state_id,
+                "entries_used": state.entries_used,
+                "entry": entry.index,
+                "entry_status": entry.status,
+                "instances": [_instance_json(instance) for instance in entry.instances],
+            },
+        )
+
+    def _journal_admission(
+        self, run: FactoryRun, state: "_StateRun", entry: "_StateEntry", instance: "_NodeInstance"
+    ) -> None:
+        """Journal one admitted child: its child_id must be durable the
+        moment the spawn handle lands."""
+        self._journal_line(
+            run,
+            {
+                "kind": "admission",
+                "state": state.state_id,
+                "entries_used": state.entries_used,
+                "entry": entry.index,
+                "entry_status": entry.status,
+                "instance": _instance_json(instance),
+            },
+        )
+
+    def rehydrate_registry(self) -> None:
+        """Load the run registry off the session artifact dir (kernel boot).
+
+        The snapshots this kernel's predecessors wrote are the registry:
+        ``run_id`` keys, ``FactoryRun`` values, with each run's admissions
+        journal adopted on top (the admissions a throttle window kept out
+        of the snapshot). An unreadable snapshot is skipped loudly (its
+        children stay visible on the supervisor lane); the rest of the
+        registry never depends on it.
+        """
+        import sys
+
+        directory = _runs_dir()
+        if directory is None:
+            return
+        try:
+            names = sorted(os.listdir(directory))
+        except FileNotFoundError:
+            return  # nothing persisted yet: a fresh session's first boot
+        except OSError as error:
+            # A runs dir that EXISTS but cannot be listed (round-9 probe
+            # R9-08: a permission change, an I/O error, checksummed
+            # metadata damage) read as "no runs" with no line — every run
+            # lost for the boot, nothing said so. The line names it.
+            import sys
+
+            print(
+                f"the factory runs directory could not be read; every persisted "
+                f"run is lost for this boot (its children stay visible under the "
+                f"supervisor): {error}",
+                file=sys.stderr,
+            )
+            return
+        for name in names:
+            if not name.endswith(".json") or name.startswith("."):
+                continue
+            try:
+                with open(directory / name, encoding="utf-8") as handle:
+                    payload = _clean_surrogates(json.load(handle))
+                run = _run_from_json(payload)
+                # The registry is keyed by FILE NAME (round-8 probes
+                # R8-02/R8-04): the writer always names a snapshot
+                # <run_id>.json, so a payload id that disagrees with the
+                # file stem is a stray copy (an operator backup left in
+                # the live runs dir — it would silently REPLACE the live
+                # run) or a hand edit. Refusing it also keeps an
+                # unhashable payload id from raising at the registry
+                # insert below, outside every recovery unit.
+                if run.run_id != name[: -len(".json")]:
+                    raise ValueError(
+                        f"payload run_id {run.run_id!r} is not the file stem {name!r}"
+                    )
+            except Exception as error:  # noqa: BLE001 - a corrupt input
+                # file at a disk boundary: the run is skipped loudly, and
+                # the registry never depends on it. The tuple would have
+                # to enumerate every exception a malformed machine,
+                # journal, or clock pair can raise (round-3 probe R3D:
+                # a non-dict journal line slipped past ValueError/
+                # KeyError/TypeError as AttributeError and killed the arm).
+                print(
+                    f"factory run snapshot {_shown(name)} is unreadable; the run is not "
+                    f"rehydrated (its children stay visible under the supervisor): {error}",
+                    file=sys.stderr,
+                )
+                continue
+            # A stale .persist-failed marker names a snapshot this boot's
+            # predecessor could not write (round-5 probe R5-01: the r4
+            # marker was write-only — after a restart the model's status
+            # read clean while the loss rode a file only a human ls saw).
+            # The read is FAULT-TOLERANT (round-7 probe R7-01): the marker
+            # exists precisely BECAUSE this disk already failed once, and a
+            # strict-UTF-8 read raised UnicodeDecodeError (a ValueError)
+            # PAST the recovery units — killing the whole rehydrate mid-
+            # loop, with the corrupt run AND every later run silently
+            # never loading and the boot arm arming nothing. errors=
+            # 'replace' costs the corrupt byte its own line; the belt
+            # (r6 A4) prints the marker's EXISTENCE even when its text
+            # cannot be read at all (chmod 000 says so instead of
+            # silence).
+            marker_path = directory / f"{run.run_id}.persist-failed"
+            try:
+                # The stat AND the read sit inside the try (round-8 probe
+                # R8-02): on the repo floor (3.11), Path.exists() re-raises
+                # every OSError outside its ENOENT/ENOTDIR/EBADF/ELOOP set
+                # — a metadata read error on exactly the marker's inode
+                # (EIO, or a checksumming filesystem's EBADMSG) escaped
+                # the loop one line above the r7 read fix, with the same
+                # whole-boot blast. (OSError, ValueError) routes stat
+                # faults and any decode shape to the belt line.
+                if marker_path.exists():
+                    marker_text = marker_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).strip()
+                else:
+                    marker_text = None
+            except (OSError, ValueError):
+                marker_text = "(the marker's text is unreadable)"
+            if marker_text is not None:
+                print(
+                    f"factory run {_shown(name)}: a previous kernel could not persist "
+                    f"its registry snapshot — {marker_text or '(the marker is empty)'}",
+                    file=sys.stderr,
+                )
+            # The whole post-parse load is one recovery unit (round-2
+            # probe Q5): one corrupt journal line inside _adopt_mutations
+            # (or a malformed machine in _transitions_index) used to
+            # kill the WHOLE boot arm — every later run never loaded and
+            # the loaded ones stayed frozen with no loop and no log. One
+            # run's corruption now costs that run alone, loudly.
+            try:
+                # The machine's shape is internally consistent (round-8
+                # probe R8-01): a snapshot whose JSON stays VALID but whose
+                # fields disagree (a bit flip inside an identifier —
+                # order ["b"] -> ["c"] — or a hand edit that renames a
+                # state in one place) loads with no skip line and then
+                # raises a raw KeyError inside the arm loop and the
+                # unscoped graph, breaking EVERY shared surface for the
+                # whole boot. The check refuses it HERE, at the same
+                # recovery unit, loudly, costing that run alone.
+                if set(run.order) != set(run.states):
+                    raise ValueError(
+                        f"order {run.order} disagrees with the states "
+                        f"{sorted(run.states)}"
+                    )
+                run.transitions_from = _transitions_index(run.machine)
+                # Every stored time field rides the executor's monotonic
+                # clock, which a host reboot or a cloud-sandbox checkpoint
+                # restore restarts: rebase the fields onto THIS boot's
+                # clock before any budget, backoff, or repair wait reads
+                # them.
+                rebase_run_clocks(run, payload.get("clock"), self._now_fn())
+                # The trailing event window keeps its seqs; this boot
+                # numbers its events above them so the ledger never reuses
+                # a seq.
+                run.seq_base = max((event.get("seq") or 0) for event in run.events) if run.events else 0
+                self._adopt_mutations(run, directory)
+            except Exception as error:  # noqa: BLE001 - the same disk boundary
+                print(
+                    f"factory run snapshot {_shown(name)} is unreadable; the run is not "
+                    f"rehydrated (its children stay visible under the supervisor): {error}",
+                    file=sys.stderr,
+                )
+                continue
+            self._runs[run.run_id] = run
+            self._rehydrated.add(run.run_id)
+        # A marker whose snapshot is ABSENT names the run's FIRST write
+        # (round-8 probe R8-03): the marker exists because the snapshot
+        # does not, so no snapshot walk ever surfaces it — the run is
+        # lost entirely (its children run on under the supervisor with no
+        # owner), and the marker was read only by a human ls. One line
+        # at the end of the load names every such loss.
+        for marker_name in names:
+            if not marker_name.endswith(".persist-failed"):
+                continue
+            if marker_name.startswith("."):
+                continue  # a hidden stray: nothing the writer names
+            stem = marker_name[: -len(".persist-failed")]
+            try:
+                # The stat sits inside its own try (round-9 probe R9-02):
+                # this scan runs OUTSIDE every recovery unit, and a stat
+                # fault here (EIO/EBADMSG on a disk that already failed
+                # for this run, ESTALE, EACCES through a symlink) killed
+                # the rehydrate AFTER the registry loaded — the executor
+                # was already assigned, so the boot arm caught it, armed
+                # NOTHING, and the first lazy call raised the raw OSError.
+                if (directory / f"{stem}.json").exists():
+                    continue  # the run loaded; its marker line printed above
+            except OSError:
+                continue  # the run's own skip line already named its snapshot
+            # A run the retired ledger holds is not LOST (round-9 probe
+            # R9-05): its marker unlink failed (a crash between the
+            # retire's unlinks, or a directory at the marker path), and
+            # status answers its tombstone — the loss line would call a
+            # finished run lost, every boot, forever.
+            if self._retired_record(stem) is not None:
+                continue
+            print(
+                f"factory run {_shown(stem)}: a previous kernel could not write its first "
+                f"registry snapshot; the run is lost (its children stay visible "
+                f"under the supervisor; remove {_shown(marker_name)} "
+                f"to acknowledge the loss)",
+                file=sys.stderr,
+            )
+
+    def _adopt_mutations(self, run: FactoryRun, directory: Path) -> None:
+        """Replay the journal lines the snapshot never absorbed.
+
+        Batches replay in order (an entry's prepared instances append by
+        their per-state index — a state-unique counter, so the lookup is
+        by index attribute, never by list position: a re-entered state's
+        second entry carries its instance at position 0); the LAST
+        admission per instance wins (a retry's new child, not the
+        attempt that failed) and applies only where the snapshot's
+        instance is missing or still childless — a snapshot that already
+        carries the mutation, or one whose entry went terminal past it, is
+        fresher than the journal and stands.
+        """
+        try:
+            journal = (directory / f"{run.run_id}{ADMISSIONS_JOURNAL_SUFFIX}").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            return  # no journal: the snapshot is the whole truth
+        batches: list[dict[str, Any]] = []
+        admissions: dict[tuple[str, int, int], dict[str, Any]] = {}
+        for line in journal.splitlines():
+            if not line.strip():
+                continue
+            try:
+                # The replay decode point cleans (round-11 R11-02 /
+                # round-12 R12-01): this loop re-decodes the journal the
+                # intent reader cleaned — a lone surrogate in a replayed
+                # batch's content flowed into the rehydrated run and the
+                # boot arm's first act was the poisoned rlm.run frame,
+                # every boot (a mid-spawn SIGKILL leaves the journal the
+                # only record).
+                row = _clean_surrogates(json.loads(line))
+                instance = row["instance"] if row.get("kind") == "admission" else None
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue  # a torn tail line: the mutations before it stand
+            if row.get("kind") == "batch":
+                batches.append(row)
+            elif instance is not None:
+                admissions[(row["state"], row["entry"], instance["index"])] = row
+        for row in batches:
+            state = run.states.get(row.get("state"))
+            if state is None:
+                continue
+            entry = self._entry_at(state, row.get("entry"))
+            if entry is None or entry.status in TERMINAL_ENTRY_STATUSES:
+                continue  # the snapshot moved past this batch
+            for data in row.get("instances") or []:
+                if self._instance_at(entry, data.get("index")) is None:
+                    entry.instances.append(_instance_from_json(data))
+            self._state_counters_from_lines(run, state, entry, row)
+        for (_, entry_index, _), row in admissions.items():
+            state = run.states.get(row.get("state"))
+            if state is None:
+                continue
+            entry = self._entry_at(state, entry_index)
+            if entry is None or entry.status in TERMINAL_ENTRY_STATUSES:
+                continue  # the snapshot moved past this admission
+            data = row["instance"]
+            instance = self._instance_at(entry, data.get("index"))
+            if instance is None:
+                instance = _instance_from_json(data)
+                entry.instances.append(instance)
+            elif instance.child_id is not None or instance.status != "pending":
+                # The snapshot's instance carries an EARLIER state of the
+                # same attempt. The journal is TRUNCATED at every snapshot
+                # write, so each surviving line is NEWER than the snapshot:
+                # a retry's admission line (at or above the snapshot's
+                # attempt — `_admit` increments the attempt BEFORE the
+                # spawn, so a snapshot taken mid-spawn already carries the
+                # new attempt without the child) replaces the failed
+                # attempt's child (probe E — the orphaned retry: the old
+                # attempt's child was adopted and the retry ran on with no
+                # owner). A line BELOW the snapshot's attempt predates it:
+                # skip it.
+                line_attempt = data.get("attempt") or 0
+                if not (_is_int(line_attempt) and line_attempt >= instance.attempt):
+                    continue  # the snapshot already carries this admission
+            entry.instances[entry.instances.index(instance)] = _instance_from_json(data)
+            self._state_counters_from_lines(run, state, entry, row)
+
+    async def _resolve_admission_intents(self, run: FactoryRun) -> None:
+        """Resolve mid-spawn kernel deaths (probe F): an ``admitting`` intent
+        line whose admission never landed named a child the supervisor
+        created while the kernel died before the reply. Delete that child
+        so the re-admission does not collide with its name (the collision
+        paused the run) and it does not run on with no owner. The
+        snapshot's instance stays at the old attempt — the loop's own
+        re-admission is the clean retry.
+        """
+        from . import delete_subagent, list_subagents
+
+        intents: dict[tuple[Any, Any, Any, Any], str] = {}
+        for line in self._journal_lines(run):
+            kind = line.get("kind")
+            if kind == "admitting":
+                key = (line.get("state"), line.get("entry"), line.get("index"), line.get("attempt"))
+                intents[key] = line.get("label") or ""
+            elif kind == "admission":
+                # The admission line carries the instance's index and
+                # attempt inside ``instance`` (the shape `_journal_admission`
+                # writes): the intent is spent when the instance the spawn
+                # created was admitted — reading the fields from the top
+                # level (where the INTENT carries them) would never match
+                # and every arm would resolve a LIVE admission as an
+                # unresolved intent and delete its child.
+                instance = line.get("instance") or {}
+                key = (
+                    line.get("state"),
+                    line.get("entry"),
+                    instance.get("index"),
+                    instance.get("attempt"),
+                )
+                intents.pop(key, None)  # the admission landed; the intent is spent
+        labels = {label for label in intents.values() if label}
+        if not labels:
+            return
+        try:
+            roster = await list_subagents()
+        except Exception:
+            return  # an unreachable roster: the loop's own retry surfaces it
+        for row in roster:
+            name = getattr(row, "session_name", None) or ""
+            child_id = getattr(row, "rlm_child_id", None) or ""
+            if name not in labels:
+                continue
+            try:
+                await delete_subagent(child_id)
+                self._event(
+                    run,
+                    "orphan_reclaimed",
+                    child=child_id,
+                    detail=f"deleted the child a mid-spawn kernel death orphaned (label {name!r})",
+                )
+            except Exception:
+                pass  # already gone, or the supervisor refuses: the re-admission's name error names it
+
+    def _journal_lines(self, run: FactoryRun) -> "list[dict[str, Any]]":
+        """The run's journal lines, parsed and skipped-tail tolerant."""
+        directory = _runs_dir()
+        if directory is None:
+            return []
+        try:
+            journal = (directory / f"{run.run_id}{ADMISSIONS_JOURNAL_SUFFIX}").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            return []
+        lines = []
+        for line in journal.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            # A line that is valid JSON but NOT an object (round-4 probe
+            # R4-02: `12345`, `[1,2]`) would parse fine and kill the ARM
+            # door's consumer — _resolve_admission_intents' line.get
+            # raises AttributeError, freezing every rehydrated run and
+            # hard-failing every later factory call. The corrupt line
+            # costs its own skip, like every other reader of this journal.
+            if not isinstance(row, dict):
+                continue
+            lines.append(_clean_surrogates(row))
+        return lines
+
+    def _entry_at(self, state: "_StateRun", index: Any) -> "_StateEntry | None":
+        """The state's entry at a journal line's index: entries append
+        positionally (the index IS the position), so a line for an entry
+        the snapshot predates materializes it."""
+        if not _is_int(index) or index < 0:
+            return None
+        while len(state.entries) <= index:
+            state.entries.append(_StateEntry(index=len(state.entries)))
+        return state.entries[index]
+
+    @staticmethod
+    def _instance_at(entry: "_StateEntry", index: Any) -> "_NodeInstance | None":
+        """The entry's instance carrying a per-state index (indexes are
+        state-unique, not positions: locate by attribute)."""
+        if not _is_int(index):
+            return None
+        return next((i for i in entry.instances if i.index == index), None)
+
+    @staticmethod
+    def _state_counters_from_lines(
+        run: FactoryRun, state: "_StateRun", entry: "_StateEntry", row: dict[str, Any]
+    ) -> None:
+        """Carry a journal line's bookkeeping onto the rehydrated state: the
+        entry's status at the mutation, the state's entries_used, and the
+        instance counter (an adopted index must never be reused — a reused
+        index collides the spawn label with a still-registered child)."""
+        if entry.status == "pending" and row.get("entry_status"):
+            entry.status = row["entry_status"]
+        state.entries_used = max(state.entries_used, int(row.get("entries_used") or 0))
+        state.instance_counter = max(
+            state.instance_counter,
+            max((i.index for i in entry.instances), default=0) + 1,
+        )
+        run.revision += 1
+
+    async def arm_persisted_runs(self) -> None:
+        """Re-arm the runs a previous kernel left behind (idempotent).
+
+        A kernel restart lost this executor's control-loop tasks; the
+        rehydrated registry keeps the runs and their child membership.
+        The first factory use after the restart completes the interrupted
+        flows, then this boot's loops own the runs from here on: a run
+        that was stopping finishes its cancellations, a running run
+        restarts its control loop (the children kept running under the
+        supervisor; a finished child's emitted outputs are read from its
+        session dir), and a python call the restart orphaned fails through
+        its state's retry/policy path. The queue drains once per boot; the
+        iterations walk copies so an awaited failure policy mutating an
+        entry mid-pass cannot corrupt the walk.
+        """
+        while self._rehydrated:
+            run_id = self._rehydrated.pop()
+            run = self._runs.get(run_id)
+            if run is None:
+                continue  # a concurrent arm of this boot already took it
+            # Per-run isolation (round-8 probe R8-01): a corrupt durable
+            # input that loaded without raising (a wrong-but-valid shape
+            # the load-time checks missed) must cost ITS run one loud
+            # line, never the shared loop — an escape here froze every
+            # run popped after it and killed the boot arm arming nothing.
+            try:
+                await self._resolve_admission_intents(run)
+                if run.state == "stopping":
+                    await self._complete_stop(run, "stopped; rehydrated after a kernel restart")
+                    self._persist_run(run)
+                    continue
+                for state_id in list(run.order):
+                    state = run.states[state_id]
+                    python_state = "python" in state.spec
+                    for entry in list(state.entries):
+                        for instance in list(entry.instances):
+                            if instance.status != "running" or instance.child_id is not None:
+                                continue  # an admitted child re-collects
+                            if python_state:
+                                await self._apply_instance_failure(
+                                    run, state, entry, instance, RUN_LOST_PYTHON_CALL, retry=True
+                                )
+                if run.state == "running":
+                    self._start_loop(run)
+                self._persist_run(run)
+            except Exception as error:  # noqa: BLE001 - the last shared loop
+                import sys
+
+                # The frozen run keeps its child on the supervisor and
+                # reads "running" with no loop (round-9 probe R9-06):
+                # once the single stderr line has scrolled away, nothing
+                # tells the model the run is frozen. One ledger row keeps
+                # the failure visible in status() forever.
+                run.events.append(
+                    {
+                        "seq": run.seq_base + len(run.events) + 1,
+                        "kind": "executor_error",
+                        "stage": "recorded",
+                        # The `error` key matches the control loop's three
+                        # other executor_error rows (round-10 probe R10-05):
+                        # the lane and the status surface read one shape.
+                        "error": f"the run could not be re-armed after a kernel "
+                        f"restart (its children stay visible under the "
+                        f"supervisor): {error}",
+                    }
+                )
+                run.revision += 1
+                print(
+                    f"factory run {run_id} could not be re-armed after a kernel "
+                    f"restart (its children stay visible under the supervisor): {error}",
+                    file=sys.stderr,
+                )
 
     # -- public API ---------------------------------------------------------
 
@@ -1935,6 +3185,7 @@ class FactoryExecutor:
             # A budget pause during the initial admission leaves the run
             # paused with no loop: resuming is the operator's decision.
             self._start_loop(run)
+        self._persist_run(run)
         return {
             "run_id": run.run_id,
             "spec_id": run.spec_id,
@@ -1955,7 +3206,17 @@ class FactoryExecutor:
         last ``EVENT_WINDOW`` events.
         Raises ``ValueError`` for an unknown run id.
         """
-        run = self._require_run(run_id)
+        run = self._runs.get(run_id)
+        if run is None:
+            # A run this kernel never hosted may be a TOMBSTONED terminal
+            # run of an earlier boot (round-4 probe R4-03): status answers
+            # the retirement record instead of pretending the run never
+            # existed — an owner must tell by-design retirement from a
+            # lost registry.
+            retired = self._retired_record(run_id)
+            if retired is not None:
+                return retired
+            raise ValueError(f"unknown factory run {run_id!r}")
         nodes = [self._state_report(run.states[state_id]) for state_id in run.order]
         for event in run.events:
             if event["stage"] in ("recorded", "arrived"):
@@ -1967,7 +3228,11 @@ class FactoryExecutor:
             "state": run.state,
             "nodes": nodes,
             "events": [dict(event) for event in run.events[-EVENT_WINDOW:]],
-            "elapsed_ms": int((self._now_fn() - run.started_at) * 1000),
+            # The budget's clock: wall time minus paused time (and an open
+            # pause), so the number the operator reads is the same one
+            # the budget charges (round-1 probe B2: a 2h pause read as a
+            # blown 60s budget's worth of elapsed).
+            "elapsed_ms": int(self._run_budget_active_ms(run)),
             "usage": self._usage_report(run),
         }
         # The M4 oversight signal: every state whose latest terminal entry
@@ -1997,27 +3262,24 @@ class FactoryExecutor:
         return payload
 
     async def stop(self, run_id: str) -> dict[str, Any]:
-        """Cancel every running child of the run and mark it stopped.
-
-        Sets the transitional ``stopping`` state before the first await so
-        the control loop cannot admit new children or finalize the run while
-        the cancellations are in flight. Idempotent: a second stop returns
-        the same result without another ledger event.
-        """
+        """Cancel the run's live children, reporting stopped only after deletion succeeds."""
         run = self._require_run(run_id)
-        # The transitional "stopping" state is guarded as well: two
-        # concurrent stop() calls would otherwise both pass a bare
-        # "stopped" check, both enter the cancellation pass, and issue
-        # duplicate delete_subagent requests plus a second run_stopped
-        # ledger event.
-        if run.state in ("stopping", "stopped"):
+        if run.state == "stopped":
             return {"run_id": run.run_id, "state": run.state, "cancelled": []}
-        run.state = "stopping"
-        self._touch(run)
-        stopped = await self._halt_nonterminal(run, "run stopped")
-        run.state = "stopped"
-        self._event(run, "run_stopped", detail=f"stopped; {len(stopped)} state(s) cancelled")
-        return {"run_id": run.run_id, "state": "stopped", "cancelled": stopped}
+        if run.state == "stopping" and any(
+            instance.ownership_change_in_progress
+            for state in run.states.values()
+            for entry in state.entries
+            for instance in entry.instances
+        ):
+            return {"run_id": run.run_id, "state": run.state, "cancelled": []}
+        if run.state != "stopping":
+            run.state = "stopping"
+            self._touch(run)
+            self._persist_run(run)
+        stopped = await self._complete_stop(run, "stopped")
+        self._persist_run(run)
+        return {"run_id": run.run_id, "state": run.state, "cancelled": stopped}
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         """Resume a paused run (escalate, budget, or max_transitions pause).
@@ -2029,8 +3291,13 @@ class FactoryExecutor:
         under ``failure_policy: "continue"``. A budget or max_transitions
         pause is reported once per run: resuming after it is an explicit
         operator decision and no further budget pauses fire. Raises
-        ``ValueError`` when the run is not paused.
+        ``ValueError`` when the run is not paused, and on a daemonless
+        (``--print``) host for any run this kernel did not start.
         """
+        if _daemonless_host() and run_id not in self._runs:
+            raise ValueError(
+                f"factory run {run_id!r} did not start in this process: {PRINT_RUNS_NOT_DURABLE}"
+            )
         run = self._require_run(run_id)
         if run.state != "paused":
             raise ValueError(f"factory run {run_id!r} is {run.state!r}, not paused")
@@ -2042,6 +3309,10 @@ class FactoryExecutor:
         run.loop_generation += 1
         run.state = "running"
         run.pause_reason = None
+        # The budget's paused-time fold: the pause no longer counts
+        # against the run budget (the owner's decision latency is not
+        # machine work).
+        self._fold_paused(run)
         # Re-arm the pause notice: the escalate -> resume -> fail-again
         # retry flow must tell the parent about every pause, not only the
         # first. The budget and max_* notices stay one per run.
@@ -2062,6 +3333,7 @@ class FactoryExecutor:
             await self._finalize(run)
         elif run.state == "running":
             self._start_loop(run)
+        self._persist_run(run)
         return {
             "run_id": run.run_id,
             "state": run.state,
@@ -2151,6 +3423,11 @@ class FactoryExecutor:
                     "child": instance.child_id,
                     "duration_ms": instance.duration_ms,
                     "error": instance.error,
+                    **(
+                        {"factory_task_activity": instance.factory_task_activity}
+                        if instance.factory_task_activity is not None
+                        else {}
+                    ),
                 }
                 for entry in state.entries
                 for instance in entry.instances
@@ -2361,15 +3638,36 @@ class FactoryExecutor:
                 if run.state not in live_states and self._running_instance_count(run) == 0
             ]
             newest_terminal_ids = set(terminal_ids[-GRAPH_RUNS_WINDOW:])
-            return {
-                "runs": [
-                    self._graph_snapshot(run, compact=compact)
-                    for run in self._runs.values()
-                    if run.state in live_states
+            snapshots: list[dict[str, Any]] = []
+            for run in self._runs.values():
+                if not (
+                    run.state in live_states
                     or self._running_instance_count(run) > 0
                     or run.run_id in newest_terminal_ids
-                ]
-            }
+                ):
+                    continue
+                # Per-run isolation (round-8 probe R8-01): a corrupt
+                # durable input that loaded without raising must cost its
+                # own panel one loud line, never the whole unscoped poll
+                # (the view lane polls this shape; a raw error here broke
+                # the factory page for every run, all boot). ONCE per run
+                # per boot (round-9 probe R9-03): the TUI polls this
+                # shape every 2 seconds, and a line-per-poll filled the
+                # kernel's 64 KiB background buffer — and then every
+                # model cell — with one repeated line in minutes.
+                try:
+                    snapshots.append(self._graph_snapshot(run, compact=compact))
+                except Exception as error:  # noqa: BLE001 - the view lane's poll
+                    import sys
+
+                    if run.run_id not in self._graph_guard_reported:
+                        self._graph_guard_reported.add(run.run_id)
+                        print(
+                            f"factory run {run.run_id} cannot render in the factory "
+                            f"view (its children stay visible under the supervisor): {error}",
+                            file=sys.stderr,
+                        )
+            return {"runs": snapshots}
         run = self._runs.get(ref)
         if run is not None:
             return self._graph_snapshot(run, compact=compact)
@@ -2467,11 +3765,12 @@ class FactoryExecutor:
     async def activity(self, request: dict[str, Any]) -> Any:
         """Handle one out-of-band ``factory_activity`` request frame (the
         host bridge's lane): route the action to ``graph``/``status``/
-        ``watch``/``run``/``stop``/``resume``/``peek`` and return the reply's
-        result payload. Raises ``ValueError`` for malformed requests and
-        unknown runs/specs (the reply carries it as the error reason).
-        ``peek`` is the all-session overview's non-arming unscoped read; it
-        takes no target. ``graph``
+        ``watch``/``run``/``stop``/``resume``/``library``/``peek`` and
+        return the reply's result payload. Raises ``ValueError`` for malformed
+        requests and unknown runs/specs (the reply carries it as the error
+        reason). ``library`` serves the machine library: the list with no
+        target, or one machine's graph payload when ``specId`` names it.
+        ``graph``
         and ``watch`` answer with the compact snapshots (the host lane
         renders diagrams, not answers); ``run`` is the lane that starts a
         run from the daemon or TUI, so it rides the full ``run()``
@@ -2486,7 +3785,14 @@ class FactoryExecutor:
         # included, which would otherwise bypass the namespace's gate --
         # refuses with the one refusal message.
         require_factory_enabled()
+        # The lane is the factory page's poll: the first frame after a
+        # kernel restart re-arms the rehydrated runs here. ``peek`` is
+        # the one exception: it is the cross-session overview's
+        # read-only live poll, and a display refresh in one session must
+        # never complete another owner's interrupted flows.
         action = request.get("action")
+        if action != "peek":
+            await self.arm_persisted_runs()
         if action not in ACTIVITY_ACTIONS:
             raise ValueError(f"unknown factory activity action {action!r}")
         run_id = request.get("runId")
@@ -2502,11 +3808,18 @@ class FactoryExecutor:
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
         if action in ("graph", "peek"):
-            # ``peek`` answers the same compact unscoped snapshot as
-            # ``graph``; the host refuses a target for it, and this lane
-            # never arms a run, so a display refresh in one session cannot
-            # complete another owner's interrupted flows.
-            return _wire_payload(self.graph(run_id or spec_id, compact=True))
+            # ``peek`` and ``graph`` answer the same compact snapshot; only
+            # the re-arm above differs between them. A run the peek lists
+            # while it still awaits its re-arm is displayed but NOT
+            # executing: the overview's assembly reads the marker and
+            # paints the row with the saved marker, never a ticking age
+            # for a run no loop drives.
+            payload = self.graph(run_id or spec_id, compact=True)
+            if action == "peek" and isinstance(payload, dict):
+                for row in payload.get("runs") or []:
+                    if row.get("run_id") in self._rehydrated:
+                        row["armed"] = False
+            return _wire_payload(payload)
         if action == "status":
             if not run_id:
                 raise ValueError("factory activity status requires runId")
@@ -2624,13 +3937,7 @@ class FactoryExecutor:
                 max_entries=state_spec.get("max_entries", STATE_MAX_ENTRIES_DEFAULT),
             )
             run.order.append(state_id)
-        for transition in canonical.get("transitions") or []:
-            raw_from = transition["from"]
-            # A join (from is a list) is visible from EVERY source state's
-            # settle evaluation; a single-source transition registers once.
-            sources = raw_from if isinstance(raw_from, list) else [raw_from]
-            for source in sources:
-                run.transitions_from.setdefault(source, []).append(transition)
+        run.transitions_from = _transitions_index(canonical)
         return run
 
     # -- event ledger -------------------------------------------------------
@@ -2655,7 +3962,11 @@ class FactoryExecutor:
         message), and ``delivered``
         (the parent read the ledger via ``status()``).
         """
-        event: dict[str, Any] = {"seq": len(run.events) + 1, "kind": kind, "stage": stage}
+        event: dict[str, Any] = {
+            "seq": run.seq_base + len(run.events) + 1,
+            "kind": kind,
+            "stage": stage,
+        }
         if node is not None:
             event["node"] = node
         if entry is not None:
@@ -2666,21 +3977,69 @@ class FactoryExecutor:
             event["detail"] = detail
         event.update(extra)
         run.events.append(event)
+        if len(run.events) > PERSISTED_EVENTS_CAP:
+            # The trailing window: the oldest events leave, the seq
+            # watermark moves up by the same count, so no seq is ever
+            # reused and the next event still numbers above every one
+            # that left (``seq`` reads seq_base + len + 1).
+            trimmed = run.events[: len(run.events) - PERSISTED_EVENTS_CAP]
+            run.events = run.events[len(run.events) - PERSISTED_EVENTS_CAP :]
+            run.seq_base += len(trimmed)
         # Every ledger event is an observable mutation, so the watch
-        # bookkeeping rides the same seam: bump the revision and resolve
-        # every registered watcher. ``watch`` re-checks its signature, so
-        # an event that leaves the state/instance shape unchanged (a
-        # backoff notice, a repeated milestone) just re-arms the wait.
+        # bookkeeping and the registry snapshot ride the same seam: bump
+        # the revision, resolve every registered watcher, persist the run.
+        # ``watch`` re-checks its signature, so an event that leaves the
+        # state/instance shape unchanged (a backoff notice, a repeated
+        # milestone) just re-arms the wait.
         self._touch(run)
         return event
 
+    def _evict_terminal_runs(self) -> None:
+        """Past ``RETAINED_RUNS_LIMIT`` terminal runs, evict the oldest.
+
+        The terminal runs' files retired at their terminal persist, so
+        this is registry bookkeeping only: an evicted run answers
+        ``unknown factory run`` exactly like a run of a previous boot.
+        Live runs are never touched; the newest terminal runs stay (the
+        operator reads the just-finished run's final status).
+        """
+        terminal = [
+            (run.started_at, run_id)
+            for run_id, run in self._runs.items()
+            if run.state in TERMINAL_RUN_STATES
+        ]
+        if len(terminal) <= RETAINED_RUNS_LIMIT:
+            return
+        terminal.sort()
+        for _, run_id in terminal[: len(terminal) - RETAINED_RUNS_LIMIT]:
+            del self._runs[run_id]
+
     def _touch(self, run: FactoryRun) -> None:
-        """Bump the run's watch revision and wake every registered watcher."""
+        """Bump the run's watch revision and wake every registered watcher.
+        The revision also tells ``_persist_run`` the run changed."""
         run.revision += 1
         for waiter in run.watchers:
             if not waiter.done():
                 waiter.set_result(run.revision)
         run.watchers = []
+
+    async def _pause(
+        self, run: FactoryRun, reason: str, kind: str, detail: str, *, node: str | None = None
+    ) -> None:
+        """Pause the run and tell the parent. The budget excludes paused time
+        (elapsed = now - started_at - paused_ms), so every pause records its
+        start; the resume folds it into ``paused_ms``."""
+        run.state = "paused"
+        if run.pause_started_at is None:
+            run.pause_started_at = self._now_fn()
+        run.pause_reason = reason
+        await self._milestone(run, kind, detail, node=node)
+
+    def _fold_paused(self, run: FactoryRun) -> None:
+        """Fold the completed pause into the budget's paused total."""
+        if run.pause_started_at is not None:
+            run.paused_ms += (self._now_fn() - run.pause_started_at) * 1000.0
+            run.pause_started_at = None
 
     async def _milestone(self, run: FactoryRun, kind: str, detail: str, *, node: str | None = None) -> None:
         """Record a run milestone and inject one quiet notice (one per kind).
@@ -2723,6 +4082,133 @@ class FactoryExecutor:
         # fresh settle, or the paused index after a max_transitions pause.
         run.pending_evaluations.append((state.state_id, entry.index, 0))
 
+    async def _evaluate_join(
+        self,
+        run: FactoryRun,
+        state: _StateRun,
+        entry: _StateEntry,
+        position: int,
+        canonical_index: int,
+        transition: dict[str, Any],
+    ) -> str:
+        """Evaluate ONE join transition of a settled state; return its outcome.
+
+        ``unsettled`` — a source has no settle yet (the fire waits).
+        ``live`` — a source's current-round entry is still pending or
+        running; that source's own settle re-reaches this join.
+        ``arrival-queued`` — every source settled, but a queued evaluation
+        will fire a transition into a source: the arrival is this round's
+        work for it (round-1 probe A3). The caller DEFERS the join: the
+        promise may never land (its guard fails against the queued settle's
+        own captured outputs, its target sits at max_entries, or a feeding
+        join cannot complete), and a skipped join is never re-reached — so
+        the hold must re-run after the queue drains (round-2 probe Q1).
+        ``stale`` / ``blocked`` / ``fired`` / ``paused`` — the signature
+        already fired, the target is at max_entries, the fire happened, or
+        the max_transitions pause landed (the caller must stop the pass).
+        """
+        sources = transition["from"]
+        signature_parts: list[tuple[str, int]] = []
+        for source_id in sources:
+            source_state = run.states.get(source_id)
+            if source_state is not None and any(
+                source_entry.status in ("pending", "running")
+                for source_entry in source_state.entries
+            ):
+                return "live"
+            if run.pending_evaluations:
+                for pending_state_id, _, _ in run.pending_evaluations:
+                    if pending_state_id == source_id:
+                        continue
+                    for _, pending_transition in run.transitions_from.get(pending_state_id, []):
+                        if pending_transition.get("to") == source_id:
+                            return "arrival-queued"
+            latest = source_state.latest_settle() if source_state is not None else None
+            if latest is None:
+                return "unsettled"
+            signature_parts.append((source_id, latest.index))
+        signature = frozenset(signature_parts)
+        # Keyed by the transition's canonical index in the machine's
+        # transitions list: duplicate transitions (same sources, same
+        # target) are legal machine syntax and stay independent, the ONE
+        # join object shared by every source state's list keeps ONE key (a
+        # join fired from one source's settle must not re-fire from
+        # another's), and the key rides the registry snapshot verbatim
+        # where an object id() would not.
+        key = (canonical_index, transition["to"])
+        if run.join_fired.get(key) == signature:
+            return "stale"  # this completion already fired (or was blocked)
+        # The signature is CLAIMED only in _fire_transition, when the
+        # transition actually fires or is blocked: a max_transitions pause
+        # that re-queues this transition must not leave a stale mark, or
+        # the resume would skip the join forever.
+        return await self._fire_transition(run, state, entry, position, transition, (key, signature))
+
+    async def _fire_transition(
+        self,
+        run: FactoryRun,
+        state: _StateRun,
+        entry: _StateEntry,
+        position: int,
+        transition: dict[str, Any],
+        join_signature: "tuple[tuple[int, str], frozenset[tuple[str, int]]] | None",
+    ) -> str:
+        """Fire or block ONE transition of a settled state; return the outcome.
+
+        Shared by the single-source path and the join path. ``blocked``
+        records the target at max_entries; ``paused`` lands the
+        max_transitions pause (the caller must stop the pass; the settle is
+        re-queued un-consumed at this transition's position).
+        """
+        target = run.states[transition["to"]]
+        from_field = transition["from"]
+        if target.entries_used >= target.max_entries:
+            if join_signature is not None:
+                # Blocked: this source-settle combination is consumed
+                # even though the target had no entries left.
+                run.join_fired[join_signature[0]] = join_signature[1]
+            self._event(
+                run,
+                "transition_blocked",
+                detail=(
+                    f"state {target.state_id!r} is at max_entries "
+                    f"{target.max_entries}; transition {from_field!r} -> {target.state_id!r} blocked"
+                ),
+                **{"from": from_field, "to": target.state_id},
+            )
+            return "blocked"
+        if run.transitions_fired >= run.max_transitions and not run.max_transitions_reported:
+            run.max_transitions_reported = True
+            entry.consumed = False
+            run.pending_evaluations.insert(0, (state.state_id, entry.index, position))
+            await self._pause(
+                run,
+                "max_transitions exceeded",
+                "max_transitions_exceeded",
+                f"max_transitions {run.max_transitions} exceeded; no new entries; "
+                f"resume with await rlm.factory.resume('{run.run_id}')",
+            )
+            return "paused"
+        if join_signature is not None:
+            run.join_fired[join_signature[0]] = join_signature[1]
+        run.transitions_fired += 1
+        # The guard rides the fired event (and the ``last_fired`` edge the
+        # graph overlay reads): two guarded transitions may share one
+        # from+to pair, so the guard is the only identity that tells the
+        # diagram WHICH of them fired.
+        when = transition.get("when")
+        fired_fields: dict[str, Any] = {"from": from_field, "to": target.state_id}
+        if when is not None:
+            fired_fields["when"] = copy.deepcopy(when)
+        self._event(
+            run,
+            "transition_fired",
+            detail=f"{from_field!r} -> {target.state_id!r}",
+            **fired_fields,
+        )
+        self._enter_state(run, target, from_state=state.state_id)
+        return "fired"
+
     async def _evaluate_settles(self, run: FactoryRun) -> None:
         """Evaluate every queued settle's outgoing transitions once.
 
@@ -2735,6 +4221,11 @@ class FactoryExecutor:
         a resume continues after the transitions that already fired instead
         of re-firing them.
         """
+        fired = False
+        # Joins held on a QUEUED arrival (round-1 probe A3) defer instead of
+        # skipping: the promise may never land, so each one re-runs once the
+        # queue drains (round-2 probe Q1).
+        deferred_joins: list[tuple[str, int, int]] = []
         while run.pending_evaluations and run.state == "running":
             state_id, entry_index, resume_from = run.pending_evaluations.pop(0)
             state = run.states[state_id]
@@ -2743,93 +4234,80 @@ class FactoryExecutor:
                 continue
             entry.consumed = True
             outputs = entry.outputs or {}
-            for transition_index, transition in enumerate(run.transitions_from.get(state_id, [])):
-                if transition_index < resume_from:
+            for position, (canonical_index, transition) in enumerate(
+                run.transitions_from.get(state_id, [])
+            ):
+                if position < resume_from:
                     continue  # already fired before the pause; do not re-fire
                 raw_from = transition["from"]
-                join_signature: "frozenset[tuple[str, int]] | None" = None
                 if isinstance(raw_from, list):
-                    # A join fires from this settle only when every source
-                    # state has a settle, and only once per source-settle
-                    # combination: both sources settling in one collect
-                    # batch must produce ONE entry of the target, not two.
-                    sources = raw_from
-                    signature_parts = []
-                    for source_id in sources:
-                        source_state = run.states.get(source_id)
-                        latest = source_state.latest_settle() if source_state is not None else None
-                        if latest is None:
-                            signature_parts = None
-                            break
-                        signature_parts.append((source_id, latest.index))
-                    if signature_parts is None:
-                        continue  # a join source never settled yet; not firable
-                    signature = frozenset(signature_parts)
-                    # Keyed by the transition object's identity: duplicate
-                    # transitions (same sources, same target) are legal
-                    # machine syntax and stay independent.
-                    key = (id(transition), transition["to"])
-                    if run.join_fired.get(key) == signature:
-                        continue  # this completion already fired (or was blocked)
-                    # The signature is CLAIMED only below, when the
-                    # transition actually fires or is blocked: a
-                    # max_transitions pause that re-queues this transition
-                    # must not leave a stale mark, or the resume would skip
-                    # the join forever.
-                    join_signature = (key, signature)
-                else:
-                    sources = [raw_from]
-                    when = transition.get("when")
-                    if when is not None and not _guard_passes(when, outputs):
-                        continue
-                target = run.states[transition["to"]]
-                from_field = transition["from"]
-                if target.entries_used >= target.max_entries:
-                    if join_signature is not None:
-                        # Blocked: this source-settle combination is consumed
-                        # even though the target had no entries left.
-                        run.join_fired[join_signature[0]] = join_signature[1]
-                    self._event(
-                        run,
-                        "transition_blocked",
-                        detail=(
-                            f"state {target.state_id!r} is at max_entries "
-                            f"{target.max_entries}; transition {from_field!r} -> {target.state_id!r} blocked"
-                        ),
-                        **{"from": from_field, "to": target.state_id},
+                    outcome = await self._evaluate_join(
+                        run, state, entry, position, canonical_index, transition
                     )
+                    if outcome == "arrival-queued":
+                        # The hold defers (round-2 probe Q1): the queued
+                        # promise may never land (its guard fails, its
+                        # target sits at max_entries, or a feeding join
+                        # cannot complete), and nothing else re-reaches
+                        # this join. The drain recheck below re-runs it.
+                        deferred_joins.append((state_id, entry_index, position))
+                    elif outcome == "paused":
+                        # A pause mid-pass drops the pass's un-rechecked
+                        # holds — the resume's replay starts at the paused
+                        # settle's position, past the earlier joins. The
+                        # holds ride the run (probe R3B: the next pass's
+                        # drain recheck re-reaches them).
+                        run.deferred_join_rechecks = list(deferred_joins)
+                        return
+                    fired = fired or outcome == "fired"
                     continue
-                if run.transitions_fired >= run.max_transitions and not run.max_transitions_reported:
-                    run.max_transitions_reported = True
-                    entry.consumed = False
-                    run.pending_evaluations.insert(0, (state_id, entry_index, transition_index))
-                    run.state = "paused"
-                    run.pause_reason = "max_transitions exceeded"
-                    await self._milestone(
-                        run,
-                        "max_transitions_exceeded",
-                        f"max_transitions {run.max_transitions} exceeded; no new entries; "
-                        f"resume with await rlm.factory.resume('{run.run_id}')",
-                    )
-                    return
-                if join_signature is not None:
-                    run.join_fired[join_signature[0]] = join_signature[1]
-                run.transitions_fired += 1
-                # The guard rides the fired event (and the ``last_fired``
-                # edge the graph overlay reads): two guarded transitions may
-                # share one from+to pair, so the guard is the only identity
-                # that tells the diagram WHICH of them fired.
                 when = transition.get("when")
-                fired_fields: dict[str, Any] = {"from": from_field, "to": target.state_id}
-                if when is not None:
-                    fired_fields["when"] = copy.deepcopy(when)
-                self._event(
-                    run,
-                    "transition_fired",
-                    detail=f"{from_field!r} -> {target.state_id!r}",
-                    **fired_fields,
+                if when is not None and not _guard_passes(when, outputs):
+                    continue
+                outcome = await self._fire_transition(
+                    run, state, entry, position, transition, None
                 )
-                self._enter_state(run, target, from_state=state_id)
+                if outcome == "paused":
+                    run.deferred_join_rechecks = list(deferred_joins)
+                    return
+                fired = fired or outcome == "fired"
+        if deferred_joins or run.deferred_join_rechecks:
+            # Holds a paused pass stashed on the run re-enter first
+            # (probe R3B: the resume's replay of the paused settle starts
+            # past the join position, so the stash is the join's only
+            # re-entry).
+            deferred_joins = run.deferred_join_rechecks + deferred_joins
+            run.deferred_join_rechecks = []
+        while deferred_joins and run.state == "running":
+            # The queue drained: re-reach every join the queued-arrival
+            # hold deferred. A REAL arrival left a live entry (the live
+            # rule still waits for that source's own settle); a promise
+            # that never landed (a guard that failed, a max_entries block,
+            # an incomplete feeding join) left no live entry, so the join
+            # fires with the sources' current settles (round-2 probe Q1 —
+            # the alternative is the run silently finalizing a round
+            # early).
+            state_id, entry_index, position = deferred_joins.pop(0)
+            indexed = run.transitions_from.get(state_id, [])
+            if position >= len(indexed):
+                continue  # a later mutation re-shaped the settle's list
+            canonical_index, transition = indexed[position]
+            if not isinstance(transition.get("from"), list):
+                continue  # the transition is no longer a join
+            outcome = await self._evaluate_join(
+                run, run.states[state_id], run.states[state_id].entries[entry_index],
+                position, canonical_index, transition,
+            )
+            if outcome == "paused":
+                run.deferred_join_rechecks = list(deferred_joins)
+                return
+            fired = fired or outcome == "fired"
+        if fired:
+            # A fired transition consumed a settle and entered a target:
+            # both must be durable before the iteration's next await, or a
+            # restart replays the settle and re-fires — a max_entries guard
+            # would self-heal, a multi-entry target would double-work.
+            self._persist_run(run)
 
     # -- readiness, binding, admission --------------------------------------
 
@@ -2863,6 +4341,8 @@ class FactoryExecutor:
             if pair is None:
                 break
             state, entry, instance = pair
+            if self._factory_task_owners(run):
+                break  # a settled child still owns shared task work on this checkout
             python = "python" in state.spec
             if not python and self._children_budget_exceeded(run):
                 await self._pause_for_children(run)
@@ -2888,10 +4368,18 @@ class FactoryExecutor:
         generation still owns the state (a resume bumped it)."""
         return run.state == "running" and run.loop_generation == generation
 
+    def _run_budget_active_ms(self, run: FactoryRun) -> float:
+        """The run's ACTIVE time: wall time minus paused time (the owner's
+        decision latency never spends the machine's budget)."""
+        elapsed = (self._now_fn() - run.started_at) * 1000.0 - run.paused_ms
+        if run.pause_started_at is not None:
+            elapsed -= (self._now_fn() - run.pause_started_at) * 1000.0
+        return max(0.0, elapsed)
+
     def _run_budget_exceeded(self, run: FactoryRun) -> bool:
         if run.run_budget_ms is None or run.budget_reported:
             return False
-        return (self._now_fn() - run.started_at) * 1000 > run.run_budget_ms
+        return self._run_budget_active_ms(run) > run.run_budget_ms
 
     async def _pause_for_budget(self, run: FactoryRun) -> None:
         """Pause the run at the budget boundary (milestone fires once).
@@ -2899,12 +4387,11 @@ class FactoryExecutor:
         Children already in flight keep running; they settle normally once
         the run resumes. Resuming after the milestone is an explicit operator
         decision, so no further budget pauses fire (budget_reported)."""
-        elapsed_ms = (self._now_fn() - run.started_at) * 1000
-        run.state = "paused"
-        run.pause_reason = "run budget exceeded"
+        elapsed_ms = self._run_budget_active_ms(run)
         run.budget_reported = True
-        await self._milestone(
+        await self._pause(
             run,
+            "run budget exceeded",
             "budget_exceeded",
             f"run budget_ms {run.run_budget_ms} exceeded after {int(elapsed_ms)}ms; no new spawns; "
             f"resume with await rlm.factory.resume('{run.run_id}')",
@@ -2925,11 +4412,10 @@ class FactoryExecutor:
         Children already in flight keep running. Resuming after the
         milestone is an explicit operator decision, so no further
         child-budget pauses fire (max_children_reported)."""
-        run.state = "paused"
-        run.pause_reason = "max_children exceeded"
         run.max_children_reported = True
-        await self._milestone(
+        await self._pause(
             run,
+            "max_children exceeded",
             "max_children_exceeded",
             f"run max_children {run.max_children} exceeded after {run.spawn_count} children; "
             f"no new spawns; resume with await rlm.factory.resume('{run.run_id}')",
@@ -2954,6 +4440,11 @@ class FactoryExecutor:
                 entry.instances = instances
                 if instances:
                     entry.status = "running"
+                    # The batch is durable before the loop can lose it: a
+                    # restart inside the throttle window replays the pending
+                    # siblings (the foreach fan that has not been admitted
+                    # yet) instead of silently dropping them.
+                    self._journal_batch(run, state, entry)
                     self._event(
                         run, "node_ready", node=state_id, entry=entry.index,
                         detail=f"{len(instances)} instance(s) prepared",
@@ -3092,6 +4583,17 @@ class FactoryExecutor:
             return [instance], None
         if items is None:
             return None, "foreach entry did not resolve its over input"
+        if len(items) > foreach["max"]:
+            # The silent drop (probe H): 7 items with max 3 spawned 3
+            # with no ledger event, so the run's answer count could not be
+            # explained from status() alone. One event carries both counts.
+            self._event(
+                run,
+                "foreach_truncated",
+                node=state.state_id,
+                entry=entry.index,
+                detail=f"foreach over {len(items)} items; max {foreach['max']} spawns the first {foreach['max']}",
+            )
         instances = []
         for item in items[: foreach["max"]]:
             instance_value = item if isinstance(item, str) else json.dumps(item)
@@ -3148,21 +4650,88 @@ class FactoryExecutor:
         ``stop()`` is retracted (deleted and cancelled) instead of
         registered running.
         """
-        from . import _spawn
+        from . import _spawn, delete_subagent
+
+        if instance.child_id is not None:
+            old_child = instance.child_id
+            instance.ownership_change_in_progress = True
+            try:
+                await delete_subagent(old_child)
+            except Exception as exc:
+                instance.ownership_change_in_progress = False
+                self._event(
+                    run,
+                    "cancel_failed",
+                    node=state.state_id,
+                    entry=entry.index,
+                    instance=instance.index,
+                    child=old_child,
+                    error=str(exc),
+                )
+                await self._apply_instance_failure(
+                    run,
+                    state,
+                    entry,
+                    instance,
+                    f"could not retire child {old_child} before replacement: {exc}",
+                    retry=False,
+                )
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
+                return "failed"
+            instance.ownership_change_in_progress = False
+            instance.child_id = None
+            instance.session_dir = None
+            instance.child_name = None
+            instance.factory_task_activity = "idle"
+            if run.state != "running":
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
+                return "stopped"
 
         instance.attempt += 1
         child_name = _spawn_label(state.name, run.run_id, state.state_id, instance.index, instance.attempt)
-        contract = state.spec.get("emit")
+        # The admission intent: the child is about to exist under this
+        # label. A kernel death between the supervisor creating the child
+        # and the reply leaves an orphan the snapshot cannot know (the
+        # instance is still pending at the OLD attempt). The rehydrate
+        # resolves an unresolved intent line by deleting the child it
+        # names (probe F — the re-admission collided with the orphan's
+        # name and paused the run). The admission line that follows
+        # replaces the intent; the snapshot absorbs both at the next
+        # write.
+        self._journal_line(
+            run,
+            {
+                "kind": "admitting",
+                "state": state.state_id,
+                "entry": entry.index,
+                "index": instance.index,
+                "attempt": instance.attempt,
+                "label": child_name,
+            },
+        )
+        instance.ownership_change_in_progress = True
         try:
+            contract = state.spec.get("emit")
             handle = await _spawn(
                 instance.prompt,
                 name=child_name,
                 model=state.model,
                 thinking=state.thinking,
                 factory={"runId": run.run_id, "specId": run.spec_id, "stateId": state.state_id},
-                factory_contract=None if contract is None else {**contract, "inputs": instance.inputs or {}},
+                factory_contract=(
+                    None if contract is None else {**contract, "inputs": instance.inputs or {}}
+                ),
             )
         except RuntimeError as exc:
+            instance.ownership_change_in_progress = False
+            if run.state != "running":
+                # stop() ran while the spawn was in flight and waited for it;
+                # no child came of it, so the stop can finish now.
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
+                return "stopped"
             last_error = str(exc)
             if _is_rate_limit_error(last_error):
                 if allow_backoff:
@@ -3201,6 +4770,9 @@ class FactoryExecutor:
                 run, state, entry, instance, f"spawn admission failed: {last_error}", retry=False
             )
             return "failed"
+        except Exception:
+            instance.ownership_change_in_progress = False
+            raise
         if run.state != "running":
             # stop() ran while the spawn was in flight: its cancellation
             # pass could not see this child yet, so retract it here or it
@@ -3208,12 +4780,21 @@ class FactoryExecutor:
             instance.child_id = handle.rlm_child_id
             await self._retract_admission(run, state, entry, instance)
             return "stopped"
+        instance.ownership_change_in_progress = False
         instance.child_id = handle.rlm_child_id
         instance.session_dir = str(handle.session_dir)
+        instance.child_name = handle.name
+        instance.factory_task_activity = None
+        instance.repair_sent = False
         instance.spawned_at = self._now_fn()
         instance.status = "running"
         instance.rate_limit_streak = 0
         run.spawn_count += 1
+        # The admission is durable before anything else can happen to it:
+        # the journal line lands now (a snapshot may sit the throttle
+        # window out), so a restart adopts the child instead of orphaning
+        # it under the supervisor.
+        self._journal_admission(run, state, entry, instance)
         self._event(
             run,
             "spawned",
@@ -3233,19 +4814,44 @@ class FactoryExecutor:
         "stopped" like ``_admit``. The call holds a max_parallel slot but is
         no child: it never counts toward ``max_children``."""
         instance.attempt += 1
+        instance.ownership_change_in_progress = True
         try:
             process = await _PythonProcess.start(state.spec["python"], instance.inputs)
         except OSError as exc:
+            instance.ownership_change_in_progress = False
             await self._apply_instance_failure(
                 run, state, entry, instance, f"python state could not start: {exc}", retry=False
             )
+            if run.state == "stopping":
+                await self._finish_stop_if_quiescent(run, "stopped")
             return "failed"
+        except Exception:
+            instance.ownership_change_in_progress = False
+            raise
         if run.state != "running":
             # stop() ran while the process was starting; its pass could not see it.
-            await process.stop()
-            instance.status = "cancelled"
-            self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
+            try:
+                await process.stop()
+            except Exception as exc:
+                instance.ownership_change_in_progress = False
+                instance.process = process
+                instance.status = "running"
+                self._event(
+                    run,
+                    "cancel_failed",
+                    node=state.state_id,
+                    entry=entry.index,
+                    instance=instance.index,
+                    error=str(exc),
+                )
+            else:
+                instance.ownership_change_in_progress = False
+                instance.status = "cancelled"
+                self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
             return "stopped"
+        instance.ownership_change_in_progress = False
         instance.process = process
         instance.spawned_at = self._now_fn()
         instance.deadline = instance.spawned_at + self._python_limit_ms(run, state) / 1000
@@ -3282,15 +4888,31 @@ class FactoryExecutor:
     ) -> None:
         """Settle one python call that exited or ran past its time limit."""
         process = instance.process
-        assert process is not None and instance.spawned_at is not None
-        # Claimed before any await, like _cancel_running claims a child.
-        instance.process = None
+        if instance.status != "running" or process is None or instance.ownership_change_in_progress:
+            return
+        assert instance.spawned_at is not None
         instance.duration_ms = int((self._now_fn() - instance.spawned_at) * 1000)
         if process.proc.returncode is None:
-            # Past its time limit: the limit is spent, so no retry.
-            await process.stop()
-            if instance.status != "running":
-                return  # a stop or fail-fast pass cancelled it meanwhile
+            # Past its time limit: the limit is spent, but ownership stays
+            # here if stopping the process cannot be confirmed.
+            instance.ownership_change_in_progress = True
+            try:
+                await process.stop()
+            except Exception as exc:
+                instance.ownership_change_in_progress = False
+                self._event(
+                    run,
+                    "cancel_failed",
+                    node=state.state_id,
+                    entry=entry.index,
+                    instance=instance.index,
+                    error=str(exc),
+                )
+                if run.state == "stopping":
+                    await self._finish_stop_if_quiescent(run, "stopped")
+                return
+            instance.ownership_change_in_progress = False
+            instance.process = None
             await self._apply_instance_failure(
                 run,
                 state,
@@ -3299,7 +4921,10 @@ class FactoryExecutor:
                 f"python state time limit {self._python_limit_ms(run, state)}ms exceeded",
                 retry=False,
             )
+            if run.state == "stopping":
+                await self._finish_stop_if_quiescent(run, "stopped")
             return
+        instance.process = None
         stdout, stderr = process.finish()
         run.settle_count += 1
         returncode = process.proc.returncode
@@ -3360,8 +4985,8 @@ class FactoryExecutor:
     async def _apply_settlement(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, result: Any
     ) -> None:
-        if instance.status != "running":
-            return  # cancelled (stop/fail_fast) while the collect was in flight
+        if instance.status != "running" or instance.ownership_change_in_progress or run.state in ("stopping", "stopped"):
+            return  # retirement or cancellation claimed the child while collect was in flight
         if result.status == "error" and _is_infra_error(result.error or ""):
             # A worker death or a lost supervisor link is infra, not the
             # task's failure: the executor verifies it itself (a short
@@ -3372,6 +4997,8 @@ class FactoryExecutor:
             if fresh is None:
                 return  # a stop/fail_fast pass claimed it, or the worker answered
             result = fresh
+            if result.factory_task_busy is not None:
+                instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
             if (
                 entry.status == "running"
                 and not instance.infra_respawned
@@ -3412,17 +5039,29 @@ class FactoryExecutor:
             await self._apply_instance_failure(run, state, entry, instance, child_reason, retry=True)
             return
         budget_ms = state.spec.get("budget_ms")
-        if budget_ms is not None and instance.spawned_at is not None:
-            elapsed_ms = (self._now_fn() - instance.spawned_at) * 1000
-            if elapsed_ms > budget_ms:
-                # Wall-clock budget (admission to settlement) exceeded: the
-                # budget is spent, so no retry; the failure_policy applies.
+        if budget_ms is not None:
+            # The budget measures the CHILD'S OWN run time (the collect
+            # result's duration), not the wall between admission and the
+            # executor seeing the settle: a paused run does not collect,
+            # so a child that finished inside its budget while the run
+            # waited on the owner must not lose finished work to a wall
+            # reading that includes the pause (probe C: a 20-minute
+            # review that sat out a 2-hour escalate pause read 140
+            # minutes against a 60-minute budget and was thrown away).
+            # A zero/absent duration (an infra-dead re-read) falls back
+            # to the wall reading.
+            elapsed_ms = instance.duration_ms
+            if not elapsed_ms and instance.spawned_at is not None:
+                elapsed_ms = (self._now_fn() - instance.spawned_at) * 1000
+            if elapsed_ms and elapsed_ms > budget_ms:
+                # The child's own run time exceeded: the budget is spent,
+                # so no retry; the failure_policy applies.
                 await self._apply_instance_failure(
                     run,
                     state,
                     entry,
                     instance,
-                    f"state budget_ms {budget_ms} exceeded ({int(elapsed_ms)}ms from admission to settlement)",
+                    f"state budget_ms {budget_ms} exceeded ({int(elapsed_ms)}ms of child run time)",
                     retry=False,
                 )
                 return
@@ -3458,15 +5097,15 @@ class FactoryExecutor:
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
             entry.answer = self._entry_answer(entry)
             if "emit" in state.spec:
-                capture_failure, failed = self._emitted_outputs(run, state, entry)
-            else:
-                capture_failure = await self._capture_outputs(run, state, entry)
-                failed = [instance]
+                await self._settle_emitted(run, state, entry)
+                return
+            capture_failure = await self._capture_outputs(run, state, entry)
+            failed = [instance]
             if entry.status != "running":
                 return  # a stop()/fail_fast pass claimed the entry mid-capture
             if capture_failure is not None:
-                # A declared output that never bound or was never emitted
-                # is the producing entry's task failure, not a silent
+                # A declared output that never bound after the capture
+                # retry is the producing entry's task failure, not a silent
                 # valueless settle: no settle is queued (a dependent never
                 # enters on an unbound required input), retries then
                 # failure_policy apply, and the answer stays provisional
@@ -3542,18 +5181,39 @@ class FactoryExecutor:
         from . import delete_subagent
 
         old_child = instance.child_id or ""
-        # The worker may be alive-but-unreachable rather than dead: retire
-        # it so the respawn cannot run beside its zombie in the same
-        # worktree. Best-effort and bounded — the host's delete kills under
-        # the daemon's own timeout, the rest is registry bookkeeping — so
-        # an already-gone child or a dead bridge must not wedge the
-        # respawn; the supervisor-side zombie sweep this pairs with lands
-        # in PR 2 of the [factory] group.
+        instance.ownership_change_in_progress = True
         try:
             await delete_subagent(old_child)
-        except Exception:
-            pass
+        except Exception as exc:
+            instance.ownership_change_in_progress = False
+            self._event(
+                run,
+                "cancel_failed",
+                node=state.state_id,
+                entry=entry.index,
+                instance=instance.index,
+                child=old_child,
+                error=str(exc),
+            )
+            await self._apply_instance_failure(
+                run,
+                state,
+                entry,
+                instance,
+                f"worker retirement failed before infra respawn: {exc}",
+                retry=False,
+            )
+            if run.state == "stopping":
+                await self._finish_stop_if_quiescent(run, "stopped")
+            return
+        instance.ownership_change_in_progress = False
+        instance.child_id = None
+        instance.session_dir = None
+        instance.child_name = None
+        instance.factory_task_activity = "idle"
         if instance.status != "running" or run.state not in ("running", "paused"):
+            if run.state == "stopping":
+                await self._finish_stop_if_quiescent(run, "stopped")
             return  # a stop()/fail_fast pass claimed the instance mid-delete
         # A sibling may have paused the run in this same collect batch.
         # Preserve the verified death as pending; resume admits it for free
@@ -3599,6 +5259,197 @@ class FactoryExecutor:
             return None
         return "\n\n".join(answers)
 
+    def _emitted_outputs(self, state: _StateRun, entry: _StateEntry) -> "dict[int, list[str]]":
+        """Read each instance's emitted outputs into ``entry.outputs``;
+        answer the required ports each instance still owes.
+
+        A foreach entry gathers one value per item: text ports join with
+        blank lines, every other port becomes a list in item order.
+        """
+        declared = state.spec["emit"].get("outputs") or []
+        required = [out["name"] for out in declared if not str(out.get("type", "")).endswith("?")]
+        kinds = _declared_port_types(state.spec, "outputs")
+        per_instance: list[dict[str, Any]] = []
+        owed: dict[int, list[str]] = {}
+        for instance in entry.instances:
+            emitted: dict[str, Any] = {}
+            if instance.session_dir is not None:
+                try:
+                    loaded = json.loads((Path(instance.session_dir) / FACTORY_OUTPUTS_FILE).read_text("utf-8"))
+                    emitted = loaded if isinstance(loaded, dict) else {}
+                except (OSError, ValueError):
+                    emitted = {}
+            per_instance.append(emitted)
+            missing = [name for name in required if name not in emitted]
+            if missing:
+                owed[instance.index] = missing
+        if state.spec.get("foreach") is None:
+            entry.outputs = per_instance[0] if per_instance else {}
+        else:
+            entry.outputs = {}
+            for out in declared:
+                values = [emitted[out["name"]] for emitted in per_instance if out["name"] in emitted]
+                if values:
+                    entry.outputs[out["name"]] = (
+                        "\n\n".join(str(value) for value in values)
+                        if kinds.get(out["name"]) == "text"
+                        else values
+                    )
+        entry.output_errors = {}
+        return owed
+
+    async def _settle_emitted(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
+        """Settle an emit state's entry from what its children emitted.
+
+        Settled means told: every required port carries an accepted value.
+        A child that ended its turn still owing a port gets one repair
+        message in the same session; it is never replaced by a fresh child
+        (two writers in one worktree). When that repair turn ends, a child
+        that still owes a port fails the entry with ``missing_output``,
+        without a retry.
+        """
+        owed = self._emitted_outputs(state, entry)
+        if not owed:
+            entry.status = "done"
+            self._queue_settle(run, state, entry)
+            return
+        for instance in entry.instances:
+            missing = owed.get(instance.index)
+            if missing is None:
+                continue
+            if instance.repair_sent:
+                await self._apply_instance_failure(
+                    run,
+                    state,
+                    entry,
+                    instance,
+                    f"missing_output: the child still owes {', '.join(missing)} after a repair request",
+                    retry=False,
+                )
+                return
+            reason = await self._request_repair(run, state, entry, instance, missing)
+            if reason is not None:
+                await self._apply_instance_failure(run, state, entry, instance, reason, retry=False)
+                return
+
+    async def _request_repair(
+        self,
+        run: FactoryRun,
+        state: _StateRun,
+        entry: _StateEntry,
+        instance: _NodeInstance,
+        missing: list[str],
+    ) -> str | None:
+        """Steer the settled child once to emit what it owes; ``None`` when
+        the message went out, else the failure reason."""
+        from . import host_request
+
+        calls = ", ".join(f"{name}=..." for name in missing)
+        message = (
+            f"You ended your turn without handing back {', '.join(missing)}. "
+            f"Call `await rlm.factory.emit({calls})` from your Python REPL now; "
+            "the call checks each value and names any field to fix."
+        )
+        child_id = instance.child_id
+        try:
+            await host_request(
+                "agent_message.send",
+                {"message": message, "receiver_role": "child", "receiver_name": instance.child_name},
+            )
+        except RuntimeError as error:
+            if (
+                instance.child_id != child_id
+                or instance.ownership_change_in_progress
+                or run.state != "running"
+            ):
+                return None
+            return f"missing_output: {', '.join(missing)}, and the repair message failed: {error}"
+        if (
+            instance.child_id != child_id
+            or instance.ownership_change_in_progress
+            or run.state != "running"
+        ):
+            return None
+        instance.repair_sent = True
+        instance.status = "running"
+        self._event(
+            run,
+            "repair_requested",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            detail=f"owes {', '.join(missing)}",
+        )
+        return None
+
+    async def _pause_for_unverified_task_activity(
+        self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance
+    ) -> None:
+        if run.state != "running":
+            return
+        instance.factory_task_activity = "unverified"
+        reason = (
+            f"factory task activity UNVERIFIED for {state.state_id}; "
+            f"child ownership remains with {instance.child_id or 'this instance'}"
+        )
+        self._event(
+            run,
+            "factory_task_activity_unverified",
+            node=state.state_id,
+            entry=entry.index,
+            instance=instance.index,
+            child=instance.child_id,
+            detail=reason,
+        )
+        await self._pause(
+            run,
+            reason,
+            "paused",
+            f"{reason}; resume with await rlm.factory.resume('{run.run_id}')",
+            node=state.state_id,
+        )
+
+    async def _poll_repair(
+        self,
+        run: FactoryRun,
+        state: _StateRun,
+        entry: _StateEntry,
+        instance: _NodeInstance,
+        *,
+        task_busy: bool | None,
+    ) -> None:
+        """Decide a repair when its turn ends: the child reads idle again
+        (the queued repair message keeps it busy until its turn starts).
+        Emitted means done; anything still owed fails with ``missing_output``."""
+        if (
+            instance.status != "running"
+            or instance.ownership_change_in_progress
+            or run.state in ("stopping", "stopped")
+        ):
+            return
+        instance.factory_task_activity = (
+            "busy" if task_busy is True else "idle" if task_busy is False else "unverified"
+        )
+        owed = self._emitted_outputs(state, entry).get(instance.index)
+        if owed is None:
+            instance.status = "done"
+            self._event(run, "repaired", node=state.state_id, entry=entry.index, instance=instance.index)
+            if entry.status == "running" and all(i.status == "done" for i in entry.instances):
+                await self._settle_emitted(run, state, entry)
+            return
+        if task_busy is None:
+            await self._pause_for_unverified_task_activity(run, state, entry, instance)
+            return
+        if not task_busy:
+            await self._apply_instance_failure(
+                run,
+                state,
+                entry,
+                instance,
+                f"missing_output: the child still owes {', '.join(owed)} after a repair request",
+                retry=False,
+            )
+
     def _capture_ports(self, state: _StateRun, entry: _StateEntry) -> None:
         """Capture the state's declared output ports from the entry's answer.
 
@@ -3628,58 +5479,6 @@ class FactoryExecutor:
                 errors[name] = error
         entry.outputs = outputs
         entry.output_errors = errors
-
-    def _emitted_outputs(
-        self, run: FactoryRun, state: _StateRun, entry: _StateEntry
-    ) -> tuple[str | None, list[_NodeInstance]]:
-        """Read what each child emitted into ``entry.outputs``.
-
-        The child's ``factory.emit`` already checked every value and wrote
-        the accepted ones to its outputs file in one step, so this reads
-        and gathers them: a foreach entry joins text ports with blank lines
-        and turns every other port into a list in item order. Returns the
-        joined failure reason and the instances that omitted a required
-        port; ``(None, [])`` when every port has a value.
-        """
-        declared = state.spec["emit"].get("outputs") or []
-        kinds = _declared_port_types(state.spec, "outputs")
-        per_instance: list[dict[str, Any]] = []
-        for instance in entry.instances:
-            emitted: dict[str, Any] = {}
-            if instance.session_dir is not None:
-                try:
-                    loaded = json.loads((Path(instance.session_dir) / FACTORY_OUTPUTS_FILE).read_text("utf-8"))
-                    emitted = loaded if isinstance(loaded, dict) else {}
-                except (OSError, ValueError):
-                    emitted = {}
-            per_instance.append(emitted)
-        if state.spec.get("foreach") is None:
-            entry.outputs = per_instance[0] if per_instance else {}
-        else:
-            entry.outputs = {}
-            for out in declared:
-                values = [emitted[out["name"]] for emitted in per_instance if out["name"] in emitted]
-                if values:
-                    entry.outputs[out["name"]] = (
-                        "\n\n".join(str(value) for value in values) if kinds.get(out["name"]) == "text" else values
-                    )
-        entry.output_errors = {}
-        missing: list[_NodeInstance] = []
-        for instance, emitted in zip(entry.instances, per_instance):
-            if any(
-                not out.get("type", "").endswith("?") and out["name"] not in emitted
-                for out in declared
-            ):
-                missing.append(instance)
-        failures = []
-        for out in declared:
-            name = out["name"]
-            if out.get("type", "").endswith("?") or all(name in emitted for emitted in per_instance):
-                continue
-            error = f"output {name!r} was never emitted (rlm.factory.emit)"
-            self._event(run, "output_capture_failed", node=state.state_id, entry=entry.index, port=name, error=error)
-            failures.append(error)
-        return ("; ".join(failures) or None), missing
 
     async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> str | None:
         """Capture the settle's outputs, retrying the capture once.
@@ -3913,6 +5712,15 @@ class FactoryExecutor:
             await self._halt_nonterminal(run, "run failed (fail_fast)")
             if run.state != "running":
                 return  # stop() landed during the cancellations; it wins
+            if self._has_unresolved_actor(run):
+                await self._pause(
+                    run,
+                    "child retirement failed; the actor remains owned by this run",
+                    "paused",
+                    "failure cascade could not confirm child retirement; resume after the child is safe to replace",
+                    node=state.state_id,
+                )
+                return
             cancelled_children = sum(
                 1
                 for other in run.states.values()
@@ -3930,55 +5738,117 @@ class FactoryExecutor:
         elif policy == "continue":
             pass  # the entry stays error; dependents see the error settle at binding
         else:  # escalate (default)
-            run.state = "paused"
-            run.pause_reason = reason
-            await self._milestone(
+            await self._pause(
                 run,
+                reason,
                 "paused",
                 f"state {state.state_id} failed: {reason}; resume with await rlm.factory.resume('{run.run_id}') "
                 "to re-admit the failed entry as a fresh attempt",
                 node=state.state_id,
             )
 
-    async def _halt_nonterminal(self, run: FactoryRun, reason: str) -> list[str]:
-        """Delete every running child and cancel every non-terminal entry;
-        never-entered states are marked cancelled.
+    async def _complete_stop(self, run: FactoryRun, detail: str) -> list[str]:
+        """Cancel non-terminal actors and report stopped only after retirement."""
+        return await self._halt_nonterminal(run, "run stopped", detail=detail)
 
-        A state participates when ANY entry is non-terminal, not only the
-        latest one: a re-entered state can keep an earlier entry in flight
-        while its latest entry settled, and that entry must be cancelled too
-        (state.status reports the latest entry only).
-        """
-        stopped = [
-            state_id
-            for state_id in run.order
-            if any(entry.status in ("pending", "running") for entry in run.states[state_id].entries)
-            or (not run.states[state_id].entries and run.states[state_id].status == "pending")
-        ]
-        await self._cancel_running(run)
-        for state_id in stopped:
+    def _has_unresolved_actor(self, run: FactoryRun) -> bool:
+        return any(
+            instance.ownership_change_in_progress
+            or instance.process is not None and instance.status == "running"
+            or instance.child_id is not None
+            and (
+                instance.status in ("pending", "running")
+                or instance.factory_task_activity in ("busy", "unverified")
+            )
+            for state in run.states.values()
+            for entry in state.entries
+            for instance in entry.instances
+        )
+
+    def _factory_task_owners(
+        self, run: FactoryRun
+    ) -> list[tuple[_StateRun, _StateEntry, _NodeInstance]]:
+        owners = []
+        for state_id in run.order:
             state = run.states[state_id]
-            if any(entry.status in ("pending", "running") for entry in state.entries) or not state.entries:
+            if state.lifecycle == "resident":
+                continue
+            owners.extend(
+                (state, entry, instance)
+                for entry in state.entries
+                for instance in entry.instances
+                if instance.status != "running"
+                and instance.child_id is not None
+                and instance.factory_task_activity in ("busy", "unverified")
+            )
+        return owners
+
+    def _mark_stopped_entries(self, run: FactoryRun, reason: str) -> list[str]:
+        stopped: list[str] = []
+        for state_id in run.order:
+            state = run.states[state_id]
+            was_nonterminal = any(entry.status in ("pending", "running") for entry in state.entries) or (
+                not state.entries and state.status == "pending"
+            )
+            for entry in state.entries:
+                if entry.status not in ("pending", "running"):
+                    continue
+                for instance in entry.instances:
+                    if (
+                        instance.status == "pending"
+                        and instance.child_id is None
+                        and instance.process is None
+                        and not instance.ownership_change_in_progress
+                    ):
+                        instance.status = "cancelled"
+                        self._event(
+                            run,
+                            "cancelled",
+                            node=state_id,
+                            entry=entry.index,
+                            instance=instance.index,
+                            detail="cancelled before admission",
+                        )
+                if any(
+                    instance.ownership_change_in_progress
+                    or instance.process is not None and instance.status == "running"
+                    or instance.child_id is not None
+                    and (
+                        instance.status in ("pending", "running")
+                        or instance.factory_task_activity in ("busy", "unverified")
+                    )
+                    for instance in entry.instances
+                ):
+                    continue
+                entry.status = "cancelled"
+                self._event(run, "node_cancelled", node=state_id, entry=entry.index, detail=reason)
+            if was_nonterminal and all(entry.status not in ("pending", "running") for entry in state.entries):
                 state.cancelled = True
-                for entry in state.entries:
-                    if entry.status in ("pending", "running"):
-                        entry.status = "cancelled"
-                        self._event(run, "node_cancelled", node=state_id, entry=entry.index, detail=reason)
-                        for instance in entry.instances:
-                            if instance.status == "pending":
-                                # Prepared but never admitted (or still in
-                                # flight inside _admit): the cancelled entry
-                                # owns it, so it reads cancelled, not pending,
-                                # in the stopped/failed ledger.
-                                instance.status = "cancelled"
-                                self._event(
-                                    run,
-                                    "cancelled",
-                                    node=state_id,
-                                    entry=entry.index,
-                                    instance=instance.index,
-                                    detail="cancelled before admission",
-                                )
+                stopped.append(state_id)
+        return stopped
+
+    async def _finish_stop_if_quiescent(
+        self, run: FactoryRun, detail: str, *, stopped: list[str] | None = None
+    ) -> bool:
+        if run.state != "stopping" or self._has_unresolved_actor(run):
+            return False
+        stopped = self._mark_stopped_entries(run, "run stopped") if stopped is None else stopped
+        if self._has_unresolved_actor(run):
+            return False
+        run.state = "stopped"
+        self._event(run, "run_stopped", detail=f"{detail}; {len(stopped)} state(s) cancelled")
+        self._touch(run)
+        self._evict_terminal_runs()
+        return True
+
+    async def _halt_nonterminal(
+        self, run: FactoryRun, reason: str, *, detail: str = "stopped"
+    ) -> list[str]:
+        """Retire every owned actor, preserving entries whose deletion failed."""
+        await self._cancel_running(run)
+        stopped = self._mark_stopped_entries(run, reason)
+        if run.state == "stopping":
+            await self._finish_stop_if_quiescent(run, detail, stopped=stopped)
         return stopped
 
     async def _retract_admission(
@@ -3995,19 +5865,28 @@ class FactoryExecutor:
         from . import delete_subagent
 
         child_id = instance.child_id or ""
+        instance.ownership_change_in_progress = True
         try:
             await delete_subagent(child_id)
         except Exception as exc:
-            self._event(run, "cancel_failed", node=state.state_id, entry=entry.index, instance=instance.index, child=child_id, error=str(exc))
-            # The slot is released either way, so the ledger must record the
-            # cancellation next to the failure (the eval replay checker keys
-            # off cancelled events, and the instance below reads cancelled).
-            self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index, child=child_id, detail="slot released despite the failed delete")
+            instance.ownership_change_in_progress = False
+            self._event(
+                run,
+                "cancel_failed",
+                node=state.state_id,
+                entry=entry.index,
+                instance=instance.index,
+                child=child_id,
+                error=str(exc),
+            )
+            instance.status = "running"
         else:
+            instance.ownership_change_in_progress = False
+            instance.factory_task_activity = "idle"
+            instance.status = "cancelled"
             self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index, child=child_id)
-        # The child is supervisor-owned; a failed delete leaves it running
-        # there, but the executor treats its slot as released.
-        instance.status = "cancelled"
+            if run.state == "stopping":
+                await self._finish_stop_if_quiescent(run, "stopped")
 
     async def _cancel_python(self, run: FactoryRun) -> None:
         """Stop executor-owned calls when the run stops or its control lane fails."""
@@ -4015,17 +5894,42 @@ class FactoryExecutor:
             state = run.states[state_id]
             for entry in state.entries:
                 for instance in entry.instances:
-                    # A running python call either still has its process,
-                    # or its exit is being settled (time-limit stop or the
-                    # output check in flight): both are claimed here.
-                    if instance.status == "running" and "python" in state.spec:
-                        process, instance.process = instance.process, None
-                        instance.status = "cancelled"
-                        if entry.status == "running":
-                            entry.status = "cancelled"
-                        if process is not None:
+                    if (
+                        instance.status != "running"
+                        or "python" not in state.spec
+                        or instance.ownership_change_in_progress
+                    ):
+                        continue
+                    process = instance.process
+                    if process is not None:
+                        instance.ownership_change_in_progress = True
+                        try:
                             await process.stop()
-                        self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
+                        except Exception as exc:
+                            instance.ownership_change_in_progress = False
+                            self._event(
+                                run,
+                                "cancel_failed",
+                                node=state_id,
+                                entry=entry.index,
+                                instance=instance.index,
+                                error=str(exc),
+                            )
+                            continue
+                        instance.ownership_change_in_progress = False
+                        instance.process = None
+                    # A call whose exit is being settled (its output check in
+                    # flight) has no process left; it is claimed here too.
+                    instance.status = "cancelled"
+                    if entry.status == "running" and all(
+                        other.status not in ("pending", "running", "error")
+                        and other.process is None
+                        and other.child_id is None
+                        and not other.ownership_change_in_progress
+                        for other in entry.instances
+                    ):
+                        entry.status = "cancelled"
+                    self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
 
     async def _cancel_running(self, run: FactoryRun) -> None:
         from . import delete_subagent
@@ -4035,30 +5939,35 @@ class FactoryExecutor:
             state = run.states[state_id]
             for entry in state.entries:
                 for instance in entry.instances:
-                    if instance.status != "running" or instance.child_id is None:
+                    if (
+                        instance.child_id is None
+                        or (
+                            instance.status not in ("pending", "running")
+                            and instance.factory_task_activity not in ("busy", "unverified")
+                        )
+                        or instance.ownership_change_in_progress
+                    ):
                         continue
                     child_id = instance.child_id
-                    # Claim the instance BEFORE the await: a concurrent
-                    # cancellation pass (stop() racing fail_fast's cascade, or a
-                    # repeated stop) must never issue a duplicate delete for a
-                    # child this pass already owns. A failed delete still
-                    # releases the slot, so the terminal status is the same
-                    # either way, and a settle landing inside the delete window
-                    # is dropped instead of applying to a child being torn down.
-                    instance.status = "cancelled"
+                    instance.ownership_change_in_progress = True
                     try:
                         await delete_subagent(child_id)
                     except Exception as exc:
-                        self._event(run, "cancel_failed", node=state_id, entry=entry.index, instance=instance.index, child=child_id, error=str(exc))
-                        # The slot is released either way, so the ledger also
-                        # records the cancellation next to the failure (the
-                        # eval replay checker keys off cancelled events, and
-                        # the instance above already reads cancelled).
-                        self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index, child=child_id, detail="slot released despite the failed delete")
+                        instance.ownership_change_in_progress = False
+                        self._event(
+                            run,
+                            "cancel_failed",
+                            node=state_id,
+                            entry=entry.index,
+                            instance=instance.index,
+                            child=child_id,
+                            error=str(exc),
+                        )
                     else:
+                        instance.ownership_change_in_progress = False
+                        instance.factory_task_activity = "idle"
+                        instance.status = "cancelled"
                         self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index, child=child_id)
-                    # The child is supervisor-owned; a failed delete leaves it
-                    # running there, but the executor treats its slot as released.
 
     # -- completion ----------------------------------------------------------
 
@@ -4077,7 +5986,7 @@ class FactoryExecutor:
         (pending) instances do: the admission queue must drain before the
         run can end, or a resident left pending by max_parallel was
         misreported as quiescent and never admitted."""
-        if run.pending_evaluations:
+        if run.pending_evaluations or self._factory_task_owners(run):
             return False
         for state in run.states.values():
             resident = state.lifecycle == "resident"
@@ -4107,6 +6016,7 @@ class FactoryExecutor:
                 "failed",
                 "completed with state error(s): " + ", ".join(state.state_id for state in errors),
             )
+            self._evict_terminal_runs()
             return
         run.state = "done"
         residents = [
@@ -4119,12 +6029,14 @@ class FactoryExecutor:
         if residents:
             detail += f"; {len(residents)} resident state(s) still running (stop with await rlm.factory.stop('{run.run_id}'))"
         await self._milestone(run, "finished", detail)
+        self._evict_terminal_runs()
 
     # -- control loop --------------------------------------------------------
 
     def _start_loop(self, run: FactoryRun) -> None:
-        # Called only from run()/resume(), both awaited inside a running
-        # asyncio loop, so get_running_loop() always finds it.
+        # Called from run()/resume() and the rehydrated re-arm, all awaited
+        # inside a running asyncio loop, so get_running_loop() always finds
+        # it.
         import asyncio
 
         run.task = asyncio.get_running_loop().create_task(
@@ -4136,13 +6048,24 @@ class FactoryExecutor:
 
         try:
             await self._loop_body(run, generation)
+            self._persist_run(run)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             # A dead bridge or host failure must not wedge the run silently;
             # children stay alive under the supervisor either way. A stop()
             # that landed concurrently keeps ownership of the final state.
+            from .repl import teardown_started
+
             self._event(run, "executor_error", error=f"{type(exc).__name__}: {exc}")
+            if teardown_started():
+                # The kernel's own shutdown tore the host bridge down while
+                # the run was in flight: an interruption, not a verdict. The
+                # run stays nonterminal — its durable snapshot keeps the last
+                # true state and the boot arm re-arms it at the next kernel
+                # boot — exactly what a hard SIGKILL leaves behind, so a
+                # graceful shutdown is never worse than a kill.
+                return
             if run.state == "running":
                 run.state = "failed"
                 # Child agents remain supervisor-owned; these subprocesses
@@ -4152,6 +6075,7 @@ class FactoryExecutor:
                     await self._milestone(run, "failed", f"executor error: {exc}")
                 except Exception:
                     pass
+                self._persist_run(run)
 
     async def _loop_body(self, run: FactoryRun, generation: int) -> None:
         import asyncio
@@ -4164,6 +6088,9 @@ class FactoryExecutor:
         # so this task exits at its next check instead of continuing as a
         # second concurrent control loop.
         while self._loop_alive(run, generation):
+            # The iteration boundary is a consistent point: every settle the
+            # last iteration applied is complete before the loop waits again.
+            self._persist_run(run)
             in_flight = [
                 (run.states[state_id], entry, instance)
                 for state_id in run.order
@@ -4171,34 +6098,111 @@ class FactoryExecutor:
                 for instance in entry.instances
                 if instance.status == "running"
             ]
-            children = [item for item in in_flight if item[2].child_id is not None]
+            task_owners = self._factory_task_owners(run)
+            owner_polls = [item for item in task_owners if item[2].status != "running"]
+            active_work = in_flight + owner_polls
+            repairing = [item for item in in_flight if item[2].repair_sent]
+            children = [
+                item for item in in_flight if item[2].child_id is not None and not item[2].repair_sent
+            ]
             python_calls = [item for item in in_flight if item[2].process is not None]
-            if children:
+            results_by_child: dict[str, Any] = {}
+            task_work_waiting = False
+            if children or owner_polls:
                 # A child poll must not postpone a concurrent Python call's deadline.
                 timeout_ms = POLL_TIMEOUT_MS
+                if repairing:
+                    timeout_ms = min(timeout_ms, int(REPAIR_POLL_SECONDS * 1000))
                 if python_calls:
                     nearest = min(instance.deadline for _, _, instance in python_calls)
                     timeout_ms = min(timeout_ms, max(0, math.ceil((nearest - self._now_fn()) * 1000)))
                 results = await collect(
-                    [instance.child_id for _, _, instance in children], timeout_ms=timeout_ms
+                    [instance.child_id for _, _, instance in children + repairing + owner_polls],
+                    timeout_ms=timeout_ms,
                 )
-                settled = {entry.rlm_child_id: entry for entry in results if entry.settled}
-                for state, entry, instance in children:
-                    # A GENERATION bump mid-batch drops this collect's
-                    # results: the resumed loop re-collects the children
-                    # (they stay running supervisor-side), so no settle is
-                    # applied by two lanes. A pause or stop that this very
-                    # batch triggered does NOT drop the rest of the batch:
-                    # the old design (and its tests) finish applying the
-                    # batch's settlements, and a policy pause must not
-                    # strand the siblings' statuses.
-                    if run.loop_generation != generation:
-                        return
-                    result = settled.get(instance.child_id or "")
-                    if result is not None:
-                        await self._apply_settlement(run, state, entry, instance, result)
+                results_by_child = {result.rlm_child_id: result for result in results}
             elif python_calls:
                 await self._wait_python([instance for _, _, instance in python_calls])
+                if repairing:
+                    results = await collect(
+                        [instance.child_id for _, _, instance in repairing], timeout_ms=0
+                    )
+                    results_by_child = {result.rlm_child_id: result for result in results}
+            elif repairing:
+                await self._sleep_fn(REPAIR_POLL_SECONDS)
+                results = await collect([instance.child_id for _, _, instance in repairing], timeout_ms=0)
+                results_by_child = {result.rlm_child_id: result for result in results}
+            for state, entry, instance in children:
+                # A GENERATION bump mid-batch drops this collect's
+                # results: the resumed loop re-collects the children
+                # (they stay running supervisor-side), so no settle is
+                # applied by two lanes. A pause or stop that this very
+                # batch triggered does NOT drop the rest of the batch:
+                # the old design (and its tests) finish applying the
+                # batch's settlements, and a policy pause must not
+                # strand the siblings' statuses.
+                if run.loop_generation != generation:
+                    return
+                result = results_by_child.get(instance.child_id or "")
+                if result is None:
+                    continue
+                if not result.settled:
+                    if result.factory_task_busy is not None:
+                        instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
+                    continue
+                instance.factory_task_activity = (
+                    "busy" if result.factory_task_busy is True else
+                    "idle" if result.factory_task_busy is False else
+                    "unverified"
+                )
+                missing = (
+                    self._emitted_outputs(state, entry).get(instance.index)
+                    if state.spec.get("emit") is not None
+                    else None
+                )
+                if state.spec.get("emit") is not None and missing:
+                    if result.factory_task_busy is None and state.lifecycle != "resident":
+                        await self._pause_for_unverified_task_activity(run, state, entry, instance)
+                        return
+                    if result.factory_task_busy is True:
+                        task_work_waiting = True
+                        continue
+                await self._apply_settlement(run, state, entry, instance, result)
+                if result.factory_task_busy is True and state.lifecycle != "resident":
+                    task_work_waiting = True
+                if instance.factory_task_activity == "unverified" and state.lifecycle != "resident":
+                    await self._pause_for_unverified_task_activity(run, state, entry, instance)
+                    return
+            for state, entry, instance in owner_polls:
+                if run.loop_generation != generation:
+                    return
+                result = results_by_child.get(instance.child_id or "")
+                if result is None or not result.settled or result.factory_task_busy is None:
+                    instance.factory_task_activity = "unverified"
+                    await self._pause_for_unverified_task_activity(run, state, entry, instance)
+                    return
+                instance.factory_task_activity = "busy" if result.factory_task_busy else "idle"
+                task_work_waiting = task_work_waiting or result.factory_task_busy
+            child_still_running = any(
+                not result.settled
+                for _, _, instance in children
+                if (result := results_by_child.get(instance.child_id or "")) is not None
+            )
+            if task_work_waiting and not child_still_running and not python_calls and not repairing:
+                # Every collected child read settled, so the collect returned
+                # without waiting; a still-running child's collect already waited.
+                await self._sleep_fn(REPAIR_POLL_SECONDS)
+            for state, entry, instance in repairing:
+                if run.loop_generation != generation:
+                    return
+                result = results_by_child.get(instance.child_id or "")
+                await self._poll_repair(
+                    run,
+                    state,
+                    entry,
+                    instance,
+                    task_busy=None if result is None else result.factory_task_busy,
+                )
             for state, entry, instance in python_calls:
                 if run.loop_generation != generation:
                     return
@@ -4224,16 +6228,22 @@ class FactoryExecutor:
             started = await self._spawn_ready(run, generation=generation, allow_backoff=True)
             if not self._loop_alive(run, generation):
                 return
-            if run.admission_backoff_until is not None and self._now_fn() < run.admission_backoff_until:
-                # Admission is backed off: wait out the deadline in bounded
-                # slices (capped at the collect poll timeout) instead of
-                # hot-spinning -- and instead of blocking the lane with one
-                # long sleep: children that settle during the slice are
-                # collected on the next iteration, within the same bound a
-                # normal collect wait already has.
-                remaining = run.admission_backoff_until - self._now_fn()
-                await self._sleep_fn(min(remaining, POLL_TIMEOUT_MS / 1000))
-                continue
+            if run.admission_backoff_until is not None:
+                if self._now_fn() >= run.admission_backoff_until:
+                    # The deadline passed (possibly on the old clock,
+                    # rebased at the rehydrate): clear it so the run's
+                    # status and snapshot stop carrying a dead backoff.
+                    run.admission_backoff_until = None
+                else:
+                    # Admission is backed off: wait out the deadline in bounded
+                    # slices (capped at the collect poll timeout) instead of
+                    # hot-spinning -- and instead of blocking the lane with one
+                    # long sleep: children that settle during the slice are
+                    # collected on the next iteration, within the same bound a
+                    # normal collect wait already has.
+                    remaining = run.admission_backoff_until - self._now_fn()
+                    await self._sleep_fn(min(remaining, POLL_TIMEOUT_MS / 1000))
+                    continue
             if not run.pending_evaluations and self._resident_cap_starved(run):
                 # Residents never settle, so a max_parallel cap held entirely
                 # by resident instances never frees a slot: the queued work
@@ -4252,11 +6262,11 @@ class FactoryExecutor:
                 except Exception:
                     pass
                 return
-            resident_only_in_flight = all(
-                state.lifecycle == "resident" for state, _, _ in in_flight
+            resident_only_in_flight = bool(active_work) and all(
+                state.lifecycle == "resident" for state, _, _ in active_work
             )
             if (
-                (not in_flight or resident_only_in_flight)
+                (not active_work or resident_only_in_flight)
                 and not started
                 and not self._has_pending_instance(run)
                 and not run.pending_evaluations
@@ -4348,6 +6358,12 @@ FACTORY_DISABLED_MESSAGE = "the factory is disabled; run /factory on to enable i
 
 _SETTINGS_FILE_NAME = "settings.json"
 
+#: The cached ``factory_enabled()`` read: (stat key, verdict). The key is
+#: the resolved settings path with its size and nanosecond mtime (or
+#: ``None`` markers when the file cannot be stat-ed), so any rewrite
+#: re-reads while an unchanged document costs one ``stat``.
+_SETTINGS_READ_CACHE: tuple[tuple, bool] | None = None
+
 
 def factory_enabled() -> bool:
     """Read the ``factory.enabled`` opt-in setting (default off).
@@ -4361,6 +6377,13 @@ def factory_enabled() -> bool:
     wrong-typed value, or a corrupt document all read as unset, and unset
     means disabled -- the opt-in default is fail-closed, so an unreadable
     settings file refuses the factory instead of silently enabling it.
+
+    The read is cached by the document's stat identity (the resolved
+    path, its size, and its nanosecond mtime): the boot arm asks on every
+    executed command while it keeps declining, and every cell must not
+    re-open and re-parse the file. Any rewrite -- ``/factory on`` or
+    ``off`` -- moves the stat key, so the next call re-reads the new
+    document; the cache holds no verdict across an observable change.
     """
     # One home for the agent-dir resolution (harness.py owns it); imported
     # lazily because harness imports this module at its own top.
@@ -4368,16 +6391,29 @@ def factory_enabled() -> bool:
 
     path = _agent_dir() / _SETTINGS_FILE_NAME
     try:
+        stat = os.stat(path)
+    except OSError:
+        stat = None
+    key = (str(path), stat.st_size, stat.st_mtime_ns) if stat is not None else (str(path), None, None)
+    global _SETTINGS_READ_CACHE
+    if _SETTINGS_READ_CACHE is not None and _SETTINGS_READ_CACHE[0] == key:
+        return _SETTINGS_READ_CACHE[1]
+    try:
         with open(path, encoding="utf-8") as handle:
             document = json.load(handle)
     except (OSError, ValueError):
-        return False
-    if not isinstance(document, dict):
-        return False
-    factory = document.get("factory")
-    if not isinstance(factory, dict):
-        return False
-    return factory.get("enabled") is True
+        enabled = False
+    else:
+        if not isinstance(document, dict):
+            enabled = False
+        else:
+            factory = document.get("factory")
+            if not isinstance(factory, dict):
+                enabled = False
+            else:
+                enabled = factory.get("enabled") is True
+    _SETTINGS_READ_CACHE = (key, enabled)
+    return enabled
 
 
 def require_factory_enabled() -> None:
@@ -4399,14 +6435,115 @@ _DEFAULT_EXECUTOR: FactoryExecutor | None = None
 def default_factory_executor() -> FactoryExecutor:
     """The process-wide executor behind the ``rlm.factory`` namespace.
 
-    Tests that need an injected clock or sleep assign their own
-    ``FactoryExecutor`` to ``factory._DEFAULT_EXECUTOR``; the namespace then
-    routes through it.
+    Constructed once per kernel boot, and its registry rehydrated off the
+    session artifact dir: runs this kernel's predecessors left behind are
+    this kernel's runs. Tests that need an injected clock or sleep assign
+    their own ``FactoryExecutor`` to ``factory._DEFAULT_EXECUTOR``; the
+    namespace then routes through it.
     """
     global _DEFAULT_EXECUTOR
     if _DEFAULT_EXECUTOR is None:
         _DEFAULT_EXECUTOR = FactoryExecutor()
+        _DEFAULT_EXECUTOR.rehydrate_registry()
     return _DEFAULT_EXECUTOR
+
+
+_BOOT_ARM_TASK: "asyncio.Task[None] | None" = None
+"""The boot arm's task handle: keeps a reference so the loop does not
+garbage-collect the task mid-flight (the kernel's boot arm runs detached
+by design — a kernel that dies takes it along)."""
+
+
+def boot_arm_persisted_runs() -> bool:
+    """Arm the rehydrated runs when execution is proven permitted.
+
+    Without this, a kernel restart leaves every persisted run frozen until
+    some factory API call happens: the children settle under the
+    supervisor and nobody collects them, and a parent waiting on
+    ``factory.progress`` milestones waits forever (probe I — the run
+    moved only after a manual ``status`` call). The daemon lane answers
+    ``runs: []`` while the kernel is down, so it cannot substitute either.
+
+    The arm is a RELEASE, not a boot fact: ``rlm.repl`` fires it on a
+    clean restore completion (every saved name revived) or on the first
+    executed command the HOST dispatches — never at kernel boot, and
+    never on the provisioner's own runtime-bootstrap execute (the host
+    sends it after every restore attempt, a refused restore included,
+    so it is not a gate's permission), because a kernel booted to READ
+    a payload (a hosted guest's reader prewarm, a blocked resume) must
+    not collect or advance its persisted runs before the read is
+    proven; the host only dispatches commands past the gates it owns.
+    Returns whether the arm was scheduled; a plain import (a CLI, a
+    test process) stays on the lazy first-call path.
+    """
+    global _BOOT_ARM_TASK
+    if _BOOT_ARM_TASK is not None:
+        return False  # already armed
+    if not factory_enabled():
+        return False  # the opt-in gate stays authoritative, even at boot
+    if not _runs_dir_snapshots():
+        return False  # nothing persisted: a fresh session's first boot
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+    async def _arm() -> None:
+        try:
+            await default_factory_executor().arm_persisted_runs()
+        except Exception as error:  # noqa: BLE001 - a dead boot arm is the F-03
+            # failure mode in miniature: children settle uncollected and no
+            # log names it. The arm is detached by design (a kernel that
+            # dies takes it along), so this is the one place its failure
+            # can reach a human.
+            import sys
+
+            print(f"factory boot arm failed: {error}", file=sys.stderr)
+
+    _BOOT_ARM_TASK = loop.create_task(_arm())
+    return True
+
+
+def _runs_dir_snapshots() -> bool:
+    """Whether the runs dir holds at least one snapshot or loss marker.
+
+    A .persist-failed marker counts (round-9 probe R9-04): a session whose
+    only run's FIRST write failed holds no snapshot at all — the boot
+    gate stayed closed, no executor ever existed, and the load-end line
+    naming the loss never printed. The marker is the run's only durable
+    trace; boot must surface it.
+    """
+    directory = _runs_dir()
+    if directory is None:
+        return False
+    try:
+        return any(
+            (name.endswith(".json") or name.endswith(".persist-failed"))
+            and not name.startswith(".")
+            for name in os.listdir(directory)
+        )
+    except FileNotFoundError:
+        return False  # nothing persisted yet: a fresh session's first boot
+    except OSError:
+        # A runs dir that EXISTS but cannot be listed (round-10 probe
+        # R10-03): the gate stayed closed, no executor existed at boot,
+        # and the R9-08 listdir line never printed — the loss was silent
+        # at boot. The gate opens so the executor reports it.
+        return True
+
+
+async def _armed_executor() -> FactoryExecutor:
+    """The namespace executor with rehydrated runs re-armed for this boot.
+
+    The re-arm completes the flows a kernel restart interrupted; the first
+    factory use after the restart is the natural seam (the lane polls, the
+    model asks, either arms it).
+    """
+    executor = default_factory_executor()
+    await executor.arm_persisted_runs()
+    return executor
 
 
 async def run_factory(
@@ -4429,7 +6566,7 @@ async def run_factory(
     require_factory_enabled()
     if params is not None and not isinstance(params, dict):
         raise TypeError(f"params must be a dict, got {type(params).__name__}")
-    executor = default_factory_executor()
+    executor = await _armed_executor()
     if executor._resolve_harness().get("factory", spec_id) is not None:
         if params:
             raise ValueError(
@@ -4462,13 +6599,13 @@ async def run_factory(
 async def status_factory(run_id: str) -> dict[str, Any]:
     """Return state states, the event window, elapsed time, and usage."""
     require_factory_enabled()
-    return await default_factory_executor().status(run_id)
+    return await (await _armed_executor()).status(run_id)
 
 
 async def stop_factory(run_id: str) -> dict[str, Any]:
     """Cancel every running child of the run and mark it stopped."""
     require_factory_enabled()
-    return await default_factory_executor().stop(run_id)
+    return await (await _armed_executor()).stop(run_id)
 
 
 async def resume_factory(run_id: str) -> dict[str, Any]:
@@ -4478,7 +6615,20 @@ async def resume_factory(run_id: str) -> dict[str, Any]:
     same rendered prompt first; see ``FactoryExecutor.resume``.
     """
     require_factory_enabled()
-    return await default_factory_executor().resume(run_id)
+    return await (await _armed_executor()).resume(run_id)
+
+
+def _schedule_rearm(executor: FactoryExecutor) -> None:
+    """Arm rehydrated runs from a sync seam: a loop task when a loop is
+    running (the kernel's sync calls always run inside one), nothing
+    otherwise — the next async seam arms."""
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no loop: a sync CLI context; the async seams own arming
+    loop.create_task(executor.arm_persisted_runs())
 
 
 def graph_factory(ref: str | None = None, *, compact: bool = False) -> dict[str, Any]:
@@ -4486,7 +6636,9 @@ def graph_factory(ref: str | None = None, *, compact: bool = False) -> dict[str,
     ``FactoryExecutor.graph``): a live run id, a stored spec id, or no ref
     for every live run."""
     require_factory_enabled()
-    return default_factory_executor().graph(ref, compact=compact)
+    executor = default_factory_executor()
+    _schedule_rearm(executor)
+    return executor.graph(ref, compact=compact)
 
 
 async def watch_factory(
@@ -4496,7 +6648,7 @@ async def watch_factory(
     timeout elapses, then return the same fused snapshot ``graph()``
     returns plus ``changed``."""
     require_factory_enabled()
-    return await default_factory_executor().watch(run_id, timeout, compact=compact)
+    return await (await _armed_executor()).watch(run_id, timeout, compact=compact)
 
 
 def _machine_structure(
@@ -4709,6 +6861,16 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
         frame.pop("result", None)
         frame["status"] = "error"
         frame["reason"] = "factory activity reply contains non-finite values"
+    # The same belt for lone surrogates (round-10 probe R10-01): a lone
+    # \\udXXX escape in the reply's text would pass every earlier check,
+    # serialize as the escape, and the host's serde_json rejects the whole
+    # frame — "Kernel protocol error" for the session. A belt trip names
+    # the fault instead of emitting it; the decode-point cleaners should
+    # make it unreachable.
+    if _frame_has_lone_surrogate(frame):
+        frame.pop("result", None)
+        frame["status"] = "error"
+        frame["reason"] = "factory activity reply contains a lone surrogate escape"
 
 
 # ---------------------------------------------------------------------------
@@ -4893,6 +7055,7 @@ def render_machine_file(machine: MachineFile) -> str:
     sections.append(json.dumps(machine.spec, indent=2, ensure_ascii=False))
     sections.append("```")
     return "\n".join(sections) + "\n"
+
 
 
 def _machine_dir_argument(spec_id: str) -> "Path | None":
@@ -5327,7 +7490,8 @@ for the next — where a child agent would only spend budget.
   (the kernel's interpreter, isolated mode) in the session's working
   directory, which is on the import path, so a module next to your work
   imports. It has no `rlm`, no harness, no kernel globals, and cannot spawn
-  agents. Prints go to stderr; only the returned dict goes to stdout.
+  agents. `PRIME_AGENT_FACTORY_OWNER_SESSION` carries the id of the session
+  running the machine. Prints go to stderr; only the returned dict goes to stdout.
 - **Failures**: an exception (its stderr tail is the error), output that is
   not a dict, or keys that do not match the declared outputs fail the
   attempt: `retries` re-runs the call with the same inputs, then
@@ -5335,10 +7499,10 @@ for the next — where a child agent would only spend budget.
 - **Time limit**: the state's `budget_ms`, else the run's `budget_ms`, else
   60 seconds. A call past its limit is killed and fails without a retry.
   `stop` and `fail_fast` kill running calls.
-- **Pure functions**: calls are re-run on retry and on resume after an
-  escalate pause, so a python state should depend only on its inputs.
-  A running call belongs to its run and is lost with it on a kernel
-  restart.
+- **Pure functions**: calls are re-run on retry, on resume after an
+  escalate pause, and after a kernel restart orphaned the running call
+  (the rehydrated run fails it through `retries`/`failure_policy`), so a
+  python state should depend only on its inputs.
 - Python states cannot be `resident` and cannot use `foreach`. A call holds
   a `max_parallel` slot but is no child: it does not count toward
   `max_children`.
@@ -5488,20 +7652,19 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
 - Prompts insert params and inputs with `{{name}}`; `prompts/_context.md`
   is prepended to every agent state. The loader appends a generated
   Outputs section that spells out each port's type.
-- A child of a directory machine hands back its outputs with
-  `await rlm.factory.emit(<port>=<value>, ...)`. The call checks every
-  value against the declared types and keeps nothing when one is wrong:
-  it raises `FactoryEmitError` with the exact field
-  (`verdict.decision: "ship" is not one of approve, rework`), and the
-  child fixes the value and calls again. A `file` output takes a path, and
-  the file is copied beside the child's session. A `file` must be a
-  top-level output: the loader refuses one inside a list or a record
-  field. Each call sets the ports
-  it names. A child that ends without a required port fails its entry.
-  `await rlm.factory.inputs()` gives the child its bound inputs and the
-  params as values. A python state's returned dict goes through the same
-  check. A python state cannot return a `file` output: only an agent
-  child's emit copies a file, so the loader refuses it.
+- A child hands back its outputs with `await rlm.factory.emit(port=value,
+  ...)` from its REPL, never in its answer text. Each value is checked
+  against the port's type before it is kept; a wrong one raises
+  `FactoryEmitError` with the exact field (`verdict.findings[0].severity:
+  'high' is not one of ...`), so the child fixes it in the same turn. A
+  `file` port takes a path and the file is copied beside the child's
+  session. `await rlm.factory.inputs()` returns the bound inputs and params
+  as values. A child that ends its turn still owing a required output gets
+  one message in its own session asking for it; if it still owes one when
+  that turn ends, the entry fails with `missing_output`. No fresh child is
+  started for a missing output. A python state's returned dict goes
+  through the same check. `text?` marks an optional output, and an input
+  that reads one must be optional too.
 - Routing is `next` (a state, or a list to fan out) or `route`, a switch
   on one enum or bool output where every value needs a target. A state
   with `join = [...]` waits for every member, and each member names it in
@@ -5545,18 +7708,26 @@ route = { on = "verdict.decision", approve = "ship", rework = "plan" }
   `max_entries`, `max_transitions`, and `run.max_children` (total
   admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.
-- In a stored spec (no emit contract), outputs bind from the child's full
-  final answer (the collect envelope
+- Outputs bind from the child's full final answer (the collect envelope
   carries it; the executor caps its own capture at 65,536 characters,
   the same bound the daemon puts on the envelope's answer text): a
   fenced json output block binds whole as long as it fits that cap (a
   bare JSON object that ends the answer binds too), so keep declared
   outputs compact — the rosters and ledger previews stay ~160 characters
   — and let the full answer live in the child's session.
-- Run registries live in kernel memory: a kernel restart loses `status`
-  for old runs, but the children keep running under the supervisor
-  (`rlm.list_subagents` sees them). Stop runs before restarting, or
-  delete the children by hand afterwards.
+- Runs survive kernel restarts: the registry snapshots to the session
+  artifact dir (at the control loop's consistent points, with a mutation
+  journal for batches and admissions in between), a restarted kernel rehydrates it on the next factory use, and
+  the runs continue (a run that was stopping
+  finishes its cancellations; a python call the restart orphaned fails
+  through its state's `retries` and `failure_policy`; children, supervisor-
+  owned, run straight through — a finished child's emitted outputs are
+  read from its session dir, never from kernel memory). While the kernel
+  is down the status lane answers the no-kernel refusal, never `running`.
+  That durability is the daemon's: a `--print` session hosts its children
+  in its own process, so its runs end with it, and `resume` of a run that
+  process did not start refuses with "--print runs are not durable; run
+  machines under the daemon for restart safety".
 - Residents outlive their run; stop the run (or tear down the session) to
   retire them. Prefer `rlm.factory.stop(run_id)` over deleting a factory
   child by hand — the executor claims and cancels children itself, and a
