@@ -533,6 +533,64 @@ fn print_inline_factory_child_emits_through_its_contract() {
     assert_eq!(outputs, serde_json::json!({"line": "about tides"}));
 }
 
+/// A `--no-session` print run has no session files, so the factory child's
+/// accepted outputs land in the child's own directory, the spawn handle's
+/// `session_dir` the executor reads.
+#[test]
+fn print_no_session_factory_child_emits_into_its_session_dir() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let spawn = "from rlm import _spawn\n\
+        h = await _spawn(\"write the line\", name=\"emitter\", \
+        factory={\"runId\": \"run-1\", \"specId\": \"spec\", \"stateId\": \"plan\"}, \
+        factory_contract={\"outputs\": [{\"name\": \"line\", \"type\": \"text\"}], \"records\": {}, \"inputs\": {}})\n\
+        open(\"spawned.txt\", \"w\").write(str(h.session_dir))";
+    let emit = "try:\n\
+        \x20   receipt = await rlm.factory.emit(line=\"no session\")\n\
+        \x20   result = f\"EMITTED {receipt['accepted']} {receipt['missing']}\"\n\
+        except Exception as error:\n\
+        \x20   result = f\"EMIT FAILED: {error}\"\n\
+        open(\"emitted.txt\", \"w\").write(result)";
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython", "arguments": { "code": spawn } },
+            ] },
+            "PARENT DONE",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "emitter": { "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "ipython", "arguments": { "code": emit } },
+                ] },
+                "emitter finished",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(
+        &["-p", "--no-session", "run the state"],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+
+    let emitted = std::fs::read_to_string(lane.home.path().join("emitted.txt"))
+        .expect("the child ran its emit cell");
+    assert_eq!(emitted, "EMITTED ['line'] []");
+    let child_dir = PathBuf::from(
+        std::fs::read_to_string(lane.home.path().join("spawned.txt"))
+            .expect("the parent recorded the child's session dir"),
+    );
+    let outputs: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(child_dir.join("factory-outputs.json")).expect("the outputs file"),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&child_dir).unwrap();
+    assert_eq!(outputs, serde_json::json!({"line": "no session"}));
+}
+
 /// A settled factory child's collect reports its task work idle: the inline
 /// settle already waits out background bash, so the executor need not pause
 /// the run as unverified. An ordinary child carries no task-activity flag.
