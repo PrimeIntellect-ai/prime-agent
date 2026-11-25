@@ -30,7 +30,8 @@ mod tests;
 use errors::{command_type_debug, response_data_or_error, DirectRequestError};
 pub use errors::{
     is_daemon_rejection, is_daemon_timeout, is_daemon_unreachable, is_kernel_not_running,
-    is_update_restarting_rejection, rejected_provider_unauthenticated, RequestRejected,
+    is_supervisor_shutting_down_rejection, is_update_restarting_rejection,
+    rejected_provider_unauthenticated, RequestRejected,
 };
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;

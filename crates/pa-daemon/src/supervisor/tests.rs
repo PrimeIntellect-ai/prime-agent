@@ -1368,6 +1368,41 @@ async fn a_create_while_shutting_down_is_refused() {
     );
 }
 
+/// A worker registering with a supervisor in its stop pass gets the typed refusal, so its
+/// registration loop can tell the stop pass from a rejected identity.
+#[tokio::test]
+async fn a_stop_pass_refuses_worker_registration_with_the_typed_info() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    supervisor.shutting_down.store(true, Ordering::SeqCst);
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-late".to_string(),
+        session_id: None,
+        socket_path: "/tmp/none.sock".to_string(),
+        worker_instance_id: String::new(),
+        token: "token".to_string(),
+        pid: 4242,
+        rest: Map::default(),
+    };
+    let response = supervisor
+        .handle_worker_register("r1", "worker_register", &command)
+        .await;
+    assert_eq!(
+        (response.success, response.error_info),
+        (
+            false,
+            Some(pa_types::daemon::DaemonErrorInfo::SupervisorShuttingDown)
+        )
+    );
+}
+
 #[tokio::test]
 async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
     let dir = tempfile::TempDir::new().unwrap();

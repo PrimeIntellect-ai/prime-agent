@@ -148,7 +148,7 @@ impl Supervisor {
         // process). The command surfaces the same failure as any refused
         // create.
         if self.shutting_down.load(Ordering::SeqCst) {
-            return Err(anyhow!("Supervisor is shutting down"));
+            return Err(anyhow!(pa_types::daemon::SUPERVISOR_SHUTTING_DOWN_MESSAGE));
         }
         let config_object = config.as_ref().and_then(Value::as_object);
         let explicit_cwd = config_object

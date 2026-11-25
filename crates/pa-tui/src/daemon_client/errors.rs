@@ -67,6 +67,22 @@ pub fn is_update_restarting_rejection(error: &anyhow::Error) -> bool {
     })
 }
 
+/// True when a refusal comes from a supervisor in its terminal stop pass: the typed
+/// `supervisor_shutting_down` info, or the exact message older daemons refuse with.
+#[must_use]
+pub fn is_supervisor_shutting_down_rejection(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<RequestRejected>()
+            .is_some_and(|rejected| {
+                matches!(
+                    &rejected.error_info,
+                    Some(DaemonErrorInfo::SupervisorShuttingDown)
+                ) || rejected.message == pa_types::daemon::SUPERVISOR_SHUTTING_DOWN_MESSAGE
+            })
+    })
+}
+
 /// Whether an error is a response/handshake timeout: a transient
 /// under-load failure, not a protocol error — the caller degrades (retry
 /// or surface the queued state) instead of exiting.

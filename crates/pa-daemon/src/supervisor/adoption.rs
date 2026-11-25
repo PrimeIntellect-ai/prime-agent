@@ -413,7 +413,12 @@ impl Supervisor {
         };
         let fail = |error: &str| response_failure(Some(command_id), type_name, error, None);
         if self.shutting_down.load(Ordering::SeqCst) {
-            return fail("Supervisor is shutting down");
+            return response_failure(
+                Some(command_id),
+                type_name,
+                pa_types::daemon::SUPERVISOR_SHUTTING_DOWN_MESSAGE,
+                Some(pa_types::daemon::DaemonErrorInfo::SupervisorShuttingDown),
+            );
         }
         if active_session_id.is_empty() || socket_path.is_empty() || *pid == 0 {
             return fail("Session worker registration is missing identity fields");
