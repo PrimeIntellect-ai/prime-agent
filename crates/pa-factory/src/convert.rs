@@ -181,6 +181,13 @@ fn convert_state(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    // The id names files (`prompts/<id>.md`), so it must be one the loader
+    // accepts before anything is written.
+    if !crate::load::is_state_id(&id) {
+        return Err(vec![format!(
+            "{id:?} is not a state id: lowercase letters, digits and -, at most 64 characters"
+        )]);
+    }
     let mut problems = Vec::new();
     let mut lines = Vec::new();
     if state.get("entry").and_then(Value::as_bool) == Some(true) {
