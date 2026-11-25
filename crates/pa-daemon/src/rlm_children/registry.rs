@@ -139,6 +139,9 @@ impl SupervisorChildSessionsInner {
                 // happen — the user sees `cancelled: false` and can retry.
                 return false;
             }
+            // The cancel suppresses an ordinary child's terminal notice, but
+            // a refinement child's cancel is still its refinement's outcome.
+            self.deliver_refine_outcome(record).await;
             // The settled/cancelled child releases an owed goal continuation.
             self.fire_settle_hook(record).await;
             // A cancelled refinement child is a settled one: retire it too.

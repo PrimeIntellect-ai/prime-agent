@@ -88,9 +88,6 @@ impl AgentSessionEngine {
             return Ok(());
         };
         let outcome = self.runtime.block_on(async {
-            // A dead auto child's round releases first, so its in-flight
-            // guard never holds off this take.
-            self.release_dead_refine_child_rounds().await;
             // The round take: the gates decide and stamp the cadence; the
             // in-flight guard holds the trigger while the child runs.
             let Some(options) = core

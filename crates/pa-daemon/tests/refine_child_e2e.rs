@@ -67,6 +67,17 @@ struct TurnHold {
 struct TurnHoldState {
     holding: bool,
     turn_seen: bool,
+    plan: PlanHold,
+}
+
+/// The planning-request hold: while armed, a planning request waits for
+/// the release instead of answering (the child stays mid-plan).
+#[derive(Default, PartialEq, Eq)]
+enum PlanHold {
+    #[default]
+    Off,
+    Armed,
+    Held,
 }
 
 /// An OpenAI-compatible SSE mock: the refinement child's planning request
@@ -138,6 +149,28 @@ impl RefineMock {
 
     fn release_turns(&self) {
         self.hold.state.lock().expect("mock lock").holding = false;
+        self.hold.changed.notify_all();
+    }
+
+    /// Hold every planning request until [`Self::release_plans`].
+    fn hold_plans(&self) {
+        self.hold.state.lock().expect("mock lock").plan = PlanHold::Armed;
+    }
+
+    /// Wait until a planning request is held (the child is mid-plan).
+    fn wait_for_held_plan(&self) {
+        drop(
+            self.hold
+                .changed
+                .wait_while(self.hold.state.lock().expect("mock lock"), |state| {
+                    state.plan != PlanHold::Held
+                })
+                .expect("mock lock"),
+        );
+    }
+
+    fn release_plans(&self) {
+        self.hold.state.lock().expect("mock lock").plan = PlanHold::Off;
         self.hold.changed.notify_all();
     }
 
@@ -270,8 +303,16 @@ fn serve(
     let body = read_body(&mut reader)?;
     requests.lock().expect("mock lock").push(body.clone());
     if is_refinement_plan_request(&body) {
-        let state = hold.state.lock().expect("mock lock");
-        if state.holding {
+        let mut state = hold.state.lock().expect("mock lock");
+        if state.plan != PlanHold::Off {
+            state.plan = PlanHold::Held;
+            hold.changed.notify_all();
+            drop(
+                hold.changed
+                    .wait_while(state, |state| state.plan != PlanHold::Off)
+                    .expect("mock lock"),
+            );
+        } else if state.holding {
             drop(
                 hold.changed
                     .wait_while(state, |state| state.holding && !state.turn_seen)
@@ -1359,4 +1400,129 @@ fn a_branch_move_cancels_the_in_flight_refine_child() {
         &stderr_path,
     );
     assert_eq!(complete["result"]["appliedEdits"][0]["applied"], true);
+}
+
+/// A refinement child that ends mid-plan without replying (a user cancel
+/// of its run) fails its refinement: exactly one `refine_failed` names the
+/// child's end, no generic child notice, late reply or follow-up turn
+/// reaches the parent, the flight is released at the child's end, and the
+/// next `/refine` spawns, plans and commits. Red when the child's end is
+/// silent (no `refine_failed`), or when it still rides the generic
+/// child-terminal notice into the parent.
+#[test]
+fn a_refine_child_that_ends_mid_plan_fails_the_refinement() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    let mock = RefineMock::start();
+    write_fixture(&agent_dir, &session_dir, &mock.url());
+    let socket = dir.path().join("daemon.sock");
+    let stderr_path = dir.path().join("daemon.stderr");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir, &stderr_path);
+    let mut client = TimedClient::connect(&socket);
+    let (session_id, _durable) = create_and_attach(&mut client, &session_dir);
+    prompt_and_wait(&mut client, "p0", &session_id, "seed turn");
+
+    mock.hold_plans();
+    let response = refine(&mut client, "r1", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    let child_id = response["data"]["rlmChildId"]
+        .as_str()
+        .expect("child id")
+        .to_string();
+    mock.wait_for_held_plan();
+    // The cancel's answer waits for the child's teardown, which the held
+    // planning call blocks: it is not read here.
+    client.send_command(
+        "x1",
+        &json!({
+            "type": "cancel_rlm_child",
+            "activeSessionId": session_id,
+            "childId": child_id,
+        }),
+    );
+    let failed = wait_for_event(
+        &mut client,
+        Duration::from_secs(30),
+        "refine_failed",
+        &stderr_path,
+    );
+    let error = failed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Cancelled by user"),
+        "the failure names the child's end: {error}"
+    );
+    // The planning call may finish and the child may still send its
+    // reply; the one-shot record retires either way.
+    mock.release_plans();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = rlm_children_rows(&mut client, "g1", &session_id);
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the ended refinement child never retired; rows: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The flight is released: the next refinement spawns, plans and
+    // commits.
+    mock.release_plans();
+    let response = refine(&mut client, "r2", &session_id);
+    assert_eq!(response["success"], true, "refine failed: {response}");
+    let complete = wait_for_event(
+        &mut client,
+        Duration::from_secs(30),
+        "refine_complete",
+        &stderr_path,
+    );
+    assert_eq!(complete["result"]["appliedEdits"][0]["applied"], true);
+    assert_eq!(
+        client
+            .events
+            .iter()
+            .filter(|(event, _)| event["type"] == "refine_failed")
+            .count(),
+        1,
+        "exactly one refine_failed"
+    );
+
+    // No generic child notice, no late reply and no follow-up turn reached
+    // the parent: its durable file holds only the seed turn's assistant
+    // reply.
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .expect("the parent's session file")
+        .path();
+    let rows: Vec<Value> = std::fs::read_to_string(&session_file)
+        .expect("read session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let child_notices: Vec<&Value> = rows
+        .iter()
+        .filter(|row| {
+            [
+                pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE,
+                pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE,
+            ]
+            .iter()
+            .any(|kind| row["customType"] == json!(kind))
+        })
+        .collect();
+    assert!(
+        child_notices.is_empty(),
+        "a child notice or a late reply reached the parent: {child_notices:?}"
+    );
+    let assistant_rows = rows
+        .iter()
+        .filter(|row| row["type"] == "message" && row["message"]["role"] == "assistant")
+        .count();
+    assert_eq!(assistant_rows, 1, "no extra parent turn ran: {rows:?}");
 }

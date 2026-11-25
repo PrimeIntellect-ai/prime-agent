@@ -879,13 +879,16 @@ impl SupervisorChildSessionsInner {
     /// reserved-kind row exclusively with a live mint, and answers
     /// anything a caller sends — with or without a guessed nonce —
     /// loudly instead. A factory child's notice is dropped: the factory
-    /// reads the settle through collect and posts its own milestones.
+    /// reads the settle through collect and posts its own milestones. A
+    /// refinement child's terminal outcome goes to the engine's refine
+    /// terminal hook instead: the child's end is its refinement's outcome,
+    /// never a conversation turn.
     pub(super) async fn deliver_terminal_notice(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
         message: CustomMessage,
     ) {
-        if record.lock().await.factory {
+        if record.lock().await.factory || self.deliver_refine_outcome(record).await {
             return;
         }
         let Some(content) = custom_message_text(&message) else {
@@ -920,6 +923,31 @@ impl SupervisorChildSessionsInner {
                 "pa-daemon: RLM child terminal notice was not delivered to the parent session: {error:#}"
             );
         }
+    }
+
+    /// Hand a refinement child's terminal outcome (its run's error, `None`
+    /// for a run that ended without one) to the engine's refine terminal
+    /// hook. `false` for any other child.
+    pub(super) async fn deliver_refine_outcome(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        let (active_session_id, error) = {
+            let record = record.lock().await;
+            if !record.refine_child {
+                return false;
+            }
+            (
+                record.active_session_id.clone(),
+                record.run.error().map(str::to_string),
+            )
+        };
+        let hook = self
+            .refine_terminal_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook(&active_session_id, error.as_deref());
+        }
+        true
     }
 }
 

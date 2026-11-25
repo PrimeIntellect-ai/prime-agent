@@ -255,9 +255,10 @@ pub struct AgentSessionEngine {
     pub(crate) pending_refine_replies:
         std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
     /// The active session ids of the refinement children that a branch
-    /// move or a replacement abandoned. The cancel cannot recall a reply
-    /// that is already in delivery, so the park drops that late reply and
-    /// removes its id. An id whose child never replied stays, as the child
+    /// move or a replacement abandoned, or whose refinement already failed
+    /// because the child ended before replying. A cancel cannot recall a
+    /// reply that is already in delivery, so the park drops that late reply
+    /// and removes its id. An id whose child never replied stays, as the child
     /// registry also keeps its own record of that child.
     pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Orders refinement-child admissions (prepare, spawn, flight record,
