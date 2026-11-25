@@ -389,16 +389,48 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
     Some(scan)
 }
 
-/// Every usage row of a transcript as `(entry id, usage)`, in file order:
-/// the rows the usage ledger records for the session.
+/// Every usage row of a transcript as `(entry id, own usage)`, in file
+/// order: the rows the usage ledger records for the session. An older
+/// build's `child_usage_attributed` row nets out of its target the way
+/// [`UsageScan`] does (the target bills the latest aggregate minus the
+/// attributed child spend), so a rewrite that persisted the folded
+/// aggregate never bills the children's spend twice.
 #[must_use]
 pub fn read_usage_rows(path: &Path) -> Option<Vec<(String, Usage)>> {
-    let mut rows = Vec::new();
+    let mut rows: Vec<(String, Usage)> = Vec::new();
+    let mut child_spend: Vec<Usage> = Vec::new();
+    let mut assistant_rows: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut attribution_ids = std::collections::HashSet::new();
     each_scan_entry(path, |entry, billed| {
+        if entry.type_ == "child_usage_attributed" {
+            let (Some(&at), Some(child), Some(aggregate)) = (
+                entry
+                    .target_id
+                    .as_deref()
+                    .and_then(|target| assistant_rows.get(target)),
+                entry.child_usage,
+                entry.aggregate_usage,
+            ) else {
+                return;
+            };
+            rows[at].1 = aggregate.into();
+            if entry.id.is_empty() || attribution_ids.insert(entry.id) {
+                add_assistant_usage(&mut child_spend[at], &child.into());
+            }
+            return;
+        }
         if let Some(usage) = entry.usage_row(billed.as_ref()) {
+            if entry.type_ == "message" {
+                assistant_rows.insert(entry.id.clone(), rows.len());
+            }
             rows.push((entry.id, usage));
+            child_spend.push(Usage::default());
         }
     })?;
+    for ((_, usage), child) in rows.iter_mut().zip(&child_spend) {
+        subtract_assistant_usage(usage, child);
+    }
     Some(rows)
 }
 
@@ -774,6 +806,29 @@ mod tests {
                 cost: 0.0
             })
         );
+    }
+
+    /// The ledger import nets an older build's attribution out of its target
+    /// whether the target row still holds its own call or a rewrite already
+    /// persisted the folded aggregate.
+    #[test]
+    fn read_usage_rows_nets_attributed_child_spend_out_of_the_target() {
+        let dir = std::env::temp_dir().join(format!("session-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let attributed = attribution("a", usage(30, 3, 0.3), usage(130, 13, 1.3));
+        for (name, row) in [
+            ("raw", usage(100, 10, 1.0)),
+            ("rewritten", usage(130, 13, 1.3)),
+        ] {
+            let path = dir.join(format!("{name}.jsonl"));
+            let assistant = message("a", "assistant", &serde_json::to_value(row).unwrap());
+            std::fs::write(&path, format!("{assistant}\n{attributed}\n")).unwrap();
+            let rows = read_usage_rows(&path).unwrap();
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!((rows[0].1.input, rows[0].1.output), (100, 10), "{name}");
+            assert!((rows[0].1.cost.total.as_f64() - 1.0).abs() < 1e-9, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
