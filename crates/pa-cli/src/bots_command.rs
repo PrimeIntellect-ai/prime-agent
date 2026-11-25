@@ -9,7 +9,8 @@ use pa_daemon::bots::github;
 
 use crate::config::get_agent_dir;
 
-const USAGE: &str = "Usage: prime-agent bots github <set|clear|status>";
+const USAGE: &str =
+    "Usage: prime-agent bots github <set|clear|status> | prime-agent bots allow-spawns <bot>";
 
 /// Run the `bots` command; returns the process exit code.
 pub fn run_bots_command(args: &[String]) -> i32 {
@@ -22,6 +23,7 @@ pub fn run_bots_command(args: &[String]) -> i32 {
             status(&agent_dir);
             Ok(())
         }
+        ["allow-spawns", bot] => allow_spawns(&agent_dir, bot),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -125,6 +127,45 @@ fn delete_platform_secrets(agent_dir: &Path) -> anyhow::Result<usize> {
         .enable_all()
         .build()?
         .block_on(github::delete_secrets(&client))
+}
+
+/// Give one running bot the ability to spawn bots without a respawn: the
+/// platform rule that injects the owner's sandbox API key, the guest
+/// settings and nested context, and the record flag.
+fn allow_spawns(agent_dir: &Path, bot: &str) -> Result<(), String> {
+    let manager = pa_daemon::bots::manager_for(agent_dir).map_err(|error| error.to_string())?;
+    let record = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?
+        .block_on(async {
+            // The bot by id, or by name when only one carries it.
+            let found = manager
+                .list()
+                .into_iter()
+                .find(|record| record.bot_id == bot)
+                .or_else(|| {
+                    let named: Vec<_> = manager
+                        .list()
+                        .into_iter()
+                        .filter(|record| record.name == bot)
+                        .collect();
+                    (named.len() == 1).then(|| named[0].clone())
+                });
+            let Some(found) = found else {
+                return Err(anyhow::anyhow!("No bot named {bot:?}."));
+            };
+            manager
+                .allow_spawns(&found.bot_id)
+                .await
+                .map(|record| record.name)
+        })
+        .map_err(|error: anyhow::Error| format!("{error:#}"))?;
+    println!(
+        "{record} may now spawn bots. With this, any code in that bot can call the whole \
+         Prime sandbox API as the owner; prefer a dedicated, sandbox-scoped API key."
+    );
+    Ok(())
 }
 
 fn status(agent_dir: &Path) {

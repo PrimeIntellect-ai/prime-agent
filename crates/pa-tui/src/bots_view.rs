@@ -38,6 +38,10 @@ pub struct BotRow {
     pub github: bool,
     /// The owner logins of the bot whose refresh failed or that expired.
     pub login_stale: Vec<String>,
+    /// The bot may spawn its own bots, or already has children.
+    pub spawns_bots: bool,
+    /// The bot that spawned this one, when a bot did.
+    pub parent_bot_id: Option<String>,
 }
 
 impl BotRow {
@@ -77,6 +81,9 @@ impl BotRow {
         if !self.login_stale.is_empty() {
             let _ = write!(note, " \u{b7} login stale: {}", self.login_stale.join(", "));
         }
+        if self.spawns_bots {
+            note.push_str(" \u{b7} spawns bots");
+        }
         if self.has_turn {
             let _ = write!(
                 note,
@@ -106,6 +113,10 @@ impl BotRow {
             (
                 "github".into(),
                 if self.github { "on" } else { "off" }.into(),
+            ),
+            (
+                "spawns".into(),
+                if self.spawns_bots { "on" } else { "off" }.into(),
             ),
             ("created".into(), self.created_at.clone()),
             ("activity".into(), self.last_activity_at.clone()),
@@ -201,6 +212,11 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                spawns_bots: row
+                    .get("spawnsBots")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                parent_bot_id: text(row, "parentBotId"),
             })
         })
         .collect();
@@ -212,8 +228,46 @@ pub fn parse_bots(value: &Value) -> Result<BotsCatalog, String> {
             .cmp(&section_rank(b.section()))
             .then_with(|| b.last_activity_at.cmp(&a.last_activity_at))
     });
+    // The tree: a bot's children follow it, indented. A child whose parent
+    // sits later in the same section waits for it; a child whose parent is
+    // absent or in another section keeps its own sorted place.
+    let mut treed: Vec<BotRow> = Vec::with_capacity(bots.len());
+    let mut placed = vec![false; bots.len()];
+    let parent_position = |row: &BotRow| {
+        row.parent_bot_id
+            .as_deref()
+            .and_then(|parent| bots.iter().position(|bot| bot.bot_id == parent))
+    };
+    for index in 0..bots.len() {
+        if placed[index] {
+            continue;
+        }
+        let waits_for_parent = parent_position(&bots[index]).is_some_and(|parent| {
+            !placed[parent] && bots[parent].section() == bots[index].section()
+        });
+        if waits_for_parent {
+            continue;
+        }
+        placed[index] = true;
+        treed.push(bots[index].clone());
+        for child in 0..bots.len() {
+            if !placed[child]
+                && bots[child].parent_bot_id.as_deref() == Some(bots[index].bot_id.as_str())
+            {
+                placed[child] = true;
+                treed.push(bots[child].clone());
+            }
+        }
+    }
+    // A parent that never appeared in its child's section leaves the child
+    // here, in its sorted place.
+    for index in 0..bots.len() {
+        if !placed[index] {
+            treed.push(bots[index].clone());
+        }
+    }
     Ok(BotsCatalog {
-        rows: bots,
+        rows: treed,
         skipped,
     })
 }
@@ -520,7 +574,16 @@ impl BotsView {
                             Span::styled(glyph.to_string(), theme.fg_style(color)),
                             Span::raw(" ".to_string()),
                         ];
-                        let name: String = row.name.chars().take(NAME_COLUMN_W).collect();
+                        // A child nests under its parent: the arrow keeps the
+                        // indent inside the fixed name column.
+                        let name: String = if row.parent_bot_id.is_some() {
+                            format!("\u{21b3} {}", row.name)
+                        } else {
+                            row.name.clone()
+                        }
+                        .chars()
+                        .take(NAME_COLUMN_W)
+                        .collect();
                         let name_pad =
                             " ".repeat(NAME_COLUMN_W.saturating_sub(name.chars().count()));
                         line.push(theme.fg_span(

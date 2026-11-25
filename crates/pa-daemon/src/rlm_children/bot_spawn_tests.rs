@@ -93,6 +93,7 @@ fn request(name: &str, target: RlmSpawnTarget) -> RlmSpawnRequest {
     RlmSpawnRequest {
         target,
         github: None,
+        bots: false,
         prompt: "scout the repo".to_string(),
         name: Some(name.to_string()),
         model: None,
@@ -138,6 +139,7 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     assert_eq!(spawn["ownerSessionId"], "parent-file");
     assert_eq!(spawn["prompt"], "scout the repo");
     assert_eq!(spawn["rlmMaxDepth"], DEFAULT_RLM_MAX_DEPTH - 1);
+    assert_eq!(spawn["bots"], false);
     assert!(!sessions.spawn_name_reserved("scout"));
 
     // The bot shows on the roster and in collect, and deletes through
@@ -161,6 +163,17 @@ async fn a_sandbox_spawn_is_a_bot_on_the_supervisor() {
     assert_eq!(collected[0].status, "done");
     let roster = sessions.list_subagents().await.unwrap();
     assert_eq!(roster[0].status, "paused");
+    // The nested-spawn flag rides the request to the supervisor.
+    sessions
+        .spawn(RlmSpawnRequest {
+            bots: true,
+            ..request("scout-b", RlmSpawnTarget::Sandbox)
+        })
+        .await
+        .expect("the flag rides along");
+    let flagged = commands.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(flagged["bots"], true);
+
     // A factory state cannot spawn a bot: its ledger edge would be lost.
     let tagged = RlmSpawnRequest {
         factory: Some(pa_core::session_engine::rlm_host::RlmFactoryTag {

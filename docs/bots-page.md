@@ -52,6 +52,18 @@ A bot runs the same prime-agent version as the daemon that owns it. The sandbox 
 
 A local build (no published release) installs a linux-x64 tarball of its own build. Run `make bot-tarball` in its checkout on Linux: it puts the tarball next to `target/debug/prime-agent` and `target/release/prime-agent`, where the daemon finds it. Or set `PRIME_AGENT_BOT_TARBALL` to the tarball. The tarball must carry the daemon's exact version.
 
+## Bots that spawn bots
+
+A bot can spawn its own bots: `rlm.spawn(..., target="sandbox", bots=True)`. The flag is off by default and is stored on the bot's record. The /bots page indents a bot's children under it and marks the bots that spawn bots.
+
+The owner's daemon stores its sandbox API key as a Prime secret and adds one header rule to that bot's sandbox: the platform sets `Authorization: Bearer <key>` on the bot's HTTPS requests to `api.primeintellect.ai`. The key value never enters the sandbox. The bot's own daemon then creates, pauses, and deletes its children directly through the sandbox API, so it keeps working while this Mac sleeps.
+
+Bots nest two levels deep: owner, bot, bot. A bot at the second level cannot spawn another one, and `rlm.spawn(target="sandbox")` inside a bot that was not spawned with `bots=True` fails fast with "this bot may not spawn bots" instead of calling the platform. Children count toward the owner's bot list and its `bots.maxBots` cap (default 10, in `settings.json`), checked before each create. A child's sandbox carries the owner's label and a `prime-agent-bot-parent:<id>` label, so the owner's daemon lists them, shows them in the tree, prices them, and deletes them: deleting a bot deletes its descendants first.
+
+`prime-agent bots allow-spawns <bot>` gives one running bot the same rule, guest settings, and flag without a respawn (it replaces the sandbox's whole network policy, keeping its current rules). `rlm.spawn(..., bots=True)` on a new bot is the cleaner path.
+
+**Security note.** With `bots=True`, any code inside that bot can call the whole Prime sandbox API as the owner: create sandboxes, delete them, and exec into any sandbox of the account. Give such bots a dedicated, sandbox-scoped API key (its own key in `auth.json`, injected through a header rule) so it can be disabled alone, and review what runs in them.
+
 ## Pause policy
 
 The daemon pauses a bot 2 minutes after a settled turn. It does not pause a bot while a message is queued, a turn is running, or a TUI is attached. A pause keeps the bot's state. The next message or attach resumes it:

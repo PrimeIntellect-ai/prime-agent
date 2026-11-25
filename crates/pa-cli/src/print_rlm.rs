@@ -1301,6 +1301,7 @@ mod tests {
         let mut spawn = InlineHost(Arc::clone(&node)).spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
             prompt: "finish the task".to_string(),
             name: Some("late".to_string()),
             model: None,

@@ -241,6 +241,34 @@ fn the_page_lists_the_bots_and_counts_the_bad_rows() {
     assert!(frame.contains("1 malformed bot rows skipped"), "{frame}");
 }
 
+/// The /bots page shows the tree: a bot's children follow it, indented
+/// with an arrow, and a bot that spawns bots carries the mark.
+#[test]
+fn the_page_nests_a_bots_children_under_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut parent = bot("b1", "chief-of-staff", "running", None);
+    parent["spawnsBots"] = json!(true);
+    let mut child = bot("b2", "scout", "running", None);
+    child["parentBotId"] = json!("b1");
+    let outcome = run(
+        &dir.path().join("d.sock"),
+        SessionSelection::New,
+        local_mock(json!({"bots": [child.clone(), parent]}), Err("unused")),
+        vec![HeadlessStep::Submit("/bots".into()), wait("chief-of-staff")],
+    );
+    let frame = last_frame_with(&outcome, "chief-of-staff");
+    let rows: Vec<&str> = frame.lines().collect();
+    let at = |needle: &str| rows.iter().position(|row| row.contains(needle)).unwrap();
+    assert!(
+        at("chief-of-staff") < at("\u{21b3} scout"),
+        "the child follows: {frame}"
+    );
+    assert!(
+        rows[at("chief-of-staff") + 1].contains("spawns bots"),
+        "{frame}"
+    );
+}
+
 #[test]
 fn the_status_bar_counts_the_running_bots_and_opens_the_page() {
     let dir = tempfile::tempdir().unwrap();

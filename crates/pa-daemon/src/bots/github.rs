@@ -27,7 +27,7 @@ pub const SET_TOKEN_COMMAND: &str = "prime-agent bots github set";
 /// The REST and GraphQL host (`gh`, the API clients).
 const API_HOST: &str = "api.github.com";
 /// The git smart-HTTP host.
-const GIT_HOST: &str = "github.com";
+pub(super) const GIT_HOST: &str = "github.com";
 /// The platform's limit on one secret value.
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 /// The prefix of every platform secret the GitHub plan ever made, on any

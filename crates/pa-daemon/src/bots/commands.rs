@@ -19,14 +19,61 @@ pub const BOTS_DISABLED_MESSAGE: &str = "hosted sandbox spawns are off until the
      ask the user to run /bots on or set bots.enabled in the daemon settings.json; \
      do not change this setting yourself";
 
-/// The opt-in gate: a fresh, strict read of the global `bots.enabled`
-/// setting per attempt. Unset, malformed, and unreadable settings all
-/// refuse.
+/// The refusal inside a bot that was not spawned with `bots=True`.
+pub const BOT_MAY_NOT_SPAWN_MESSAGE: &str = "this bot may not spawn bots: its owner spawned it \
+     without bots=True, and bots nest two levels deep (owner -> bot -> bot). Ask the owner to \
+     respawn it with rlm.spawn(..., target=\"sandbox\", bots=True), or to run \
+     `prime-agent bots allow-spawns <bot>` on it";
+
+/// The spawn gate. Inside a bot, the nested-spawn context decides (see
+/// [`admit_nested_spawn`]); everywhere else, a fresh, strict read of the
+/// global `bots.enabled` setting per attempt (unset, malformed, and
+/// unreadable settings all refuse).
 ///
 /// # Errors
 ///
-/// Returns [`BOTS_DISABLED_MESSAGE`] while the opt-in is off.
-pub async fn admit_bot_spawn(agent_dir: &Path) -> Result<()> {
+/// Returns [`BOT_MAY_NOT_SPAWN_MESSAGE`] inside a bot that may not spawn
+/// bots, and [`BOTS_DISABLED_MESSAGE`] while the opt-in is off.
+pub async fn admit_bot_spawn(agent_dir: &Path, bots: bool) -> Result<()> {
+    if super::remote_parent::remote_parent_name().is_some() {
+        return admit_nested_spawn(agent_dir, bots).await;
+    }
+    admit_owner_bot_spawn(agent_dir).await
+}
+
+/// The gate inside a bot: the nested-spawn context decides.
+///
+/// # Errors
+///
+/// Returns [`BOT_MAY_NOT_SPAWN_MESSAGE`] for a bot without the context,
+/// and the depth-cap refusals past it.
+pub async fn admit_nested_spawn(agent_dir: &Path, bots: bool) -> Result<()> {
+    let agent_dir = agent_dir.to_path_buf();
+    let nested =
+        tokio::task::spawn_blocking(move || super::nested::NestedContext::read(&agent_dir))
+            .await
+            .context("the nested-spawn gate read failed")?;
+    let Some(context) = nested else {
+        bail!(BOT_MAY_NOT_SPAWN_MESSAGE);
+    };
+    if !context.may_spawn() {
+        bail!(
+            "bots nest at most two levels deep (owner -> bot -> bot); this bot is at \
+             level {} and cannot spawn another one",
+            context.depth
+        );
+    }
+    if bots {
+        bail!(
+            "a bot cannot pass bots=True on: bots nest two levels deep \
+             (owner -> bot -> bot), so a bot's children never spawn bots"
+        );
+    }
+    Ok(())
+}
+
+/// The `bots.enabled` opt-in gate outside a bot.
+async fn admit_owner_bot_spawn(agent_dir: &Path) -> Result<()> {
     let agent_dir = agent_dir.to_path_buf();
     let enabled = tokio::task::spawn_blocking(move || {
         pa_core::settings::SettingsManager::create(&agent_dir, &agent_dir).get_bots_enabled()
@@ -75,7 +122,12 @@ impl Drop for NameReservation {
 /// One bot as a `list_bots` row. `login_stale` names the owner logins
 /// whose refresh failed or that expired.
 #[must_use]
-pub fn bot_row(record: &BotRecord, attached: bool, login_stale: &[String]) -> Value {
+pub fn bot_row(
+    record: &BotRecord,
+    attached: bool,
+    login_stale: &[String],
+    spawns_bots: bool,
+) -> Value {
     json!({
         "botId": record.bot_id,
         "name": record.name,
@@ -91,6 +143,9 @@ pub fn bot_row(record: &BotRecord, attached: bool, login_stale: &[String]) -> Va
         "attached": attached,
         "github": record.github,
         "loginStale": login_stale,
+        // The bot may spawn its own bots, or already has children.
+        "spawnsBots": spawns_bots,
+        "parentBotId": record.parent_bot_id,
     })
 }
 
@@ -111,6 +166,7 @@ impl Supervisor {
             prompt,
             rlm_max_depth,
             github,
+            bots,
             ..
         } = command
         else {
@@ -125,12 +181,13 @@ impl Supervisor {
             prompt: prompt.clone(),
             github: false,
             git_identity: None,
+            bots: *bots,
         };
         match self.spawn_bot(spec, *github, *rlm_max_depth).await {
             Ok(record) => response_success(
                 Some(command_id),
                 "spawn_bot",
-                Some(bot_row(&record, false, &[])),
+                Some(bot_row(&record, false, &[], record.bots)),
             ),
             Err(error) => {
                 response_failure(Some(command_id), "spawn_bot", &format!("{error:#}"), None)
@@ -145,12 +202,34 @@ impl Supervisor {
         rlm_max_depth: u64,
     ) -> Result<BotRecord> {
         let agent_dir = &self.options.agent_dir;
-        admit_bot_spawn(agent_dir).await?;
+        admit_bot_spawn(agent_dir, spec.bots).await?;
         let dir = agent_dir.clone();
-        (spec.github, spec.git_identity) =
-            tokio::task::spawn_blocking(move || super::github::for_spawn(&dir, github))
-                .await
-                .context("the GitHub settings read failed")??;
+        let nested = tokio::task::spawn_blocking({
+            let dir = dir.clone();
+            move || super::nested::NestedContext::read(&dir)
+        })
+        .await
+        .context("the nested-spawn context read failed")?;
+        let nested_for_github = nested.clone();
+        (spec.github, spec.git_identity) = tokio::task::spawn_blocking(move || {
+            // Inside a bot, GitHub access is what the bot's own sandbox
+            // rule can pass on, not this daemon's settings.
+            if let Some(context) = nested_for_github.as_ref() {
+                let inherited = context.network_rules.contains_key(super::github::GIT_HOST);
+                return match github {
+                    Some(true) if !inherited => Err(anyhow::anyhow!(
+                        "this bot has no GitHub access to pass on: its sandbox has no \
+                         GitHub header rule. Spawn the child without github."
+                    )),
+                    Some(true) => Ok((true, super::github::git_identity(&dir))),
+                    Some(false) => Ok((false, super::github::git_identity(&dir))),
+                    None => Ok((inherited, super::github::git_identity(&dir))),
+                };
+            }
+            super::github::for_spawn(&dir, github)
+        })
+        .await
+        .context("the GitHub settings read failed")??;
         let spec = &spec;
         let manager = super::manager_for(agent_dir)?;
         let _reservation = NameReservation::take(&spec.owner_session_id, &spec.name)?;
@@ -162,6 +241,30 @@ impl Supervisor {
             bail!(
                 "a bot named \"{}\" already exists for this session",
                 spec.name
+            );
+        }
+        // The owner's bot list cap, children included. Inside a bot, the
+        // context's owner label names every bot of the same owner, so the
+        // count covers the owner's own bots too.
+        let (count_owner, max_bots) = if let Some(context) = nested.as_ref() {
+            (context.owner_session_id.clone(), context.max_bots)
+        } else {
+            let dir = agent_dir.clone();
+            let owner = spec.owner_session_id.clone();
+            let max = tokio::task::spawn_blocking(move || {
+                pa_core::settings::SettingsManager::create(&dir, &dir).get_bots_max_bots() as usize
+            })
+            .await
+            .context("the bots.maxBots read failed")?;
+            (owner, max)
+        };
+        let owned = manager.owner_bot_ids(&count_owner).await?;
+        if owned.len() >= max_bots {
+            bail!(
+                "the owner's bot list is full: {} of bots.maxBots {} (children a bot spawned \
+                 count too). Delete a bot or raise bots.maxBots in the daemon settings.json.",
+                owned.len(),
+                max_bots
             );
         }
         let started = tokio::time::timeout(BOT_DEADLINE, async {
@@ -206,12 +309,23 @@ impl Supervisor {
                 Ok(record)
             }
             // A failed spawn leaves nothing billing, whatever step it reached.
-            Err(error) => match manager.delete(&spec.bot_id).await {
-                Ok(()) => Err(error.context("the bot was deleted")),
-                Err(delete_error) => {
-                    Err(error.context(format!("deleting the bot failed: {delete_error:#}")))
-                }
-            },
+            Err(error) => {
+                let cleanup = match manager.delete(&spec.bot_id).await {
+                    Ok(()) => "the failed bot was deleted".to_string(),
+                    Err(delete_error) => {
+                        let same = error.chain().last().map(ToString::to_string)
+                            == delete_error.chain().last().map(ToString::to_string);
+                        if same {
+                            "the failed bot could not be deleted (the same error)".to_string()
+                        } else {
+                            format!("the failed bot could not be deleted: {delete_error:#}")
+                        }
+                    }
+                };
+                Err(anyhow::anyhow!(
+                    "the bot did not start: {error:#}; {cleanup}"
+                ))
+            }
         }
     }
 
@@ -248,7 +362,7 @@ impl Supervisor {
             Ok(record) => response_success(
                 Some(command_id),
                 "delete_bot",
-                Some(bot_row(&record, false, &[])),
+                Some(bot_row(&record, false, &[], record.bots)),
             ),
             Err(error) => {
                 response_failure(Some(command_id), "delete_bot", &format!("{error:#}"), None)
@@ -278,8 +392,13 @@ impl Supervisor {
                 return response_failure(Some(command_id), "list_bots", &format!("{error:#}"), None)
             }
         };
-        let rows: Vec<Value> = manager
-            .list()
+        let bots = manager.list();
+        // The bots that have children (a merged child row names its parent).
+        let parents: std::collections::BTreeSet<&str> = bots
+            .iter()
+            .filter_map(|bot| bot.parent_bot_id.as_deref())
+            .collect();
+        let rows: Vec<Value> = bots
             .iter()
             .filter(|bot| {
                 owner_session_id
@@ -291,6 +410,7 @@ impl Supervisor {
                     bot,
                     manager.attached(&bot.bot_id),
                     &manager.login_stale(bot),
+                    bot.bots || parents.contains(bot.bot_id.as_str()),
                 )
             })
             .collect();

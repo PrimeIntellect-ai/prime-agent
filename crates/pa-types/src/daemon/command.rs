@@ -634,6 +634,9 @@ pub enum DaemonCommand {
         /// The bot's GitHub access; `None` follows the `bots.github` setting.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         github: Option<bool>,
+        /// The bot may spawn its own bots (the nested-spawn flag).
+        #[serde(default)]
+        bots: bool,
         #[serde(flatten)]
         rest: JsonMap,
     },

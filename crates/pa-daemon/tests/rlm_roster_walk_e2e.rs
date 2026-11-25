@@ -498,6 +498,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
             prompt: "ship the seed lane".to_string(),
             name: Some("worker-a".to_string()),
             model: None,

@@ -464,6 +464,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
             prompt: "f20 child task".to_string(),
             name: Some("f20-worker".to_string()),
             model: None,
@@ -486,6 +487,7 @@ async fn a_factory_child_settles_without_a_parent_notice() {
         .spawn(RlmSpawnRequest {
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
             prompt: "f20 child task".to_string(),
             name: Some("f20-worker".to_string()),
             model: None,
@@ -1265,6 +1267,7 @@ async fn a_decision_spawn_resolves_the_model_from_the_child_cwd() {
             factory: None,
             target: pa_core::session_engine::rlm_host::RlmSpawnTarget::default(),
             github: None,
+            bots: false,
         })
         .await
         .expect("the decision spawn resolves through the child cwd");

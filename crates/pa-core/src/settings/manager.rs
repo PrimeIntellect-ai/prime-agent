@@ -1261,6 +1261,46 @@ mod tests {
         assert!(!manager.get_factory_enabled());
     }
 
+    /// `bots.maxBots` reads the global scope: a positive number caps the
+    /// bot list; unset, malformed, and non-positive values read as the
+    /// default (10).
+    #[test]
+    fn bots_max_bots_reads_the_global_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let manager = SettingsManager::create(&cwd, dir.path());
+        assert_eq!(
+            manager.get_bots_max_bots(),
+            crate::settings::types::DEFAULT_BOTS_MAX_BOTS as u64
+        );
+
+        for document in [
+            r#"{"bots": {"maxBots": "3"}}"#,
+            r#"{"bots": {"maxBots": 0}}"#,
+            r#"{"bots": {"maxBots": -2}}"#,
+            r#"{"bots": [3]}"#,
+            "{ not json",
+        ] {
+            std::fs::write(dir.path().join("settings.json"), document).unwrap();
+            let manager = SettingsManager::create(&cwd, dir.path());
+            assert_eq!(
+                manager.get_bots_max_bots(),
+                crate::settings::types::DEFAULT_BOTS_MAX_BOTS as u64,
+                "{document}"
+            );
+        }
+
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"bots": {"maxBots": 25}}"#,
+        )
+        .unwrap();
+        let manager = SettingsManager::create(&cwd, dir.path());
+        assert_eq!(manager.get_bots_max_bots(), 25);
+    }
+
     /// `bots.enabled` reads the GLOBAL scope only and only the JSON
     /// boolean `true` enables it: every malformed, wrong-typed, or
     /// absent shape stays disabled (the daemon's sandbox-admission

@@ -16,6 +16,7 @@ pub mod ledger;
 pub mod link;
 pub mod logins;
 pub mod manager;
+pub mod nested;
 pub mod platform;
 pub mod registry;
 pub mod relay;
@@ -72,6 +73,16 @@ pub fn owner_label(owner_session_id: &str) -> String {
     format!("{BOT_LABEL}-owner:{owner_session_id}")
 }
 
+/// The label that names the bot a bot was spawned by.
+#[must_use]
+pub fn parent_label(bot_id: &str) -> String {
+    format!("{BOT_LABEL}-parent:{bot_id}")
+}
+
+/// How deep bots nest: owner -> bot -> bot. A bot at the maximum depth
+/// cannot spawn another one.
+pub const MAX_BOT_DEPTH: u32 = 2;
+
 /// The label that names one owner login a bot carries.
 #[must_use]
 pub fn login_label(provider: &str) -> String {
@@ -95,6 +106,8 @@ pub struct BotSpec {
     pub github: bool,
     /// The git author the bot commits as.
     pub git_identity: Option<BotGitIdentity>,
+    /// The bot may spawn its own bots (`rlm.spawn(..., bots=True)`).
+    pub bots: bool,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
