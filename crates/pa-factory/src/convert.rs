@@ -158,7 +158,7 @@ fn attach_transitions(transitions: &[Value], order: &mut [StateOut], problems: &
                     }
                 }
                 match index.get(&to) {
-                    Some(&at) if !order[at].join.is_empty() && order[at].join != members => {
+                    Some(&at) if !order[at].join.is_empty() => {
                         problems.push(format!(
                             "more than one join ends at state {to:?}, which machine.toml cannot express"
                         ));

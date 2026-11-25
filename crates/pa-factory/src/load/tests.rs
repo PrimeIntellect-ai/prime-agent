@@ -662,6 +662,14 @@ fn a_null_guard_is_an_unguarded_transition_and_two_joins_to_one_state_are_refuse
         convert_spec(&two_joins, &meta("a")).unwrap_err(),
         ["more than one join ends at state \"d\", which machine.toml cannot express"]
     );
+    let same_join_twice = json!({
+        "states": [state("a", true), state("b", true), state("d", false)],
+        "transitions": [{"from": ["a", "b"], "to": "d"}, {"from": ["a", "b"], "to": "d"}],
+    });
+    assert_eq!(
+        convert_spec(&same_join_twice, &meta("a")).unwrap_err(),
+        ["more than one join ends at state \"d\", which machine.toml cannot express"]
+    );
 }
 
 #[test]
