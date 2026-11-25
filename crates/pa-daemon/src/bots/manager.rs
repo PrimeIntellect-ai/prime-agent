@@ -808,10 +808,24 @@ impl BotManager {
     /// # Errors
     /// Returns an error when the label listing fails.
     pub async fn owner_bot_ids(&self, owner_session_id: &str) -> Result<BTreeSet<String>> {
-        let mut bot_ids: BTreeSet<String> = lock(&self.registry)
-            .all()
+        // A merged child's record names its parent bot's guest session as
+        // the owner; the parent's record names this owner. Both count, so
+        // a stopped child with a checkpoint still holds a cap slot.
+        let records = lock(&self.registry).all();
+        let owners: BTreeMap<String, String> = records
+            .iter()
+            .map(|record| (record.bot_id.clone(), record.owner_session_id.clone()))
+            .collect();
+        let mut bot_ids: BTreeSet<String> = records
             .into_iter()
-            .filter(|record| record.owner_session_id == owner_session_id)
+            .filter(|record| {
+                record.owner_session_id == owner_session_id
+                    || record
+                        .parent_bot_id
+                        .as_deref()
+                        .and_then(|parent| owners.get(parent))
+                        .is_some_and(|owner| *owner == owner_session_id)
+            })
             .map(|record| record.bot_id)
             .collect();
         let label = owner_label(owner_session_id);
@@ -1875,28 +1889,31 @@ impl BotManager {
             network_rules.remove(super::github::GIT_HOST);
             network_rules.remove(super::github::API_HOST);
         }
-        // The auth record alone is not enough: the placeholder is always
-        // present for Prime Inference (it carries the billing team), so
-        // the child's provider must also have a rule the platform injects
-        // a key on. The spawn fails here, before anything is billed.
+        // The child's provider needs credentials this sandbox actually
+        // holds: an auth record, and — for a provider whose models ride an
+        // API-key rule — a rule host in the inherited set. The Prime
+        // Inference placeholder is always present (it carries the billing
+        // team), so the record alone proves nothing there; a login-only
+        // provider (Copilot, Codex) has no API-key host, so its record is
+        // the whole proof. The spawn fails here, before anything is billed.
+        let injected: Vec<&str> = auth_json
+            .as_ref()
+            .and_then(Value::as_object)
+            .map(|auth| auth.keys().map(String::as_str).collect())
+            .unwrap_or_default();
         let hosts = super::credentials::provider_rule_hosts(provider);
-        if !hosts.iter().any(|host| network_rules.contains_key(host)) {
-            let known: Vec<&str> = network_rules.keys().map(String::as_str).collect();
-            let known = if known.is_empty() {
+        let credible = injected.contains(&provider)
+            && (hosts.is_empty() || hosts.iter().any(|host| network_rules.contains_key(host)));
+        if !credible {
+            let known = if injected.is_empty() {
                 "none are".to_string()
             } else {
-                known.join(", ")
+                injected.join(", ")
             };
             bail!(
                 "this bot cannot spawn a bot on {provider}: its sandbox holds no {provider} \
-                 rule; the rules its children can inherit are: {known}"
+                 credentials; the injected providers are: {known}"
             );
-        }
-        if !github {
-            // Both GitHub hosts go: the git smart-HTTP host and the REST
-            // host the `gh` CLI and API clients use.
-            network_rules.remove(super::github::GIT_HOST);
-            network_rules.remove(super::github::API_HOST);
         }
         Ok(GuestCredentials {
             network_rules,

@@ -2190,7 +2190,7 @@ async fn a_bot_refuses_a_child_on_a_provider_it_has_no_key_for() {
     bot.model = Some("anthropic/model-x".to_string());
     let refused = manager.spawn(&bot).await.expect_err("refused");
     assert!(
-        refused.to_string().contains("no anthropic rule"),
+        refused.to_string().contains("no anthropic credentials"),
         "{refused}"
     );
 }
@@ -2227,6 +2227,21 @@ async fn children_count_toward_the_owners_bot_list() {
     );
     platform.state().sandboxes.get_mut(&gone).unwrap().status = BotStatus::Stopped;
     assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 3);
+
+    // A merged child counts through its parent even with no live sandbox:
+    // a stopped child with a checkpoint still holds a cap slot.
+    manager
+        .merge_children(
+            "bot-a",
+            &[serde_json::json!({
+                "botId": "bot-child", "name": "child", "ownerSessionId": "guest-session",
+                "parentBotId": "bot-a", "checkpointId": "ckpt-1", "status": "stopped",
+                "createdAt": 1_i64,
+            })],
+        )
+        .await
+        .unwrap();
+    assert_eq!(manager.owner_bot_ids("owner-1").await.unwrap().len(), 4);
 }
 
 /// The follower merge: a bot's `list_bots` rows upsert as its children,
