@@ -745,19 +745,23 @@ pub(crate) fn block_diagram(
                 canvas.put(x[item] + width[item] - 1, line_y, &side.to_string(), role);
             }
             if !self_loops[item].is_empty() {
-                // A self-loop in the last-fired window lights like any
-                // fired edge.
-                let role = if fired_pairs.contains(&(item, item)) {
-                    Role::Fired
-                } else {
-                    Role::Label
-                };
-                canvas.put(
-                    x[item] + width[item] + 1,
-                    top + 2,
-                    &format!("↺ {}", self_loops[item].join(", ")),
-                    role,
-                );
+                // Each self-loop label lights only when ITS loop fired, like
+                // the forward labels: a guarded loop by its guard, the
+                // unguarded `again` by the loop edge itself.
+                let mut at = x[item] + width[item] + 1;
+                canvas.put(at, top + 2, "↺ ", Role::Label);
+                at += 2;
+                for (index, label) in self_loops[item].iter().enumerate() {
+                    if index > 0 {
+                        canvas.put(at, top + 2, ", ", Role::Label);
+                        at += 2;
+                    }
+                    let fired = fired_labels.contains(&(item, label.clone()))
+                        || (label == "again" && fired_pairs.contains(&(item, item)));
+                    let role = if fired { Role::Fired } else { Role::Label };
+                    canvas.put(at, top + 2, label, role);
+                    at += label.chars().count();
+                }
             }
         }
     }

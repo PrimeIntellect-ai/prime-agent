@@ -760,11 +760,44 @@ fn a_fired_self_loop_lights_its_label() {
     let label = spans
         .iter()
         .flatten()
-        .find(|span| span.content.contains("↺ verdict exists"))
+        .find(|span| span.content.contains("verdict exists"))
         .expect("the self-loop label renders");
     assert_eq!(
         label.style, success,
         "the fired self-loop's label paints success"
+    );
+}
+
+/// With two guarded self-loops on one state, only the loop that fired lights.
+#[test]
+fn only_the_fired_self_loop_lights_among_siblings() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(
+            json!({ "from": "reviewing", "to": "reviewing", "on": "settled",
+            "when": { "output": "retry", "op": "exists" } }),
+        );
+    snapshot["lastFired"] = json!([
+        { "from": "reviewing", "to": "reviewing", "seq": 9,
+          "when": { "output": "verdict", "op": "exists" } }
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 60);
+    let spans = frame_spans(&mut view);
+    let success = theme().fg_style(ThemeColor::Success);
+    let style_of = |text: &str| {
+        spans
+            .iter()
+            .flatten()
+            .find(|span| span.content.contains(text))
+            .map_or_else(|| panic!("{text:?} renders"), |span| span.style)
+    };
+    assert_eq!(style_of("verdict exists"), success, "the fired loop lights");
+    assert_ne!(
+        style_of("retry exists"),
+        success,
+        "the sibling loop stays unlit"
     );
 }
 
