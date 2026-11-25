@@ -46,7 +46,7 @@ const RESUME_JUMP_MS: u64 = 45_000;
 /// The oldest overdue heartbeat that still holds off a self-pause. A due
 /// job older than this is dormant (no live scheduler) or stuck; an idle
 /// sandbox must not keep billing for it.
-const HEARTBEAT_GUARD_MAX_OVERDUE_MS: u64 = 5 * 60 * 1000;
+pub(crate) const HEARTBEAT_GUARD_MAX_OVERDUE_MS: u64 = 5 * 60 * 1000;
 /// The pause request's deadline.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -182,7 +182,7 @@ pub(crate) async fn self_pause_loop<F, S>(
 pub(crate) fn heartbeat_due_soon(agent_dir: &Path, now_ms: u64) -> bool {
     let horizon = now_ms.saturating_add(TICK_MS);
     let floor = now_ms.saturating_sub(HEARTBEAT_GUARD_MAX_OVERDUE_MS);
-    crate::update_roster::scan_scheduled_jobs(agent_dir)
+    crate::update_roster::scan_all_scheduled_jobs(agent_dir)
         .into_iter()
         .filter(|job| is_heartbeat_cron_job(job) && job.status == JobStatus::Active)
         .any(|job| {

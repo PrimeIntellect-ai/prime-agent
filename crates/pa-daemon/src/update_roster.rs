@@ -262,6 +262,33 @@ pub(crate) fn scan_scheduled_jobs(agent_dir: &Path) -> Vec<pa_core::cron::AgentC
     jobs
 }
 
+/// Every scheduled job under the agent's session-artifacts tree. A child
+/// session's artifacts nest under its parent:
+/// `session-artifacts/<parent>/session-artifacts/<child>/scheduled-jobs.json`.
+/// The roster scan stops one level short of that layout.
+pub(crate) fn scan_all_scheduled_jobs(agent_dir: &Path) -> Vec<pa_core::cron::AgentCronJob> {
+    let mut jobs = Vec::new();
+    let mut pending = vec![agent_dir.join("session-artifacts")];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("scheduled-jobs.json")
+            {
+                jobs.extend(read_scheduled_jobs_artifact(&path));
+            }
+        }
+    }
+    jobs
+}
+
 /// The `scheduled-jobs.json` files one level under an artifacts partition
 /// root entry (per-session and per-child partitions).
 fn scheduled_job_files(partition: &Path) -> Vec<PathBuf> {

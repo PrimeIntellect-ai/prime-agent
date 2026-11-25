@@ -11,13 +11,12 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use pa_core::cron::store::read_scheduled_jobs_artifact;
-use pa_core::cron::{parse_iso_millis, AgentCronJob, JobStatus, ScheduleKind};
+use pa_core::cron::{parse_iso_millis, JobStatus, ScheduleKind};
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify};
 
 use super::credentials::GUEST_API_KEY_PLACEHOLDER;
-use super::self_pause::SelfPauseConfig;
+use super::self_pause::{SelfPauseConfig, HEARTBEAT_GUARD_MAX_OVERDUE_MS};
 
 /// How often the mirror re-reads the schedule set when no change wakes it.
 const POLL: Duration = Duration::from_secs(10);
@@ -95,9 +94,10 @@ impl WakeupSync {
             return Ok(false);
         }
         let agent_dir = self.agent_dir.clone();
-        let wakeups = tokio::task::spawn_blocking(move || wakeup_set(&agent_dir))
-            .await
-            .context("the relay wake-up scan task failed")?;
+        let wakeups =
+            tokio::task::spawn_blocking(move || wakeup_set(&agent_dir, crate::util::now_ms()))
+                .await
+                .context("the relay wake-up scan task failed")?;
         let body = serde_json::to_string(&json!({
             "sandboxId": config.sandbox_id,
             "wakeups": wakeups,
@@ -169,45 +169,24 @@ impl WakeupSync {
     }
 }
 
-/// Every scheduled job under the agent's session-artifacts tree. A child
-/// session's artifacts nest under its parent:
-/// `session-artifacts/<parent>/session-artifacts/<child>/scheduled-jobs.json`.
-/// The roster scan stops one level short of that layout, so the mirror
-/// walks the tree.
-fn scan_all_scheduled_jobs(agent_dir: &Path) -> Vec<AgentCronJob> {
-    let mut jobs = Vec::new();
-    let mut pending = vec![agent_dir.join("session-artifacts")];
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                pending.push(path);
-            } else if path.file_name().and_then(|name| name.to_str()) == Some("scheduled-jobs.json")
-            {
-                jobs.extend(read_scheduled_jobs_artifact(&path));
-            }
-        }
-    }
-    jobs
-}
-
 /// The whole `rlm_heartbeat` set to mirror: every active job in every
 /// session artifact partition. Paused, cancelled, and non-RLM jobs stay
 /// local. `nextRunAt` is unix seconds, rounded up so the relay never wakes
 /// the sandbox before the native due time.
-pub(crate) fn wakeup_set(agent_dir: &Path) -> Vec<Value> {
-    let mut wakeups: Vec<Value> = scan_all_scheduled_jobs(agent_dir)
+pub(crate) fn wakeup_set(agent_dir: &Path, now_ms: u64) -> Vec<Value> {
+    let floor = now_ms.saturating_sub(HEARTBEAT_GUARD_MAX_OVERDUE_MS);
+    let mut wakeups: Vec<Value> = crate::update_roster::scan_all_scheduled_jobs(agent_dir)
         .into_iter()
         .filter(|job| job.source.as_deref() == Some("rlm_heartbeat"))
         .filter(|job| job.status == JobStatus::Active)
         .filter_map(|job| {
             let next = job.next_run_at.as_deref().and_then(parse_iso_millis)?;
+            // A dormant heartbeat is exactly the job the pause guard
+            // ignores. Mirroring it would wake the bot the guard just let
+            // pause, and nothing advances it while the sandbox is frozen.
+            if next < floor {
+                return None;
+            }
             let mut entry = json!({
                 "id": job.id,
                 "nextRunAt": next.div_ceil(1000),
@@ -289,7 +268,7 @@ mod tests {
     fn the_wakeup_set_is_daemon_wide_and_filters_local_jobs() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
-        let now = 1_700_000_000_000;
+        let now = crate::util::now_ms();
         let store = AgentCronJobStore::for_session_artifacts();
         let main = artifact(root, "main");
         // Child sessions nest their artifacts under the parent's partition.
@@ -314,9 +293,25 @@ mod tests {
             )
             .unwrap();
         let subagent = add_rlm(&store, "live-child", "child", now, "every 5m");
+        // Overdue by two minutes: still inside the pause guard's window.
+        let late = add_rlm(
+            &store,
+            "live-main",
+            "main",
+            now - 12 * 60 * 1000,
+            "every 10m",
+        );
+        // Overdue by ten minutes: dormant, so the pause guard ignores it.
+        let dormant = add_rlm(
+            &store,
+            "live-main",
+            "main",
+            now - 20 * 60 * 1000,
+            "every 10m",
+        );
 
-        let set = wakeup_set(root);
-        assert_eq!(set.len(), 3);
+        let set = wakeup_set(root, now);
+        assert_eq!(set.len(), 4);
         let ids: BTreeSet<&str> = set
             .iter()
             .filter_map(|entry| entry["id"].as_str())
@@ -324,7 +319,9 @@ mod tests {
         assert!(ids.contains(interval.id.as_str()));
         assert!(ids.contains(cron.id.as_str()));
         assert!(ids.contains(subagent.id.as_str()));
+        assert!(ids.contains(late.id.as_str()));
         assert!(!ids.contains(paused.id.as_str()));
+        assert!(!ids.contains(dormant.id.as_str()));
 
         let cron_entry = set
             .iter()
