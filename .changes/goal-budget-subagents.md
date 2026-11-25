@@ -1,0 +1,1 @@
+- A goal's token budget now counts its subagents' spend, deleted subagents included: each subagent's input and output tokens charge the goal as they are attributed to the parent, and spend that reaches the budget between turns stops the goal before another continuation.
