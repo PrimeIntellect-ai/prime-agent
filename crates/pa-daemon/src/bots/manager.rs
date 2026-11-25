@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use pa_core::auth::PRIME_INFERENCE_PROVIDER_ID;
+use pa_core::cron::parse_iso_millis;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
@@ -1351,9 +1352,10 @@ impl BotManager {
     /// ends the recorded head may be stale, and a restore from it would
     /// roll the bot back. A failed or empty query leaves the record
     /// alone, and so does a head that is still uploading and newer than
-    /// the winner: the recorded checkpoints stay the fallback. The winner
-    /// is recorded without pruning, so a failed restore keeps the older
-    /// ones to fall back to; the next pause prunes them.
+    /// the winner: that head keeps its place and the winner joins the
+    /// older list behind it. The winner is recorded without pruning, so
+    /// a failed restore keeps the older ones to fall back to; the next
+    /// pause prunes them.
     async fn prefer_platform_checkpoint(&self, record: &mut BotRecord) {
         let label = bot_label(&record.bot_id);
         let listed = match retry(|| self.platform.list_checkpoints(&label)).await {
@@ -1371,10 +1373,7 @@ impl BotManager {
             if !checkpoint.durable {
                 continue;
             }
-            if newest
-                .as_ref()
-                .is_none_or(|found| checkpoint.created_at.as_str() > found.created_at.as_str())
-            {
+            if newest.is_none_or(|found| checkpoint_millis(checkpoint) > checkpoint_millis(found)) {
                 newest = Some(checkpoint);
             }
         }
@@ -1385,18 +1384,27 @@ impl BotManager {
             return;
         }
         // A pending head may still be uploading and hold newer state than
-        // the newest durable checkpoint: promoting the older durable one
-        // would move the head into the older list, where prune deletes it.
-        // Keep the record alone then; the candidate loop below restores
-        // from the older durable one without touching the record.
+        // the newest durable checkpoint: it stays the head, and the winner
+        // joins the older list behind it. The head is never demoted to
+        // where prune would delete it, and the wake still restores from
+        // the winner.
         let head_pending_newer = record
             .checkpoint_id
             .as_deref()
             .and_then(|head| listed.iter().find(|checkpoint| checkpoint.id == head))
             .is_some_and(|head| {
-                !head.durable && head.created_at.as_str() > newest.created_at.as_str()
+                !head.durable && checkpoint_millis(head) > checkpoint_millis(newest)
             });
         if head_pending_newer {
+            if !record.older_checkpoint_ids.contains(&newest.id) {
+                record.older_checkpoint_ids.push(newest.id.clone());
+                if let Err(error) = self.save(record.clone()) {
+                    eprintln!(
+                        "pa-daemon: bot {}: could not record the newest platform checkpoint: {error:#}",
+                        record.bot_id
+                    );
+                }
+            }
             return;
         }
         // The winner may already sit in the older list (the recorded head
@@ -2355,6 +2363,14 @@ fn label_value(labels: &[String], prefix: &str) -> Option<String> {
 
 fn sort_newest_first(sandboxes: &mut [BotSandbox]) {
     sandboxes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+}
+
+/// A checkpoint's creation time as epoch milliseconds; an unparseable
+/// stamp counts as the oldest, so it never wins an ordering. A plain
+/// string comparison misorders RFC 3339 precision variants
+/// (`10:00:00Z` sorts after `10:00:00.500Z`).
+fn checkpoint_millis(checkpoint: &BotCheckpoint) -> u64 {
+    parse_iso_millis(&checkpoint.created_at).unwrap_or(0)
 }
 
 /// One `list_bots` row of a bot's daemon, as this daemon's record for the
