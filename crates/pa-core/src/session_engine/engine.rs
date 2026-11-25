@@ -56,9 +56,11 @@ pub struct SessionEngineConfig {
     /// The session's depth in the RLM recursion tree (0 for top-level
     /// sessions); gates the `refine.*` host requests.
     pub rlm_depth: Option<u32>,
-    /// Whether this session is a factory state's child (its spawn carried a
-    /// factory run tag); selects the child prompt's factory line.
-    pub factory_child: bool,
+    /// What this child session's final message is for: a factory state's
+    /// child selects the prompt's factory line; a refinement child's final
+    /// message is the proposal its parent applies, and its kernel refuses
+    /// harness writes.
+    pub child_role: crate::prompts::ChildRole,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
     /// turn. Set explicitly by the embedding; print sessions are
@@ -518,6 +520,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_unavailable_skills,
         on_bootstrap_result,
         config.kernel_ready_gate.clone(),
+        config.child_role == crate::prompts::ChildRole::Refinement,
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
@@ -593,7 +596,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth.unwrap_or(0),
-            factory_child: config.factory_child,
+            child_role: config.child_role,
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
         },

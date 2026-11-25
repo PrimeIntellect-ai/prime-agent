@@ -144,6 +144,16 @@ def _require_refinements_enabled() -> None:
         raise RuntimeError("Harness refinements are disabled in /settings")
 
 
+def _require_harness_writable() -> None:
+    # A refinement child proposes harness edits in its final message; only its
+    # parent commits them, so every store refuses writes in the child's kernel.
+    if os.environ.get("RLM_HARNESS_READ_ONLY") == "1":
+        raise RuntimeError(
+            "Harness writes are refused in a refinement child: put the edits in your "
+            "final JSON proposal; your parent applies them."
+        )
+
+
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
     extra = dict(extra or {})
     if "global" in extra:
@@ -436,6 +446,7 @@ class HarnessState:
 
     def _ensure_local_writable(self) -> None:
         _require_refinements_enabled()
+        _require_harness_writable()
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
 

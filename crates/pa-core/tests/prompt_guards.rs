@@ -65,7 +65,7 @@ fn session_options<'a>(
         messages_path: Some("/log.jsonl".to_string()),
         generic_mcp_servers: Vec::new(),
         rlm_depth: 0,
-        factory_child: false,
+        child_role: pa_core::prompts::ChildRole::Subagent,
         daemonless: false,
         can_spawn: false,
     }

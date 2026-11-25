@@ -169,7 +169,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
-        factory_child: false,
+        child_role: pa_core::prompts::ChildRole::Subagent,
         daemonless: true,
         telemetry: None,
         model_info: None,

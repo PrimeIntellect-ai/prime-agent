@@ -130,7 +130,7 @@ async fn faux_engine_with_telemetry(
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
-        factory_child: false,
+        child_role: pa_core::prompts::ChildRole::Subagent,
         daemonless: true,
         model_info: Some(model.clone()),
         kernel_ready_gate: None,

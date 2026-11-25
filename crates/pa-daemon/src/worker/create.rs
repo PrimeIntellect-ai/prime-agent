@@ -184,9 +184,15 @@ impl Worker {
                 }
                 _ => (None, None, None, None),
             };
-        let factory_child = payload
-            .get("runtimeMetadata")
-            .is_some_and(|metadata| metadata.get("factory").is_some());
+        let child_role = match payload.get("runtimeMetadata") {
+            Some(metadata) if metadata.get("kind").and_then(Value::as_str) == Some("refine") => {
+                pa_core::prompts::ChildRole::Refinement
+            }
+            Some(metadata) if metadata.get("factory").is_some() => {
+                pa_core::prompts::ChildRole::FactoryState
+            }
+            _ => pa_core::prompts::ChildRole::Subagent,
+        };
         let thinking = payload
             .get("thinking")
             .and_then(Value::as_str)
@@ -613,7 +619,7 @@ impl Worker {
             thinking,
             child_script: child_script.clone(),
             semantic_spawn,
-            factory_child,
+            child_role,
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }

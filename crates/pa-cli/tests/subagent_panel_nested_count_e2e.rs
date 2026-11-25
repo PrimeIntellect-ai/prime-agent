@@ -215,6 +215,7 @@ fn children_host(
         session_file: Some(parent.session_file.clone()),
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
+        refine_child: false,
     });
     sessions
 }

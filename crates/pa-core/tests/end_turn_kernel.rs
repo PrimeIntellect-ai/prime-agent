@@ -199,7 +199,7 @@ async fn an_end_turn_cell_ends_the_turn_without_another_assistant_response() {
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
-        factory_child: false,
+        child_role: pa_core::prompts::ChildRole::Subagent,
         daemonless: true,
         telemetry: None,
         model_info: Some(registry_model()),

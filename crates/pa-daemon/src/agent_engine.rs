@@ -244,23 +244,15 @@ pub struct AgentSessionEngine {
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
     /// The in-flight refinement children, keyed by the child's active
-    /// session id for the child-reply wake.
+    /// session id for the settle's terminal hook.
     pub(crate) refine_flights: std::sync::Mutex<
         std::collections::HashMap<String, crate::refine_children::RefineChildFlight>,
     >,
-    /// The parked refinement replies, oldest first: each waits for the
-    /// session's idle boundary, where it applies — the wake answers the
-    /// delivery at once, and the apply never interleaves with a running
-    /// turn's rows.
-    pub(crate) pending_refine_replies:
-        std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
-    /// The active session ids of the refinement children that a branch
-    /// move or a replacement abandoned, or whose refinement already failed
-    /// because the child ended before replying. A cancel cannot recall a
-    /// reply that is already in delivery, so the park drops that late reply
-    /// and removes its id. An id whose child never replied stays, as the child
-    /// registry also keeps its own record of that child.
-    pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The settled refinement children's outcomes, oldest first: each waits
+    /// for the session's idle boundary, where it applies, so the apply
+    /// never interleaves with a running turn's rows.
+    pub(crate) pending_refine_outcomes:
+        std::sync::Mutex<Vec<crate::refine_children::PendingRefineOutcome>>,
     /// Orders refinement-child admissions (prepare, spawn, flight record,
     /// prompt release) against an abandon.
     pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
@@ -312,9 +304,10 @@ pub struct AgentSessionEngine {
     /// This session's RLM recursion depth (0 for top-level): gates the kernel `refine.*` host
     /// requests.
     rlm_depth: std::sync::atomic::AtomicU32,
-    /// Whether this session runs a factory state (its create carried a
-    /// factory run tag): selects the child prompt's factory line.
-    factory_child: std::sync::atomic::AtomicBool,
+    /// What this child's final message is for (its create's runtime
+    /// metadata): a factory state's output, or a refinement child's
+    /// proposal, which also makes its kernel refuse harness writes.
+    child_role: std::sync::Mutex<pa_core::prompts::ChildRole>,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,

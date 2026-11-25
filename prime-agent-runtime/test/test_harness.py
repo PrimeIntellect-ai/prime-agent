@@ -1639,6 +1639,34 @@ class HarnessSearchTest(unittest.TestCase):
 
 
 
+class HarnessReadOnlyTests(unittest.TestCase):
+    def test_a_refinement_child_kernel_refuses_every_write_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local_dir = Path(tmp) / "local"
+            global_dir = Path(tmp) / "global"
+            with patch.dict(
+                os.environ,
+                {"RLM_HARNESS_STATE_DIR": str(local_dir), "RLM_GLOBAL_HARNESS_STATE_DIR": str(global_dir)},
+            ):
+                state = get_harness_state()
+                state.create_memory("Note", "Seeded before the child", id="note")
+                before = state.file_path.read_bytes()
+                with patch.dict(os.environ, {"RLM_HARNESS_READ_ONLY": "1"}):
+                    writes = (
+                        lambda: state.create_memory("New", "Local write"),
+                        lambda: state.update_memory("note", "Note", "Changed"),
+                        lambda: state.delete_memory("note"),
+                        lambda: state.create_memory("New", "Global write", global_=True),
+                        lambda: state.record_refinement("trigger", ["change"]),
+                    )
+                    for write in writes:
+                        with self.assertRaisesRegex(RuntimeError, "refinement child"):
+                            write()
+                    self.assertEqual(state.get("memory", "note").content, "Seeded before the child")
+                self.assertEqual(state.file_path.read_bytes(), before)
+                self.assertFalse(global_dir.exists())
+
+
 class HarnessRefinementsSettingTests(unittest.TestCase):
     def test_disabled_harness_keeps_kernel_api_introspection_available(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):

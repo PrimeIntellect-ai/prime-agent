@@ -205,7 +205,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         inbox: None,
         progress_note_emit: None,
         rlm_depth: None,
-        factory_child: false,
+        child_role: pa_core::prompts::ChildRole::Subagent,
         daemonless: true,
         telemetry: None,
         model_info: Some(registry_model()),

@@ -169,7 +169,11 @@ pub(crate) async fn build_faux_engine_with(
             inbox: None,
             progress_note_emit: None,
             rlm_depth,
-            factory_child,
+            child_role: if factory_child {
+                pa_core::prompts::ChildRole::FactoryState
+            } else {
+                pa_core::prompts::ChildRole::Subagent
+            },
             daemonless: true,
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.

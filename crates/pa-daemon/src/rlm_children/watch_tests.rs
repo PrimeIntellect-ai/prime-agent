@@ -933,7 +933,7 @@ async fn a_child_spawned_mid_turn_prompts_after_the_parent_turn_completes() {
 /// depth-2 leaf under the default max of 2) an ordinary spawn refuses
 /// with the depth-limit error, while a refinement child (`refine_child`)
 /// still admits — refinement is its parent's one-shot
-/// planning pass, so refusing it at the limit would lock every depth-2
+/// refinement run, so refusing it at the limit would lock every depth-2
 /// session out of `refine.run()` and the compaction-triggered
 /// refinement. Red when the `!refine_child` skip is lost: the ordinary
 /// half fails on the admit, the refine half fails on the refusal.
@@ -974,11 +974,55 @@ async fn a_refine_child_spawns_past_the_recursion_limit_while_an_ordinary_child_
     next_refine_outcome(&mut outcomes, Duration::from_secs(10)).await;
 }
 
+/// A refinement child spawns nothing — no subagent, decision child, or
+/// refinement child: its children would be ordinary sessions that can
+/// write the harness, so only the refinement's parent commits harness
+/// edits. Red when any spawn kind admits under a refinement identity.
+#[tokio::test]
+async fn a_refinement_child_refuses_every_spawn() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions.set_identity(ParentIdentity {
+        rlm_depth: 1,
+        model: Some("mock/mock-1".to_string()),
+        cwd: Some(std::env::temp_dir().to_string_lossy().to_string()),
+        refine_child: true,
+        ..ParentIdentity::with_default_depth()
+    });
+    for kind in [
+        RlmSpawnKind::Subagent,
+        RlmSpawnKind::Decision,
+        RlmSpawnKind::Refine,
+    ] {
+        let error = sessions
+            .spawn(RlmSpawnRequest {
+                prompt: "a refinement child's spawn".to_string(),
+                name: None,
+                model: None,
+                thinking: None,
+                cwd: None,
+                spawned_by_request_id: None,
+                kind,
+                factory: None,
+            })
+            .await
+            .expect_err("a refinement child's spawn must refuse");
+        assert!(
+            error.to_string().contains("refinement child cannot spawn"),
+            "the {kind:?} refusal names the gate: {error}"
+        );
+    }
+    assert!(
+        sessions.list_subagents().await.expect("roster").is_empty(),
+        "nothing was admitted"
+    );
+}
+
 /// The spawn-wait polarity, refinement half: a refinement child's prompt
-/// waits for its parent's release, never a turn boundary — its one
-/// planning prompt never contends with the parent's provider continuation
-/// and `/refine` fires off-turn, so a boundary would idle the child for
-/// its whole budget. Red when the turn wait comes back (the refinement
+/// waits for its parent's release, never a turn boundary — the parent
+/// engine spawns it off-turn (`/refine` included), so a boundary would idle
+/// the child for its whole budget. Red when the turn wait comes back (the refinement
 /// child idles behind a boundary that never fires).
 #[tokio::test]
 async fn a_refine_childs_prompt_waits_for_its_release_not_the_turn_boundary() {
@@ -993,12 +1037,13 @@ async fn a_refine_childs_prompt_waits_for_its_release_not_the_turn_boundary() {
     next_refine_outcome(&mut outcomes, Duration::from_secs(10)).await;
 }
 
-/// A refinement child's settle hands its outcome to the refine terminal
-/// hook — never a terminal notice into the parent conversation — and the
+/// A refinement child's settle hands its final message to the refine
+/// terminal hook as the proposal — never a terminal notice into the parent
+/// conversation, even when the child messaged its parent — and the
 /// registry retires the one-shot record on its own: the engine never polls
-/// for it. Red when the notice still rides the follow-up route, or when the
-/// retire is dropped (the completed record lingers like an ordinary
-/// subagent's row).
+/// for it. Red when the notice still rides the follow-up route, when a
+/// child that messaged its parent skips the hook, or when the retire is
+/// dropped (the completed record lingers like an ordinary subagent's row).
 #[tokio::test]
 async fn a_refine_child_settle_reaches_the_refine_hook_and_retires_the_record() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -1006,12 +1051,14 @@ async fn a_refine_child_settle_reaches_the_refine_hook_and_retires_the_record() 
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     let mut outcomes = refine_outcomes(&sessions);
     spawn_refine_child(&sessions).await;
-    let (active_session_id, error) =
+    sessions.mark_replied("child-live").await;
+    let (active_session_id, outcome) =
         next_refine_outcome(&mut outcomes, Duration::from_secs(10)).await;
     assert_eq!(active_session_id, "child-live");
     assert_eq!(
-        error, None,
-        "a run that ended without replying has no error"
+        outcome,
+        RefineChildOutcome::Answered("the child final answer".to_string()),
+        "the finished run's final message is the proposal"
     );
     // The settle retired the record: the roster empties on its own.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -1052,10 +1099,13 @@ async fn an_unreachable_refine_child_hands_its_failure_to_the_refine_hook() {
             .await;
     let mut outcomes = refine_outcomes(&sessions);
     spawn_refine_child(&sessions).await;
-    let (active_session_id, error) =
+    let (active_session_id, outcome) =
         next_refine_outcome(&mut outcomes, Duration::from_secs(3_600)).await;
     assert_eq!(active_session_id, "child-live");
-    assert_eq!(error.as_deref(), Some("Child worker unreachable"));
+    assert_eq!(
+        outcome,
+        RefineChildOutcome::Failed(Some("Child worker unreachable".to_string()))
+    );
     assert!(
         follow_up_rx.try_recv().is_err(),
         "no child-failure notice reaches the parent conversation"
@@ -1075,8 +1125,11 @@ async fn a_cancelled_refine_child_reaches_the_refine_hook() {
     let mut outcomes = refine_outcomes(&sessions);
     let handle = spawn_refine_child(&sessions).await;
     assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
-    let (_, error) = next_refine_outcome(&mut outcomes, Duration::from_secs(10)).await;
-    assert_eq!(error.as_deref(), Some("Cancelled by user"));
+    let (_, outcome) = next_refine_outcome(&mut outcomes, Duration::from_secs(10)).await;
+    assert_eq!(
+        outcome,
+        RefineChildOutcome::Failed(Some("Cancelled by user".to_string()))
+    );
     assert!(
         follow_up_rx.try_recv().is_err(),
         "no terminal notice reaches the parent conversation"
@@ -1626,10 +1679,10 @@ async fn a_replied_child_whose_final_turn_failed_sends_no_failure_row() {
 /// (the engine's refine terminal hook).
 fn refine_outcomes(
     sessions: &SupervisorChildSessions,
-) -> mpsc::UnboundedReceiver<(String, Option<String>)> {
+) -> mpsc::UnboundedReceiver<(String, RefineChildOutcome)> {
     let (tx, rx) = mpsc::unbounded_channel();
-    sessions.set_refine_terminal_hook(Arc::new(move |active_session_id, error| {
-        let _ = tx.send((active_session_id.to_string(), error.map(str::to_string)));
+    sessions.set_refine_terminal_hook(Arc::new(move |active_session_id, outcome| {
+        let _ = tx.send((active_session_id.to_string(), outcome));
     }));
     rx
 }
@@ -1655,9 +1708,9 @@ async fn spawn_refine_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandl
 }
 
 async fn next_refine_outcome(
-    outcomes: &mut mpsc::UnboundedReceiver<(String, Option<String>)>,
+    outcomes: &mut mpsc::UnboundedReceiver<(String, RefineChildOutcome)>,
     budget: Duration,
-) -> (String, Option<String>) {
+) -> (String, RefineChildOutcome) {
     tokio::time::timeout(budget, outcomes.recv())
         .await
         .expect("the refinement child's terminal outcome reaches the hook")

@@ -147,8 +147,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
             let identity = this.identity.lock().expect("identity lock").clone();
+            // A refinement child spawns nothing: its children would be
+            // ordinary sessions that can write the harness, and only the
+            // refinement's parent commits harness edits.
+            if identity.refine_child {
+                bail!("A refinement child cannot spawn subagents; finish with the proposal as your final message.");
+            }
             // The recursion budget bounds subagents only. A refinement
-            // child is a one-shot planning pass owned by its parent, not a
+            // child is a one-shot refinement run owned by its parent, not a
             // worker of the tree: refusing it at the limit would lock
             // every depth-2 session (or any session with a lowered max
             // depth) out of `refine.run()` and the compaction-triggered
@@ -237,8 +243,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // flag rides the create command's `decisionChild` key
                 // (the admission projects it onto the ledger edge).
                 let mut runtime_metadata = json!({
-                    // The refine child: its worker boots the refinement
-                    // protocol instead of the agent engine.
+                    // The refine child: its engine refuses harness writes and
+                    // spawns, and its settle hands the proposal to the parent.
                     "kind": if request.kind == RlmSpawnKind::Refine { "refine" } else { "subagent" },
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
@@ -361,11 +367,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // Capture the spawning turn before detaching. A normal mid-turn
             // spawn waits for this boundary, unless a positive collect releases
             // this child first. An idle parent has no turn to wait for. The
-            // refinement child never waits on the turn: its one prompt is a
-            // planning pass, never a turn contending with the parent's
-            // provider continuation. Its prompt instead stays held until the
-            // parent records its flight and releases it
-            // (`release_child_prompt`), so its reply always finds the flight.
+            // refinement child never waits on the turn: the parent engine
+            // spawns it outside the model's turn (`/refine`, the boundary's
+            // `refine.run`, the compact round). Its prompt instead stays held
+            // until the parent records its flight and releases it
+            // (`release_child_prompt`), so its settle always finds the flight.
             let refine_child = request.kind == RlmSpawnKind::Refine;
             let spawning_turn = if refine_child {
                 None

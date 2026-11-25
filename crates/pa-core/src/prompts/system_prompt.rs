@@ -86,9 +86,8 @@ pub struct BuildSystemPromptOptions<'a> {
     /// Enabled user-configured generic MCP servers.
     pub generic_mcp_servers: Vec<String>,
     pub rlm_depth: u32,
-    /// Whether this child runs one factory state: the factory reads its
-    /// final message, so the child does not reply to the parent.
-    pub factory_child: bool,
+    /// What a child's final message is for (the reply line it reads).
+    pub child_role: ChildRole,
     /// Whether the session runs without a daemon (no scheduler, no
     /// heartbeat firing). The wake-up facts the daemonless line states
     /// must match the embedding's wiring.
@@ -97,6 +96,19 @@ pub struct BuildSystemPromptOptions<'a> {
     /// daemonless print host or a daemon worker); a daemonless session
     /// without one cannot spawn at all.
     pub can_spawn: bool,
+}
+
+/// What a spawned child's final message is for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChildRole {
+    /// An ordinary subagent: it replies to its parent with `agent_message.send`.
+    #[default]
+    Subagent,
+    /// One factory state: the factory reads its final message.
+    FactoryState,
+    /// A refinement child: its parent applies its final message as the
+    /// refinement proposal.
+    Refinement,
 }
 
 /// Build the system prompt (assembled text only).
@@ -335,14 +347,17 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
             "You are a child agent spawned by your parent agent. Task prompts are labeled `[task from parent]`."
                 .to_string(),
         );
-        if options.factory_child {
-            lines.push(
+        match options.child_role {
+            ChildRole::FactoryState => lines.push(
                 "Your final message is this state's output, which the factory reads; do not message the parent.".to_string(),
-            );
-        } else if has_ipython {
-            lines.push(
+            ),
+            ChildRole::Refinement => lines.push(
+                "Your final message is the refinement proposal your parent applies; do not message the parent.".to_string(),
+            ),
+            ChildRole::Subagent if has_ipython => lines.push(
                 "When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.".to_string(),
-            );
+            ),
+            ChildRole::Subagent => {}
         }
         if has_ipython {
             lines.push(
@@ -464,7 +479,7 @@ mod tests {
                 messages_path: Some("/log.jsonl".to_string()),
                 generic_mcp_servers: Vec::new(),
                 rlm_depth: 0,
-                factory_child: false,
+                child_role: ChildRole::Subagent,
                 daemonless: false,
                 can_spawn: false,
             }
@@ -545,7 +560,7 @@ mod tests {
         let normal = build_system_prompt(&child);
         assert!(normal.contains(REPLY));
         assert!(!normal.contains(FACTORY));
-        child.factory_child = true;
+        child.child_role = ChildRole::FactoryState;
         let factory = build_system_prompt(&child);
         assert!(factory.contains(FACTORY));
         assert!(!factory.contains(REPLY));

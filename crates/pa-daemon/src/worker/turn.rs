@@ -170,12 +170,12 @@ impl TurnRunner {
         }
     }
 
-    /// Apply the parked refine child replies at the idle boundary through
+    /// Apply the parked refinement outcomes at the idle boundary through
     /// the engine's shared commit, then emit each one's durable rows and
     /// event here — sequenced by this runner so they never interleave with
     /// a turn's rows.
     async fn apply_parked_refine_replies(&self) {
-        while let Some(outcome) = self.engine.apply_pending_refine_reply().await {
+        while let Some(outcome) = self.engine.apply_pending_refine_outcome().await {
             let origin = {
                 let core = self.core.lock().unwrap();
                 core.store
@@ -1316,8 +1316,8 @@ impl TurnRunner {
         // The compact-trigger round services off the settle as a
         // background task: the queued next prompt's admission never waits
         // on it. The round is the refinement child's spawn — fire-and-wake;
-        // the child's proposal applies on its reply's arrival (the reply's
-        // wake emits the outcome rows and the `refine_complete` event).
+        // the child's proposal applies when it settles (the apply emits the
+        // outcome rows and the `refine_complete` event).
         {
             let engine = review_engine;
             let core = Arc::clone(&self.core);

@@ -160,7 +160,7 @@ fn assemble_breakdown(
             generic_mcp_servers: generic_servers,
             // A fresh daemon root session.
             rlm_depth: 0,
-            factory_child: false,
+            child_role: pa_core::prompts::ChildRole::Subagent,
             daemonless: false,
             can_spawn: true,
         },

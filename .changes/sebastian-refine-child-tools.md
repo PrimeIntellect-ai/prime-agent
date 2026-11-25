@@ -1,0 +1,1 @@
+- Refinement children now run a full agent turn with the normal tools, so they can look things up (the session's full history, its harness stores, files) before proposing edits; only the parent applies the edits.

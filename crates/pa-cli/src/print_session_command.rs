@@ -330,7 +330,7 @@ mod tests {
 
                     inbox: None,
                     progress_note_emit: None,
-                    factory_child: false,
+                    child_role: pa_core::prompts::ChildRole::Subagent,
                     daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
