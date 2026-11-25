@@ -52,20 +52,19 @@ pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow};
 use crate::chat::{ChatEntry, StatusKind};
 use crate::theme::ThemeColor;
 use pa_types::inbox_notice::INBOX_NOTICE_CUSTOM_TYPE;
+pub use pa_types::inbox_notice::{
+    AGENT_MESSAGE_CUSTOM_TYPE, ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE,
+    ASYNC_BASH_COMPLETION_CUSTOM_TYPE, FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
+    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+};
 use serde_json::Value;
 
 /// Custom types with a dedicated component (pa-core owns the engine-side
 /// vocabulary, the render dispatch owns these).
-pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
-pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 pub const GOAL_CONTEXT_CUSTOM_TYPE: &str = "goal_context";
 pub const IPYTHON_STATE_RESTORED_CUSTOM_TYPE: &str = "ipython_state_restored";
 pub const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE: &str = "python_skills_unavailable";
-pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
-pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
-pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
-/// Wire twin of `pa_core::session_engine::messages::ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE`.
-pub const ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE: &str = "async_background_cell";
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 /// The durable single-line outcome of one provider-retry episode (SANCTIONED DIVERGENCE,
@@ -247,6 +246,9 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         ))],
         ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE => vec![ChatEntry::ShellCompletion(Box::new(
             cell_completion_row(message, details),
+        ))],
+        FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE => vec![ChatEntry::ShellCompletion(Box::new(
+            factory_progress_row(message, details),
         ))],
         HEARTBEAT_PROMPT_CUSTOM_TYPE
         | GOAL_CONTEXT_CUSTOM_TYPE
@@ -513,6 +515,25 @@ fn cell_completion_row(message: &Value, details: &Value) -> ShellCompletionRow {
         label,
         failed: status != "ok",
         content,
+    }
+}
+
+/// One factory run milestone: the summary names the milestone kind and the
+/// run (`Factory run finished · run-1`); only `finished` reads as success.
+fn factory_progress_row(message: &Value, details: &Value) -> ShellCompletionRow {
+    let kind = details
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("progress");
+    let mut label = format!("Factory run {}", kind.replace('_', " "));
+    if let Some(run_id) = details.get("runId").and_then(Value::as_str) {
+        label.push_str(" \u{b7} ");
+        label.push_str(run_id);
+    }
+    ShellCompletionRow {
+        label,
+        failed: kind != "finished",
+        content: custom_content_text(message),
     }
 }
 
@@ -897,6 +918,31 @@ mod tests {
                 if row.label == "Background cell failed \u{b7} 1.2s"
                     && row.failed
                     && row.content.ends_with("ValueError: boom")
+        ));
+    }
+
+    #[test]
+    fn factory_progress_decodes_into_the_shell_completion_row() {
+        let progress = |kind: &str| {
+            decoded(&json!({
+                "role": "custom",
+                "customType": FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+                "content": format!("[factory-progress run:run-1] {kind}: all nodes settled"),
+                "display": true,
+                "details": { "runId": "run-1", "kind": kind, "detail": "all nodes settled" },
+            }))
+        };
+        assert!(matches!(
+            progress("finished").as_slice(),
+            [ChatEntry::ShellCompletion(row)]
+                if row.label == "Factory run finished \u{b7} run-1" && !row.failed
+        ));
+        assert!(matches!(
+            progress("budget_exceeded").as_slice(),
+            [ChatEntry::ShellCompletion(row)]
+                if row.label == "Factory run budget exceeded \u{b7} run-1"
+                    && row.failed
+                    && row.content == "[factory-progress run:run-1] budget_exceeded: all nodes settled"
         ));
     }
 

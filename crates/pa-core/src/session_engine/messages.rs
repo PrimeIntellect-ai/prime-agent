@@ -16,6 +16,10 @@ pub const BRANCH_SUMMARY_SUFFIX: &str = "\n</summary>";
 pub const HARNESS_DIGEST_PREFIX: &str = "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n";
 pub const HARNESS_DIGEST_SUFFIX: &str = "\n</harness_state>";
 
+pub use pa_types::inbox_notice::{
+    ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+    FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE,
+};
 pub use pa_types::slash_commands::{
     SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 };
@@ -30,10 +34,6 @@ pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 /// connect/disconnect leaves in the transcript (produced by the TS-era
 /// daemon; the row is bookkeeping, never model context).
 pub const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE: &str = "mcp_connection_outcome";
-pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
-/// The durable row a detached kernel bash completion admits as the
-/// woken turn's injected prompt.
-pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 /// TS `SESSION_RENAMED_CUSTOM_TYPE` (#2529): the displayed notice a
 /// rename that changed an existing name leaves in the renamed session's
 /// transcript.
@@ -42,17 +42,11 @@ pub const SESSION_RENAMED_CUSTOM_TYPE: &str = "session_renamed";
 /// notice's queued row carries (the TUI renders it with its own label,
 /// no lane prefix).
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finished";
-/// The durable row a factory run milestone (`factory.progress`) admits on
-/// the owning session's steering lane.
-pub const FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE: &str = "factory_progress_notice";
 /// The queue-strip label the factory progress notice's queued row carries.
 pub const FACTORY_PROGRESS_PREVIEW_LABEL: &str = "Factory progress";
 /// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
-/// The durable row an auto-backgrounded cell's completion admits as the
-/// woken turn's injected prompt (`[cell-done ...]`).
-pub const ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE: &str = "async_background_cell";
 /// The queue-strip label the completion notice's queued row carries.
 pub const BACKGROUND_CELL_PREVIEW_LABEL: &str = "Background cell finished";
 

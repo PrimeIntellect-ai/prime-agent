@@ -22,6 +22,64 @@ pub const INBOX_CLASS_HEARTBEAT: &str = "heartbeat";
 /// (the `[cell-done ...]` row) routed into the inbox.
 pub const INBOX_CLASS_CELL_DONE: &str = "cell-done";
 
+/// The durable row a detached kernel bash completion admits as the woken
+/// turn's injected prompt.
+pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
+/// The durable row a factory run milestone (`factory.progress`) admits on
+/// the owning session's steering lane.
+pub const FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE: &str = "factory_progress_notice";
+/// One delivered `agent_message.send` row.
+pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
+/// A child run that ended without an explicit reply or was cancelled.
+pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
+/// A child run that failed.
+pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
+/// One fired scheduled heartbeat's prompt row.
+pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
+/// The durable row an auto-backgrounded cell's completion admits as the
+/// woken turn's injected prompt (`[cell-done ...]`).
+pub const ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE: &str = "async_background_cell";
+
+/// Each inbox class with the custom type of the row its messages are
+/// routed from: the session engine classes rows by it, the TUI renders a
+/// read message as the row it replaced.
+pub const INBOX_CLASS_CUSTOM_TYPES: [(&str, &str); 7] = [
+    (INBOX_CLASS_BASH_DONE, ASYNC_BASH_COMPLETION_CUSTOM_TYPE),
+    (
+        INBOX_CLASS_FACTORY_PROGRESS,
+        FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+    ),
+    (INBOX_CLASS_AGENT_MESSAGE, AGENT_MESSAGE_CUSTOM_TYPE),
+    (
+        INBOX_CLASS_CHILD_EXITED,
+        RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+    ),
+    (INBOX_CLASS_CHILD_FAILED, RLM_CHILD_FAILURE_CUSTOM_TYPE),
+    (INBOX_CLASS_HEARTBEAT, HEARTBEAT_PROMPT_CUSTOM_TYPE),
+    (
+        INBOX_CLASS_CELL_DONE,
+        ASYNC_BACKGROUND_CELL_COMPLETION_CUSTOM_TYPE,
+    ),
+];
+
+/// The inbox class a custom type's rows route to.
+#[must_use]
+pub fn inbox_class_for_custom_type(custom_type: &str) -> Option<&'static str> {
+    INBOX_CLASS_CUSTOM_TYPES
+        .iter()
+        .find(|(_, row_type)| *row_type == custom_type)
+        .map(|(class, _)| *class)
+}
+
+/// The custom type of the row an inbox class's messages are routed from.
+#[must_use]
+pub fn custom_type_for_inbox_class(class: &str) -> Option<&'static str> {
+    INBOX_CLASS_CUSTOM_TYPES
+        .iter()
+        .find(|(inbox_class, _)| *inbox_class == class)
+        .map(|(_, row_type)| *row_type)
+}
+
 /// The `customType` of the inbox notice rows (`arrival` and `reminder`).
 pub const INBOX_NOTICE_CUSTOM_TYPE: &str = "inbox_notice";
 /// The arrival notice's class word (a fresh batch landed).
