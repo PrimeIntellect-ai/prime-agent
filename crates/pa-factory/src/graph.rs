@@ -59,6 +59,12 @@ pub(crate) fn check(machine: &Machine) -> Vec<Diagnostic> {
             if let Some(context) = &machine.context {
                 check_placeholders(machine, state, CONTEXT_FILE, context, &mut problems);
             }
+            // Rubric checks join the prompt, so they follow its placeholder rules.
+            if let Some(rubric) = &agent.rubric {
+                for rule in &rubric.rules {
+                    check_placeholders(machine, state, &rubric.file, &rule.check, &mut problems);
+                }
+            }
         }
     }
     problems
