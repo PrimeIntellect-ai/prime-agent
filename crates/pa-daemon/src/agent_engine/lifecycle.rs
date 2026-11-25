@@ -12,6 +12,7 @@ use super::{
     ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
     SessionEngineConfig, SupervisorChildSessions, Value,
 };
+use crate::engine::SessionEngine as _;
 
 /// The instruction the floor appends to a bare skill invocation: ask what
 /// the user wants first, never an imperative to execute.
@@ -136,11 +137,12 @@ impl AgentSessionEngine {
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             kernel_notice_sink: std::sync::Mutex::new(None),
+            cell_wake: std::sync::Arc::new(pa_core::kernel::cell_wake::CellWake::new()),
             bash_consumed_sink: std::sync::Mutex::new(None),
             inbox: std::sync::Mutex::new(None),
             inbox_read_hook: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
-            goal_backoff_wake_job_id: std::sync::Mutex::new(None),
+            background_skip_wake_armed: std::sync::atomic::AtomicBool::new(false),
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             queue_modes,
             registered_jobs_probe: std::sync::Mutex::new(None),
@@ -174,6 +176,10 @@ impl AgentSessionEngine {
             )),
             link,
             children,
+            refine_flights: std::sync::Mutex::default(),
+            pending_refine_replies: std::sync::Mutex::default(),
+            abandoned_refine_children: std::sync::Mutex::default(),
+            refine_spawn_lock: tokio::sync::Mutex::new(()),
             usage_producer: std::sync::Mutex::new(None),
             rlm_usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -199,6 +205,18 @@ impl AgentSessionEngine {
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Install the worker's queue-backed cell wake (the pending predicate
+    /// reads the live steering lane, so an arrival that predates a cell's
+    /// subscription still ends its wait). Runs once at construction, before
+    /// the engine is shared and before the first session build hands the
+    /// wake to a kernel provisioner.
+    pub fn set_worker_cell_wake(
+        &mut self,
+        wake: std::sync::Arc<pa_core::kernel::cell_wake::CellWake>,
+    ) {
+        self.cell_wake = wake;
     }
 
     /// Replace the autonomous continuation policy. Call before the first admitted turn.
@@ -622,6 +640,23 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Register one refinement child's spawn with the usage attribution:
+    /// the engine-side twin of the kernel spawn path's `register_spawn`
+    /// (`rlm.run`'s own handler). The refinement child spawns outside the
+    /// kernel bridge, so its planning rows bill on the parent only when
+    /// the engine registers the spawn itself — the child's usage folds
+    /// into the parent's last assistant row's aggregate at its settle.
+    pub(crate) async fn register_refine_child_usage(&self, rlm_child_id: &str) {
+        let producer = self
+            .usage_producer
+            .lock()
+            .expect("usage producer lock")
+            .clone();
+        if let Some(producer) = producer {
+            producer.register_spawn(rlm_child_id).await;
+        }
+    }
+
     /// Clear only the boundary this completed adoption observed. A failed
     /// build keeps it for the demand retry, and a newer captured leaf survives.
     fn finish_prompt_context_adoption(&self, adopted: Option<&PromptContextBoundary>) {
@@ -799,13 +834,28 @@ impl AgentSessionEngine {
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
         images: &[pa_agent::types::ImageContent],
+        compaction_abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<SessionCommandExecution> {
+        // `/refine` is the refinement child's command (fire-and-wake): the
+        // planning spawn returns immediately and the child's proposal applies
+        // on its reply's arrival. Only the mechanical rollback runs inline
+        // through the base executor.
+        if command.name == "refine" {
+            let options = pa_core::session_engine::slash_commands::parse_refine_command_options(
+                &command.args,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
+            if options.rollback_id.is_none() {
+                return self.execute_refine_session_command(command);
+            }
+        }
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let (model, api_key) = self.resolve_request_target(model);
         let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
+            compaction_abort,
             api_key,
             autonomous: &mut autonomous,
         };
@@ -819,6 +869,43 @@ impl AgentSessionEngine {
         Ok(self
             .runtime
             .block_on(async { execute_session_command(&core, &mut params, command, images).await }))
+    }
+
+    /// `/refine` without a rollback: spawn the refinement child and return
+    /// immediately — the child's proposal applies on its reply's arrival,
+    /// whose wake emits the durable rows and the completion event.
+    fn execute_refine_session_command(
+        &self,
+        command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
+    ) -> anyhow::Result<SessionCommandExecution> {
+        use pa_core::session_engine::refine::RefinementSource;
+        use pa_core::session_engine::session_commands::{
+            session_command_echo_row, slash_command_result,
+        };
+
+        let options =
+            pa_core::session_engine::slash_commands::parse_refine_command_options(&command.args)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let refine_options = pa_core::session_engine::refine::RefineOptions {
+            global: options.global,
+            instructions: options.instructions,
+            rollback_id: options.rollback_id,
+        };
+        let child_id = self.spawn_refinement_child(refine_options, RefinementSource::User)?;
+        let content =
+            format!("Refinement child spawned ({child_id}); its reply applies on arrival.");
+        let row = slash_command_result(command, content, true, "info", None, false);
+        Ok(SessionCommandExecution {
+            // The host skips the first row as the echo it already emitted:
+            // the spawn result rides after it.
+            messages: vec![session_command_echo_row(command), row],
+            compaction: None,
+            compaction_skipped: None,
+            compaction_aborted: false,
+            continuation_message: None,
+            error: None,
+            pending_refinement: None,
+        })
     }
 
     /// The current explicit selection (create-config flags over the
@@ -1092,6 +1179,23 @@ impl AgentSessionEngine {
             .expect("late agent message sink lock")
             .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
+            cell_wake: Some(std::sync::Arc::clone(&self.cell_wake)),
+            on_background_cell: {
+                let weak = self
+                    .self_weak
+                    .lock()
+                    .expect("engine self weak lock")
+                    .clone();
+                weak.map(|weak| {
+                    std::sync::Arc::new(
+                        move |outcome: pa_core::kernel::shared::BackgroundCellOutcome| {
+                            if let Some(engine) = weak.upgrade() {
+                                engine.admit_background_cell_outcome(&outcome);
+                            }
+                        },
+                    ) as pa_core::kernel::shared::BackgroundCellCallback
+                })
+            },
             on_late_sent_agent_message,
             semantic_edges,
             telemetry,

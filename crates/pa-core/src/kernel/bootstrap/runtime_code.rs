@@ -132,14 +132,20 @@ class _PrimeAgentUnavailableSkill:
         self._prime_agent_import_error = error
         self.__doc__ = f"Python skill {{name}} is unavailable: {{error}}"
 
-    async def run(self, *args, **kwargs):
-        raise RuntimeError(
+    def _prime_agent_unavailable(self):
+        return (
             f"Python skill {{self.__name__}} is unavailable in this kernel. "
             f"Import error: {{self._prime_agent_import_error}}"
         )
 
-    async def __call__(self, *args, **kwargs):
-        return await self.run()
+    def __getattr__(self, attribute):
+        # Protocol probes (import's __spec__, pickling, copy) must see a missing attribute.
+        if attribute.startswith("__") and attribute.endswith("__"):
+            raise AttributeError(attribute)
+        raise RuntimeError(self._prime_agent_unavailable())
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(self._prime_agent_unavailable())
 
     def __repr__(self):
         return f"<unavailable Python skill {{self.__name__!r}}: {{self._prime_agent_import_error}}>"
@@ -176,9 +182,8 @@ for _prime_agent_skill_name in {imports_json}:
             str(_prime_agent_skill_error) or type(_prime_agent_skill_error).__name__
         )
         _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = _prime_agent_skill_error_text
-        globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
-            _prime_agent_skill_name,
-            _prime_agent_skill_error_text,
+        globals()[_prime_agent_skill_name] = _prime_agent_sys.modules[_prime_agent_skill_name] = (
+            _PrimeAgentUnavailableSkill(_prime_agent_skill_name, _prime_agent_skill_error_text)
         )
 
 if _PRIME_AGENT_SKILL_IMPORT_ERRORS:

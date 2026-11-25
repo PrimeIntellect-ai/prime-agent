@@ -30,6 +30,8 @@ pub use crate::autonomous::AUTONOMOUS_STATUS_CUSTOM_TYPE;
 /// Inputs the host runtime supplies to one execution.
 pub struct SessionCommandParams<'a> {
     pub model: &'a pa_types::ai::Model,
+    /// Cancels a `/compact` run up to its commit (the host's `abort_compaction`).
+    pub compaction_abort: Option<&'a pa_agent::abort::AbortSignal>,
     /// Resolved API key (None falls back to provider resolution).
     pub api_key: Option<String>,
     pub autonomous: &'a mut AutonomousRuntimeState,
@@ -58,6 +60,9 @@ pub struct SessionCommandExecution {
     /// A compaction skipped: the message the wire `compaction_end`
     /// event carries (the durable transcript records nothing).
     pub compaction_skipped: Option<&'static str>,
+    /// A compaction cancelled before its commit: the wire `compaction_end`
+    /// reports `aborted` (the failure row records "Compaction cancelled").
+    pub compaction_aborted: bool,
     /// An injected custom row the follow-up turn runs on (goal start/resume):
     /// the transcript holds ONE representation of the turn, NOT part of
     /// `messages` — the loop's `message_end` persists it once admitted.
@@ -124,7 +129,8 @@ pub fn session_command_failure_row(command: &SessionSlashCommand, error: &str) -
 }
 
 /// The durable result row (`session_slash_command_result`).
-fn slash_command_result(
+#[must_use]
+pub fn slash_command_result(
     command: &SessionSlashCommand,
     content: String,
     success: bool,
@@ -250,11 +256,24 @@ async fn execute_compact(
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
     let instructions = (!command.args.is_empty()).then_some(command.args.as_str());
-    let outcome = engine
+    let outcome = match engine
         .session
-        .compact(instructions, params.model, params.api_key.clone(), None)
+        .compact(
+            instructions,
+            params.model,
+            params.api_key.clone(),
+            params.compaction_abort,
+        )
         .await
-        .map_err(|error| format!("{error:#}"))?;
+    {
+        Ok(outcome) => outcome,
+        // TS `_performCompaction` throws "Compaction cancelled" on abort.
+        Err(error) if pa_agent::abort::is_abort_error(&error) => {
+            execution.compaction_aborted = true;
+            return Err("Compaction cancelled".to_string());
+        }
+        Err(error) => return Err(format!("{error:#}")),
+    };
     match outcome {
         CompactOutcome::Skipped(message) => {
             execution.compaction_skipped = Some(message);
@@ -527,6 +546,7 @@ mod tests {
         execute_autonomous(
             &mut SessionCommandParams {
                 model: &scripted_model(),
+                compaction_abort: None,
                 api_key: None,
                 autonomous: &mut autonomous,
             },

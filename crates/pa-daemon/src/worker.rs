@@ -21,6 +21,7 @@ mod connection;
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
 pub(crate) use summary::emit_action_update_fresh;
 
+mod inbox_router;
 mod queue;
 
 pub(crate) use queue::admit_inbox_notice_locked;
@@ -29,17 +30,21 @@ pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_goal_follow_up, admit_inbox_notice, admit_inbox_reminder,
     admit_kernel_notice, checkpoint_queue_recovery, clear_withdrawn_progress_note,
-    enqueue_priority, gather_delivery_batch, parse_custom_message, parse_prompt_images,
-    queue_lanes, queued_bash_completion_notices, refresh_inbox_wake_rows_locked,
-    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
-    withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy, TurnSettle,
-    ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY, INBOX_REMINDER_QUEUE_KEY,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    consume_shown_inbox_items_locked, deliver_inbox_arrival_row_locked, enqueue_priority,
+    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
+    queued_bash_completion_notices, queued_cell_completion_deliveries,
+    refresh_inbox_wake_rows_locked, restore_queue_snapshot, restored_turn_policy, row_wakes_a_cell,
+    withdraw_bash_completion_notice, withdraw_drained_inbox_notice, QueueCheckpoint, QueueLanes,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
+    INBOX_REMINDER_QUEUE_KEY, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
 mod turn;
+mod work_notify;
+
+pub(crate) use work_notify::WorkNotify;
 
 use create::{active_session_id_of, worker_server_capabilities};
 // session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
@@ -55,8 +60,9 @@ mod commands;
 
 pub use env::{
     strip_inherited_worker_env, WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV,
-    WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV,
-    WORKER_SOCKET_ENV, WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
+    WORKER_DECISION_CHILD_ENV, WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV,
+    WORKER_REFINE_CHILD_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV,
+    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
     WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
 use serde_json::Map;
@@ -140,7 +146,7 @@ pub struct Worker {
     /// authoritative pulls embed: a push can race a fresher pull, so the
     /// supervisor's gate drops the stale snapshot.
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) work_notify: Arc<Notify>,
+    pub(crate) work_notify: Arc<WorkNotify>,
     pub(crate) idle_notify: Arc<Notify>,
     /// The per-connection session-attach registry (the fresh bots'
     /// release findings): connection tokens -> the client ids their
@@ -320,6 +326,7 @@ impl Worker {
             last_action_snapshot: Some(SessionActionSnapshot::default()),
             rlm_depth: 0,
             runtime_kind: "top-level".to_string(),
+            decision_child: false,
             rlm_child_id: None,
             parent_active_session_id: None,
             parent_session_id: None,
@@ -334,6 +341,9 @@ impl Worker {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
+            inbox_wake_due: None,
+            inbox_shown_unaccepted: std::collections::BTreeSet::new(),
+            run_cut_at_tool_boundary: false,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
             tool_use_count: 0,
@@ -356,7 +366,24 @@ impl Worker {
         // Shared worker recovery journal: the turn runner persists queue
         // snapshots, `serve` opens the file, commands record busy state.
         let recovery = Arc::new(Mutex::new(None));
-        let work_notify = Arc::new(Notify::new());
+        // The worker's queue-backed cell wake: the pending predicate
+        // reads the live steering lane (wakeable rows only — a cell-done
+        // row never detaches a later cell), so an arrival that lands while
+        // the model is still streaming the tool call ends the cell's wait
+        // at once instead of waiting out the budget. Every work wake
+        // requests it; the agent engine installs it before it is shared.
+        let wake_core = Arc::clone(&core);
+        let cell_wake_pending: pa_core::kernel::cell_wake::CellWakePending =
+            std::sync::Arc::new(move || {
+                let core = wake_core
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                core.steering.iter().any(row_wakes_a_cell)
+            });
+        let worker_cell_wake = std::sync::Arc::new(
+            pa_core::kernel::cell_wake::CellWake::with_pending(cell_wake_pending),
+        );
+        let work_notify = Arc::new(WorkNotify::new(std::sync::Arc::clone(&worker_cell_wake)));
         let idle_notify = Arc::new(Notify::new());
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner and the command arms
@@ -390,15 +417,61 @@ impl Worker {
             Arc::clone(&events),
             Arc::clone(&recovery),
         ));
+        // The refinement child flag rides the worker's launch env (the
+        // durable create command's `refineChild`): the worker runs the
+        // refinement engine instead of the agent engine.
+        let refine_child =
+            std::env::var_os(WORKER_REFINE_CHILD_ENV).is_some_and(|value| value == "1");
         // The coalescing arrival batch the queued short notice covers:
         // shared by the kernel-notice sink and the agent-message
         // delivery route, so both classes extend the same batch.
         let inbox_arrivals = pa_core::session_engine::inbox::InboxArrivals::default();
-        let (engine, agent_engine, roster_pushes): (
+        // The turn runner's passivation context: shared by the engine
+        // branches below (the roster context after them moves the worker
+        // token into its queue; the refinement and decision engines take a
+        // clone).
+        let passivation = crate::worker::turn::PassivationContext {
+            agent_dir: config.agent_dir.clone(),
+            link: Arc::clone(&roster_link),
+            worker_token: worker_token.clone(),
+        };
+        // The Decision API child flag rides the worker's launch env (the
+        // durable create command's `decisionChild`): the worker runs the
+        // decision engine instead of the agent engine.
+        let decision_child =
+            std::env::var_os(WORKER_DECISION_CHILD_ENV).is_some_and(|value| value == "1");
+        // The flag reaches the summary (`decisionChild`): the agents view
+        // hides System 1 children from the user; costs still roll up.
+        if decision_child {
+            core.lock().unwrap().decision_child = true;
+        }
+        let (engine, agent_engine): (
             std::sync::Arc<dyn SessionEngine>,
             Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
-            crate::roster_activity::RosterPushQueue,
-        ) = {
+        ) = if refine_child {
+            // The refinement child runs the refinement engine, the
+            // decision child the decision engine; every other session
+            // (scripted or not) runs the agent engine family.
+            let engine: std::sync::Arc<dyn SessionEngine> =
+                std::sync::Arc::new(crate::refine_engine::RefineEngine::new(
+                    config.agent_dir.clone(),
+                    Arc::clone(&roster_link),
+                    config.active_session_id.clone(),
+                    worker_token.clone(),
+                ));
+            (engine, None)
+        } else if decision_child {
+            // The Decision API child runs the decision engine.
+            let engine: std::sync::Arc<dyn SessionEngine> =
+                std::sync::Arc::new(crate::decision_engine::DecisionEngine::new(
+                    &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    &config.agent_dir,
+                    std::sync::Arc::clone(&roster_link),
+                    config.active_session_id.clone(),
+                    worker_token.clone(),
+                ));
+            (engine, None)
+        } else {
             // Scripted sessions serve the integration harness; sessions
             // without a script run the real agent engine.
             let mut agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>> =
@@ -424,7 +497,11 @@ impl Worker {
                         cron_store: Some(kernel_cron_wiring(&scheduled)),
                         queued_steering_probe: queued_steering_probe.clone(),
                     }) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
+                            // The queue-backed wake installs before the
+                            // engine is shared: its session builds then
+                            // hand the same wake to every provisioner.
+                            engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));
                             let concrete = std::sync::Arc::new(engine);
                             agent_engine = Some(std::sync::Arc::clone(&concrete));
                             concrete
@@ -454,7 +531,8 @@ impl Worker {
                         cron_store: Some(kernel_cron_wiring(&scheduled)),
                         queued_steering_probe: queued_steering_probe.clone(),
                     }) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
+                            engine.set_worker_cell_wake(std::sync::Arc::clone(&worker_cell_wake));
                             let concrete = std::sync::Arc::new(engine);
                             agent_engine = Some(std::sync::Arc::clone(&concrete));
                             concrete
@@ -738,53 +816,53 @@ impl Worker {
                     });
                 concrete.set_progress_note_emit(note_emit);
             }
-            // The live roster activity feed (TS `observeRosterEvent`): busy
-            // flips and trigger events coalesce into `worker_roster_delta`
-            // pushes.
-            let roster_pushes =
-                crate::roster_activity::RosterPushQueue::spawn(crate::worker::RosterPushContext {
-                    core: Arc::clone(&core),
-                    engine: std::sync::Arc::clone(&engine),
-                    user_bash: std::sync::Arc::clone(&user_bash),
-                    roster_link: Arc::clone(&roster_link),
-                    worker_token: worker_token.clone(),
-                    worker_instance_id: config.worker_instance_id.clone(),
-                    roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
-                });
-            crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
-            if let Some(children) = agent_engine
-                .as_ref()
-                .and_then(|engine| engine.children.as_ref())
-            {
-                crate::roster_activity::spawn_running_children_watch(
-                    children,
-                    roster_pushes.clone(),
-                );
-            }
-            let runner = TurnRunner {
-                recovery: Arc::clone(&recovery),
-                core: Arc::clone(&core),
-                input_pauses: input_pauses.clone(),
-                prompt_admissions: prompt_admissions.clone(),
-                work_notify: Arc::clone(&work_notify),
-                idle_notify: Arc::clone(&idle_notify),
-                events: events.clone(),
-                engine: std::sync::Arc::clone(&engine),
-                active_session_id,
-                roster_pushes: roster_pushes.clone(),
-                user_bash: std::sync::Arc::clone(&user_bash),
-                passivation: crate::worker::turn::PassivationContext {
-                    agent_dir: config.agent_dir.clone(),
-                    link: Arc::clone(&roster_link),
-                    worker_token,
-                },
-                herdr: std::sync::Arc::clone(&herdr_slot),
-            };
-            tokio::spawn(async move {
-                runner.run().await;
-            });
-            (engine, agent_engine, roster_pushes)
+            (engine, agent_engine)
         };
+        // The live roster activity feed (TS `observeRosterEvent`): busy
+        // flips and trigger events coalesce into `worker_roster_delta`
+        // pushes. Every engine family runs it — a decision child's busy
+        // and completion transitions publish to roster subscribers like
+        // any other session's.
+        let roster_pushes =
+            crate::roster_activity::RosterPushQueue::spawn(crate::worker::RosterPushContext {
+                core: Arc::clone(&core),
+                engine: std::sync::Arc::clone(&engine),
+                user_bash: std::sync::Arc::clone(&user_bash),
+                roster_link: Arc::clone(&roster_link),
+                worker_token,
+                worker_instance_id: config.worker_instance_id.clone(),
+                roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
+            });
+        crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
+        if let Some(children) = agent_engine
+            .as_ref()
+            .and_then(|engine| engine.children.as_ref())
+        {
+            crate::roster_activity::spawn_running_children_watch(children, roster_pushes.clone());
+        }
+        // The turn runner drives the engine's queued prompts; every engine
+        // needs it — a refinement or decision child without a runner never
+        // dequeues its first prompt.
+        let runner = TurnRunner {
+            recovery: Arc::clone(&recovery),
+            core: Arc::clone(&core),
+            input_pauses: input_pauses.clone(),
+            prompt_admissions: prompt_admissions.clone(),
+            work_notify: Arc::clone(&work_notify),
+            idle_notify: Arc::clone(&idle_notify),
+            events: events.clone(),
+            engine: std::sync::Arc::clone(&engine),
+            active_session_id,
+            roster_pushes: roster_pushes.clone(),
+            user_bash: std::sync::Arc::clone(&user_bash),
+            passivation,
+            herdr: std::sync::Arc::clone(&herdr_slot),
+            inbox_arrivals: std::sync::Arc::clone(&inbox_arrivals),
+            inbox_engine: agent_engine.as_ref().map(std::sync::Arc::downgrade),
+        };
+        tokio::spawn(async move {
+            runner.run().await;
+        });
         let side_questions = crate::side_question::SideQuestionManager::new(
             std::sync::Arc::clone(&engine),
             events.clone(),
@@ -1047,25 +1125,6 @@ pub(crate) fn emit_refinement_event_for_generation(
     let payload = serde_json::to_vec(&outbound).unwrap_or_default();
     events.send(OutboundFrame::session_event(payload));
     true
-}
-
-/// Record one durable custom row of the background compact-trigger
-/// review and broadcast its `message_start`/`message_end` pair.
-/// `review_session_id` fences the row against session moves made while
-/// the review's model call was in flight.
-fn emit_refinement_row(
-    core: &Arc<Mutex<SessionCore>>,
-    events: &Arc<EventPump>,
-    review_session_id: &str,
-    message: &Value,
-) -> bool {
-    emit_refinement_row_for_generation(
-        core,
-        events,
-        review_session_id,
-        /*expected_generation*/ None,
-        message,
-    )
 }
 
 pub(crate) fn emit_refinement_row_for_generation(
@@ -1332,9 +1391,13 @@ mod agent_message_tests;
 mod prompt_image_tests;
 
 #[cfg(test)]
+mod abort_scope_tests;
+#[cfg(test)]
 mod compaction_admission_tests;
 #[cfg(test)]
 mod inbox_queue_tests;
+#[cfg(test)]
+mod inbox_wake_policy_tests;
 #[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]

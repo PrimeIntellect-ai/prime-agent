@@ -1,10 +1,12 @@
 //! Request plumbing: enqueue/execute state machine, signal enum, and failure
 //! description helpers.
 
+use std::sync::atomic::Ordering;
+
 use super::{
-    anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
-    Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus, Instant,
-    InternalExecuteResult, KernelStartOptions, Mutex, ReplKernelManager, Request,
+    anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Admission, Arc,
+    AsyncWriteExt, AtomicBool, Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus,
+    Instant, InternalExecuteResult, KernelStartOptions, Mutex, ReplKernelManager, Request,
     DEFAULT_MAX_OUTPUT_CHARS, KERNEL_ABORT_GRACE_MS,
 };
 
@@ -139,6 +141,35 @@ impl HeadTailBuffer {
         self.omitted += chars;
     }
 
+    /// A non-consuming copy of [`Self::finish`]: the head, marker, and tail a
+    /// finish would produce right now, leaving the buffer untouched (the
+    /// detach path reads the partial output while the cell keeps writing).
+    pub(crate) fn snapshot(&self, max_chars: usize) -> String {
+        let (_, tail_cap) = Self::split_cap(max_chars);
+        let mut omitted = self.omitted;
+        let tail = if self.tail_chars > tail_cap {
+            let drop = self.tail_chars - tail_cap;
+            omitted += drop;
+            let end = self
+                .tail
+                .char_indices()
+                .nth(drop)
+                .map_or(self.tail.len(), |(i, _)| i);
+            &self.tail[end..]
+        } else {
+            self.tail.as_str()
+        };
+        if omitted == 0 {
+            let mut text = self.head.clone();
+            text.push_str(tail);
+            return text;
+        }
+        format!(
+            "{}\n[... {} chars omitted ...]\n{}",
+            self.head, omitted, tail
+        )
+    }
+
     /// Resolve the buffered text: trim the tail to its cap, then return head,
     /// marker, and tail. Text that fit the cap passes through unchanged.
     pub(crate) fn finish(mut self, max_chars: usize) -> String {
@@ -221,8 +252,23 @@ impl ReplKernelManager {
             self.wait_for_protocol_repair(opts.signal.as_ref()).await?;
             return Box::pin(self.enqueue_request(request, opts, execution_timeout_ms)).await;
         }
+        // A backgrounded cell is never interrupted, so an internal op behind
+        // it fails at once instead of waiting out the busy window. The
+        // dispose flush interrupts the cell first and keeps waiting.
+        if opts.internal
+            && self.inner.has_detached_active_execution()
+            && !lock(&self.inner.guarded).flushing_snapshot_for_dispose
+        {
+            return Err(anyhow!("the kernel is running a backgrounded cell"));
+        }
 
-        self.wait_for_active_execution_to_clear_for_reuse(opts.signal.as_ref())
+        // A user cell runs beside backgrounded cells; everything else (the
+        // runtime bootstrap, state requests) waits out every running request.
+        let admission = match &request {
+            Request::Execute { .. } if !opts.internal => Admission::BesideDetached,
+            _ => Admission::Exclusive,
+        };
+        self.wait_for_active_execution_to_clear_for_reuse(admission, opts.signal.as_ref())
             .await?;
         if let Some(signal) = &opts.signal {
             if signal.is_aborted() {
@@ -233,7 +279,10 @@ impl ReplKernelManager {
             return Err(anyhow!("Kernel has been shut down"));
         }
 
-        // Bound the execution with an out-of-band abort (interrupt + grace).
+        // The hard bound (internal ops: bootstrap/state captures) merges into
+        // the abort signal: an unfinished op must fail, not detach. The
+        // model-facing wait budget in `opts.cell_timeout_ms` is separate: its
+        // clock arms in `execute_inner` and it detaches instead.
         let timeout_signal = execution_timeout_ms.map(|ms| {
             let signal = AbortSignal::new();
             let timer_signal = signal.clone();
@@ -246,7 +295,12 @@ impl ReplKernelManager {
         let merged = merge_signals(opts.signal.as_ref(), timeout_signal.clone());
         let mut opts = opts;
         opts.signal = merged;
-        let result = self.execute_inner(request, opts, started).await;
+        // The hard bound fails the op (the base `execute_bounded` contract):
+        // it never arms the kill-on-ignored-interrupt — a bound write or
+        // state capture keeps its kernel alive for the next op.
+        let result = self
+            .execute_inner(request, opts, started, execution_timeout_ms.is_some())
+            .await;
         if let Some(signal) = &timeout_signal {
             signal.abort();
         }
@@ -259,6 +313,7 @@ impl ReplKernelManager {
         request: Request,
         opts: ExecuteOptions,
         started: Instant,
+        hard_bounded: bool,
     ) -> anyhow::Result<InternalExecuteResult> {
         let max_chars = opts.max_output_chars.unwrap_or(DEFAULT_MAX_OUTPUT_CHARS);
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -268,7 +323,11 @@ impl ReplKernelManager {
                 return Ok(InternalExecuteResult::aborted(started));
             }
         }
-        if lock(&self.inner.guarded).active_execution.is_some() {
+        if lock(&self.inner.guarded)
+            .active_executions
+            .iter()
+            .any(|active| !active.detached.load(Ordering::SeqCst))
+        {
             return Err(anyhow!("Kernel already has an active execution"));
         }
 
@@ -285,12 +344,30 @@ impl ReplKernelManager {
                 std::mem::take(&mut g.pending_background_output_chars);
             buffers.background_output_truncated =
                 std::mem::replace(&mut g.pending_background_output_truncated, false);
-            g.active_execution = None; // reset below with the execution in hand
         }
         let (namespace_code, restores_namespace) = match &request {
             Request::Execute { .. } => (true, false),
             Request::Restore { .. } => (false, true),
             _ => (false, false),
+        };
+        // The execution-local stop signal: a child of the caller's token, so
+        // a run abort cancels this execution without cancelling the provider
+        // run's later cells, and a manager-targeted cancel or the hard cap
+        // can reach it after the caller's run is gone. Internal ops keep the
+        // merged signal directly (their bound must fail the op, not stop a
+        // user cell), and so does a hard-bounded user op
+        // (`execute_bounded`): its bound aborts the op, never the kernel.
+        let stop_signal = if opts.internal || hard_bounded {
+            opts.signal.clone().unwrap_or_default()
+        } else {
+            opts.signal
+                .as_ref()
+                .map(|signal| {
+                    crate::kernel::cancellation::AbortSignal::from_token(
+                        signal.token().child_token(),
+                    )
+                })
+                .unwrap_or_default()
         };
         let execution = Arc::new(ActiveExecution {
             request_id: request_id.clone(),
@@ -301,77 +378,131 @@ impl ReplKernelManager {
             buffers: Mutex::new(buffers),
             result_tx: Mutex::new(Some(result_tx)),
             opts,
+            detached: AtomicBool::new(false),
+            stop_signal,
+            settled_tx: tokio::sync::watch::channel(false).0,
         });
-        {
-            let mut g = lock(&self.inner.guarded);
-            g.active_execution = Some(execution.clone());
-        }
+        lock(&self.inner.guarded)
+            .active_executions
+            .push(execution.clone());
 
-        // Abort watcher: on an abort, or when the cell outlives its time limit,
-        // interrupts the kernel out-of-band, then force-aborts after the grace
-        // window if the runtime did not settle the cell. The limit's clock
-        // starts here, as the request goes on the wire (no await separates the
-        // two): queue wait and kernel boot are excluded.
+        // The stop watcher and the wait clocks. The wait budget's deadline
+        // and the session wake's subscription arm BEFORE the request goes on
+        // the wire: a wake or a budget that lands while the frame is still
+        // being written is retained, not lost (queue wait and kernel boot
+        // stay excluded — both clocks start at the write).
         let cell_timeout_ms = execution.opts.cell_timeout_ms.filter(|ms| *ms > 0);
-        if execution.opts.signal.is_some() || cell_timeout_ms.is_some() {
-            let signal = execution.opts.signal.clone();
-            // Weak on both sides: a never-fired signal leaves this watcher pending forever, and a
-            // strong manager would pin the kernel past the last manager's drop.
+        let budget_deadline =
+            cell_timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
+        let mut wake_rx = execution.opts.wake.as_ref().map(|wake| wake.subscribe());
+        let wake_pending = execution.opts.wake.as_ref().and_then(|wake| wake.pending());
+        if execution.opts.internal || hard_bounded {
+            // A bounded op's watcher: interrupt, grace, force-abort. Its
+            // hard bound must fail the op, never retire a kernel behind a
+            // user cell (the base `execute_bounded` contract; the bound is
+            // not a user cancel). The settle watch ends the watcher when
+            // the op settles, so no successful op leaves a task behind.
+            if let Some(signal) = execution.opts.signal.clone() {
+                let inner = Arc::downgrade(&self.inner);
+                let weak_exec = Arc::downgrade(&execution);
+                let settled_rx = execution.settled_tx.subscribe();
+                tokio::spawn(async move {
+                    let mut settled_rx = settled_rx;
+                    if *settled_rx.borrow() {
+                        return;
+                    }
+                    tokio::select! {
+                        () = signal.cancelled() => {}
+                        _ = settled_rx.changed() => return,
+                    }
+                    let Some(execution) = weak_exec.upgrade() else {
+                        return;
+                    };
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
+                    // A blocked request write holds the stdin mutex. Do not let an
+                    // interrupt queued behind it postpone the force-abort forever.
+                    // Dropping the interrupt at this deadline cannot tear its
+                    // frame: the ~60-byte frame is one write on a non-blocking
+                    // pipe, all-or-nothing below PIPE_BUF.
+                    let deadline =
+                        tokio::time::Instant::now() + Duration::from_millis(KERNEL_ABORT_GRACE_MS);
+                    tokio::select! {
+                        _ = inner.interrupt(Some(&execution.request_id)) => {},
+                        () = tokio::time::sleep_until(deadline) => {}
+                    }
+                    tokio::time::sleep_until(deadline).await;
+                    inner.force_abort(&execution);
+                });
+            }
+        } else {
+            // A user cell's stop is execution-owned: the run's abort (the
+            // parent token) or a manager-targeted user cancel fires the
+            // execution-local signal. Weak on both sides: a never-fired
+            // signal leaves the watcher pending forever, and a strong
+            // manager would pin the kernel past the last manager's drop.
+            let stop_signal = execution.stop_signal.clone();
             let inner = Arc::downgrade(&self.inner);
             let weak_exec = Arc::downgrade(&execution);
+            let settled_rx = execution.settled_tx.subscribe();
             tokio::spawn(async move {
-                let timed_out_after_ms = tokio::select! {
-                    () = async {
-                        match &signal {
-                            Some(signal) => signal.cancelled().await,
-                            None => std::future::pending().await,
-                        }
-                    } => None,
-                    () = async {
-                        match cell_timeout_ms {
-                            Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
-                            None => std::future::pending().await,
-                        }
-                    } => cell_timeout_ms,
-                };
+                let mut settled_rx = settled_rx;
+                // A settled, rejected, or retired execution ends its
+                // watcher: the task exits instead of awaiting a stop
+                // signal that will never fire.
+                if *settled_rx.borrow() {
+                    return;
+                }
+                tokio::select! {
+                    () = stop_signal.cancelled() => {}
+                    _ = settled_rx.changed() => return,
+                }
                 let Some(execution) = weak_exec.upgrade() else {
                     return;
                 };
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                if timed_out_after_ms.is_some() {
-                    lock(&execution.buffers).timed_out_after_ms = timed_out_after_ms;
+                // Fence: only the still-active, unsettled execution gets the
+                // out-of-band interrupt — a settled execution's late watcher
+                // must never signal the next cell.
+                if inner.execution_is_live(&execution) {
+                    // A blocked request write holds the stdin mutex. Do not let an
+                    // interrupt queued behind it postpone the stop forever.
+                    // Dropping the interrupt at this deadline cannot tear its
+                    // frame: the ~60-byte frame is one write on a non-blocking
+                    // pipe, all-or-nothing below PIPE_BUF.
+                    let deadline =
+                        tokio::time::Instant::now() + Duration::from_millis(KERNEL_ABORT_GRACE_MS);
+                    tokio::select! {
+                        _ = inner.interrupt(Some(&execution.request_id)) => {},
+                        () = tokio::time::sleep_until(deadline) => {}
+                    }
+                    tokio::time::sleep_until(deadline).await;
                 }
-                // A blocked request write holds the stdin mutex. Do not let an
-                // interrupt queued behind it postpone the force-abort forever.
-                // Dropping the interrupt at this deadline cannot tear its
-                // frame: the ~60-byte frame is one write on a non-blocking
-                // pipe, all-or-nothing below PIPE_BUF.
-                let deadline =
-                    tokio::time::Instant::now() + Duration::from_millis(KERNEL_ABORT_GRACE_MS);
-                tokio::select! {
-                    _ = inner.interrupt(Some(&execution.request_id)) => {},
-                    () = tokio::time::sleep_until(deadline) => {}
+                // An attached cell still running at grace expiry is
+                // force-aborted: its caller gets the abort and the kernel
+                // keeps its state. A detached cell has no caller to free the
+                // kernel, so it retires the kernel, and the forced-stop
+                // completion publishes only after the kill. The retirement
+                // claims its execution atomically, so a cell that settled
+                // while the grace ran out (and a replacement that started
+                // behind it) is never touched.
+                if execution.detached.load(Ordering::SeqCst) {
+                    inner.retire_for_ignored_interrupt(&execution);
+                } else {
+                    inner.force_abort(&execution);
                 }
-                tokio::time::sleep_until(deadline).await;
-                // The execution stays active until its done event arrives;
-                // clearing it early would let a new cell race the interrupted
-                // one (see busy-after-interrupt).
-                inner.force_abort(&execution);
             });
         }
-
         let mut frame = request.to_json();
         frame["id"] = json!(request_id);
 
         let (mut send_task, stdin_retire) = {
             let writer = lock(&self.inner.child).as_ref().map(|c| c.stdin.clone());
             let Some(stdin) = writer else {
-                {
-                    let mut g = lock(&self.inner.guarded);
-                    g.active_execution = None;
-                }
+                self.inner.remove_active_execution(&execution);
                 return Err(anyhow!("Kernel stdin is not connected"));
             };
             let mut line = frame.to_string();
@@ -394,9 +525,8 @@ impl ReplKernelManager {
 
         let mut settled_result: Option<anyhow::Result<InternalExecuteResult>> = None;
         let send_outcome: anyhow::Result<()> = {
-            let send_promise = &mut send_task;
             tokio::select! {
-                r = send_promise => r.unwrap_or_else(|e| Err(anyhow!("{e}"))),
+                biased;
                 settled = &mut result_rx => {
                     // The cell settled before the write completed (fast runtime). Only an aborted
                     // status may skip waiting for the write; a failed write on a successful cell
@@ -431,30 +561,230 @@ impl ReplKernelManager {
                     }
                     Ok(())
                 }
+                r = &mut send_task => {
+                    r.unwrap_or_else(|e| Err(anyhow!("{e}")))
+                }
             }
         };
 
-        match settled_result.take() {
-            Some(result) => result,
-            None => match send_outcome {
-                Err(error) => {
-                    {
-                        let mut g = lock(&self.inner.guarded);
-                        if matches!(g.active_execution.as_ref(), Some(active) if Arc::ptr_eq(active, &execution))
-                        {
-                            g.active_execution = None;
+        if let Some(result) = settled_result.take() {
+            return result;
+        }
+        if let Err(error) = send_outcome {
+            self.inner.remove_active_execution(&execution);
+            Err(error)
+        } else {
+            // The wait: the cell's settlement, or a detach (the session
+            // wake or the budget deadline firing while the cell runs). A
+            // settled cell wins a tie: the work is done, so there is
+            // nothing to background. A wake with a pending predicate is a
+            // LEVEL signal: an arrival that predates the subscription ends
+            // the wait only after a short settle window — a cell that is
+            // about to answer keeps its own tool result instead of paying
+            // a completion-notice model turn, while a long cell still
+            // detaches promptly — and a notification whose input was
+            // consumed or cleared rechecks the level instead of detaching
+            // a later cell. Without a predicate the wake keeps its
+            // standalone edge-triggered contract.
+            let wait = loop {
+                let budget = || async {
+                    match budget_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                if let Some(pending) = &wake_pending {
+                    if pending() {
+                        // The settle window: the arrival predates the
+                        // subscription, so let a quick result win inline;
+                        // a cell still running at the window's end
+                        // detaches (the wait budget keeps its own reason).
+                        let settle = tokio::time::sleep(Duration::from_millis(
+                            crate::kernel::shared::KERNEL_LEVEL_WAKE_SETTLE_MS,
+                        ));
+                        tokio::select! {
+                            biased;
+                            settled = &mut result_rx => {
+                                break Wait::Settled(Box::new(
+                                    settled.unwrap_or_else(|_| Err(anyhow!("Kernel has been shut down"))),
+                                ));
+                            }
+                            () = budget() => {
+                                break Wait::Detach(
+                                    crate::kernel::shared::DetachReason::WaitBudget(
+                                        cell_timeout_ms.unwrap_or(0),
+                                    ),
+                                );
+                            }
+                            () = settle => {
+                                if pending() {
+                                    break Wait::Detach(
+                                        crate::kernel::shared::DetachReason::Interrupted,
+                                    );
+                                }
+                                // The level cleared inside the window: the
+                                // wait keeps going under the normal arms.
+                            }
                         }
                     }
-                    Err(error)
                 }
-                Ok(()) => match result_rx.await {
-                    Ok(result) => result,
-                    Err(_) => Err(anyhow!("Kernel has been shut down")),
-                },
-            },
+                tokio::select! {
+                    biased;
+                    settled = &mut result_rx => {
+                        break Wait::Settled(Box::new(
+                            settled.unwrap_or_else(|_| Err(anyhow!("Kernel has been shut down"))),
+                        ));
+                    }
+                    () = awakened(wake_rx.as_mut()) => {
+                        if wake_pending.is_none() {
+                            break Wait::Detach(
+                                crate::kernel::shared::DetachReason::Interrupted,
+                            );
+                        }
+                        // With a level predicate, the loop top rechecks it
+                        // (through the settle window).
+                    }
+                    () = budget() => {
+                        break Wait::Detach(
+                            crate::kernel::shared::DetachReason::WaitBudget(
+                                cell_timeout_ms.unwrap_or(0),
+                            ),
+                        );
+                    }
+                }
+            };
+            match wait {
+                Wait::Settled(settled) => *settled,
+                Wait::Detach(reason) => {
+                    // The call stops waiting; the cell does not. Its
+                    // completion resolves through the same channel and
+                    // goes to the background sink.
+                    execution.detached.store(true, Ordering::SeqCst);
+                    // The residency hold: from the caller's return until
+                    // the terminal outcome is admitted, the cell is live
+                    // background work the passivation gates must see.
+                    let hold = self.inner.pending_detached_completions.acquire();
+                    let (stdout, stderr) = {
+                        let buffers = lock(&execution.buffers);
+                        (
+                            buffers.stdout.snapshot(max_chars),
+                            buffers.stderr.snapshot(max_chars),
+                        )
+                    };
+                    let cell_id = execution.request_id.clone();
+                    let completion = execution.opts.on_background_cell.clone();
+                    let detached_execution = Arc::clone(&execution);
+                    let inner = Arc::downgrade(&self.inner);
+                    tokio::spawn(async move {
+                        // Every host-observed exit delivers exactly one
+                        // terminal outcome: a normal settle, a forced stop,
+                        // a teardown's reject, or a dropped channel (the
+                        // manager died with its kernel) — never silence.
+                        let settled: anyhow::Result<InternalExecuteResult> = match result_rx.await {
+                            Ok(settled) => settled,
+                            Err(_) => Err(anyhow!("Kernel has been shut down")),
+                        };
+                        let mut result = match settled {
+                            Ok(settled) => settled.result,
+                            Err(error) => {
+                                // The kernel ended without settling the cell
+                                // (teardown, crash, restart): the terminal
+                                // outcome is an error naming the cause, with
+                                // the cell's partial output retained.
+                                let max_chars = detached_execution.max_chars;
+                                let (stdout, stderr) = {
+                                    let buffers = lock(&detached_execution.buffers);
+                                    (
+                                        buffers.stdout.snapshot(max_chars),
+                                        buffers.stderr.snapshot(max_chars),
+                                    )
+                                };
+                                ExecuteResult {
+                                    stdout,
+                                    stderr,
+                                    result: None,
+                                    diffs: None,
+                                    attachments: None,
+                                    sent_agent_messages: None,
+                                    bash_commands: None,
+                                    transcript_reads: None,
+                                    inbox_messages: None,
+                                    background_output: None,
+                                    ended_turn: false,
+                                    status: ExecuteStatus::Error,
+                                    error: Some(crate::kernel::shared::KernelError {
+                                        ename: "KernelShutdown".to_string(),
+                                        evalue: format!("{error:#}"),
+                                        traceback: Vec::new(),
+                                    }),
+                                    duration_ms: detached_execution.started.elapsed().as_millis()
+                                        as u64,
+                                    // The marker below stamps the detach on
+                                    // every arm.
+                                    detached: None,
+                                }
+                            }
+                        };
+                        if let Some(inner) = inner.upgrade() {
+                            // The settle consumes the capture this cell kept
+                            // owed: an ok settle schedules its own capture,
+                            // and any other status retries the owed one (an
+                            // error outcome can still have moved the
+                            // namespace before it failed), but only with the
+                            // kernel still alive.
+                            let owed = inner.snapshot_owed.swap(false, Ordering::SeqCst);
+                            if result.status == ExecuteStatus::Ok
+                                || (owed && inner.is_running_state())
+                            {
+                                inner.schedule_snapshot();
+                            }
+                        }
+                        result.detached = Some(crate::kernel::shared::DetachedCell {
+                            reason,
+                            cell_id: detached_execution.request_id.clone(),
+                        });
+                        if let Some(callback) = completion {
+                            callback(crate::kernel::shared::BackgroundCellOutcome {
+                                cell_id: detached_execution.request_id.clone(),
+                                reason,
+                                result,
+                            });
+                        }
+                        // The terminal outcome is admitted: drop the
+                        // residency hold (exactly once), then fire the
+                        // settled callback so owed continuations resume
+                        // behind the queued notice.
+                        drop(hold);
+                        if let Some(inner) = inner.upgrade() {
+                            inner.notify_background_work_settled();
+                        }
+                    });
+                    Ok(InternalExecuteResult::detached(
+                        started, reason, cell_id, stdout, stderr,
+                    ))
+                }
+            }
         }
     }
 }
+
+/// What one cell wait resolved to: the cell's settlement, or a detach (the
+/// call stops waiting; the cell keeps running).
+enum Wait {
+    Settled(Box<anyhow::Result<InternalExecuteResult>>),
+    Detach(crate::kernel::shared::DetachReason),
+}
+
+/// Resolve when the optional wake receiver fires; never when absent.
+async fn awakened(receiver: Option<&mut crate::kernel::cell_wake::CellWakeReceiver>) {
+    match receiver {
+        Some(receiver) => receiver.awakened().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod detach_tests;
 
 #[cfg(test)]
 mod tests {

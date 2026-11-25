@@ -94,7 +94,7 @@ pub(crate) fn safe_home_uv(path: &Path, project: Option<&Path>) -> bool {
 
 /// The account's home from the user database, independent of `HOME`.
 #[cfg(unix)]
-fn account_home() -> Option<PathBuf> {
+pub(crate) fn account_home() -> Option<PathBuf> {
     nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()
         .flatten()
@@ -104,7 +104,7 @@ fn account_home() -> Option<PathBuf> {
 /// No dependency exposes the profile known folder, so Windows takes
 /// `USERPROFILE`.
 #[cfg(not(unix))]
-fn account_home() -> Option<PathBuf> {
+pub(crate) fn account_home() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .filter(|profile| !profile.is_empty())
         .map(PathBuf::from)

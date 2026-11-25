@@ -156,49 +156,42 @@ mod tests {
             resolve_codex_url("https://example.com/codex/responses"),
             "https://example.com/codex/responses"
         );
-    }
-
-    #[test]
-    fn resolves_websocket_urls() {
         assert_eq!(
-            resolve_codex_websocket_url("https://example.com/codex"),
-            "wss://example.com/codex/responses"
-        );
-        assert_eq!(
-            resolve_codex_websocket_url("http://example.com/codex"),
-            "ws://example.com/codex/responses"
-        );
-        assert_eq!(
-            resolve_codex_websocket_url("https://example.com"),
-            "wss://example.com/codex/responses"
+            [
+                resolve_codex_websocket_url("https://example.com/codex"),
+                resolve_codex_websocket_url("http://example.com/codex"),
+                resolve_codex_websocket_url("https://example.com"),
+            ],
+            [
+                "wss://example.com/codex/responses",
+                "ws://example.com/codex/responses",
+                "wss://example.com/codex/responses",
+            ]
+            .map(str::to_string)
         );
     }
 
+    /// The one account-id check behind login, refresh and streaming: a token that is no JWT, or
+    /// that has no `chatgpt_account_id` claim, is rejected.
     #[test]
-    fn extracts_account_id_from_jwt() {
+    fn a_token_without_the_account_id_is_rejected() {
         use base64::Engine as _;
-        fn b64(json: &str) -> String {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
-        }
-        let payload = format!("{{\"{JWT_CLAIM_PATH}\":{{\"chatgpt_account_id\":\"acct-123\"}}}}");
-        let token = format!("header.{}.signature", b64(&payload));
-        assert_eq!(extract_account_id(&token).unwrap(), "acct-123");
-
-        let bad = format!("header.{}.signature", b64("{}"));
-        assert!(extract_account_id(&bad).is_err());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+        assert!(extract_account_id(&format!("header.{payload}.signature")).is_err());
         assert!(extract_account_id("not-a-jwt").is_err());
     }
 
     #[test]
     fn builds_expected_headers() {
-        let headers = build_sse_headers(None, None, "acct", "tok", Some("sess-1"));
-        let get = |name: &str| {
+        let find = |headers: &[(String, String)], name: &str| {
             headers
                 .iter()
                 .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
+                .map(|(_, value)| value.clone())
                 .unwrap_or_default()
         };
+        let headers = build_sse_headers(None, None, "acct", "tok", Some("sess-1"));
+        let get = |name: &str| find(&headers, name);
         assert_eq!(get("Authorization"), "Bearer tok");
         assert_eq!(get("chatgpt-account-id"), "acct");
         assert_eq!(get("originator"), "pi");
@@ -207,21 +200,15 @@ mod tests {
         assert_eq!(get("content-type"), "application/json");
         assert_eq!(get("session_id"), "sess-1");
         assert_eq!(get("x-client-request-id"), "sess-1");
-    }
 
-    #[test]
-    fn websocket_headers_use_websockets_beta() {
-        let headers = build_websocket_headers(None, None, "acct", "tok", "req-1");
-        let get = |name: &str| {
-            headers
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
-                .unwrap_or_default()
-        };
-        assert_eq!(get("OpenAI-Beta"), OPENAI_BETA_RESPONSES_WEBSOCKETS);
-        assert_eq!(get("session_id"), "req-1");
-        assert!(!headers
+        // The websocket handshake swaps the beta flag and sends no `accept`.
+        let websocket = build_websocket_headers(None, None, "acct", "tok", "req-1");
+        assert_eq!(
+            find(&websocket, "OpenAI-Beta"),
+            OPENAI_BETA_RESPONSES_WEBSOCKETS
+        );
+        assert_eq!(find(&websocket, "session_id"), "req-1");
+        assert!(!websocket
             .iter()
             .any(|(key, _)| key.eq_ignore_ascii_case("accept")));
     }

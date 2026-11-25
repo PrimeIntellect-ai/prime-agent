@@ -1,12 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
-    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    checkpoint_queue_recovery, compact_action_label, consume_shown_inbox_items_locked,
+    create_daemon_event_meta, deliver_inbox_arrival_row_locked, emit_refinement_event_for_session,
+    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
+    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR, INBOX_ARRIVAL_QUEUE_KEY,
 };
 
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ pub(super) struct TurnRunner {
     /// The prompt-admission registry: an admitted prompt clears when its
     /// turn settles.
     pub(super) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
-    pub(super) work_notify: Arc<Notify>,
+    pub(super) work_notify: Arc<super::WorkNotify>,
     pub(super) idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
     pub(super) engine: std::sync::Arc<dyn SessionEngine>,
@@ -31,6 +31,10 @@ pub(super) struct TurnRunner {
     /// runner reads it at every boundary so a create-time rebind is always
     /// current.
     pub(super) herdr: std::sync::Arc<std::sync::Mutex<crate::herdr::HerdrReporter>>,
+    /// The batch the queued inbox arrival row covers (the worker's
+    /// `inbox_arrivals`) and the engine whose live inbox it consumes from.
+    pub(super) inbox_arrivals: pa_core::session_engine::inbox::InboxArrivals,
+    pub(super) inbox_engine: Option<std::sync::Weak<crate::agent_engine::AgentSessionEngine>>,
 }
 
 /// The idle-passivation context on the turn runner: the worker token
@@ -45,6 +49,14 @@ impl TurnRunner {
     pub(super) async fn run(self) {
         loop {
             let engine = self.engine.clone();
+            // The live inbox store, fetched before the core lock (its slot
+            // has its own mutex): a picked arrival row consumes from it.
+            let inbox = self
+                .inbox_engine
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|engine| engine.inbox());
+            let mut inbox_hold = None;
             let item: Option<(Lane, Vec<QueuedItem>)> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
@@ -59,28 +71,20 @@ impl TurnRunner {
                 if core.queued_input_parked(&self.input_pauses) {
                     core.busy = false;
                     None
+                } else if let Some(due) = core.inbox_wake_hold(tokio::time::Instant::now()) {
+                    core.busy = false;
+                    inbox_hold = Some(due);
+                    None
                 } else if core.steering.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::Steering);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::Steering, items))
+                    Some((
+                        Lane::Steering,
+                        self.pick(&mut core, Lane::Steering, inbox.as_ref()),
+                    ))
                 } else if core.follow_up.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
-                    core.running_admission_ids = items
-                        .iter()
-                        .filter_map(|item| item.admission_id.clone())
-                        .collect();
-                    core.busy = true;
-                    core.abort_requested = false;
-                    core.retry_abort_requested = false;
-                    core.running_tool_calls.clear();
-                    Some((Lane::FollowUp, items))
+                    Some((
+                        Lane::FollowUp,
+                        self.pick(&mut core, Lane::FollowUp, inbox.as_ref()),
+                    ))
                 } else {
                     core.busy = false;
                     None
@@ -110,8 +114,30 @@ impl TurnRunner {
                 }
                 self.push_roster_delta();
                 self.run_turn(engine, lane, items).await;
+                // Refine replies that parked during the turn apply at
+                // this park boundary, before any queued turn starts: the
+                // next turn must see the applied harness.
+                self.apply_parked_refine_replies().await;
             } else {
+                // Parked refine child replies apply at this idle
+                // boundary: the runner owns turn admission, so the apply's
+                // context push can never interleave with a running turn's
+                // history (a notice between an assistant tool call and its
+                // tool result drops the real result). The apply runs before
+                // the idle notify, so a waiter never sees a session whose
+                // refinement is still parked.
+                self.apply_parked_refine_replies().await;
                 self.idle_notify.notify_waiters();
+                // A held inbox row (`SessionCore::inbox_wake_hold`) is not
+                // idle: no activity stamp, no kernel release. It wakes the
+                // runner at its due time; any queued work wakes it sooner.
+                if let Some(due) = inbox_hold {
+                    tokio::select! {
+                        () = self.work_notify.notified() => {}
+                        () = tokio::time::sleep_until(due) => {}
+                    }
+                    continue;
+                }
                 // Every park re-stamps the activity end: the idle-eviction
                 // window measures from the TRUE last activity.
                 {
@@ -142,6 +168,61 @@ impl TurnRunner {
                 }
             }
         }
+    }
+
+    /// Apply the parked refine child replies at the idle boundary through
+    /// the engine's shared commit, then emit each one's durable rows and
+    /// event here — sequenced by this runner so they never interleave with
+    /// a turn's rows.
+    async fn apply_parked_refine_replies(&self) {
+        while let Some(outcome) = self.engine.apply_pending_refine_reply().await {
+            let origin = {
+                let core = self.core.lock().unwrap();
+                core.store
+                    .as_ref()
+                    .map(|store| (store.session_id().to_string(), core.generation.clone()))
+            };
+            if let Some((session_id, generation)) = origin {
+                super::refinement::emit_refinement_outcome(
+                    &self.core,
+                    &self.events,
+                    &session_id,
+                    &generation,
+                    outcome,
+                );
+            }
+        }
+    }
+
+    /// Take the next delivery from `lane` and mark the session busy with
+    /// it. An inbox arrival row delivers through
+    /// [`deliver_inbox_arrival_row_locked`]; its accepted row consumes what
+    /// it shows.
+    fn pick(
+        &self,
+        core: &mut SessionCore,
+        lane: Lane,
+        inbox: Option<&std::sync::Arc<pa_core::session_engine::inbox::SessionInbox>>,
+    ) -> Vec<QueuedItem> {
+        let mut items = gather_delivery_batch(core, lane);
+        if let Some(inbox) = inbox {
+            for item in items
+                .iter_mut()
+                .filter(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY))
+            {
+                deliver_inbox_arrival_row_locked(core, item, &self.inbox_arrivals, inbox);
+            }
+        }
+        core.running_admission_ids = items
+            .iter()
+            .filter_map(|item| item.admission_id.clone())
+            .collect();
+        core.busy = true;
+        core.abort_requested = false;
+        core.retry_abort_requested = false;
+        core.run_cut_at_tool_boundary = false;
+        core.running_tool_calls.clear();
+        items
     }
 
     /// Release a parked parent-owned child's kernel; the engine owns the
@@ -417,6 +498,16 @@ impl TurnRunner {
         let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         let batch_len = items.len();
+        // The arrival row's accepted transcript row consumes what it shows.
+        let arrival_row = items
+            .iter()
+            .position(|item| item.queue_key.as_deref() == Some(INBOX_ARRIVAL_QUEUE_KEY));
+        let inbox_arrivals = self.inbox_arrivals.clone();
+        let inbox = self
+            .inbox_engine
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|engine| engine.inbox());
         // The accepted prefix must survive an engine panic after persistence.
         let accepted_prefix = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepted_prefix_seen = Arc::clone(&accepted_prefix);
@@ -438,6 +529,8 @@ impl TurnRunner {
             let mut last_retry_error: Option<String> = None;
             // A failed run's `agent_end` frame, held for the frame after it.
             let mut held_run_end: Option<Value> = None;
+            // Whether the run's latest `turn_end` ran tools.
+            let mut last_turn_ran_tools = false;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
@@ -489,7 +582,16 @@ impl TurnRunner {
                 // completion that cut this run) keeps the note for the work
                 // continuing in the next delivery. Clear before the frame:
                 // its roster flush must not publish the stale note.
+                if let EngineEvent::TurnEnd { tool_results, .. } = &event {
+                    last_turn_ran_tools = !tool_results.is_empty();
+                }
                 let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
+                // A queued steer cuts a run only at a tool boundary, and the
+                // row that cut it stays queued until the runner takes it.
+                if agent_end {
+                    core.run_cut_at_tool_boundary =
+                        last_turn_ran_tools && !core.steering.is_empty();
+                }
                 let more_queued =
                     agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
                 if agent_end && !more_queued {
@@ -678,6 +780,12 @@ impl TurnRunner {
                 {
                     accepted_rows += 1;
                     accepted_prefix_seen.store(accepted_rows, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(inbox) = inbox
+                        .as_ref()
+                        .filter(|_| arrival_row == Some(accepted_rows - 1))
+                    {
+                        consume_shown_inbox_items_locked(&mut core, &inbox_arrivals, inbox);
+                    }
                     if accepted_rows == 1 {
                         if let Some(active) = core.active_action.as_mut() {
                             active.phase = "committing".to_string();
@@ -1117,6 +1225,8 @@ impl TurnRunner {
                     lane_items.push_front(item);
                 }
             }
+            // An arrival row the turn never accepted leaves its shown items waiting.
+            core.inbox_shown_unaccepted.clear();
             let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
             // Publish the note clear and idle transition atomically to
             // roster readers, which capture core then the engine note.
@@ -1203,9 +1313,11 @@ impl TurnRunner {
                 let _ = done.send(result.clone());
             }
         }
-        // The compact-trigger review services off the settle as a
-        // background round: the queued next prompt's admission never
-        // waits on it.
+        // The compact-trigger round services off the settle as a
+        // background task: the queued next prompt's admission never waits
+        // on it. The round is the refinement child's spawn — fire-and-wake;
+        // the child's proposal applies on its reply's arrival (the reply's
+        // wake emits the outcome rows and the `refine_complete` event).
         {
             let engine = review_engine;
             let core = Arc::clone(&self.core);
@@ -1215,14 +1327,14 @@ impl TurnRunner {
                 // The round takes the engine's session mutex on the blocking
                 // pool, never on this async task: a `blocking_lock` from the
                 // runtime thread deadlocks.
-                let refined = tokio::task::spawn_blocking(move || {
+                let spawned = tokio::task::spawn_blocking(move || {
                     pa_core::session_engine::compaction_trace::trace(
-                        "autorefine.review_started",
+                        "autorefine.round_started",
                         &serde_json::Value::Null,
                     );
                     let outcome = engine.consume_compact_auto_refine();
                     pa_core::session_engine::compaction_trace::trace(
-                        "autorefine.review_done",
+                        "autorefine.round_done",
                         &serde_json::json!({ "ran": outcome.is_ok() }),
                     );
                     outcome
@@ -1231,49 +1343,14 @@ impl TurnRunner {
                 .unwrap_or_else(|error| {
                     Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
                 });
-                match refined {
-                    Ok(Some(result)) => {
-                        // The outcome row and the model-facing notice (when edits
-                        // applied) persist like the `/refine` command's rows, fenced on
-                        // the serviced session.
-                        let outcome_row =
-                            pa_core::session_engine::refine::create_refinement_outcome_message(
-                                &result,
-                            );
-                        if let Ok(value) = serde_json::to_value(
-                            pa_types::session::AgentMessage::Custom(outcome_row),
-                        ) {
-                            emit_refinement_row(&core, &events, &review_session_id, &value);
-                        }
-                        if result.applied_edits.iter().any(|edit| edit.applied) {
-                            let notice =
-                                pa_core::session_engine::refine::create_refinement_notice_message(
-                                    &result,
-                                    pa_core::session_engine::refine::RefinementSource::Auto,
-                                );
-                            if let Ok(value) = serde_json::to_value(
-                                pa_types::session::AgentMessage::Custom(notice),
-                            ) {
-                                emit_refinement_row(&core, &events, &review_session_id, &value);
-                            }
-                        }
-                        emit_refinement_event_for_session(
-                            &core,
-                            &events,
-                            &review_session_id,
-                            crate::worker::refine_complete_event(&result),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
-                        emit_refinement_event_for_session(
-                            &core,
-                            &events,
-                            &review_session_id,
-                            json!({ "type": "refine_failed", "error": format!("{error:#}") }),
-                        );
-                    }
+                if let Err(error) = spawned {
+                    eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    emit_refinement_event_for_session(
+                        &core,
+                        &events,
+                        &review_session_id,
+                        json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+                    );
                 }
             });
         }

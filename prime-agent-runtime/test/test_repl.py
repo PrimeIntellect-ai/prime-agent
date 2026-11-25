@@ -882,6 +882,26 @@ class ReplTest(unittest.TestCase):
             events = fresh.execute("r2", "x")
             self.assertEqual(one(events, "result")["text"], "42")
 
+    def test_stdin_eof_final_snapshot_keeps_a_running_cells_last_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            self.assertEqual(one(self.repl.execute("s1", "x = 1"), "done")["status"], "ok")
+            self.repl.send({"type": "snapshot", "id": "s2", "path": path, "manifest_path": manifest_path})
+            self.assertEqual(one(self.repl.until_done("s2"), "done")["status"], "ok")
+            self.repl.send({"type": "execute", "id": "s3", "code": "import asyncio\nawait asyncio.sleep(0.2)\nx = 42"})
+            assert self.repl.proc.stdin is not None
+            self.repl.proc.stdin.close()
+            self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+            fresh = ReplProcess()
+            self.addCleanup(fresh.close)
+            fresh.ready()
+            fresh.send({"type": "restore", "id": "r1", "path": path})
+            self.assertEqual(one(fresh.until_done("r1"), "done")["status"], "ok")
+            events = fresh.execute("r2", "x")
+            self.assertEqual(one(events, "result")["text"], "42")
+
     def test_stdin_eof_without_prior_snapshot_keeps_payload(self):
         # Until this process committed a snapshot of its own, an EOF must
         # not overwrite the on-disk payload with a namespace the host never
@@ -1210,6 +1230,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 0.05; printf detached",
                 "exitCode": 0,
+                "outputTail": "detached",
             },
         )
         reply_ok(self.repl, request)
@@ -1240,6 +1261,7 @@ class ReplTest(unittest.TestCase):
                 "pid": pid,
                 "command": "sleep 1.5; printf degraded",
                 "exitCode": 0,
+                "outputTail": "degraded",
             },
         )
         reply_ok(self.repl, request)
@@ -1276,6 +1298,7 @@ class ReplTest(unittest.TestCase):
                 "pid": int(pid),
                 "command": "sleep 1.5; printf persisted",
                 "exitCode": 0,
+                "outputTail": "persisted",
             },
         )
         reply_ok(repl, request)
@@ -1322,30 +1345,88 @@ class ReplTest(unittest.TestCase):
         withdrawal = wait_for_host_request(self.repl, [])["data"]
         self.assertEqual(withdrawal, {"type": "bash.consumed", "pid": notice["data"]["pid"], "command": "printf early"})
 
-    def test_detached_read_between_turns_keeps_bash_completion(self):
+    def accepted_notice(self, rid: str, code: str) -> tuple[dict, list[dict]]:
+        """Run code that starts `handle`, accept its [bash-done] notice."""
+        events = self.repl.execute(rid, f"from rlm import bash\nimport asyncio, os\n{code}")
+        notice = wait_for_host_request(self.repl, events)
+        self.assertEqual(notice["data"]["type"], "bash.completed")
+        reply_ok(self.repl, notice)
+        return notice["data"], events
+
+    def test_read_in_a_later_cell_withdraws_the_notice(self):
+        reads = {
+            "output": "handle.output()",
+            "task-await": (
+                "async def read():\n    return (await handle).output\n"
+                "reader = asyncio.create_task(read())\nawait asyncio.sleep(0.05)\nreader.result()"
+            ),
+        }
+        for label, read_code in reads.items():
+            with self.subTest(label=label):
+                command = f"sleep 0.05; printf later-{label}"
+                notice, _ = self.accepted_notice(f"later-{label}", f"handle = bash({command!r})")
+                read = self.repl.execute(f"later-{label}-read", read_code)
+                self.assertIn(f"later-{label}", one(read, "result")["text"])
+                requests = [e["data"] for e in read if e.get("event") == "host_request"]
+                self.assertEqual(
+                    requests, [{"type": "bash.consumed", "pid": notice["pid"], "command": command}]
+                )
+
+    def test_poll_before_completion_keeps_the_notice_and_a_later_poll_withdraws_it(self):
+        command = "sleep 0.1; printf polled"
+        notice, events = self.accepted_notice("poll-early", f"handle = bash({command!r})\nhandle.poll()")
+        self.assertIsNone(one(events, "result"))
+        read = self.repl.execute("poll-late", "handle.poll().output")
+        self.assertEqual(one(read, "result")["text"], "'polled'")
+        requests = [e["data"] for e in read if e.get("event") == "host_request"]
+        self.assertEqual(requests, [{"type": "bash.consumed", "pid": notice["pid"], "command": command}])
+
+    def test_read_with_no_live_cell_keeps_the_notice(self):
         # A watcher reading the handle with no cell running reaches nobody: the
         # notice is the only wake-up an idle session gets, so it must survive.
-        code = "\n".join(
-            [
-                "from rlm import bash",
-                "import asyncio",
-                "handle = bash('sleep 0.2; printf detached-read')",
-                "async def watch():",
-                "    await handle._wait()",
-                "    globals()['seen'] = handle.output()",
-                "asyncio.create_task(watch())",
-                "handle.pid",
-            ]
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        gate = os.path.join(temp.name, "gate")
+        read = os.path.join(temp.name, "read")
+        command = "sleep 0.05; printf no-cell"
+        self.accepted_notice(
+            "no-cell",
+            "\n".join(
+                [
+                    f"handle = bash({command!r})",
+                    "async def watch():",
+                    f"    while not os.path.exists({gate!r}):",
+                    "        await asyncio.sleep(0.01)",
+                    "    globals()['seen'] = (await handle).output",
+                    f"    open({read!r}, 'w').close()",
+                    "asyncio.create_task(watch())",
+                ]
+            ),
         )
-        started = self.repl.execute("detached-read", code)
-        pid = int(one(started, "result")["text"])
-        request = wait_for_host_request(self.repl, started)
-        self.assertEqual(request["data"]["type"], "bash.completed")
-        self.assertEqual(request["data"]["pid"], pid)
-        reply_ok(self.repl, request)
-        probe = self.repl.execute("detached-read-probe", "await asyncio.sleep(0.05)\nseen")
+        open(gate, "w").close()
+        deadline = time.monotonic() + 5
+        while not os.path.exists(read) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        probe = self.repl.execute("no-cell-seen", "seen")
         self.assertIsNone(one(probe, "host_request"))
-        self.assertEqual(one(probe, "result")["text"], "'detached-read'")
+        self.assertEqual(one(probe, "result")["text"], "'no-cell'")
+
+    def test_unread_failed_command_still_notifies(self):
+        notice, _ = self.accepted_notice(
+            "failed", "handle = bash('sleep 0.05; exit 3')\nhandle.poll()"
+        )
+        self.assertEqual(
+            notice,
+            {
+                "type": "bash.completed",
+                "pid": notice["pid"],
+                "command": "sleep 0.05; exit 3",
+                "exitCode": 3,
+                "outputTail": "",
+            },
+        )
+        probe = self.repl.execute("failed-probe", "await asyncio.sleep(0.05)")
+        self.assertIsNone(one(probe, "host_request"))
 
     def test_result_read_in_creating_cell_suppresses_bash_completion(self):
         events = self.repl.execute(
@@ -1427,64 +1508,6 @@ class ReplTest(unittest.TestCase):
                 if request is not None:
                     reply_ok(self.repl, request)
                 self.assertIsNone(request)
-
-    def test_as_completed_outside_creating_cell_keeps_one_bash_completion(self):
-        snippets = {
-            "no-await": (
-                "iterator = asyncio.as_completed([handle])\n"
-                "next(iterator).close()\n"
-                "await asyncio.sleep(0.05)"
-            ),
-            "detached": (
-                "async def consume():\n"
-                "    for completed in asyncio.as_completed([handle]):\n"
-                "        await completed\n"
-                "consumer = asyncio.create_task(consume())\n"
-                "await asyncio.sleep(0.05)"
-            ),
-        }
-        for label, snippet in snippets.items():
-            with self.subTest(label=label):
-                command = f"printf {label}"
-                events = self.repl.execute(
-                    f"as-completed-{label}",
-                    f"from rlm import bash\nimport asyncio\nhandle = bash({command!r})\n{snippet}",
-                )
-                events += self.repl.execute(
-                    f"as-completed-{label}-probe", "await asyncio.sleep(0.05)"
-                )
-                requests = [event for event in events if event.get("event") == "host_request"]
-                for request in requests:
-                    reply_ok(self.repl, request)
-                self.assertEqual(len(requests), 1)
-                self.assertEqual(requests[0]["data"]["type"], "bash.completed")
-                self.assertEqual(requests[0]["data"]["command"], command)
-                self.assertFalse(any(event.get("event") == "error" for event in events))
-
-    def test_background_task_await_does_not_suppress_bash_completion(self):
-        code = "\n".join(
-            [
-                "from rlm import bash",
-                "import asyncio",
-                "task_handle = bash('sleep 0.05; printf background-waiter')",
-                "async def consume():",
-                "    globals()['task_result'] = await task_handle",
-                "waiter = asyncio.create_task(consume())",
-                "bookkeeping = asyncio.get_running_loop().create_future()",
-                "def callback_for(marker):",
-                "    return lambda _: marker.cancelled()",
-                "waiter.add_done_callback(callback_for(bookkeeping))",
-                "asyncio.get_running_loop().call_later(0.02, bookkeeping.set_result, None)",
-                "await bookkeeping",
-                "task_handle.pid",
-            ]
-        )
-        started = self.repl.execute("bash-task-waiter", code)
-        pid = int(one(started, "result")["text"])
-        request = wait_for_host_request(self.repl, started)
-        self.assertEqual(request["data"]["type"], "bash.completed")
-        self.assertEqual(request["data"]["pid"], pid)
-        reply_ok(self.repl, request)
 
     def test_bash_activity_and_notice_wait_for_group_reap(self):
         mime = "application/vnd.prime-agent.bash-activity+json"
@@ -2118,6 +2141,123 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(done["reason"], "snapshot not found")
 
 
+class ConcurrentCellTest(unittest.TestCase):
+    """A new cell runs beside a running cell that waits at an await point,
+    and is refused while the running cell executes synchronous code."""
+
+    def setUp(self) -> None:
+        self.repl = ReplProcess()
+        self.addCleanup(self.repl.close)
+        self.repl.ready()
+
+    def until_started(self, cell: str, events: list[dict]) -> None:
+        """Read events until `cell` printed its start marker: the cell is
+        past compile and into its body."""
+        while True:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("event") == "stdout" and event.get("id") == cell and "started" in event.get("text", ""):
+                return
+
+    def until_both_done(self, events: list[dict]) -> list[dict]:
+        pending = {"slow", "next"} - {e.get("id") for e in events if e.get("event") == "done"}
+        while pending:
+            event = self.repl.read_event()
+            events.append(event)
+            if event.get("event") == "done":
+                pending.discard(event.get("id"))
+        return events
+
+    def test_a_new_cell_runs_while_a_running_cell_awaits(self):
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(3)\nprint('slow done')"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        self.until_both_done(events)
+        dones = [e["id"] for e in events if e.get("event") == "done"]
+        self.assertEqual(dones, ["next", "slow"])
+        by_cell = {cell: "".join(e["text"] for e in events if e.get("event") == "stdout" and e.get("id") == cell) for cell in ("slow", "next")}
+        self.assertEqual(by_cell, {"slow": "started\nslow done\n", "next": "next ran\n"})
+
+    def test_a_new_cell_is_refused_while_a_running_cell_runs_synchronous_code(self):
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import time\nprint('started')\ntime.sleep(7)"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "print('next ran')"})
+        self.until_both_done(events)
+        dones = [(e["id"], e["status"]) for e in events if e.get("event") == "done"]
+        self.assertEqual(dones, [("next", "error"), ("slow", "ok")])
+        refusal = next(e for e in events if e.get("event") == "error" and e.get("id") == "next")
+        self.assertEqual(refusal["ename"], "KernelBusy")
+        self.assertNotIn("next ran", stream_text(events, "stdout"))
+
+    def test_interrupting_the_awaiting_cell_leaves_the_synchronous_cell_running(self):
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import asyncio\nprint('started')\nawait asyncio.sleep(30)"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "import time\nprint('started')\ntime.sleep(2)\nprint('next ran')"})
+        self.until_started("next", events)
+        self.repl.send({"type": "interrupt", "id": "slow"})
+        self.until_both_done(events)
+        outcomes = {e["id"]: e["status"] for e in events if e.get("event") == "done"}
+        self.assertEqual(outcomes, {"slow": "error", "next": "ok"})
+        interrupted = next(e for e in events if e.get("event") == "error" and e.get("id") == "slow")
+        self.assertEqual(interrupted["ename"], "KeyboardInterrupt")
+        self.assertIn("next ran", stream_text(events, "stdout"))
+
+    def test_a_cells_degraded_await_writes_its_note_beside_a_newer_cell(self):
+        # The note belongs to the calling cell, not the newest running one.
+        events: list[dict] = []
+        self.repl.send({"type": "execute", "id": "slow", "code": "import rlm\nrlm._set_completion_notices_wired(True)\nh = rlm.bash('sleep 3')\nprint('started')\nawait h"})
+        self.until_started("slow", events)
+        self.repl.send({"type": "execute", "id": "next", "code": "import asyncio\nawait asyncio.sleep(2)"})
+        self.until_both_done(events)
+        notes = "".join(e["text"] for e in events if e.get("event") == "stderr" and e.get("id") == "slow")
+        self.assertIn("do not await it again this turn", notes)
+
+
+class EofFinalFlushTest(unittest.TestCase):
+    """In-process check of the EOF shutdown's second final flush."""
+
+    def test_a_cell_that_settles_during_the_mcp_status_wait_is_flushed(self):
+        import rlm.repl as repl_module
+
+        ns = {"x": 1}
+        flushed: list[int] = []
+
+        async def run() -> None:
+            mcp_cancelled = asyncio.Event()
+            cell_wrote = asyncio.Event()
+
+            async def mcp_status() -> None:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    mcp_cancelled.set()
+                    await cell_wrote.wait()
+
+            async def cell() -> None:
+                await mcp_cancelled.wait()
+                ns["x"] = 42
+                cell_wrote.set()
+
+            for tasks, coro in ((repl_module._mcp_status_tasks, mcp_status()), (repl_module._cell_tasks, cell())):
+                task = asyncio.get_running_loop().create_task(coro)
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            # Both tasks reach their first await before the shutdown cancels.
+            await asyncio.sleep(0)
+            queue: asyncio.Queue[dict] = asyncio.Queue()
+            queue.put_nowait({"type": "shutdown", "eof": True})
+            await repl_module._serve(queue, ns)
+
+        handler = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGINT, handler)
+        with mock.patch.object(repl_module, "_flush_final_snapshot", lambda flushed_ns: flushed.append(flushed_ns["x"])):
+            asyncio.run(run())
+        self.assertEqual(flushed, [1, 42])
+
+
 class FinishRequestTest(unittest.TestCase):
     """In-process checks of the parked-interrupt bookkeeping on request finish."""
 
@@ -2132,9 +2272,57 @@ class FinishRequestTest(unittest.TestCase):
         self.repl_module._pending_interrupts["ids"].clear()
         self.repl_module._pending_interrupts["any"] = False
         self.repl_module._finishing_rid = None
-        self.repl_module._handoff_interrupted = False
-        self.repl_module._sigint_target = None
-        self.repl_module._active.update({"task": None, "rid": None, "interrupted": False})
+        self.repl_module._handoff_interrupted.clear()
+        self.repl_module._sigint_targets.clear()
+        self.repl_module._active.clear()
+        self.repl_module._interrupted.clear()
+
+    def test_interrupt_without_pthread_kill_in_the_finishing_phase_raises_nothing(self):
+        repl = self.repl_module
+        repl._inflight.add("fin")
+        repl._finishing_rid = "fin"
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+
+        async def main() -> list[dict]:
+            loop = asyncio.get_running_loop()
+            repl._loop = loop
+            errors: list[dict] = []
+            loop.set_exception_handler(lambda _loop, context: errors.append(context))
+            # A stand-in signal module without pthread_kill, as on Windows.
+            with mock.patch.object(repl, "signal", object()):
+                repl._request_interrupt(None)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return errors
+
+        self.assertEqual(asyncio.run(main()), [])
+
+    @unittest.skipUnless(hasattr(signal, "pthread_kill"), "the SIGINT delivery path needs pthread_kill")
+    def test_two_interrupts_before_the_handler_runs_cancel_both_cells(self):
+        # The host stops every running cell at once. SIGINTs sent before the
+        # main thread runs the handler coalesce into one handler call, which
+        # must still cancel each targeted cell.
+        repl = self.repl_module
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+
+        async def main() -> list[object]:
+            loop = asyncio.get_running_loop()
+            repl._loop = loop
+            cells = {rid: loop.create_task(asyncio.sleep(30)) for rid in ("a", "b")}
+            repl._inflight.update(cells)
+            repl._active.update(cells)
+            # No signal is sent: the one handler call below stands in for both.
+            with mock.patch.object(signal, "pthread_kill", lambda *_: None):
+                repl._request_interrupt("a")
+                repl._request_interrupt("b")
+            loop.call_soon(repl._sigint_handler, signal.SIGINT, None)
+            return await asyncio.wait_for(asyncio.gather(*cells.values(), return_exceptions=True), 2)
+
+        outcomes = asyncio.run(main())
+        self.assertTrue(all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes), outcomes)
+        self.assertEqual(repl._interrupted, {"a", "b"})
 
     def test_parked_any_survives_while_another_request_is_inflight(self):
         repl = self.repl_module
@@ -2187,9 +2375,9 @@ class FinishRequestTest(unittest.TestCase):
         async def run_guarded_then_sigint(task, rid):
             outcome = await real_run_guarded(task, rid)
             with repl._interrupt_lock:
-                repl._sigint_target = rid
+                repl._sigint_targets.add(rid)
             # Synchronous SIGINT in the post-run window: the handler sees
-            # _sigint_target == _finishing_rid and raises right here.
+            # the target is _finishing_rid and raises right here.
             signal.raise_signal(signal.SIGINT)
             return outcome
 
@@ -2271,7 +2459,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(dict(ns), {"a": 1, "b": 2})
         done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
         self.assertEqual(done_next["status"], "ok")
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertFalse(repl._pending_interrupts["ids"])
 
@@ -2307,7 +2495,7 @@ class FinishRequestTest(unittest.TestCase):
 
         def restore_then_interrupt(*args, **kwargs):
             result = real_restore(*args, **kwargs)
-            repl._sigint_target = "restore"
+            repl._sigint_targets.add("restore")
             repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
             return result
 
@@ -2336,13 +2524,13 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(ns, {"a": 1, "b": 2})
         done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
         self.assertEqual(done_next["status"], "ok")
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertFalse(repl._pending_interrupts["ids"])
 
     def test_nonprotocol_keyboardinterrupt_after_committed_restore_is_not_recovered(self):
         # A user-originated KeyboardInterrupt (no _sigint_handler provenance:
-        # _active["interrupted"] stays False) after the restore committed must
+        # the rid never joins _interrupted) after the restore committed must
         # keep the interrupted error, not be converted to snapshot success.
         from unittest import mock
 
@@ -2393,7 +2581,7 @@ class FinishRequestTest(unittest.TestCase):
 
         def snapshot_then_interrupt(*args, **kwargs):
             result = real_snapshot(*args, **kwargs)
-            repl._sigint_target = "snap"
+            repl._sigint_targets.add("snap")
             repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
             return result
 
@@ -2422,7 +2610,7 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(done["saved"], ["small"])
         self.assertEqual(done["pruned"], ["big"])
         self.assertEqual(ns, {"small": 1})
-        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._sigint_targets)
 
     def test_untargeted_interrupt_in_done_task_handoff_is_not_parked(self):
         # The cell task is done but _run_guarded's finally has not run yet
@@ -2441,16 +2629,16 @@ class FinishRequestTest(unittest.TestCase):
                 raise AssertionError("a done task must not be cancelled")
 
         repl._inflight.update({"handoff", "other"})
-        repl._active.update({"task": DoneTask(), "rid": "handoff", "interrupted": False})
+        repl._active["handoff"] = DoneTask()
         previous = signal.signal(signal.SIGINT, repl._sigint_handler)
         self.addCleanup(signal.signal, signal.SIGINT, previous)
         repl._request_interrupt(None)
         deadline = time.monotonic() + 5
         while not repl._handoff_interrupted and time.monotonic() < deadline:
             time.sleep(0.01)
-        self.assertEqual(repl._sigint_target, "handoff")
+        self.assertEqual(repl._sigint_targets, {"handoff"})
         self.assertFalse(repl._pending_interrupts["any"])
-        self.assertTrue(repl._consume_handoff_interrupt())
+        self.assertTrue(repl._consume_handoff_interrupt("handoff"))
         self.assertFalse(repl._handoff_interrupted)
         self.assertIn("other", repl._inflight)
 
@@ -2551,6 +2739,11 @@ class RestoreApplyShieldTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, SRC)
         self.addCleanup(sys.path.remove, SRC)
+        # These tests raise SIGINT in this process and expect Python's own
+        # KeyboardInterrupt handler. A runner started as a background job
+        # inherits SIGINT as ignored, and Python then installs no handler.
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
 
     class SigintOnNthSet(dict):
         """Fires one synchronous SIGINT right after its Nth assignment."""
@@ -3300,6 +3493,78 @@ class OwnerExitWaitTest(unittest.TestCase):
         ):
             self.repl_module._wait_owner_posix(self.owner.pid, os.getppid())
         sleep.assert_called_once()
+
+
+class InheritedSigintMaskTest(unittest.TestCase):
+    """The kernel owns its SIGINT mask: a host that blocks SIGINT on the
+    spawning thread (tokio-style signal handling) leaks that mask through
+    fork+exec, and the kernel must unblock it at startup, or no user
+    interrupt can ever land in a stuck cell."""
+
+    def test_an_interrupt_lands_even_when_the_host_blocked_sigint(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masks required")
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            repl = ReplProcess()
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        self.addCleanup(repl.close)
+        repl.ready()
+        repl.send({"type": "execute", "id": "stuck", "code": "print('spinning', flush=True)\nn = 0\nwhile True:\n    n += 1"})
+        # Interrupt once the cell is observably running, not after a fixed sleep.
+        events = []
+        while not any(event.get("event") == "stdout" for event in events):
+            events.append(repl.read_event())
+        repl.send({"type": "interrupt", "id": "stuck"})
+        events.extend(repl.until_done("stuck"))
+        error = one(events, "error")
+        self.assertIsNotNone(error, f"events: {events}")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+
+class ProtocolFrameAtomicityTest(unittest.TestCase):
+    """An interrupt raised by the handler must not tear a protocol frame: the
+    write blocks SIGINT on the main thread, so the signal lands after the last
+    byte instead of splitting the frame the host is parsing."""
+
+    def test_interrupt_during_a_display_write_keeps_the_frame_whole(self):
+        repl = ReplProcess()
+        self.addCleanup(repl.close)
+        repl.ready()
+        cell = "\n".join(
+            [
+                "import os",
+                "import rlm.repl as repl_module",
+                "real_write = repl_module.os.write",
+                "armed = []",
+                "def write(fd, data):",
+                "    if fd == repl_module._protocol_fd and len(data) > 4096 and not armed:",
+                "        armed.append(True)",
+                "        sent = real_write(fd, bytes(data[:4096]))",
+                # The request-interrupt path: mark the rid, then SIGINT the
+                # main thread while the frame is only partly on the wire.
+                "        repl_module._request_interrupt('tear')",
+                "        return sent",
+                "    return real_write(fd, data)",
+                "repl_module.os.write = write",
+                "try:",
+                "    repl_module.emit({'text/plain': 'x' * 200000})",
+                "finally:",
+                "    repl_module.os.write = real_write",
+            ]
+        )
+        repl.send({"type": "execute", "id": "tear", "code": cell})
+        events = repl.until_done("tear")
+        display = one(events, "display")
+        self.assertIsNotNone(display, f"events: {events}")
+        self.assertEqual(len(display["data"]["text/plain"]), 200000)
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        events = repl.execute("after", "6 * 7")
+        self.assertEqual(one(events, "result")["text"], "42")
 
 
 if __name__ == "__main__":

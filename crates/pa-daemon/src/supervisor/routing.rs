@@ -39,9 +39,18 @@ pub(super) async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_
 /// TS daemon-supervisor.ts:204 `WORKER_REQUEST_TIMEOUT_MS`.
 pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The route budget of a client command: turn-long waits ride TS's 24 h
-/// worker-request budget; everything else is a short control route.
+/// Explicit `wait_for_idle` slices use their budget plus grace. Other
+/// turn-long waits use TS's 24 h worker-request budget; controls use a short route.
 pub(crate) fn client_route_timeout(command: &DaemonCommand) -> u64 {
+    if let DaemonCommand::WaitForIdle {
+        timeout_ms: Some(timeout_ms),
+        ..
+    } = command
+    {
+        return timeout_ms
+            .saturating_add(crate::rlm_children::IDLE_WAIT_GRACE_MS)
+            .min(WORKER_REQUEST_TIMEOUT_MS);
+    }
     if matches!(
         command,
         DaemonCommand::PromptAndWait { .. }
@@ -594,6 +603,29 @@ impl Supervisor {
                 }
             }
         }
+        // The scoped idle cancel must reach a worker that reads the
+        // scope: an older worker answers EVERY abort with the full
+        // queue-suspending abort, so forwarding would mutate true-idle
+        // queues. Refuse at the routing boundary — the serving worker's
+        // own `worker_auth` advertisement is the only gate that matters
+        // (the supervisor's own hello is not evidence about the adopted
+        // worker's binary); never fall back to the plain abort.
+        if let DaemonCommand::Abort { scope: Some(_), .. } = command {
+            if !resident
+                .background_cell_abort_capable
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        "this session's worker does not support scoped aborts",
+                        None,
+                    ))],
+                    false,
+                );
+            }
+        }
         if let DaemonCommand::Attach {
             telemetry_disabled: Some(true),
             ..
@@ -981,39 +1013,80 @@ impl Supervisor {
         files.sort();
         files.dedup();
         let session_file = files.first()?.clone();
-        // The passive row's durable summary carries the child identity: the depth + agent id
-        // ride the create's rest (without `rest.rlmDepth` the revived child never re-passivates).
-        let (depth, child_id) = {
+        // The passive row's durable summary carries the child identity: the
+        // depth + child id ride the create's rest (without `rest.rlmDepth`
+        // the revived child never re-passivates), the runtime kind gates the
+        // subagent identity the create arm extracts (a child row must present
+        // `kind: "subagent"` or the child id and the parent edge are dropped),
+        // the parent path restores the parent edge a revived decision
+        // child's replies route by, and the decision flag must replay or the
+        // revived decision child boots the agent engine.
+        let (depth, child_id, parent_session_id, parent_session_path, is_child, decision_child) = {
             let roster = self.roster.lock().unwrap();
-            roster
-                .by_active_session_id(selector)
-                .map_or((0, String::new()), |row| {
+            roster.by_active_session_id(selector).map_or(
+                (0, String::new(), String::new(), String::new(), false, false),
+                |row| {
+                    let parent_session_path = row
+                        .summary
+                        .get("parentSessionPath")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let parent_session_id = std::path::Path::new(&parent_session_path)
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     (
                         row.summary
                             .get("rlmDepth")
                             .and_then(Value::as_u64)
                             .unwrap_or_default(),
                         row.summary
-                            .get("agentId")
+                            .get("rlmChildId")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
+                        parent_session_id,
+                        parent_session_path,
+                        row.summary
+                            .get("runtimeKind")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| kind == "subagent"),
+                        row.summary.get("decisionChild").and_then(Value::as_bool) == Some(true),
                     )
-                })
+                },
+            )
         };
         let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
             .map_or_else(|| "/".to_string(), |info| info.cwd);
         // The identity rides `config.rlmDepth` + `runtime_metadata.rlmChildId` —
         // the keys launch_worker copies into the DURABLE create command's rest.
+        let mut config = json!({ "cwd": cwd, "rlmDepth": depth });
+        if decision_child {
+            config["decisionChild"] = json!(true);
+        }
+        let mut runtime_metadata = json!({ "rlmChildId": child_id });
+        if is_child {
+            runtime_metadata["kind"] = json!("subagent");
+            if !parent_session_id.is_empty() {
+                runtime_metadata["parentSessionId"] = json!(parent_session_id);
+            }
+            if !parent_session_path.is_empty() {
+                // The spawn's config carries the parent path into the
+                // durable create command's rest; the wake keeps that shape
+                // so a respawn replays it too.
+                config["parentSessionPath"] = json!(parent_session_path);
+            }
+        }
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_file.clone()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
-            config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
+            config: Some(config),
             telemetry_disabled: None,
-            runtime_metadata: Some(json!({ "rlmChildId": child_id })),
+            runtime_metadata: Some(runtime_metadata),
             lifecycle: None,
             env: None,
             launch_env: None,

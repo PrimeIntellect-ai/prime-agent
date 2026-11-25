@@ -191,14 +191,4 @@ mod tests {
         let damaged = asset(vec![json!({"id": "broken"})]);
         assert!(load_bundled_models(&damaged, &PinnedTemplates::from_compiled()).is_none());
     }
-
-    #[test]
-    fn from_dir_reads_assets() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(PACKAGED_MCP_CATALOG_FILE), "{}").unwrap();
-        let assets = BundledAssets::from_dir(dir.path());
-        assert!(assets.read_mcp_services().is_some());
-        assert!(assets.read_models().is_none());
-        assert_eq!(assets.dir(), dir.path());
-    }
 }

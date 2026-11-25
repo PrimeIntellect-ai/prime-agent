@@ -42,7 +42,7 @@ impl Worker {
             "prompt_and_wait" => self.handle_prompt(payload, true).await,
             "steer" => self.handle_queue(payload, Lane::Steering),
             "follow_up" => self.handle_queue(payload, Lane::FollowUp),
-            "abort" => self.handle_abort(),
+            "abort" => self.handle_abort(payload),
             "abort_and_send_queued" => self.handle_abort_and_send_queued(),
             "start_side_question" => {
                 if let Err(response) = self.require_created("start_side_question") {
@@ -89,7 +89,7 @@ impl Worker {
             "get_tool_definition" => self.handle_get_tool_definition(payload).await,
             "get_rlm_max_depth_status" => self.handle_get_rlm_max_depth_status(),
             "get_available_models" => self.handle_get_available_models(),
-            "worker_deliver_message" => self.handle_worker_deliver_message(payload),
+            "worker_deliver_message" => self.handle_worker_deliver_message(payload).await,
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
             "shutdown" => self.handle_shutdown(payload).await,
@@ -371,9 +371,35 @@ impl Worker {
         self.push_roster_delta();
     }
 
-    fn handle_abort(&self) -> DaemonResponse {
-        self.request_abort();
-        response_success(None, "abort", None)
+    fn handle_abort(&self, payload: &Value) -> DaemonResponse {
+        // The scoped arm runs before any queue mutation: `background_cell`
+        // targets ONLY the session's detached (backgrounded) kernel cell and
+        // never touches the queues, the running turn, or the suspension —
+        // the idle cancel contract. An unknown scope is rejected without any
+        // abort, and the scoped arm never falls back to the full funnel.
+        match payload.get("scope").and_then(Value::as_str) {
+            None => {
+                self.request_abort();
+                response_success(None, "abort", None)
+            }
+            Some("background_cell") => {
+                let stopped = self.engine.abort_background_cell();
+                // The report: the idle cancel says whether it stopped a
+                // parked cell, so the frontend can note the outcome
+                // instead of answering success either way.
+                response_success(
+                    None,
+                    "abort",
+                    Some(json!({ "stoppedBackgroundCell": stopped })),
+                )
+            }
+            Some(unknown) => response_failure(
+                None,
+                "abort",
+                &format!("unknown abort scope: {unknown}"),
+                None,
+            ),
+        }
     }
 
     fn handle_abort_and_send_queued(&self) -> DaemonResponse {
@@ -389,11 +415,18 @@ impl Worker {
         }
         let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
-        response_success(
-            None,
-            "get_state",
-            Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-        )
+        drop(core);
+        let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
+        // The owed background completions ride every state read: a child
+        // with a detached cell (or a queued completion) is not idle, and the
+        // parent's busy check reads the count.
+        if let Some(object) = data.as_object_mut() {
+            object.insert(
+                "pendingBackgroundCompletions".to_string(),
+                json!(self.pending_background_completions()),
+            );
+        }
+        response_success(None, "get_state", Some(data))
     }
 
     /// `get_session_header`: the persisted session header line (TS wraps it

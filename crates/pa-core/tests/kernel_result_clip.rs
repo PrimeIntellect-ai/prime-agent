@@ -43,6 +43,7 @@ async fn result_clipping_counts_characters_and_preserves_follow_up_cells() {
         bootstrap_code: None,
         stderr_log_path: None,
         on_background_work_settled: None,
+        pending_detached_completions: None,
     });
     tokio::time::timeout(
         Duration::from_secs(10),

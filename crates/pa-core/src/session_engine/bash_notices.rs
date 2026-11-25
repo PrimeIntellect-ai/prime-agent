@@ -16,7 +16,7 @@ use pa_types::session::CustomMessage;
 
 use super::messages::{
     self, ASYNC_BASH_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-    FACTORY_PROGRESS_PREVIEW_LABEL,
+    BACKGROUND_CELL_PREVIEW_LABEL, FACTORY_PROGRESS_PREVIEW_LABEL,
 };
 use super::{session_message_to_loop, SessionAgentMessage};
 
@@ -44,6 +44,60 @@ impl KernelNotice {
                 crate::autonomous::now_millis(),
             ),
             preview_label: ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+        }
+    }
+
+    /// The `[cell-done]` notice for one auto-backgrounded cell's completion:
+    /// the cell kept running after its call returned early, and this row
+    /// wakes the session with the outcome. The completion composes through
+    /// the ONE settled-result conversion and formatter the foreground tool
+    /// result uses (`convert_execute_result` + `settled_cell_output_text`),
+    /// so the two lanes can never drift; a host stop's cause rides the
+    /// model-visible text. Rich completions (image attachments) ride
+    /// content blocks — the inbox's text-only route declines them, so those
+    /// rows deliver through the full-row lane while text-only completions
+    /// stay in the inbox.
+    #[must_use]
+    pub fn background_cell_completion(
+        outcome: &crate::kernel::shared::BackgroundCellOutcome,
+    ) -> Self {
+        let result =
+            crate::session_engine::runtime_wiring::convert_execute_result(outcome.result.clone());
+        let status = match result.status {
+            crate::tools::ipython::ExecuteStatus::Ok => "ok",
+            crate::tools::ipython::ExecuteStatus::Error => "error",
+            crate::tools::ipython::ExecuteStatus::Aborted => "aborted",
+        };
+        let reason = match outcome.reason {
+            crate::kernel::shared::DetachReason::Interrupted => "interrupted".to_string(),
+            crate::kernel::shared::DetachReason::WaitBudget(ms) => format!("wait-budget:{ms}"),
+        };
+        let duration_ms = result.duration_ms.unwrap_or_default();
+        let output = crate::tools::ipython::settled_cell_output_text(
+            &result,
+            result.background_output.as_deref(),
+        );
+        let images: Vec<crate::kernel::shared::KernelAttachment> =
+            crate::tools::ipython::image_attachments(&result)
+                .into_iter()
+                .cloned()
+                .map(|attachment| crate::kernel::shared::KernelAttachment {
+                    mime_type: attachment.mime_type,
+                    data: attachment.data,
+                    path: None,
+                })
+                .collect();
+        Self {
+            row: messages::create_background_cell_completion_message(
+                &outcome.cell_id,
+                status,
+                duration_ms,
+                &reason,
+                &output,
+                &images,
+                crate::autonomous::now_millis(),
+            ),
+            preview_label: BACKGROUND_CELL_PREVIEW_LABEL,
         }
     }
 }
@@ -115,18 +169,23 @@ pub fn register_kernel_notice_host_handlers(
 }
 
 /// TS `createAsyncBashCompletionHostHandler` validation: a positive
-/// integer pid, a non-empty string command, an integer exit code.
+/// integer pid, a non-empty string command, an integer exit code. The
+/// optional `outputTail` rides into the row's details, so an inbox wake
+/// row can show it.
 fn validate_completion(data: &Value) -> anyhow::Result<KernelNotice> {
     let consumed = validate_consumed(data)?;
     let exit_code = data
         .get("exitCode")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("bash.completed exitCode must be an integer"))?;
-    Ok(KernelNotice::bash_completion(
-        consumed.pid,
-        &consumed.command,
-        exit_code,
-    ))
+    let mut notice = KernelNotice::bash_completion(consumed.pid, &consumed.command, exit_code);
+    if let (Some(details), Some(tail)) = (
+        notice.row.details.as_mut(),
+        data.get("outputTail").and_then(Value::as_str),
+    ) {
+        details["outputTail"] = tail.into();
+    }
+    Ok(notice)
 }
 
 /// TS `createAsyncBashConsumedHostHandler` validation: a positive integer pid and a
@@ -289,6 +348,132 @@ mod tests {
         let mut handlers = HostRequestHandlers::default();
         register_in_process_kernel_notice_handlers(&wake, &slot, &mut handlers);
         (agent, slot, wakes, handlers)
+    }
+
+    /// One settled cell result for the notice tests: the identity fields
+    /// of the notice under test, every other field empty.
+    fn settled_result(
+        status: crate::kernel::shared::ExecuteStatus,
+        duration_ms: u64,
+        stdout: &str,
+    ) -> crate::kernel::shared::ExecuteResult {
+        crate::kernel::shared::ExecuteResult {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            result: None,
+            diffs: None,
+            attachments: None,
+            sent_agent_messages: None,
+            bash_commands: None,
+            transcript_reads: None,
+            inbox_messages: None,
+            background_output: None,
+            ended_turn: false,
+            status,
+            error: None,
+            duration_ms,
+            detached: None,
+        }
+    }
+
+    /// One auto-backgrounded cell's outcome for the notice tests.
+    fn outcome(
+        cell_id: &str,
+        reason: crate::kernel::shared::DetachReason,
+        result: crate::kernel::shared::ExecuteResult,
+    ) -> crate::kernel::shared::BackgroundCellOutcome {
+        crate::kernel::shared::BackgroundCellOutcome {
+            cell_id: cell_id.to_string(),
+            reason,
+            result,
+        }
+    }
+
+    /// A rich completion carries its image attachments as content blocks
+    /// (the inbox declines block content, so it rides the full-row lane);
+    /// the row's details keep the cell's identity only (the structured
+    /// result details are the foreground tool result's own).
+    #[test]
+    fn a_rich_completion_carries_images_as_blocks() {
+        let mut result = settled_result(
+            crate::kernel::shared::ExecuteStatus::Ok,
+            1_234,
+            "work finished",
+        );
+        result.attachments = Some(vec![crate::kernel::shared::KernelAttachment {
+            mime_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+            path: None,
+        }]);
+        let notice = KernelNotice::background_cell_completion(&outcome(
+            "cell-7",
+            crate::kernel::shared::DetachReason::WaitBudget(200),
+            result,
+        ));
+        let content = &notice.row.content;
+        let pa_types::ai::UserContent::Blocks(blocks) = content else {
+            panic!("a rich completion rides blocks: {content:?}")
+        };
+        assert_eq!(
+            blocks.len(),
+            2,
+            "the text header plus the image: {blocks:?}"
+        );
+        assert!(
+            notice
+                .row
+                .content
+                .text()
+                .starts_with("[cell-done id:cell-7 status:ok"),
+            "the blocks keep a readable text preview: {}",
+            notice.row.content.text()
+        );
+        let details = notice.row.details.as_ref().expect("the details row");
+        assert_eq!(
+            details.get("cellId").and_then(serde_json::Value::as_str),
+            Some("cell-7")
+        );
+        assert!(
+            details.get("bashCommands").is_none(),
+            "the unread structured result details are not duplicated onto the row: {details}"
+        );
+        assert!(
+            serde_json::to_value(&notice.row)
+                .expect("the row serializes")
+                .to_string()
+                .contains("aGVsbG8="),
+            "the image payload rides the row"
+        );
+    }
+
+    /// A text-only completion stays a plain text row (the inbox route).
+    #[test]
+    fn a_text_completion_stays_plain_text() {
+        let notice = KernelNotice::background_cell_completion(&outcome(
+            "cell-8",
+            crate::kernel::shared::DetachReason::Interrupted,
+            settled_result(crate::kernel::shared::ExecuteStatus::Error, 1_000, "boom"),
+        ));
+        assert!(matches!(
+            notice.row.content,
+            pa_types::ai::UserContent::Text(_)
+        ));
+    }
+
+    #[test]
+    fn completed_details_carry_the_output_tail() {
+        let mut payload = completed_payload(4321, "make", 0);
+        payload["outputTail"] = "done\n".into();
+        let notice = validate_completion(&payload).expect("a valid completion");
+        assert_eq!(
+            notice.row.details,
+            Some(serde_json::json!({
+                "pid": 4321,
+                "command": "make",
+                "exitCode": 0,
+                "outputTail": "done\n",
+            }))
+        );
     }
 
     #[tokio::test]

@@ -103,6 +103,8 @@ async fn engine_runs_tool_loop_and_persists() {
         inner_stream(model, context, options)
     });
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -214,6 +216,8 @@ async fn spawned_child_prompt_stamps_its_depth() {
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -288,6 +292,8 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
         stream_fn: pa_agent::stream::StreamFn,
     ) -> SessionEngineConfig {
         SessionEngineConfig {
+            cell_wake: None,
+            on_background_cell: None,
             on_late_sent_agent_message: None,
             semantic_edges: None,
             cron_store: None,
@@ -420,6 +426,8 @@ async fn create_session_registers_the_kernel_backed_tools_without_cron_wiring() 
     let agent_model = crate::session_engine::provider_adapter::json_round_trip(&model).unwrap();
     let stream_fn = crate::session_engine::provider_adapter::real_stream_fn(None, model.clone());
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cron_store: None,
         cwd: dir.path().to_path_buf(),
         agent_dir: dir.path().to_path_buf(),
@@ -479,6 +487,8 @@ async fn create_session_appends_missing_resume_settings_rows() {
         ))
         .unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -592,6 +602,8 @@ async fn engine_over(
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cron_store,
         cwd: cwd.clone(),
         agent_dir: tmp.path().join("agent"),
@@ -761,6 +773,8 @@ async fn engine_build_restores_late_sent_agent_message_receipts() {
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         cwd: cwd.clone(),
         agent_dir: tmp.path().join("agent"),
         model: Some(model),
@@ -863,6 +877,8 @@ async fn late_receipts_recorded_before_the_row_lands_apply_on_landing() {
         }),
     };
     let engine = create_session(SessionEngineConfig {
+        cell_wake: None,
+        on_background_cell: None,
         on_late_sent_agent_message: None,
         semantic_edges: None,
         cron_store: None,
@@ -1025,4 +1041,145 @@ async fn a_fresh_session_reports_skill_problems_on_its_first_turn() {
         .map(|row| (row.content.clone(), row.display))
         .collect();
     assert_eq!(rows, vec![(expected.content, true)]);
+}
+
+/// A kernel probe whose liveness read requests the caller's abort. The
+/// read runs after the compaction row commits; the prune that follows
+/// yields, so the compaction is still awaiting when the abort is visible.
+struct AbortAfterCommit {
+    controller: pa_agent::abort::AbortController,
+}
+
+impl crate::session_engine::ipython_state::CompactionKernelProbe for AbortAfterCommit {
+    fn has_running_kernel(&self) -> bool {
+        self.controller.abort();
+        true
+    }
+
+    fn prune_oversized_variables(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<String>>> + Send + '_>> {
+        Box::pin(async {
+            tokio::task::yield_now().await;
+            None
+        })
+    }
+
+    fn list_namespace_names(
+        &self,
+        _signal: Option<crate::kernel::cancellation::AbortSignal>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<String>>> + Send + '_>> {
+        Box::pin(async { Some(Vec::new()) })
+    }
+}
+
+fn compaction_turn(text: &str) -> pa_types::session::AgentMessage {
+    pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
+        content: pa_types::ai::UserContent::Text(text.to_string()),
+        timestamp: 0,
+        rest: pa_types::JsonMap::default(),
+    })
+}
+
+fn compaction_reply(text: &str) -> pa_types::session::AgentMessage {
+    pa_types::session::AgentMessage::Assistant(pa_ai::faux::faux_assistant_text_message(
+        text,
+        pa_ai::faux::FauxAssistantMessageOptions::default(),
+    ))
+}
+
+/// A model-requested compaction that commits, then sees the abort while it
+/// still awaits its kernel notice, finishes. The result, the compaction row,
+/// and the notice must all stand; reporting cancelled here skips the success
+/// event and the retry for work that is already durable.
+#[tokio::test]
+async fn a_committed_compaction_finishes_when_the_abort_lands_after_the_commit() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                id: "faux-abort-final-poll".to_string(),
+                name: Some("Faux abort final poll".to_string()),
+                reasoning: Some(false),
+                input: Some(vec![pa_types::ai::ModelInput::Text]),
+                cost: None,
+                context_window: Some(100_000),
+                max_tokens: Some(4_096),
+            }]),
+            ..Default::default()
+        });
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "## Goal\nkeep the committed compaction",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    let model = registration.get_model();
+    let agent_model = crate::session_engine::provider_adapter::json_round_trip(&model).unwrap();
+    let stream_fn = crate::session_engine::provider_adapter::real_stream_fn(None, model.clone());
+    let mut engine = create_session(SessionEngineConfig {
+        cwd,
+        agent_dir,
+        model: Some(agent_model),
+        stream_fn: Some(stream_fn),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    {
+        let mut session = engine.session.session.lock().await;
+        for index in 0..3 {
+            session
+                .append_message(compaction_turn(&format!("turn {index} with a few words")))
+                .unwrap();
+            session
+                .append_message(compaction_reply(&format!("reply {index}")))
+                .unwrap();
+        }
+    }
+    engine
+        .session
+        .set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+            keep_recent_tokens: 12,
+            ..Default::default()
+        });
+
+    let controller = pa_agent::abort::AbortController::new();
+    engine
+        .session
+        .set_kernel_state_probe(Some(Arc::new(AbortAfterCommit {
+            controller: controller.clone(),
+        })));
+    engine.turn_boundary.schedule_compaction(None).await;
+
+    let outcome = engine
+        .consume_pending_compaction(&model, None, Some(&controller.signal()))
+        .await
+        .expect("the pending compaction is taken")
+        .expect("the committed compaction keeps its result");
+    let crate::session_engine::compact_session::CompactOutcome::Ran(run) = outcome else {
+        panic!("the committed compaction reports Ran");
+    };
+    assert!(
+        run.ipython_state.is_some(),
+        "the kernel notice lands after the abort"
+    );
+    assert!(
+        controller.is_aborted(),
+        "the probe requested the abort after the commit"
+    );
+    assert!(
+        engine
+            .session
+            .entries()
+            .await
+            .iter()
+            .any(|entry| matches!(entry, crate::session_engine::FileEntry::Compaction { .. })),
+        "the compaction row is committed"
+    );
 }

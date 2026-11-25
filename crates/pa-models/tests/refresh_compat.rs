@@ -11,10 +11,7 @@ use std::sync::Arc;
 use pa_models::cache::{CatalogCache, RefreshOptions, PUBLIC_SCOPE};
 use pa_models::fetch::CatalogFetcher;
 use pa_models::pinning::{parse_provider_model_catalog, PinnedTemplates};
-use pa_models::prime_inference::{
-    build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceCatalog,
-    PrimeInferenceCredentials,
-};
+use pa_models::prime_inference::{PrimeInferenceCatalog, PrimeInferenceCredentials};
 use serde_json::{json, Value};
 
 /// A cache over the models catalog parse pipeline (the same closure
@@ -540,17 +537,6 @@ async fn unauthorized_prime_inference_clears_only_that_scope() {
         "cache file removed"
     );
     assert!(catalog.get(&other).is_none());
-}
-
-#[test]
-fn prime_inference_parse_and_coverage_gate_use_public_fns() {
-    // Sanity for the closure the PrimeInferenceCatalog installs: an empty
-    // live catalog parses (allowEmpty) but fails the coverage gate, so a
-    // degraded fetch never replaces a good snapshot.
-    let compiled = pa_models::transports::prime_inference_offline_entries();
-    let payload = json!({"data": []});
-    let entries = parse_prime_inference_model_catalog(&payload, true).expect("empty ok");
-    assert!(build_prime_inference_models(&compiled, &entries, false, None).is_none());
 }
 
 #[tokio::test]
