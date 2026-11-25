@@ -708,9 +708,9 @@ mod tests {
             name: "kid".to_string(),
             deleted: None,
             deleted_usage: None,
-            deleted_usage_by_model: None,
             factory: None,
             decision_child: false,
+            refine_child: false,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

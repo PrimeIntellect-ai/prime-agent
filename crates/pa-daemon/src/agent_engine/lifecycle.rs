@@ -8,9 +8,9 @@ use super::{
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn_with_live_auth, AgentEngineConfig, AgentSessionEngine, Arc,
     CoreSessionEngine, EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
-    LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, PromptContextBoundary,
-    ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
-    SessionEngineConfig, SupervisorChildSessions, Value,
+    LinkAgentObserveController, Model, OverflowRecovery, PromptContextBoundary, ProviderTarget,
+    QuotaParkState, SessionCommandExecution, SessionCommandParams, SessionEngineConfig,
+    SupervisorChildSessions, Value,
 };
 use crate::engine::SessionEngine as _;
 
@@ -180,8 +180,7 @@ impl AgentSessionEngine {
             pending_refine_replies: std::sync::Mutex::default(),
             abandoned_refine_children: std::sync::Mutex::default(),
             refine_spawn_lock: tokio::sync::Mutex::new(()),
-            usage_producer: std::sync::Mutex::new(None),
-            rlm_usage_store: std::sync::Mutex::new(None),
+            usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
             quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             autonomous_driver,
@@ -308,11 +307,12 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
-    pub(crate) fn set_rlm_usage_store(
+    /// Bind the worker's session transcript: the engine's billed rows land in it.
+    pub(crate) fn set_usage_store(
         &self,
-        store: std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>,
+        store: std::sync::Arc<dyn pa_core::session_engine::usage_store::UsageStore>,
     ) {
-        *self.rlm_usage_store.lock().expect("rlm usage store lock") = Some(store);
+        *self.usage_store.lock().expect("usage store lock") = Some(store);
     }
 
     /// Installs the worker's accepted-note announcer, threaded into every
@@ -376,26 +376,10 @@ impl AgentSessionEngine {
         }
         // The in-run autonomous continuation hook (the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
-        // Live children outlive the rebuild and registered their spawns on the old producer:
-        // adopt those registrations before the new sink observes, or the first post-swap
-        // report drops against a producer that never saw the spawn.
         if let Some(children) = &self.children {
-            let retired = self
-                .usage_producer
-                .lock()
-                .expect("usage producer lock")
-                .take();
-            if let Some(retired) = retired {
-                built.rlm_usage.adopt_registrations(&retired).await;
-            }
-            children.set_usage_sink(std::sync::Arc::new(ProducerUsageSink(
-                std::sync::Arc::clone(&built.rlm_usage),
-            )));
-            *self.usage_producer.lock().expect("usage producer lock") =
-                Some(std::sync::Arc::clone(&built.rlm_usage));
-            // The semantic-edge handoff (the same per-build pattern): the
-            // settle watcher records a returned child's last committed
-            // request into this recorder.
+            // The per-build semantic-edge handoff: the settle watcher
+            // records a returned child's last committed request into this
+            // recorder.
             children.set_semantic_edges(built.session.semantic_edges());
         }
         if let Some(handles) = self.built_handles() {
@@ -643,23 +627,6 @@ impl AgentSessionEngine {
         pa_types::memory_release::trim_freed_heap();
         self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
         Ok(())
-    }
-
-    /// Register one refinement child's spawn with the usage attribution:
-    /// the engine-side twin of the kernel spawn path's `register_spawn`
-    /// (`rlm.run`'s own handler). The refinement child spawns outside the
-    /// kernel bridge, so its planning rows bill on the parent only when
-    /// the engine registers the spawn itself — the child's usage folds
-    /// into the parent's last assistant row's aggregate at its settle.
-    pub(crate) async fn register_refine_child_usage(&self, rlm_child_id: &str) {
-        let producer = self
-            .usage_producer
-            .lock()
-            .expect("usage producer lock")
-            .clone();
-        if let Some(producer) = producer {
-            producer.register_spawn(rlm_child_id).await;
-        }
     }
 
     /// Clear only the boundary this completed adoption observed. A failed
@@ -1153,11 +1120,7 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal queue purge lock")
             .clone();
-        let rlm_usage_store = self
-            .rlm_usage_store
-            .lock()
-            .expect("rlm usage store lock")
-            .clone();
+        let usage_store = self.usage_store.lock().expect("usage store lock").clone();
         let progress_note_emit = self
             .progress_note_emit
             .lock()
@@ -1241,7 +1204,7 @@ impl AgentSessionEngine {
                 children as Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>
             }),
             inbox: Some(inbox),
-            rlm_usage_store,
+            usage_store,
             progress_note_emit,
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             factory_child: self

@@ -398,6 +398,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
                 name: format!("flash worker {index:03}"),
                 factory: None,
                 decision_child: false,
+                refine_child: false,
             })
             .expect("append spawn edge");
     }
