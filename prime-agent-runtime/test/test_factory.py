@@ -8674,6 +8674,9 @@ class FactoryEmitRetryTest(_ExecutorTestCase):
         result = await self.start()
         await self.host.gate_entered("factory.check", 1).wait()  # the python call exited; its check is in flight
         await rlm_module.rlm.factory.stop(result["run_id"])
+        # The stop pass itself claims the call whose check is in flight.
+        instance = self.executor._runs[result["run_id"]].states["plan"].entries[0].instances[0]
+        self.assertEqual(instance.status, "cancelled")
         check_gate.set()
         await self.executor._runs[result["run_id"]].task
         status = await rlm_module.rlm.factory.status(result["run_id"])
