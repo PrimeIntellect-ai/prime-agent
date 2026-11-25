@@ -1,0 +1,1 @@
+- A backgrounded cell's completion now renders like a background shell completion: one summary line (`✓ Background cell finished · 339.9s`) that click or Ctrl+O expands to the output tail, both in the transcript and inside the python card that read it from the inbox, instead of an always-expanded `[cell-done]` panel.

@@ -196,6 +196,11 @@ fn inbox_read_messages_render_with_their_transcript_rows() {
                 "text": "Check the run.",
                 "meta": { "schedule": "5m" },
             },
+            {
+                "id": "inbox-5", "class": "cell-done", "arrivedAtMs": 5, "sender": "c1",
+                "text": "[cell-done id:c1 status:ok duration:1.6s]\n\nscancelled 206885",
+                "meta": { "cellId": "c1", "status": "ok", "durationMs": 1_600, "reason": "interrupted" },
+            },
         ],
     });
     let card = cell_card("await rlm.inbox.read()", details, false, false);
@@ -211,6 +216,7 @@ fn inbox_read_messages_render_with_their_transcript_rows() {
             " \u{2713} Background shell command finished",
             "",
             " \u{25f7} Heartbeat prompt \u{b7} every 5m",
+            " \u{2713} Background cell finished \u{b7} 1.6s",
         ],
         "summary rows only when collapsed: {collapsed:?}"
     );
@@ -237,6 +243,10 @@ fn inbox_read_messages_render_with_their_transcript_rows() {
     assert!(body_after(" \u{2713} Background shell command finished")
         .contains("[bash-done pid:7 exit:0]"));
     assert!(body_after(" \u{25f7} Heartbeat prompt \u{b7} every 5m").contains("Check the run."));
+    assert_eq!(
+        body_after(" \u{2713} Background cell finished \u{b7} 1.6s"),
+        " \u{2570}\u{2500} [cell-done id:c1 status:ok duration:1.6s]"
+    );
 
     for detail in [Detail::Overview, Detail::Details, Detail::All] {
         assert_eq!(

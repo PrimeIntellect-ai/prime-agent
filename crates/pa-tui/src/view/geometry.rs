@@ -367,18 +367,15 @@ mod tests {
             1 => (injected_kind(), prop::option::of(markdown_text())).prop_map(|(kind, body)| {
                 ChatEntry::InjectedPrompt(Box::new(InjectedPromptRow { kind, body }))
             }),
-            1 => (
-                prop::option::of(0i64..9),
-                prop::option::of(0i64..3),
-                markdown_text()
-            )
-                .prop_map(|(pid, exit_code, content)| {
+            1 => (markdown_text(), any::<bool>(), markdown_text()).prop_map(
+                |(label, failed, content)| {
                     ChatEntry::ShellCompletion(Box::new(ShellCompletionRow {
-                        pid,
-                        exit_code,
+                        label,
+                        failed,
                         content,
                     }))
-                }),
+                }
+            ),
             1 => (markdown_text(), markdown_text()).prop_map(|(summary, meta)| {
                 ChatEntry::RefinementOutcome(Box::new(RefinementOutcomeRow {
                     header: "Refined".to_string(),
