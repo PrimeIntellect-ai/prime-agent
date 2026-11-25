@@ -2729,8 +2729,10 @@ class FakeHost:
         # factory.compile replies by machine directory path or library
         # name (the Rust loader's answer, scripted).
         self.compiled: dict[str, dict[str, Any]] = {}
-        # factory.limits answers {} unless a test scripts its error.
+        # factory.limits answers the Rust max_transitions bound unless a
+        # test scripts its error.
         self.limits_error: str | None = None
+        self.max_transitions_bound = 10_000
 
     def gate(self, request_type: str, call_number: int) -> asyncio.Event:
         """Suspend the call_number-th call of that type on a returned event."""
@@ -2895,7 +2897,7 @@ class FakeHost:
         if request_type == "factory.limits":
             if self.limits_error is not None:
                 raise RuntimeError(self.limits_error)
-            return {}
+            return {"max_transitions": self.max_transitions_bound}
         raise AssertionError(f"unexpected host request type {request_type!r}")
 
 
@@ -7238,6 +7240,14 @@ class FactoryMachineDirectoryTest(_ExecutorTestCase):
             await rlm_module.rlm.factory.run("sw")
         self.assertEqual(self.host.calls_of("factory.limits"), [{"spec": spec}])
         self.assertEqual(self.host.calls_of("rlm.run"), [])
+
+    @async_test
+    async def test_the_default_max_transitions_is_capped_at_the_host_bound(self) -> None:
+        # Two states default to 20 transitions; the host's bound caps it.
+        self.store_machine({"states": [state("a", entry=True), state("b")], "transitions": [{"from": "a", "to": "b"}]})
+        self.host.max_transitions_bound = 15
+        result = await rlm_module.rlm.factory.run("sw")
+        self.assertEqual(self.executor._runs[result["run_id"]].max_transitions, 15)
 
 
 class FactoryGraphWatchTest(_ExecutorTestCase):

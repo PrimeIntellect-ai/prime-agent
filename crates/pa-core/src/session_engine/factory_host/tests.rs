@@ -820,8 +820,8 @@ fn factory_compile_resolves_names_through_the_library_scan() {
     );
 }
 
-/// `factory.limits` answers `{}` for a spec inside the limits, else every
-/// bound it breaks.
+/// `factory.limits` answers the `max_transitions` bound for a spec inside
+/// the limits, else every bound it breaks.
 #[tokio::test]
 async fn factory_limits_checks_a_stored_spec() {
     let mut handlers = crate::kernel::shared::HostRequestHandlers::default();
@@ -836,7 +836,7 @@ async fn factory_limits_checks_a_stored_spec() {
         call(json!({"spec": {"run": {"max_parallel": 4}, "states": []}}))
             .await
             .unwrap(),
-        json!({})
+        json!({"max_transitions": 10_000})
     );
     assert_eq!(
         call(json!({"spec": {"run": {"max_parallel": 65}, "states": [{"id": "a", "retries": 11}]}}))
