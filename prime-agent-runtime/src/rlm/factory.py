@@ -3282,6 +3282,8 @@ class FactoryExecutor:
         if process.proc.returncode is None:
             # Past its time limit: the limit is spent, so no retry.
             await process.stop()
+            if instance.status != "running":
+                return  # a stop or fail-fast pass cancelled it meanwhile
             await self._apply_instance_failure(
                 run,
                 state,
@@ -3313,12 +3315,8 @@ class FactoryExecutor:
                 check_error = None
             except RuntimeError as error:
                 check_error = str(error)
-            if entry.status != "running":
-                # A stop claimed the entry during the check; the instance it
-                # could not reach (its process was already claimed) settles too.
-                instance.status = "cancelled"
-                self._event(run, "cancelled", node=state.state_id, entry=entry.index, instance=instance.index)
-                return
+            if instance.status != "running":
+                return  # a stop or fail-fast pass cancelled it during the check
             if check_error is not None:
                 await self._apply_instance_failure(
                     run, state, entry, instance, f"python state output: {check_error}", retry=True
@@ -4010,12 +4008,16 @@ class FactoryExecutor:
             state = run.states[state_id]
             for entry in state.entries:
                 for instance in entry.instances:
-                    if instance.status == "running" and instance.process is not None:
+                    # A running python call either still has its process,
+                    # or its exit is being settled (time-limit stop or the
+                    # output check in flight): both are claimed here.
+                    if instance.status == "running" and "python" in state.spec:
                         process, instance.process = instance.process, None
                         instance.status = "cancelled"
                         if entry.status == "running":
                             entry.status = "cancelled"
-                        await process.stop()
+                        if process is not None:
+                            await process.stop()
                         self._event(run, "cancelled", node=state_id, entry=entry.index, instance=instance.index)
 
     async def _cancel_running(self, run: FactoryRun) -> None:
