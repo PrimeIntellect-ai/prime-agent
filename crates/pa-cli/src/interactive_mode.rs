@@ -20,6 +20,7 @@ use pa_tui::interactive::{
 
 mod daemon;
 
+pub(crate) use daemon::is_current_daemon;
 pub use daemon::{ensure_daemon_running, ensure_daemon_running_with};
 
 mod onboarding;
