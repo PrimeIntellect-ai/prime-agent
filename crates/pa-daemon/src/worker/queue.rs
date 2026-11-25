@@ -536,7 +536,7 @@ pub(crate) fn admit_kernel_notice(
     work_notify: &Arc<super::WorkNotify>,
     notice: crate::engine::KernelNotice,
     session_is_closed: impl Fn() -> bool,
-) -> bool {
+) {
     let crate::engine::KernelNotice { row, preview_label } = notice;
     // Block rows (a rich cell completion) keep a readable text preview for
     // the queue strip while the custom row carries the actual blocks.
@@ -546,11 +546,8 @@ pub(crate) fn admit_kernel_notice(
     let mut core_guard = core.lock().unwrap();
     // A notice that raced past the sink's first check is refused here or wiped
     // by the close's clear — never a completion turn for a closed session.
-    if session_is_closed()
-        || (row.custom_type == pa_core::session_engine::messages::BASH_WAITING_NOTICE_CUSTOM_TYPE
-            && (core_guard.busy || core_guard.compacting))
-    {
-        return false;
+    if session_is_closed() {
+        return;
     }
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
@@ -587,7 +584,6 @@ pub(crate) fn admit_kernel_notice(
         },
     );
     work_notify.notify_one();
-    true
 }
 
 /// The queue-strip coalescing key of the inbox arrival notice: one
@@ -1235,11 +1231,11 @@ fn is_bash_completion_row(row: &Value) -> bool {
 
 /// Whether one queued steering row is wakeable input for a running cell:
 /// every user and agent row is; a backgrounded cell's own completion row
-/// never is (the kernel runs one cell at a time, so a cell still waiting
-/// when the notice lands started after the backgrounded one settled, and
-/// the notice cannot concern it); an inbox arrival row carries its stored
-/// eligibility bit (a restored row without the bit is conservatively
-/// wakeable — one extra detach, never a lost steer).
+/// never is (a cell still waiting when the notice lands is a different cell,
+/// one that started after the backgrounded one or beside it, so the notice
+/// does not concern it and is read after it); an inbox arrival row carries
+/// its stored eligibility bit (a restored row without the bit is
+/// conservatively wakeable — one extra detach, never a lost steer).
 pub(crate) fn row_wakes_a_cell(item: &QueuedItem) -> bool {
     let Some(row) = item.custom_message.as_ref() else {
         return true;

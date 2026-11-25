@@ -151,8 +151,13 @@ impl Worker {
         // no edge.
         let (rlm_child_id, parent_active_session_id, parent_session_id, semantic_spawn) =
             match payload.get("runtimeMetadata") {
+                // A refine child keeps its subagent identity: the same
+                // parent edge routes its proposal reply to the parent.
                 Some(metadata)
-                    if metadata.get("kind").and_then(Value::as_str) == Some("subagent") =>
+                    if matches!(
+                        metadata.get("kind").and_then(Value::as_str),
+                        Some("subagent" | "refine")
+                    ) =>
                 {
                     let parent_session_id = metadata
                         .get("parentSessionId")
@@ -182,6 +187,7 @@ impl Worker {
         let factory_child = payload
             .get("runtimeMetadata")
             .is_some_and(|metadata| metadata.get("factory").is_some());
+        let factory_contract = create_payload_factory_contract(payload);
         let thinking = payload
             .get("thinking")
             .and_then(Value::as_str)
@@ -609,6 +615,7 @@ impl Worker {
             child_script: child_script.clone(),
             semantic_spawn,
             factory_child,
+            factory_contract,
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }
@@ -681,7 +688,8 @@ impl Worker {
                 let core = std::sync::Arc::clone(&self.core);
                 let events = self.events.clone();
                 children.set_child_update_sink(std::sync::Arc::new(move |mut child| {
-                    if let Some(parent_id) = core.lock().unwrap().rlm_child_id.clone() {
+                    let parent_id = core.lock().unwrap().rlm_child_id.clone();
+                    if let Some(parent_id) = parent_id {
                         child["parentId"] = json!(parent_id);
                     }
                     crate::user_bash::emit_session_event_frame(
@@ -794,6 +802,18 @@ pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<Str
     // that would read it as the full abort.
     capabilities.push("background_cell_abort".to_string());
     capabilities
+}
+
+/// A factory child's output contract from its create's runtime metadata
+/// (`factoryContract`, set by the spawn that carried it). The durable
+/// create of a respawned child replays it, so the contract survives a
+/// restart.
+fn create_payload_factory_contract(payload: &Value) -> Option<Value> {
+    payload
+        .get("runtimeMetadata")
+        .and_then(|metadata| metadata.get("factoryContract"))
+        .filter(|contract| contract.is_object())
+        .cloned()
 }
 
 /// RLM depth fields of a create payload: `(depth, max_depth)`. Values must

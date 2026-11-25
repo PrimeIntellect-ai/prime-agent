@@ -2,6 +2,7 @@
 //! goal continuation), the stale boundary-request drop, and the
 //! auto-compaction abort clear.
 use super::{AbortController, AgentSessionEngine, BoundaryRun, EngineEvent, Value};
+use crate::engine::SessionEngine as _;
 
 impl AgentSessionEngine {
     /// Clear the automatic-compaction abort slot when `controller`'s run
@@ -94,27 +95,55 @@ impl AgentSessionEngine {
                 return BoundaryRun::Cancelled;
             }
         }
-        let consumption = {
+        let compaction = {
             let engine = self.session.blocking_lock().clone();
             let Some(engine) = engine else {
                 self.clear_auto_compaction_abort(&controller);
                 return BoundaryRun::Proceed;
             };
             let consumed = self.runtime.block_on(async {
-                let compaction = engine
-                    .consume_pending_compaction(&model, api_key.clone(), Some(&signal))
-                    .await;
-                if let Some(pending) = engine.start_pending_refinement(&model, api_key).await {
-                    self.report_background_refinement(pending);
-                }
-                compaction
+                engine
+                    .consume_pending_compaction(&model, api_key, Some(&signal))
+                    .await
             });
             self.clear_auto_compaction_abort(&controller);
             consumed
         };
+        // The kernel's scheduled `refine.run` consumes here: the pending
+        // refinement is the refinement child's, so the boundary spawns it
+        // (fire-and-wake) — the session lock and the compaction flight are
+        // never held; the child's proposal applies on its reply's arrival.
+        {
+            let guard = self.session.blocking_lock();
+            let pending = match guard.as_deref() {
+                Some(engine) => self
+                    .runtime
+                    .block_on(async { engine.turn_boundary.take_refine().await }),
+                None => None,
+            };
+            drop(guard);
+            if let Some(pending) = pending {
+                let options = pa_core::session_engine::refine::RefineOptions {
+                    global: pending.global,
+                    instructions: pending.instructions,
+                    rollback_id: None,
+                };
+                if let Err(error) = self.spawn_refinement_child(
+                    options,
+                    pa_core::session_engine::refine::RefinementSource::SelfRefine,
+                ) {
+                    eprintln!("pa-daemon: the requested refinement failed: {error:#}");
+                    if !emit(EngineEvent::RefineFailed {
+                        error: format!("{error:#}"),
+                    }) {
+                        return BoundaryRun::Cancelled;
+                    }
+                }
+            }
+        }
         let mut stopped_for_compaction = false;
         let mut compacted = false;
-        match consumption {
+        match compaction {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the settled end;
                 // its pair precedes `compaction_end`.
@@ -206,193 +235,65 @@ impl AgentSessionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_engine::tests::{admit, write_compaction_settings};
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings};
     use crate::agent_engine::FAUX_TEST_LOCK;
-    use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine};
-    use pa_core::session_engine::refine::CommittedRefinement;
     use pa_core::session_engine::turn_boundary::PendingRefine;
     use serde_json::json;
 
-    /// One faux-driven engine over its own tempdir: the shared helper pins
-    /// `session_dir` to `None`, so the config is written here — the sessions
-    /// root, the durable conversation log under it (the engine session is
-    /// non-persisted, so its artifact tree and local harness store are the
-    /// ones the log path implies), and the agent dir the global store
-    /// resolves under. `responses` drive the seed turn and each refinement's
-    /// planning call.
-    fn refinement_engine(
-        dir: &tempfile::TempDir,
-        responses: &[serde_json::Value],
-    ) -> std::sync::Arc<AgentSessionEngine> {
-        write_compaction_settings(dir.path(), 1);
-        let engine = std::sync::Arc::new(
-            AgentSessionEngine::new(AgentEngineConfig {
-                cwd: dir.path().to_path_buf(),
-                agent_dir: dir.path().join("agent"),
-                provider: None,
-                model: None,
-                api_key: None,
-                thinking: None,
-                session_dir: Some(dir.path().join("sessions")),
-                session_file: Some(dir.path().join("sessions").join("engine-session.jsonl")),
-                faux_script: Some(json!({ "responses": responses.to_vec() }).to_string()),
-                supervisor_link: None,
-                telemetry_disabled: None,
-                cron_store: None,
-                queued_steering_probe: None,
-            })
-            .unwrap(),
-        );
-        // The worker registers the engine's own arc: the live-auth
-        // resolver upgrades it per provider call.
-        engine.register_arc();
-        engine
-    }
-
-    /// Schedule one refinement (local or global), run the turn boundary,
-    /// and return the committed refinement the background sink handed off.
-    fn run_refinement(
-        engine: &std::sync::Arc<AgentSessionEngine>,
-        instructions: &str,
-        global: bool,
-    ) -> CommittedRefinement {
+    #[test]
+    fn a_requested_refinement_without_children_refuses_visibly() {
+        // The fire-and-wake contract: the boundary's pending refinement is
+        // the refinement child's spawn — a standalone engine (no child
+        // runtime) refuses visibly; the apply never runs inline here.
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) =
+            faux_engine_with_settings(&json!({"responses": [{"text": "seed reply"}]}), 1);
+        admit(&engine, "seed turn".to_string(), &mut Vec::new());
         {
             let guard = engine.session.blocking_lock();
             let session = guard.as_ref().expect("built session");
             engine
                 .runtime
                 .block_on(session.turn_boundary.schedule_refine(PendingRefine {
-                    instructions: Some(instructions.to_string()),
-                    global,
+                    instructions: Some("Verify the completed outcome".to_string()),
+                    global: false,
                 }));
         }
-        let (send, receive) = std::sync::mpsc::channel();
-        *engine.refinement_completion_sink.lock().unwrap() =
-            Some(std::sync::Arc::new(move |pending| {
-                send.send(pending).unwrap();
-            }));
-        let boundary = engine.run_turn_boundary(&mut |_| true);
+        let mut events = Vec::new();
+        let boundary = engine.run_turn_boundary(&mut |event| {
+            events.push(event);
+            true
+        });
         assert!(matches!(boundary, BoundaryRun::Proceed));
-        let pending = receive
-            .try_recv()
-            .expect("completion handed to background sink");
-        engine.runtime.block_on(pending).unwrap().unwrap()
-    }
-
-    #[test]
-    fn requested_refinement_commits_its_durable_outcome_row() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::TempDir::new().unwrap();
-        let engine = refinement_engine(
-            &dir,
-            &[
-                json!("seed reply"),
-                json!({"text": json!({
-                    "summary": "No durable change justified",
-                    "rationale": "Fixture only",
-                    "expectedOutcome": "No change",
-                    "edits": []
-                }).to_string()}),
-            ],
-        );
-        admit(&engine, "seed turn".to_string(), &mut Vec::new());
-        let committed = run_refinement(&engine, "Verify the completed outcome", false);
-        let outcomes = committed
-            .rows
+        let failure = events
             .iter()
-            .filter(|row| row.custom_type == "refinement_outcome")
-            .count();
-        assert_eq!(
-            outcomes, 1,
-            "one durable outcome, including a no-op refinement"
-        );
-    }
-
-    /// The daemon's refinements write the store pair the session's digest
-    /// reads: the local refinement lands in the artifact store the
-    /// conversation log implies, and the global refinement lands in the
-    /// agent dir's harness store.
-    #[test]
-    fn the_daemons_refinements_write_the_digests_store_pair() {
-        let _faux = FAUX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::TempDir::new().unwrap();
-        let engine = refinement_engine(
-            &dir,
-            &[
-                json!("seed reply"),
-                json!({"text": json!({
-                    "summary": "Record the local seam",
-                    "rationale": "Fixture only",
-                    "edits": [{
-                        "action": "create",
-                        "kind": "memory",
-                        "id": "l1",
-                        "title": "Local tactic",
-                        "content": "Prefer the artifact store"
-                    }]
-                }).to_string()}),
-                json!({"text": json!({
-                    "summary": "Record the shared seam",
-                    "rationale": "Fixture only",
-                    "edits": [{
-                        "action": "create",
-                        "kind": "memory",
-                        "id": "g1",
-                        "title": "Global tactic",
-                        "content": "Prefer the shared seam"
-                    }]
-                }).to_string()}),
-            ],
-        );
-        admit(&engine, "seed turn".to_string(), &mut Vec::new());
-        let conversation_log = dir.path().join("sessions").join("engine-session.jsonl");
-        // The local half: the session's own artifact store, the one the
-        // conversation log implies.
-        let committed = run_refinement(&engine, "Record the local seam", false);
-        let local_store =
-            pa_core::session_engine::harness_digest::local_harness_dir_for_log(&conversation_log)
-                .expect("the conversation log implies the artifact store");
-        assert_eq!(
-            std::path::Path::new(&committed.result.harness_state_path),
-            pa_core::refinement::get_harness_state_path(&local_store),
-            "the daemon's local refinement wrote the session's own artifact store"
-        );
-        let local_state = pa_core::refinement::load_harness_state(
-            &local_store,
-            pa_core::refinement::HarnessScope::Local,
+            .find(|event| matches!(event, EngineEvent::RefineFailed { .. }))
+            .expect("the refusal surfaced");
+        let EngineEvent::RefineFailed { error } = failure else {
+            unreachable!("matched above")
+        };
+        assert!(
+            error.contains("daemon-backed"),
+            "the refusal names the gate: {error}"
         );
         assert!(
-            local_state.entries[&pa_core::refinement::RefinementKind::Memory].contains_key("l1"),
-            "the local edit lands in the session's own harness store"
+            events.iter().all(|event| {
+                !matches!(
+                    event,
+                    EngineEvent::CustomMessage(row) if row["customType"] == "refinement_outcome"
+                )
+            }),
+            "no inline apply ran at the boundary: {events:?}"
         );
-        // The global half: the agent dir's harness store, the one the
-        // session's digest context carries.
-        let global_committed = run_refinement(&engine, "Record a durable global tactic", true);
-        let agent_dir = dir.path().join("agent");
-        let global_dir = pa_core::refinement::get_global_harness_state_dir(&agent_dir);
-        let global_state = pa_core::refinement::load_harness_state(
-            &global_dir,
-            pa_core::refinement::HarnessScope::Global,
-        );
-        assert!(
-            global_state.entries[&pa_core::refinement::RefinementKind::Memory].contains_key("g1"),
-            "the global edit lands in the agent dir's harness store"
-        );
-        assert_eq!(
-            std::path::Path::new(&global_committed.result.harness_state_path),
-            pa_core::refinement::get_harness_state_path(&global_dir),
-            "the daemon's global refinement wrote the agent dir's harness store"
-        );
-        // The digest half of the pair is pinned at the pa-core seam
-        // (`daemon_shaped_local_refinement_writes_the_sessions_own_harness_store`):
-        // the digest renders the session's own digest context, and the
-        // refinement `harness_state_path` asserts above pin that same
-        // context's store pair through the daemon's wiring. Rebuilding
-        // the context here by hand would re-derive the paths this test
-        // just asserted and could not fail.
+        let pending = {
+            let guard = engine.session.blocking_lock();
+            let session = guard.as_ref().expect("built session");
+            engine
+                .runtime
+                .block_on(session.turn_boundary.refine_pending())
+        };
+        assert!(!pending, "the pending request was consumed");
     }
 }

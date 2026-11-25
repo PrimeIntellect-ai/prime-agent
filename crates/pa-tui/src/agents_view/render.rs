@@ -329,7 +329,9 @@ impl AgentsViewMode {
                     section,
                     self.rows
                         .iter()
-                        .filter(|row| row.kind == RowKind::Agent && row.section == section)
+                        .filter(|row| {
+                            row.depth == 0 && row.kind == RowKind::Agent && row.section == section
+                        })
                         .count(),
                 )
             })
@@ -649,6 +651,27 @@ impl AgentsViewMode {
                 ratatui::style::Style::default(),
             ));
         }
+        // The M1 machine-child chip: a session spawned by a run node
+        // carries `⚙` in the badge slot (the heartbeat badge's
+        // precedent); the selected row's note spells `in factory:
+        // <run>/<state>`.
+        let machine_child = row
+            .summary
+            .get("rlmChildId")
+            .and_then(Value::as_str)
+            .and_then(|child| self.machine_children_label(child));
+        let machine_chip = machine_child.is_some().then_some("\u{2699}");
+        let machine_width = machine_chip.map_or(0, |chip| str_width(chip) + 1);
+        if let Some(chip) = machine_chip {
+            line.push(crate::Span::styled(
+                chip,
+                theme.fg_style(ThemeColor::Warning),
+            ));
+            line.push(crate::Span::styled(
+                " ".to_string(),
+                ratatui::style::Style::default(),
+            ));
+        }
         // TS `formatTableCell(title, nameWidth)`: the name cell (indent +
         // icon + badge + title) clips to the column width, so a long
         // session name can never push the model and cost/age columns
@@ -658,13 +681,13 @@ impl AgentsViewMode {
             &row.title,
             layout
                 .name_width
-                .saturating_sub(2 + indent_width + badge_width),
+                .saturating_sub(2 + indent_width + badge_width + machine_width),
         );
         // Session titles render uniformly (no bold for named sessions): deliberate divergence
         // from TS `styleRowTitle`, which bolds explicit session names.
         let pad = layout
             .name_width
-            .saturating_sub(str_width(&title) + 2 + indent_width + badge_width);
+            .saturating_sub(str_width(&title) + 2 + indent_width + badge_width + machine_width);
         line.push(crate::Span::styled(title, theme.fg_style(ThemeColor::Text)));
         line.push(crate::Span::raw(" ".repeat(pad)));
         line.push(crate::Span::styled(
@@ -685,10 +708,36 @@ impl AgentsViewMode {
         finish_session_row(theme, line, selected, hovered, width)
     }
 
+    /// The machine-child label for one spawned child id (the M1 note's
+    /// `in factory: <run>/<state>` vocabulary).
+    fn machine_children_label(&self, child: &str) -> Option<String> {
+        self.machine_children
+            .get(child)
+            .map(|marker| marker.label.clone())
+    }
+
     /// The selected agent/subagent row's progress note: wrapped,
     /// indented to the title column, dim; other row kinds render nothing.
     pub(super) fn render_note_details(&self, row: &AgentsViewRow, width: usize) -> Vec<Line> {
-        if width == 0 || !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
+        if width == 0 {
+            return Vec::new();
+        }
+        // The machine child's note (M1): `in factory: <run>/<state>`.
+        if matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
+            if let Some(label) = row
+                .summary
+                .get("rlmChildId")
+                .and_then(Value::as_str)
+                .and_then(|child| self.machine_children_label(child))
+            {
+                let dim = self.theme.fg_style(ThemeColor::Dim);
+                return vec![vec![crate::Span::styled(
+                    format!("  in factory: {label}"),
+                    dim,
+                )]];
+            }
+        }
+        if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
             return Vec::new();
         }
         let Some(note) = row
@@ -871,6 +920,11 @@ impl AgentsViewMode {
             {
                 if let Some(keys) = all("app.agents.program") {
                     segments.push(format!("{keys} program"));
+                }
+            }
+            if self.factory_supported {
+                if let Some(keys) = all("app.agents.factory") {
+                    segments.push(format!("{keys} machines"));
                 }
             }
             if self.scope_active {

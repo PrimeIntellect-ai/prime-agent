@@ -892,10 +892,14 @@ mod tests {
         );
         assert!(text[4].contains("Paste value"));
         assert_eq!(text[5], "", "the blank between the field and the actions");
-        let alt = crate::keybindings::format_key_text("alt");
+        // The copy key renders with the host platform's `alt` label
+        // (macOS: Option, elsewhere: Alt).
         assert_eq!(
             text[6],
-            format!(" Enter submit  {alt}+C copy  Esc/Ctrl+C cancel"),
+            format!(
+                " Enter submit  {}+C copy  Esc/Ctrl+C cancel",
+                crate::keybindings::host_alt_label()
+            ),
             "the TS auth-actions row: {text:?}"
         );
         assert_eq!(text.len(), 7, "no bottom rule rides the prompt: {text:?}");

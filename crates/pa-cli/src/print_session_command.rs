@@ -331,6 +331,7 @@ mod tests {
                     inbox: None,
                     progress_note_emit: None,
                     factory_child: false,
+                    factory_contract: None,
                     daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),

@@ -157,6 +157,7 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
     ("agentsNew", "app.agents.new"),
     ("agentsDelete", "app.agents.delete"),
     ("agentsProgram", "app.agents.program"),
+    ("agentsFactory", "app.agents.factory"),
     ("agentsRename", "app.agents.rename"),
     ("treeFoldOrUp", "app.tree.foldOrUp"),
     ("treeUnfoldOrDown", "app.tree.unfoldOrDown"),
@@ -634,6 +635,20 @@ fn format_key_text_on(key: &str, platform: LabelPlatform) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The host platform's `alt` label in hint text (macOS: `Option`, elsewhere:
+/// `Alt`) — the exact per-platform contract `format_key_text` renders, so unit
+/// tests assert the true host expectation on every platform (the
+/// `hint_rows_carry_the_platform_alt_label` precedent).
+#[cfg(test)]
+#[must_use]
+pub(crate) fn host_alt_label() -> &'static str {
+    if std::env::consts::OS == "macos" {
+        "Option"
+    } else {
+        "Alt"
+    }
 }
 
 #[cfg(test)]

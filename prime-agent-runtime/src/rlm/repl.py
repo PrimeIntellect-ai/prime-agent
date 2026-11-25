@@ -87,7 +87,10 @@ _current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar("_cur
 _current_cell_execution: contextvars.ContextVar[_CellExecution | None] = contextvars.ContextVar(
     "_current_cell_execution", default=None
 )
-_active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
+# Running cell body tasks by request id. A backgrounded cell keeps its entry
+# while a newer cell runs beside it; both share the loop at await points.
+_active: dict[str, asyncio.Task[Any]] = {}
+_interrupted: set[str] = set()
 _cell_counter = 0
 _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
 # Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
@@ -105,9 +108,23 @@ _mcp_status_tasks: "set[asyncio.Task[None]]" = set()
 _interrupt_lock = threading.Lock()
 _inflight: set[str] = set()
 _pending_interrupts: dict[str, Any] = {"ids": set(), "any": False}
-_sigint_target: str | None = None
+# Requests whose interrupt the SIGINT handler delivers. A set, not one slot:
+# the host stops every running cell at once, and SIGINTs sent before the
+# handler runs coalesce into one handler call.
+_sigint_targets: set[str] = set()
 _finishing_rid: str | None = None
-_handoff_interrupted = False
+_handoff_interrupted: set[str] = set()
+# Execute handlers run as tasks so a new cell can start while a backgrounded
+# one waits at an await point; shutdown cancels the set.
+_cell_tasks: "set[asyncio.Task[None]]" = set()
+# How long a new cell waits for a running cell's synchronous code to reach
+# an await point before the kernel refuses it.
+_SYNC_CELL_ADMISSION_WAIT_S = 5.0
+_KERNEL_BUSY_SYNC_CELL = (
+    "A backgrounded cell is running synchronous code, so this cell did not run. "
+    "A new cell can start while the backgrounded cell waits at an await point. "
+    "Try again later, or end the turn and read the cell's completion notice when it arrives."
+)
 
 
 def _send(event: dict[str, Any]) -> None:
@@ -173,13 +190,9 @@ def is_active() -> bool:
     return _protocol_fd >= 0
 
 
-def request_in_flight() -> bool:
-    """True when a request (a cell or state op) is executing right now.
-
-    Lock-free like the SIGINT handler's own read: a torn read can only miss
-    one keepalive tick or send one that queues behind the running turn.
-    """
-    return _active["task"] is not None
+def current_cell_id() -> str | None:
+    """The id of the cell whose code (or a task it started) is running here."""
+    return _current_cell.get()
 
 
 def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
@@ -191,11 +204,56 @@ def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] 
 
 
 def active_cell_task() -> asyncio.Task[Any] | None:
-    """The cell body task executing right now, or None between cells (global
-    state, not the cell contextvar — detached tasks keep stale context copies)."""
+    """A live cell body task, the newest when cells run side by side, or None
+    between cells (global state, not the cell contextvar — detached tasks keep
+    stale context copies)."""
     with _interrupt_lock:
-        task = _active["task"]
-    return task if isinstance(task, asyncio.Task) and not task.done() else None
+        tasks = list(_active.values())
+    return next((task for task in reversed(tasks) if not task.done()), None)
+
+
+def _beside_sync_cell() -> bool:
+    """Whether a cell is running and the loop thread is inside cell code.
+
+    A cell waiting at an await point has no frame on the main thread's
+    stack; a cell running synchronous code (or blocked in a sync call) does.
+    Read from the reader thread, so the answer is a snapshot.
+    """
+    with _interrupt_lock:
+        if not _active:
+            return False
+    frame = sys._current_frames().get(threading.main_thread().ident)  # noqa: SLF001
+    while frame is not None:
+        if frame.f_code.co_filename.startswith("<cell-"):
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _admit_beside_sync_cell(req: dict[str, Any], queue: asyncio.Queue[dict[str, Any]]) -> None:
+    """The one guard on concurrent cells, on its own thread.
+
+    The loop thread is inside a running cell's synchronous code, so a new
+    cell cannot start until that code reaches an await point. Wait a bounded
+    time for it, then refuse instead of queueing behind code that may never
+    yield. An interrupt for the waiting cell ends the wait at once.
+    """
+    assert _loop is not None
+    rid = req["id"]
+    deadline = time.monotonic() + _SYNC_CELL_ADMISSION_WAIT_S
+    while _beside_sync_cell():
+        with _interrupt_lock:
+            interrupted = rid in _pending_interrupts["ids"]
+        if interrupted or time.monotonic() >= deadline:
+            _finish_request(rid)
+            if interrupted:
+                _send({"event": "error", "id": rid, "ename": "KeyboardInterrupt", "evalue": "", "traceback": ["KeyboardInterrupt\n"]})
+            else:
+                _send({"event": "error", "id": rid, "ename": "KernelBusy", "evalue": _KERNEL_BUSY_SYNC_CELL, "traceback": []})
+            _send({"event": "done", "id": rid, "status": "error"})
+            return
+        time.sleep(0.02)
+    _loop.call_soon_threadsafe(queue.put_nowait, req)
 
 
 async def host_request(data: dict[str, Any]) -> dict[str, Any]:
@@ -223,6 +281,16 @@ def _fail_pending_host_requests() -> None:
     for future in _pending_host.values():
         if not future.done():
             future.set_exception(RuntimeError("host connection closed; host_request cannot be answered"))
+
+
+def teardown_started() -> bool:
+    """Whether the kernel's shutdown teardown already began: an explicit
+    shutdown request or a host EOF, both of which set the flag BEFORE any
+    pending host request is failed (the loop thread's teardown half), so a
+    transport failure that arrives after it is host loss, not a business
+    verdict. The flag is set only on the kernel's real shutdown path, never
+    by an exception handler."""
+    return _host_closed
 
 
 def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
@@ -417,34 +485,42 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
 
 def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
-    global _handoff_interrupted
-    task = _active["task"]
-    # No lock (the main thread may hold it): the rid equality revalidates the
-    # target so a SIGINT delayed past its request's finish cannot hit a later cell.
-    if task is None or task.done() or _active["rid"] != _sigint_target:
-        if _sigint_target is not None and _sigint_target == _active["rid"]:
-            # Handoff: the task is done but _run_guarded's finally has not run
-            # yet, so the main thread may be inside loop internals where raising
-            # would kill the serve loop. Record it; the finishing phase consumes it.
-            _handoff_interrupted = True
-            return
-        # Post-run repr/drain is synchronous main-thread work: raise into it.
-        # The equality revalidation drops a SIGINT delayed past the done send.
-        if _sigint_target is not None and _sigint_target == _finishing_rid:
-            raise KeyboardInterrupt
-        return
-    _active["interrupted"] = True
     # Handler runs in the main (loop) thread: current_task is whose step the signal interrupted.
     running = asyncio.current_task(_loop) if _loop is not None else None
-    if running is task:
-        # The active request's own step (sync bytecode or an EINTR-woken syscall): raise into it.
-        raise KeyboardInterrupt
-    # Loop idle in select() or another task mid-step: cancel the active task (same thread, safe).
-    task.cancel()
-    if running is not None and running is not _serve_task:
-        # A background task blocked in sync code occupies the only thread and would keep the
-        # cancel from ever running: raise into it to unwind its step; it dies with the KI.
-        running.add_done_callback(_consume_task_exception)
+    raise_now = False
+    # No lock (the main thread may hold it): the lookup by target id drops a
+    # SIGINT delayed past its request's finish, so it cannot hit a later cell.
+    for target in tuple(_sigint_targets):
+        task = _active.get(target)
+        if task is None or task.done():
+            if task is not None:
+                # Handoff: the task is done but _run_guarded's finally has not run
+                # yet, so the main thread may be inside loop internals where raising
+                # would kill the serve loop. Record it; the finishing phase consumes it.
+                _handoff_interrupted.add(target)
+            elif target == _finishing_rid:
+                # Post-run repr/drain is synchronous main-thread work: raise into it.
+                raise_now = True
+            continue
+        _interrupted.add(target)
+        if running is task:
+            # The active request's own step (sync bytecode or an EINTR-woken syscall): raise into it.
+            raise_now = True
+            continue
+        # Loop idle in select() or another task mid-step: cancel the active task (same thread, safe).
+        task.cancel()
+        if (
+            running is not None
+            and running is not _serve_task
+            and running not in _cell_tasks
+            and running not in _active.values()
+        ):
+            # A background task blocked in sync code occupies the only thread and would keep the
+            # cancel from ever running: raise into it to unwind its step; it dies with the KI.
+            # Another cell's body is never such a task: the cancel runs when that cell yields.
+            running.add_done_callback(_consume_task_exception)
+            raise_now = True
+    if raise_now:
         raise KeyboardInterrupt
 
 
@@ -452,22 +528,21 @@ def _request_interrupt(target: str | None) -> None:
     """Deliver an interrupt now, or park it for the request it targets.
 
     Runs on the reader thread. Without a target id the interrupt applies to
-    the running request, else to the next queued one; with a target id it
-    applies to that request only. A request finishing its post-run repr/drain
+    the newest running request, else to the next queued one; with a target id
+    it applies to that request only. A request finishing its post-run repr/drain
     is still interrupted (never parked: parking would hit the NEXT request).
     Interrupts for finished or unknown requests are dropped.
     """
-    global _sigint_target
     with _interrupt_lock:
-        task = _active["task"]
-        rid = _active["rid"]
-        if rid is not None and (target is None or target == rid):
+        rid = next(reversed(_active), None) if target is None else target
+        task = _active.get(rid) if rid is not None else None
+        if task is not None:
             # Active, or in the done-task handoff before _run_guarded's finally:
             # either way the rid still owns the interrupt (parking here would
             # leak it onto the next request); the handler decides delivery.
-            _sigint_target = rid
+            _sigint_targets.add(rid)
         elif _finishing_rid is not None and (target is None or target == _finishing_rid):
-            _sigint_target = _finishing_rid
+            _sigint_targets.add(_finishing_rid)
         elif target is not None:
             if target in _inflight:
                 _pending_interrupts["ids"].add(target)
@@ -487,13 +562,12 @@ def _request_interrupt(target: str | None) -> None:
             # Wake the selector so a cancel scheduled by the handler runs promptly.
             _loop.call_soon_threadsafe(lambda: None)
         return
-    if _loop is not None:
+    if _loop is not None and task is not None:
 
         def cancel_active() -> None:
-            current = _active["task"]
-            if current is task and current is not None and not current.done():
-                _active["interrupted"] = True
-                current.cancel()
+            if _active.get(rid) is task and not task.done():
+                _interrupted.add(rid)
+                task.cancel()
 
         _loop.call_soon_threadsafe(cancel_active)
 
@@ -506,27 +580,26 @@ def _consume_pending_interrupt(rid: str) -> bool:
     return pending
 
 
-def _consume_handoff_interrupt() -> bool:
+def _consume_handoff_interrupt(rid: str) -> bool:
     """Check-and-clear an interrupt that landed in the done-task handoff."""
-    global _handoff_interrupted
     with _interrupt_lock:
-        pending = _handoff_interrupted
-        _handoff_interrupted = False
+        pending = rid in _handoff_interrupted
+        _handoff_interrupted.discard(rid)
         return pending
 
 
 def _finish_locked(rid: str) -> None:
     """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
-    global _finishing_rid, _handoff_interrupted, _sigint_target
+    global _finishing_rid
     if _finishing_rid == rid:
-        # An unconsumed handoff interrupt dies with its request (state requests
-        # have no cancellable post-run work); it must never hit the next request.
         _finishing_rid = None
-        _handoff_interrupted = False
-    if _sigint_target == rid:
-        # The target dies with its request: a later request reusing this id must
-        # not match a stale target when a delayed/external SIGINT arrives.
-        _sigint_target = None
+    # An unconsumed handoff interrupt dies with its request (state requests
+    # have no cancellable post-run work); it must never hit the next request.
+    _handoff_interrupted.discard(rid)
+    _interrupted.discard(rid)
+    # The target dies with its request: a later request reusing this id must
+    # not match a stale target when a delayed/external SIGINT arrives.
+    _sigint_targets.discard(rid)
     _inflight.discard(rid)
     _pending_interrupts["ids"].discard(rid)
     if not _inflight:
@@ -650,18 +723,17 @@ async def _run_codes(codes: list[types.CodeType], ns: dict[str, Any]) -> Any:
 async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dict[str, Any] | None]:
     """Await a request task; returns (status, value, error event or None)."""
     with _interrupt_lock:
-        _active["interrupted"] = False
-        _active["rid"] = rid
-        _active["task"] = task
+        _interrupted.discard(rid)
+        _active[rid] = task
         if _consume_pending_interrupt(rid):
             # Interrupt parked before activation: cancel before the first step.
-            _active["interrupted"] = True
+            _interrupted.add(rid)
             task.cancel()
     try:
         value = await task
         return "ok", value, None
     except asyncio.CancelledError as exc:
-        if _active["interrupted"]:
+        if rid in _interrupted:
             return "error", None, _interrupt_event(rid, exc)
         return "error", None, _error_event(rid, exc)
     except BaseException as exc:  # noqa: BLE001 - every cell failure becomes an error event
@@ -674,12 +746,26 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
             # Set before clearing _active: the lock-free handler must always see
             # the rid in one of the two slots, never a torn in-between state.
             _finishing_rid = rid
-            _active["task"] = None
-            _active["rid"] = None
+            _active.pop(rid, None)
 
 
 async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     global _cell_counter
+    # The runtime's OWN bootstrap execute never counts as the host's
+    # release: the provisioner sends it after every restore attempt
+    # (a refused restore included), so arming on it would collect
+    # persisted runs before the host's gates permitted any command.
+    if not req.get("runtime_bootstrap"):
+        # The first executed command the host dispatches is the
+        # factory arm's release: no restore ran (a fresh namespace)
+        # or the restore already proved itself, and the host only
+        # dispatches past the gates it owns — the persisted runs may
+        # arm now that execution is permitted. This replaces the
+        # boot-time arm (a reader boot that never executes must never
+        # collect runs).
+        from .factory import boot_arm_persisted_runs
+
+        boot_arm_persisted_runs()
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
@@ -694,7 +780,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         status, value, error = await _run_guarded(task, cell_id)
         result_text: str | None = None
         try:
-            if _consume_handoff_interrupt() and status == "ok":
+            if _consume_handoff_interrupt(cell_id) and status == "ok":
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
                 status, error = "error", _error_event(cell_id, KeyboardInterrupt())
@@ -1267,6 +1353,7 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     outcome: tuple[str, Any, dict[str, Any] | None] | None = None
     try:
         outcome = await _run_guarded(task, rid)
+        interrupted = rid in _interrupted
         _finish_request(rid)  # no post-run repr/drain: close the interrupt window now
     except KeyboardInterrupt:
         # A finishing-targeted SIGINT can raise anywhere between _run_guarded's
@@ -1275,6 +1362,7 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
         # complete (destructively so for a pruning snapshot). Consume the
         # interrupt and report the task's real outcome; escaping to the backstop
         # would misreport a committed snapshot as failed.
+        interrupted = rid in _interrupted
         _finish_request(rid)
         if outcome is None:
             # The KeyboardInterrupt pre-empted _run_guarded's return: recover
@@ -1282,14 +1370,14 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
             try:
                 outcome = ("ok", task.result(), None)
             except asyncio.CancelledError as exc:
-                event = _interrupt_event(rid, exc) if _active["interrupted"] else _error_event(rid, exc)
+                event = _interrupt_event(rid, exc) if interrupted else _error_event(rid, exc)
                 outcome = ("error", None, event)
             except BaseException as exc:  # noqa: BLE001 - every request failure becomes an error event
                 outcome = ("error", None, _error_event(rid, exc))
     status, result, error = outcome
     if (
         committed
-        and _active["interrupted"]
+        and interrupted
         and error is not None
         and error.get("ename") == "KeyboardInterrupt"
     ):
@@ -1312,6 +1400,17 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
             "max_bytes": req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES),
             "max_variable_bytes": req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
         }
+    elif not result.get("failed"):
+        # A clean restore completion is the factory arm's FIRST release:
+        # every saved name revived, so the persisted runs may arm. A
+        # partial restore (lost names) leaves them frozen — the resumed
+        # namespace is degraded and the runs wait for an explicit
+        # command. This replaces the boot-time arm (a kernel booted to
+        # read a payload must never collect runs before the read is
+        # proven; the first execute below is the other release).
+        from .factory import boot_arm_persisted_runs
+
+        boot_arm_persisted_runs()
     _send({"event": "done", "id": rid, "status": "ok", **result})
 
 
@@ -1438,6 +1537,9 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         rtype = req.get("type")
         if rtype == "shutdown":
             rid = req.get("id")
+            # Captured before any await: a cell that settles during the waits
+            # below leaves `_cell_tasks` but still needs the second flush.
+            cells = set(_cell_tasks)
             if req.get("eof"):
                 # Host stdin closed without a shutdown request: the host
                 # process is gone, so this is the last chance to persist.
@@ -1451,6 +1553,20 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
                     task.cancel()
                 await asyncio.wait(set(_mcp_status_tasks), timeout=1.0)
                 _mcp_status_tasks.clear()
+            # A cell still running at shutdown gets a short grace (a cell
+            # whose host request just failed finishes with that error), then
+            # its handler reports the cancellation as its error and done.
+            if cells:
+                await asyncio.wait(cells, timeout=0.5)
+                if _cell_tasks:
+                    for task in list(_cell_tasks):
+                        task.cancel()
+                    await asyncio.wait(set(_cell_tasks), timeout=0.5)
+                if req.get("eof"):
+                    # The first flush ran before these cells settled; it stays
+                    # first because the owner watchdog may exit at any moment.
+                    # Persist the settled cells' last writes too.
+                    _flush_final_snapshot(ns)
             # MCP children must close before the loop dies; close() is internally bounded under the host's 5s deadline.
             mcp_mod = sys.modules.get("rlm.mcp")
             if mcp_mod is not None:
@@ -1464,7 +1580,12 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
                 _send({"event": "done", "id": rid, "status": "ok"})
             return
         if rtype == "execute":
-            await _handle_request(_handle_execute, req, ns)
+            # A task, not an inline await: a new cell may start while a
+            # backgrounded one waits at an await point. The host admits a
+            # second execute only beside a backgrounded cell.
+            task = asyncio.get_running_loop().create_task(_handle_request(_handle_execute, req, ns))
+            _cell_tasks.add(task)
+            task.add_done_callback(_cell_tasks.discard)
         elif rtype in ("snapshot", "restore"):
             await _handle_request(_handle_state, req, ns)
         elif rtype == "list_names":
@@ -1622,6 +1743,9 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
         if duplicate:
             _protocol_error(f"duplicate in-flight request id: {req['id']!r}")
             return
+    if rtype == "execute" and _beside_sync_cell():
+        threading.Thread(target=_admit_beside_sync_cell, args=(req, queue), daemon=True).start()
+        return
     if rtype == "shutdown":
         # No host reply follows a shutdown; a cell awaiting host_request
         # must fail now or it would block _serve from ever consuming this.

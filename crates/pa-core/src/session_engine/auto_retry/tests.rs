@@ -1022,3 +1022,72 @@ async fn an_auth_rejection_whose_recovery_ends_the_turn_never_retries() {
         }]
     );
 }
+
+/// A 401 on a subscription token re-reads the shared store the daemon
+/// reads per call: the one retry serves the token a peer rotated in, and its
+/// 401 surfaces without another recovery.
+#[tokio::test]
+async fn a_401_on_a_subscription_retries_once_with_the_rotated_stored_token() {
+    use crate::auth::{AuthStorage, AuthStorageBackend, InMemoryAuthStorageBackend, NoOAuth};
+    let backend = Arc::new(InMemoryAuthStorageBackend::default());
+    let write = move |backend: &InMemoryAuthStorageBackend, access: &str| {
+        let content = serde_json::json!({
+            "test": { "type": "oauth", "access": access, "refresh": "refresh", "expires": 4_102_444_800_000_i64 }
+        })
+        .to_string();
+        backend
+            .with_lock(&mut |_| Ok(((), Some(content.clone()))))
+            .unwrap();
+    };
+    write(&backend, "old-access");
+    let auth = Arc::new(Mutex::new(AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::new(NoOAuth),
+    )));
+    let served = Arc::new(Mutex::new(Vec::<String>::new()));
+    let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_auth = Arc::clone(&auth);
+    let recovery_count = Arc::clone(&recoveries);
+    let mut recovery = move |message: &AssistantMessage| {
+        recovery_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let verdict = match recovery_auth
+            .lock()
+            .unwrap()
+            .refresh_rejected_oauth(&message.provider)
+        {
+            Ok(_) => AuthRecovery::Retry,
+            Err(failure) => AuthRecovery::EndTurn(failure.to_string()),
+        };
+        Box::pin(async move { verdict }) as AuthRecoveryFuture
+    };
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        || {
+            let key = {
+                let mut auth = auth.lock().unwrap();
+                auth.reload();
+                auth.get_api_key("test").unwrap_or_default()
+            };
+            let mut served = served.lock().unwrap();
+            if served.is_empty() {
+                write(&backend, "rotated-access");
+            }
+            served.push(key);
+            async { Ok(error_message(Some("auth"), Some(401), None)) }
+        },
+        |_| async { Ok(()) },
+        |_| async { true },
+        None,
+        Some(&mut recovery),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message, error_message(Some("auth"), Some(401), None));
+    assert_eq!(
+        *served.lock().unwrap(),
+        vec!["old-access".to_string(), "rotated-access".to_string()]
+    );
+    assert_eq!(recoveries.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

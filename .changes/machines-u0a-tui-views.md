@@ -1,0 +1,1 @@
+- The agents view moves message search from Ctrl+F to Ctrl+G. Ctrl+F now opens the machines page for the selected session.

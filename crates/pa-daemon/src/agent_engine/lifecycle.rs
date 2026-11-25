@@ -12,6 +12,7 @@ use super::{
     ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
     SessionEngineConfig, SupervisorChildSessions, Value,
 };
+use crate::engine::SessionEngine as _;
 
 /// The instruction the floor appends to a bare skill invocation: ask what
 /// the user wants first, never an imperative to execute.
@@ -126,7 +127,7 @@ impl AgentSessionEngine {
         // Queue delivery modes arrive at create, so the engine starts
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
-        Ok(Self {
+        let engine = Self {
             runtime,
             config,
             mcp,
@@ -165,6 +166,7 @@ impl AgentSessionEngine {
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             request_auth_oauth: std::sync::Arc::new(pa_core::auth::ProviderOAuth::new()),
             request_auth_registry: std::sync::Mutex::new(None),
+            selection_api_key_provider: std::sync::RwLock::new(None),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -174,6 +176,10 @@ impl AgentSessionEngine {
             )),
             link,
             children,
+            refine_flights: std::sync::Mutex::default(),
+            pending_refine_replies: std::sync::Mutex::default(),
+            abandoned_refine_children: std::sync::Mutex::default(),
+            refine_spawn_lock: tokio::sync::Mutex::new(()),
             usage_producer: std::sync::Mutex::new(None),
             rlm_usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -188,6 +194,7 @@ impl AgentSessionEngine {
             cwd,
             rlm_depth: std::sync::atomic::AtomicU32::new(0),
             factory_child: std::sync::atomic::AtomicBool::new(false),
+            factory_contract: std::sync::Mutex::new(None),
             rlm_max_depth_source: std::sync::Mutex::new("default"),
             pending_max_depth: std::sync::Mutex::new(None),
             reloaded_goal_update: std::sync::Mutex::new(None),
@@ -198,7 +205,11 @@ impl AgentSessionEngine {
             progress_note_emit: std::sync::Mutex::new(None),
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
-        })
+        };
+        if engine.current_selection().api_key.is_some() {
+            engine.bind_selection_api_key();
+        }
+        Ok(engine)
     }
 
     /// Install the worker's queue-backed cell wake (the pending predicate
@@ -634,6 +645,23 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Register one refinement child's spawn with the usage attribution:
+    /// the engine-side twin of the kernel spawn path's `register_spawn`
+    /// (`rlm.run`'s own handler). The refinement child spawns outside the
+    /// kernel bridge, so its planning rows bill on the parent only when
+    /// the engine registers the spawn itself — the child's usage folds
+    /// into the parent's last assistant row's aggregate at its settle.
+    pub(crate) async fn register_refine_child_usage(&self, rlm_child_id: &str) {
+        let producer = self
+            .usage_producer
+            .lock()
+            .expect("usage producer lock")
+            .clone();
+        if let Some(producer) = producer {
+            producer.register_spawn(rlm_child_id).await;
+        }
+    }
+
     /// Clear only the boundary this completed adoption observed. A failed
     /// build keeps it for the demand retry, and a newer captured leaf survives.
     fn finish_prompt_context_adoption(&self, adopted: Option<&PromptContextBoundary>) {
@@ -772,20 +800,29 @@ impl AgentSessionEngine {
     }
 
     /// One factory activity over this session's kernel (the `/factory`
-    /// view's lane); never builds a new session/kernel.
+    /// view's lane). Only the machines page's drill-in (`library` with a
+    /// machine name; the worker answers the list itself) builds the core
+    /// session (like a prompt read), so the session can start its kernel;
+    /// every other action never builds one.
     ///
     /// # Errors
     ///
-    /// Returns an error when no session kernel is running ("Kernel is
-    /// not running"), the preflight fails, or the kernel's own factory
-    /// activity call fails.
+    /// Returns an error when the `library` read cannot build the session,
+    /// no session kernel is running ("Kernel is not running"), the
+    /// preflight fails, or the kernel's own factory activity call fails.
     pub async fn factory_activity(
         &self,
         action: &str,
         run_id: Option<&str>,
         spec_id: Option<&str>,
         timeout_ms: Option<u64>,
+        entry: Option<&Value>,
+        instance: Option<&Value>,
     ) -> anyhow::Result<Value> {
+        if action == "library" {
+            let model = self.resolve_model()?;
+            self.ensure_core_session_async(&model).await?;
+        }
         let engine = self
             .session
             .lock()
@@ -793,7 +830,7 @@ impl AgentSessionEngine {
             .clone()
             .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
         engine
-            .factory_activity(action, run_id, spec_id, timeout_ms)
+            .factory_activity(action, run_id, spec_id, timeout_ms, entry, instance)
             .await
     }
 
@@ -813,6 +850,19 @@ impl AgentSessionEngine {
         images: &[pa_agent::types::ImageContent],
         compaction_abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<SessionCommandExecution> {
+        // `/refine` is the refinement child's command (fire-and-wake): the
+        // planning spawn returns immediately and the child's proposal applies
+        // on its reply's arrival. Only the mechanical rollback runs inline
+        // through the base executor.
+        if command.name == "refine" {
+            let options = pa_core::session_engine::slash_commands::parse_refine_command_options(
+                &command.args,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
+            if options.rollback_id.is_none() {
+                return self.execute_refine_session_command(command);
+            }
+        }
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let (model, api_key) = self.resolve_request_target(model);
@@ -833,6 +883,43 @@ impl AgentSessionEngine {
         Ok(self
             .runtime
             .block_on(async { execute_session_command(&core, &mut params, command, images).await }))
+    }
+
+    /// `/refine` without a rollback: spawn the refinement child and return
+    /// immediately — the child's proposal applies on its reply's arrival,
+    /// whose wake emits the durable rows and the completion event.
+    fn execute_refine_session_command(
+        &self,
+        command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
+    ) -> anyhow::Result<SessionCommandExecution> {
+        use pa_core::session_engine::refine::RefinementSource;
+        use pa_core::session_engine::session_commands::{
+            session_command_echo_row, slash_command_result,
+        };
+
+        let options =
+            pa_core::session_engine::slash_commands::parse_refine_command_options(&command.args)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let refine_options = pa_core::session_engine::refine::RefineOptions {
+            global: options.global,
+            instructions: options.instructions,
+            rollback_id: options.rollback_id,
+        };
+        let child_id = self.spawn_refinement_child(refine_options, RefinementSource::User)?;
+        let content =
+            format!("Refinement child spawned ({child_id}); its reply applies on arrival.");
+        let row = slash_command_result(command, content, true, "info", None, false);
+        Ok(SessionCommandExecution {
+            // The host skips the first row as the echo it already emitted:
+            // the spawn result rides after it.
+            messages: vec![session_command_echo_row(command), row],
+            compaction: None,
+            compaction_skipped: None,
+            compaction_aborted: false,
+            continuation_message: None,
+            error: None,
+            pending_refinement: None,
+        })
     }
 
     /// The current explicit selection (create-config flags over the
@@ -1105,6 +1192,11 @@ impl AgentSessionEngine {
             .lock()
             .expect("late agent message sink lock")
             .clone();
+        let factory_contract = self
+            .factory_contract
+            .lock()
+            .expect("factory contract lock")
+            .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             cell_wake: Some(std::sync::Arc::clone(&self.cell_wake)),
             on_background_cell: {
@@ -1155,6 +1247,7 @@ impl AgentSessionEngine {
             factory_child: self
                 .factory_child
                 .load(std::sync::atomic::Ordering::Relaxed),
+            factory_contract,
             // The worker session runs under the daemon scheduler and its wake-ups.
             daemonless: false,
             model_info: Some(model.clone()),

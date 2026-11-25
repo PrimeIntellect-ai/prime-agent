@@ -66,7 +66,7 @@ impl Worker {
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
-            "get_state" => self.handle_get_state(),
+            "get_state" => self.handle_get_state(payload),
             "get_messages" => self.handle_get_messages(payload),
             "get_session_messages" => self.handle_get_session_messages(payload).await,
             "get_session_header" => self.handle_get_session_header(),
@@ -89,7 +89,7 @@ impl Worker {
             "get_tool_definition" => self.handle_get_tool_definition(payload).await,
             "get_rlm_max_depth_status" => self.handle_get_rlm_max_depth_status(),
             "get_available_models" => self.handle_get_available_models(),
-            "worker_deliver_message" => self.handle_worker_deliver_message(payload),
+            "worker_deliver_message" => self.handle_worker_deliver_message(payload).await,
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
             "shutdown" => self.handle_shutdown(payload).await,
@@ -409,12 +409,18 @@ impl Worker {
         response_success(None, "abort_and_send_queued", None)
     }
 
-    fn handle_get_state(&self) -> DaemonResponse {
+    fn handle_get_state(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("get_state") {
             return response;
         }
         let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
+        // Read the bash lane while the same core guard is held: a notice
+        // dequeued into a new turn between the summary and the count would
+        // otherwise report an idle turn with no outstanding work.
+        let outstanding = (payload.get("taskObservation").and_then(Value::as_str)
+            == Some("factory"))
+        .then(|| self.outstanding_background_jobs_locked(&core));
         drop(core);
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
         // The owed background completions ride every state read: a child
@@ -425,6 +431,9 @@ impl Worker {
                 "pendingBackgroundCompletions".to_string(),
                 json!(self.pending_background_completions()),
             );
+            if let Some(outstanding) = outstanding {
+                object.insert("outstandingBackgroundJobs".to_string(), json!(outstanding));
+            }
         }
         response_success(None, "get_state", Some(data))
     }

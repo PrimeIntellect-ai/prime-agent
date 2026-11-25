@@ -50,9 +50,9 @@ fn push(text: &str, scope: Scope, plain: &mut String, tokens: &mut Vec<(String, 
 fn tokenize(code: &str) -> Vec<(String, Scope)> {
     let mut tokens: Vec<(String, Scope)> = Vec::new();
     let mut plain = String::new();
-    // The delimiter (and `<<-` tab stripping) of a heredoc whose body
-    // starts at the next line break.
-    let mut heredoc: Option<(&str, bool)> = None;
+    // The delimiters (and `<<-` tab stripping) of the heredocs whose bodies
+    // start at the next line break, in declaration order.
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
     // The paren depth inside `((...))` arithmetic, where `<<` is a shift.
     let mut arith = 0usize;
     let mut i = 0usize;
@@ -62,17 +62,23 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
         let prev = code[..i].chars().next_back();
         let word_start = !prev.is_some_and(is_word);
         let (len, scope) = match ch {
-            '\n' => {
-                if let Some((delimiter, strip_tabs)) = heredoc.take() {
+            '\n' if !heredocs.is_empty() => {
+                // Each pending heredoc's body starts after the previous
+                // one's terminator line; an unterminated body ends the block.
+                for (delimiter, strip_tabs) in std::mem::take(&mut heredocs) {
+                    if !code[i..].starts_with('\n') {
+                        break;
+                    }
                     push("\n", Scope::Plain, &mut plain, &mut tokens);
-                    let body = &rest[1..];
-                    let len = heredoc_body_len(body, delimiter, strip_tabs);
+                    i += 1;
+                    let body = &code[i..];
+                    let len = heredoc_body_len(body, &delimiter, strip_tabs);
                     push(&body[..len], Scope::String, &mut plain, &mut tokens);
-                    i += 1 + len;
-                    continue;
+                    i += len;
                 }
-                (1, Scope::Plain)
+                continue;
             }
+            '\n' => (1, Scope::Plain),
             // A comment starts a word: after whitespace or an operator
             // character (`ok;# note`); `a#b` and `$#` stay code.
             '#' if prev.is_none_or(|c| {
@@ -111,7 +117,7 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
                 Some((op, end, delimiter, strip_tabs)) => {
                     push(&rest[..op], Scope::Plain, &mut plain, &mut tokens);
                     push(&rest[op..end], Scope::String, &mut plain, &mut tokens);
-                    heredoc = Some((delimiter, strip_tabs));
+                    heredocs.push((delimiter, strip_tabs));
                     i += end;
                     continue;
                 }
@@ -135,10 +141,42 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
 fn double_quoted(rest: &str, plain: &mut String, tokens: &mut Vec<(String, Scope)>) -> usize {
     let mut start = 0usize;
     let mut j = 1usize;
+    // The paren depth inside `$(...)`, whose own quotes do not end the string.
+    let mut substitution = 0usize;
     while j < rest.len() {
         let ch = rest[j..].chars().next().expect("char boundary");
         match ch {
             '\\' => j += 1 + rest[j + 1..].chars().next().map_or(0, char::len_utf8),
+            '$' if rest[j + 1..].starts_with('(') => {
+                substitution += 1;
+                j += 2;
+            }
+            '(' if substitution > 0 => {
+                substitution += 1;
+                j += 1;
+            }
+            ')' if substitution > 0 => {
+                substitution -= 1;
+                j += 1;
+            }
+            '\'' if substitution > 0 => {
+                // A single-quoted string inside the substitution: its parens
+                // and quotes are literal, so skip it whole.
+                j += 1;
+                j += rest[j..].find('\'').map_or(rest.len() - j, |end| end + 1);
+            }
+            '"' if substitution > 0 => {
+                // A string inside the substitution: skip it whole.
+                j += 1;
+                while let Some(c) = rest[j..].chars().next() {
+                    j += c.len_utf8();
+                    match c {
+                        '\\' => j += rest[j..].chars().next().map_or(0, char::len_utf8),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
             '"' => {
                 push(&rest[start..=j], Scope::String, plain, tokens);
                 return j + 1;
@@ -191,36 +229,41 @@ fn variable_len(rest: &str) -> Option<usize> {
         .then_some(2)
 }
 
-/// `<<WORD`, `<<-WORD`, `<< 'WORD'`, `<<"WORD"`: the operator length, the
-/// end of the (possibly quoted) delimiter, the bare delimiter, and
-/// whether `<<-` strips leading tabs from the body lines.
-fn heredoc_start(rest: &str) -> Option<(usize, usize, &str, bool)> {
+/// `<<WORD`, `<<-WORD`, `<< 'WORD'`, `<<\WORD`, `<<E"OF"`: the operator
+/// length, the end of the delimiter word, the delimiter after shell quote
+/// removal, and whether `<<-` strips leading tabs from the body lines.
+fn heredoc_start(rest: &str) -> Option<(usize, usize, String, bool)> {
     let strip_tabs = rest[2..].starts_with('-');
     let mut op = 2 + usize::from(strip_tabs);
     op += rest[op..]
         .bytes()
         .take_while(|b| matches!(b, b' ' | b'\t'))
         .count();
-    let quote = rest[op..]
-        .chars()
-        .next()
-        .filter(|c| matches!(c, '\'' | '"'));
-    let name_start = op + usize::from(quote.is_some());
-    // A quoted delimiter runs to its closing quote, a bare one to the end
-    // of the shell word.
-    let name = &rest[name_start..];
-    let name_len = match quote {
-        Some(quote) => name.find(quote)?,
-        None => name
-            .find(|c: char| c.is_whitespace() || "'\";&|()<>".contains(c))
-            .unwrap_or(name.len()),
-    };
-    if name_len == 0 {
+    let mut delimiter = String::new();
+    let mut quote = None;
+    let mut end = op;
+    while let Some(c) = rest[end..].chars().next() {
+        end += c.len_utf8();
+        match quote {
+            Some(open) if c == open => quote = None,
+            None if c.is_whitespace() || ";&|()<>".contains(c) => {
+                end -= c.len_utf8();
+                break;
+            }
+            None if matches!(c, '\'' | '"') => quote = Some(c),
+            None if c == '\\' => {
+                if let Some(escaped) = rest[end..].chars().next() {
+                    delimiter.push(escaped);
+                    end += escaped.len_utf8();
+                }
+            }
+            Some(_) | None => delimiter.push(c),
+        }
+    }
+    if quote.is_some() || delimiter.is_empty() {
         return None;
     }
-    let name_end = name_start + name_len;
-    let end = name_end + usize::from(quote.is_some());
-    Some((op, end, &rest[name_start..name_end], strip_tabs))
+    Some((op, end, delimiter, strip_tabs))
 }
 
 /// The heredoc body through its terminator line (the line break after the
@@ -368,6 +411,18 @@ mod tests {
             ),
             vec!["EOF", "x\nEOF"]
         );
+        // Quote removal gives the terminator: `\EOF` and `E"OF"` both end at `EOF`.
+        for code in [
+            "cat <<\\EOF\nbody\nEOF\necho done",
+            "cat <<E\"OF\"\nbody\nEOF\necho done",
+        ] {
+            assert_eq!(
+                scoped(code, Scope::String).last().unwrap(),
+                "body\nEOF",
+                "{code}"
+            );
+            assert_eq!(scoped(code, Scope::BuiltIn), vec!["cat", "echo"], "{code}");
+        }
         // Neither a here-string nor an arithmetic shift is a heredoc.
         for code in [
             "cat <<<word\nls",
@@ -377,6 +432,28 @@ mod tests {
             assert!(scoped(code, Scope::String).is_empty(), "{code}");
             assert_eq!(scoped(code, Scope::BuiltIn).last().unwrap(), "ls", "{code}");
         }
+    }
+
+    #[test]
+    fn quotes_inside_a_command_substitution_stay_in_the_string() {
+        let code = r#"echo "$(echo "a # b")"; ls"#;
+        assert!(scoped(code, Scope::Comment).is_empty());
+        assert_eq!(scoped(code, Scope::String), vec![r#""$(echo "a # b")""#]);
+        assert_eq!(scoped(code, Scope::BuiltIn), vec!["echo", "ls"]);
+        // A single-quoted paren inside the substitution never unbalances it.
+        let code = r#"echo "$(grep '(' f)"; ls"#;
+        assert_eq!(scoped(code, Scope::String), vec![r#""$(grep '(' f)""#]);
+        assert_eq!(scoped(code, Scope::BuiltIn), vec!["echo", "ls"]);
+    }
+
+    #[test]
+    fn each_heredoc_keeps_its_own_body_in_declaration_order() {
+        let code = "cat <<A <<B\nfirst B\nA\necho body\nB\nls";
+        assert_eq!(
+            scoped(code, Scope::String),
+            vec!["A", "B", "first B\nA", "echo body\nB"]
+        );
+        assert_eq!(scoped(code, Scope::BuiltIn), vec!["cat", "ls"]);
     }
 
     fn fragment() -> impl Strategy<Value = String> {

@@ -238,11 +238,35 @@ pub struct AgentSessionEngine {
     /// failed `reload()` keeps the last read's data — a transiently-held
     /// document lock or a corrupt auth.json is not a logout.
     pub(crate) request_auth_registry: std::sync::Mutex<Option<pa_core::models::ModelRegistry>>,
+    /// The provider the selection's explicit key was configured for: the
+    /// key serves that provider only (see
+    /// [`Self::selection_api_key_for`]).
+    pub(crate) selection_api_key_provider: std::sync::RwLock<Option<String>>,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The in-flight refinement children, keyed by the child's active
+    /// session id for the child-reply wake.
+    pub(crate) refine_flights: std::sync::Mutex<
+        std::collections::HashMap<String, crate::refine_children::RefineChildFlight>,
+    >,
+    /// The parked refinement replies, oldest first: each waits for the
+    /// session's idle boundary, where it applies — the wake answers the
+    /// delivery at once, and the apply never interleaves with a running
+    /// turn's rows.
+    pub(crate) pending_refine_replies:
+        std::sync::Mutex<Vec<crate::refine_children::PendingRefineReply>>,
+    /// The active session ids of the refinement children that a branch
+    /// move or a replacement abandoned. The cancel cannot recall a reply
+    /// that is already in delivery, so the park drops that late reply and
+    /// removes its id. An id whose child never replied stays, as the child
+    /// registry also keeps its own record of that child.
+    pub(crate) abandoned_refine_children: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Orders refinement-child admissions (prepare, spawn, flight record,
+    /// prompt release) against an abandon.
+    pub(crate) refine_spawn_lock: tokio::sync::Mutex<()>,
     /// The worker-installed summary-delta sink, adopted onto every built
     /// session. `None` without a worker pump.
     compaction_summary_sink:
@@ -294,6 +318,9 @@ pub struct AgentSessionEngine {
     /// Whether this session runs a factory state (its create carried a
     /// factory run tag): selects the child prompt's factory line.
     factory_child: std::sync::atomic::AtomicBool,
+    /// The factory state's output contract from the create, which the
+    /// engine registers as the child's `factory.emit` and `factory.inputs`.
+    factory_contract: std::sync::Mutex<Option<serde_json::Value>>,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).
     rlm_max_depth_source: std::sync::Mutex<&'static str>,

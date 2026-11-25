@@ -10,6 +10,7 @@ mod commands;
 mod factory;
 mod heartbeats;
 mod keys;
+mod library;
 mod lifecycle;
 mod model_picker;
 mod notes;
@@ -36,6 +37,7 @@ pub(crate) use heartbeats::HeartbeatsUpdate;
 /// session open instead of echoing into the editor.
 pub(crate) use keys::opening_echo_key_claimed;
 use keys::SelectionAutoScroll;
+pub(crate) use library::LibraryUpdate;
 pub(crate) use model_picker::picker_viewport_rows;
 pub(crate) use model_picker::ModelCatalogUpdate;
 use panels::pop_superseded_attempt_row;
@@ -306,11 +308,20 @@ pub(crate) struct SessionUi {
     /// request must not repaint a newer snapshot.
     bash_list_epoch: u64,
     bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
-    /// The last `factory_activity` graph reply (the dock count's cache and
-    /// the page open's mount, the `bash_activities` pattern): the
-    /// always-on 2s poll keeps it current whether or not the page is
-    /// open.
+    /// The last `factory_activity` graph reply (the `bash_activities`
+    /// pattern): the always-on 2s poll keeps it current whether or not
+    /// the page is open. Every reader scopes it to the attached
+    /// session — the dock's count, the run page open's mount, and the
+    /// factory page's three seams: the mount seed's merge, the
+    /// overview fold's uncarried-row fill, and the older-daemon
+    /// version-skew fallback.
     factory_graph: serde_json::Value,
+    /// The last good `factory_activity` `overview` reply (the factory
+    /// page's own mount cache): every session's active runs, assembled by
+    /// the supervisor. A failed or malformed fetch keeps the last good
+    /// snapshot — the page never repaints an unreadable overview as an
+    /// empty one.
+    factory_overview: serde_json::Value,
     /// The durable session id the open `/factory` view was mounted on: the
     /// rebind fold keeps the view across a same-session reattach (`Unknown
     /// active session` recovery) and closes it only when a different
@@ -327,9 +338,28 @@ pub(crate) struct SessionUi {
     /// Monotonic id of the latest issued factory refresh; an older
     /// response never repaints a newer snapshot.
     factory_list_epoch: u64,
+    /// Monotonic id of the latest node document request; an out-of-order
+    /// instance fetch never overwrites the current document.
+    factory_node_epoch: u64,
     /// Where background factory refreshes deliver the run graph (the run
     /// loop folds them into the open view).
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
+    /// Where the machine-library page's open-path list fetch delivers
+    /// (the library page's channel, the factory lane's sibling).
+    library_updates: mpsc::UnboundedSender<LibraryUpdate>,
+    /// Monotonic id of the latest issued library list fetch; an older
+    /// response never repaints a newer open's list.
+    library_list_epoch: u64,
+    /// Monotonic id of the latest drill-in fetch; an older reply never
+    /// replaces a newer drill-in.
+    library_detail_epoch: u64,
+    /// Whether one overview refresh is still in flight (the page poll's
+    /// serialization): a tick that fires while the fetch runs waits for
+    /// the next cadence instead of stacking a second request.
+    library_overview_in_flight: bool,
+    /// Monotonic id of the latest issued overview fetch; an older
+    /// response never repaints a newer page lifetime's rows.
+    library_overview_epoch: u64,
     /// The open view's selected run id: the refresh's watch target.
     factory_selected_run: Option<String>,
     /// The activity dock holds keyboard focus (and renders expanded).
