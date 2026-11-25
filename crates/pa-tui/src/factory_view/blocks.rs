@@ -452,18 +452,23 @@ pub(crate) fn block_diagram(
             }
         })
         .collect();
-    // A self-looping box keeps room for its `↺ label` on its right, so a
-    // sibling box on the same layer starts past it.
-    let slot = |item: usize| -> usize {
-        width[item]
-            + if item < n && !self_loops[item].is_empty() {
-                self_loops[item].join(", ").chars().count() + 3
-            } else {
-                0
-            }
+    // A self-looping box keeps room for its `↺ label` before the next box
+    // on its layer (the last box's label runs into the margin).
+    let loop_room = |item: usize| -> usize {
+        if item < n && !self_loops[item].is_empty() {
+            self_loops[item].join(", ").chars().count() + 3
+        } else {
+            0
+        }
     };
     let row_width = |row: &Vec<usize>| -> usize {
-        row.iter().map(|&item| slot(item)).sum::<usize>() + GAP * row.len().saturating_sub(1)
+        row.iter().map(|&item| width[item]).sum::<usize>()
+            + GAP * row.len().saturating_sub(1)
+            + row
+                .iter()
+                .take(row.len().saturating_sub(1))
+                .map(|&item| loop_room(item))
+                .sum::<usize>()
     };
     let widest = layers.iter().map(row_width).max().unwrap_or(0);
     let mut x = vec![0usize; items];
@@ -471,7 +476,7 @@ pub(crate) fn block_diagram(
         let mut at = MARGIN + (widest - row_width(row)) / 2;
         for &item in row {
             x[item] = at;
-            at += slot(item) + GAP;
+            at += width[item] + GAP + loop_room(item);
         }
     }
     let center = |item: usize| x[item] + width[item] / 2;
